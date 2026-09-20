@@ -1,0 +1,52 @@
+#version 460
+// ============================================================================
+// M3 compose — the residual composite over the letterbox region.
+// PORT of nr_compose(), src/ref/nr_image.c:53-76, at intensity = 1.0 with no
+// control mask — i.e. exactly MLX-DLSS compose_head's vendor recipe
+// (docs/ARCHITECTURE.md:60-62):
+//
+//   predicted = unit(source + half(head.rgb) * 0.25)          (nr_image.c:66)
+//   output    = unit(source + blend * (predicted - source))   (nr_image.c:67)
+//
+// which IS the task's "final = native + (nr_out - nr_in)": nr_in = source,
+// nr_out = predicted. The C deliberately keeps both the subtract and the add
+// even at blend 1 (comment at nr_image.c:58-60: folding them removes an FP32
+// rounding and can change encoded pixels) — preserved here.
+// `half()` = fp16 rounding -> half_round() (publish.glsl:16, bit-exact vs
+// numpy float16). unit() = clamp to [0,1] (nr_image.c:22-28). No NaN guard
+// needed: this shader only reads finite floats (encode does the NaN map, as in
+// nr_encode8).
+//
+// Also emits nr_out (= predicted) for the m3_nr_out.bmp artifact.
+// The temporal gate (head.a, history_weight) is UNUSED on this still-frame
+// path — no history exists for frame 0 (vendor first-frame layout, and
+// nr_frame.py compose() takes the same branch).
+//
+//   push a = (fullStridePx, regionTop, regionLeft, 0);  b = (regionW, regionH, 0, 0)
+// ============================================================================
+#extension GL_GOOGLE_include_directive : require
+#include "publish.glsl"
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(std430, set = 0, binding = 1) readonly buffer RgbFull { float nat[]; };
+layout(std430, set = 0, binding = 5) readonly buffer HeadUp { float hup[]; };
+layout(std430, set = 0, binding = 6) writeonly buffer Final { float fin[]; };
+layout(std430, set = 0, binding = 7) writeonly buffer NrOut { float nro[]; };
+layout(push_constant) uniform Push { ivec4 a; ivec4 b; vec4 c; vec4 d; } pc;
+
+void main() {
+    uint p = gl_GlobalInvocationID.x;              // index within the region
+    uint n = uint(pc.b.x) * uint(pc.b.y);
+    if (p >= n) return;
+    uint x = p % uint(pc.b.x);
+    uint y = p / uint(pc.b.x);
+
+    uint natP = (uint(pc.a.y) + y) * uint(pc.a.x) + (uint(pc.a.z) + x);
+    for (uint c = 0u; c < 3u; ++c) {
+        float source = nat[natP * 3u + c];
+        float predicted = clamp(source + half_round(hup[p * 4u + c]) * 0.25, 0.0, 1.0);
+        float finalv = clamp(source + 1.0 * (predicted - source), 0.0, 1.0);
+        fin[p * 3u + c] = finalv;
+        nro[p * 3u + c] = predicted;
+    }
+}
