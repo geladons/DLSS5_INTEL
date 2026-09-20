@@ -1,0 +1,10 @@
+import numpy as np
+q = np.zeros((32, 288, 32))
+s = np.matmul(q, q.swapaxes(-1, -2))
+print('scores', s.shape)
+p = s.astype(np.float16)
+v = np.zeros((32, 288, 32))
+c = np.matmul(p.astype(np.float32), v.astype(np.float32))
+print('ctx', c.shape)
+m = c.transpose(1, 0, 2).reshape(288, 1024)
+print('merged', m.shape)

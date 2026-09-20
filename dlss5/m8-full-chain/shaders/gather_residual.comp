@@ -1,0 +1,52 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+/*
+ * gather_residual — M8a closing block residual with reverse-window gather.
+ *
+ * Design doc SS A.8 wrapper + SS C.2 gather_residual.comp:
+ *   out[y, x, c] = attn_branch_win[w, i, c] + ffn_out[y, x, c] * attn_cos[c]   (fp32)
+ *   optional publish: out16 = e4m3(out)        (all blocks except b0-internal/b70)
+ * where (w, i) reverse-maps image token (y, x) through the block's window origin
+ * (inverse of partition.comp). One invocation per image token; loops channels.
+ */
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+#include "publish.glsl"
+
+layout(local_size_x = 32) in;
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf { float v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer HalfBuf  { float16_t v[]; };
+
+layout(push_constant, scalar) uniform Push {
+    uint64_t a;      // attn_branch_win fp32 [W*64*C]
+    uint64_t b;      // ffn_out fp32 [Himg*Wimg*C]
+    uint64_t d;      // attn_cos fp32 [C]
+    uint64_t c;      // out fp32 [Himg*Wimg*C]
+    uint64_t h;      // out f16 (published) — written only when flags bit0 set
+    uint Himg, Wimg, C;
+    uint padTop, padLeft;
+    uint wp8;        // padded width in windows
+    uint flags;      // bit0: e4m3 publish to h
+} pc;
+
+void main() {
+    uint t = gl_GlobalInvocationID.x;           // y*Wimg + x
+    if (t >= pc.Himg * pc.Wimg) return;
+    uint y = t / pc.Wimg, x = t % pc.Wimg;
+    uint wy = (y + pc.padTop) / 8u, wx = (x + pc.padLeft) / 8u;
+    uint ly = (y + pc.padTop) % 8u, lx = (x + pc.padLeft) % 8u;
+    uint w = wy * pc.wp8 + wx;
+    uint i = ly * 8u + lx;
+    bool pub = (pc.flags & 1u) != 0u;
+    for (uint ch = 0u; ch < pc.C; ++ch) {
+        float val = FloatBuf(pc.a).v[(w * 64u + i) * pc.C + ch]
+                  + FloatBuf(pc.b).v[t * pc.C + ch] * FloatBuf(pc.d).v[ch];
+        FloatBuf(pc.c).v[t * pc.C + ch] = val;
+        if (pub) HalfBuf(pc.h).v[t * pc.C + ch] = float16_t(e4m3(val));
+    }
+}
