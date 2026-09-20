@@ -35,10 +35,14 @@ layout(std430, set = 0, binding = 3) writeonly buffer Features { float f[]; };
 layout(push_constant) uniform Push { ivec4 a; ivec4 b; vec4 c; vec4 d; } pc;
 
 // STAND-IN deterministic noise (see header). Real: features.py deterministic_noise.
+// Zero-mean [-1,1) -- the vendor deterministic_noise is sinusoid-generated and
+// (near-)zero-mean; the old [0,1) hash biased the chain input with a per-pixel
+// DC component that the real DLSSNR graph amplified into a huge head residual
+// (head4 mean -3.5 vs the design's |mean| < 0.02, docs/m6b-graph-design.md:391).
 float hashNoise(uint x, uint y, uint ch, uint frame) {
     uint h = (x * 1664525u) ^ (y * 1013904223u) ^ (ch * 374761393u) ^ (frame * 668265263u);
     h ^= h >> 15u; h *= 2246822519u; h ^= h >> 13u; h *= 3266489917u; h ^= h >> 16u;
-    return float(h & 0xFFFFFFu) / 16777216.0;
+    return float(h & 0xFFFFFFu) / 8388608.0f - 1.0f;   // [-1, 1)
 }
 
 void main() {

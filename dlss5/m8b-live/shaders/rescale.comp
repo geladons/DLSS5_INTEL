@@ -50,7 +50,14 @@ void main() {
     uint gx = gl_GlobalInvocationID.x;   // keep-axis index  (j or x)
     uint gy = gl_GlobalInvocationID.y;   // along-axis output index (r or y)
     uint keep = uint(pc.a.w);            // extent of the axis NOT being resampled
-    if (gx >= keep || gy >= uint(pc.b.x)) return;
+    // Axis-aware bounds (m8b fix): for axis=1 (horizontal) gx is the OUTPUT
+    // column (limit = outCount) and gy is the keep-axis ROW (limit = keep).
+    // The old unconditional guard killed gx >= keep / gy >= outCount, which
+    // silently dropped the right (regionW-regionH) output columns of every
+    // horizontal upscale and the bottom rows of every horizontal downscale.
+    uint gxLim = (pc.b.z == 0) ? keep : uint(pc.b.x);
+    uint gyLim = (pc.b.z == 0) ? uint(pc.b.x) : keep;
+    if (gx >= gxLim || gy >= gyLim) return;
 
     uint srcB = uint(pc.d.x), dstB = uint(pc.d.y);
     uint ch = uint(pc.b.w);
