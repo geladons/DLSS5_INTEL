@@ -51,6 +51,18 @@ lazily. M2/M3 single-shot import is fine; M3 canary re-passed at 19:37
 (driver healthy). M5 must use rotating N>=3 shared textures with per-slot
 completion tracking (skip-frame instead of stall).
 
+## Weights (2026-09-20) — ACQUIRED
+
+`work/mlxw/dlssnr-logical.safetensors` — 649 tensors, 291.5 MB (F16/F32),
+71 transformer blocks, format `dlssnr-logical-v18` (what the reference
+pipeline consumes). Source: nvngx_dlssnr.dll 310.8.0.0, SHA-256
+`ceb6432f…62650` (the single build pinned by MLX-DLSS; hash-verified),
+extracted with MLX-DLSS @ 06a3e11 (vetted: pure parsing, no network).
+Full chain of custody: docs/weights-provenance.md; tensor inventory:
+docs/weights-inventory.txt. Legal: NVIDIA proprietary — local research
+use, NOT redistributable, not in git. Next: M6 — safetensors loader in the
+Vulkan runtime + wire the real graph in place of the M3 stand-in block.
+
 ## Next
 
 - [ ] Toolchain install (Vulkan SDK, CMake, Python; VS Build Tools C++ workload check)
