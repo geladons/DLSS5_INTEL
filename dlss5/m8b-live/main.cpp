@@ -601,6 +601,9 @@ struct GatherPush {
 struct MergePush { uint64_t a, b, c, d, e, h; uint32_t n, ch, kind; };
 
 struct PackPush { uint64_t src, dst; uint32_t n; };
+// headpack two-pass push: mode 0 accumulates per-channel DC, mode 1 writes
+// the calibrated matched residual (see shaders/m8/headpack.comp).
+struct HeadPush { uint64_t src, dst, dc; uint32_t ntok; float gain; uint32_t mode; };
 #pragma pack(pop)
 
 enum { EPI_NONE = 0, EPI_E4M3 = 1, EPI_GATE = 2, EPI_GATE_E4M3 = 3, EPI_HALF = 4 };
@@ -616,23 +619,26 @@ int main(int argc, char** argv) {
 
     // ---------------- CLI
     long framesTarget = 300;
-    int wiggle = 1;
     int novideo = 0;
     float renderScale = 0.55f;   // accepted for CLI compat; grid is pinned to 288 tokens
+    long wiggleIdleSec = 0;      // --wiggle-idle N: engage the gentle cursor generator
+                                 // only after N seconds with no desktop updates (default OFF)
+    bool wiggleForbidden = false;   // --nowiggle: hard-disable any wiggle
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--frames" && i + 1 < argc) framesTarget = std::atol(argv[++i]);
-        else if (a == "--nowiggle") wiggle = 0;
+        else if (a == "--nowiggle") wiggleForbidden = true;
         else if (a == "--novideo") novideo = 1;
+        else if (a == "--wiggle-idle" && i + 1 < argc) wiggleIdleSec = std::atol(argv[++i]);
         else if (a == "--scale" && i + 1 < argc) renderScale = (float)std::atof(argv[++i]);
-        else { std::fprintf(stderr, "usage: m8blive [--frames N] [--nowiggle] [--novideo] [--scale S(ignored)]\n"); return 1; }
+        else { std::fprintf(stderr, "usage: m8blive [--frames N] [--nowiggle] [--novideo] [--scale S(ignored)] [--wiggle-idle SECS]\n"); return 1; }
     }
+    if (wiggleForbidden) wiggleIdleSec = 0;
     SetConsoleCtrlHandler(CtrlHandler, TRUE);
-
     std::printf("=== M8B-LIVE: REAL DLSS 5 graph (71 blocks) live on the desktop, Intel Arc Pro B50 ===\n");
     std::printf("transport: m4-present-simple (CPU bridge) | core: m8-full-chain @03900ab (288 tokens, ~47 ms)\n");
-    std::printf("frame target: %ux%u B8G8R8A8, frames=%ld, wiggle=%d, video=%d\n",
-                W, H, framesTarget, wiggle, !novideo);
+    std::printf("frame target: %ux%u B8G8R8A8, frames=%ld (processed), wiggle-idle=%lds, video=%d\n",
+                W, H, framesTarget, wiggleIdleSec, !novideo);
     if (renderScale != 0.55f)
         std::printf("[info] --scale ignored: network grid pinned to 12x24 = the chain's 288 tokens\n");
     std::printf("\n");
@@ -711,16 +717,16 @@ int main(int argc, char** argv) {
 
     // ===================================================================
     // 2. Initial content-checked DDA frame (M3/M4 doctrine).
-    //    One PERSISTENT wiggle thread for the whole run (m4's initial-
-    //    acquire thread was join()ed with the stop flag unset -> hang with
-    //    wiggle=1; m4's verified runs were all --nowiggle. m8b fixes it).
+    //    Wiggle is OFF by default (user demand: no cursor wiggle). With
+    //    --wiggle-idle N it runs for the initial acquire too and is then
+    //    handed to the live loop's idle logic (stopped on the first frame).
     // ===================================================================
     std::vector<uint8_t> original(W * H * 4);   // last good native frame
     std::thread wiggler;
-    if (wiggle) {
+    if (wiggleIdleSec > 0) {
         g_wiggleStop.store(false);
         wiggler = std::thread(WiggleThread);
-        std::printf("[info] cursor-wiggle activity generator ON for initial acquire (DDA is dirty-rect driven)\n");
+        std::printf("[info] cursor-wiggle generator armed (wiggle-idle=%lds)\n", wiggleIdleSec);
     }
     {
         auto tAcquireBegin = clk::now();
@@ -758,9 +764,9 @@ int main(int argc, char** argv) {
             std::printf("[DDA] initial %s frame on try %d (acquired#%d, skippedBlack=%d)\n",
                         black ? "FALLBACK-black" : "content", tries, acquired, skippedBlack);
         }
-        // wiggle=0: the acquire is done — stop the activity generator now.
-        // wiggle=1: it keeps running through the whole live loop.
-        if (!wiggle && wiggler.joinable()) { g_wiggleStop.store(true); wiggler.join(); }
+        // The initial acquire is done — always stop the generator here; the
+        // live loop re-arms it only after wiggleIdleSec of continuous idleness.
+        if (wiggler.joinable()) { g_wiggleStop.store(true); wiggler.join(); }
         if (!got) { std::fprintf(stderr, "[FAIL] no DDA frame within ~8s\n"); return 1; }
         D3D11_MAPPED_SUBRESOURCE ms{};
         HR_CHECK(context->Map(stagingTex.Get(), 0, D3D11_MAP_READ, 0, &ms));
@@ -1214,6 +1220,7 @@ int main(int argc, char** argv) {
     // m8b bridge slots: features output (fp32 [288,16]) + packed head ([288,4])
     VkDeviceSize oFeatV = slot(TOK * 16 * 4);
     VkDeviceSize oHead4 = slot(TOK * 4 * 4);
+    VkDeviceSize oHeadDC = slot(16);   // headpack per-channel DC accumulator
 
     auto preVec = [&](const std::string &n) { if (poff.count(n)) needVec(n); };
     for (int i = 0; i <= 70; ++i) {
@@ -1997,19 +2004,39 @@ int main(int argc, char** argv) {
     bool savedPair = false;
     std::deque<double> frameTimes;
     std::vector<uint8_t> nativeRef;
-    std::printf("[m8b] entering live loop (%ld frames)\n", framesTarget);
+    std::printf("[m8b] entering live loop (%ld frames, event-driven; --frames counts PROCESSED frames)\n",
+                framesTarget);
     const auto tLoopStart = clk::now();
+    uint64_t idleMs = 0;          // continuous idleness (ms)
+    bool wiggleActive = false;    // wiggle-idle generator currently running
 
     while (!g_stop.load() && frame < framesTarget) {
-        // ---- (a) DDA capture; stale-reuse last frame on timeout/black.
+        // ---- (a) EVENT-DRIVEN DDA capture: block up to 1000 ms for a real
+        // desktop update; process+present ONLY when one arrives. On idle the
+        // loop presents nothing and does no GPU work (~0% GPU on a static
+        // screen). Optional --wiggle-idle N re-arms the gentle cursor
+        // generator after N seconds of no updates (default OFF).
         bool fresh = false;
         {
             DXGI_OUTDUPL_FRAME_INFO fi{};
             ComPtr<IDXGIResource> res;
-            HRESULT hr = dup->AcquireNextFrame(100, &fi, &res);
+            HRESULT hr = dup->AcquireNextFrame(1000, &fi, &res);
             if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
                 ++dropped;
+                idleMs += 1000;
+                if (idleMs % 5000 == 0)
+                    std::printf("[m8b] idle, waiting for updates (%.0f s; %ld processed; %.2f fps)\n",
+                                idleMs / 1000.0, frame, fpsFinal);
+                if (wiggleIdleSec > 0 && !wiggleActive && idleMs >= (uint64_t)wiggleIdleSec * 1000) {
+                    g_wiggleStop.store(false);
+                    wiggler = std::thread(WiggleThread);
+                    wiggleActive = true;
+                    std::printf("[info] wiggle-idle: no updates for %ld s — engaging gentle generator\n",
+                                wiggleIdleSec);
+                }
+                continue;
             } else if (FAILED(hr)) {
+                idleMs = 0;
                 if (hr == DXGI_ERROR_ACCESS_LOST) {
                     std::fprintf(stderr, "[warn] ACCESS_LOST - attempting one DuplicateOutput recovery\n");
                     dup.Reset();
@@ -2025,34 +2052,40 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "[error] AcquireNextFrame: %s\n", HrName(hr));
                     ++dropped;
                 }
+                continue;
             } else {
                 ComPtr<ID3D11Texture2D> frameTex;
                 hr = res->QueryInterface(IID_PPV_ARGS(&frameTex));
-                if (FAILED(hr)) { dup->ReleaseFrame(); ++dropped; }
-                else {
-                    context->CopyResource(stagingTex.Get(), frameTex.Get());
-                    context->Flush();
-                    dup->ReleaseFrame();
-                    bool black = true;
-                    D3D11_MAPPED_SUBRESOURCE ms{};
-                    if (SUCCEEDED(context->Map(stagingTex.Get(), 0, D3D11_MAP_READ, 0, &ms))) {
-                        double s = 0; uint64_t cnt = 0;
-                        for (uint32_t y = 0; y < H; y += 24) {
-                            const uint8_t* row = (const uint8_t*)ms.pData + (size_t)y * ms.RowPitch;
-                            for (uint32_t x = 0; x < W * 4; x += 1997) { s += row[x]; ++cnt; }
-                        }
-                        black = (cnt == 0) || (s / (double)cnt) < 1.0;
-                        if (!black) {
-                            bool isVerify = (verifyIdx < 3 && verifyFrames[verifyIdx] == frame);
-                            for (uint32_t y = 0; y < H; ++y)
-                                std::memcpy(&original[(size_t)y * W * 4],
-                                            (const uint8_t*)ms.pData + (size_t)y * ms.RowPitch, W * 4);
-                            if (isVerify) nativeRef = original;
-                        }
-                        context->Unmap(stagingTex.Get(), 0);
+                if (FAILED(hr)) { dup->ReleaseFrame(); ++dropped; continue; }
+                context->CopyResource(stagingTex.Get(), frameTex.Get());
+                context->Flush();
+                dup->ReleaseFrame();
+                bool black = true;
+                D3D11_MAPPED_SUBRESOURCE ms{};
+                if (SUCCEEDED(context->Map(stagingTex.Get(), 0, D3D11_MAP_READ, 0, &ms))) {
+                    double s = 0; uint64_t cnt = 0;
+                    for (uint32_t y = 0; y < H; y += 24) {
+                        const uint8_t* row = (const uint8_t*)ms.pData + (size_t)y * ms.RowPitch;
+                        for (uint32_t x = 0; x < W * 4; x += 1997) { s += row[x]; ++cnt; }
                     }
-                    if (black) { ++dropped; }
-                    else fresh = true;
+                    black = (cnt == 0) || (s / (double)cnt) < 1.0;
+                    if (!black) {
+                        bool isVerify = (verifyIdx < 3 && verifyFrames[verifyIdx] == frame);
+                        for (uint32_t y = 0; y < H; ++y)
+                            std::memcpy(&original[(size_t)y * W * 4],
+                                        (const uint8_t*)ms.pData + (size_t)y * ms.RowPitch, W * 4);
+                        if (isVerify) nativeRef = original;
+                    }
+                    context->Unmap(stagingTex.Get(), 0);
+                }
+                if (black) { ++dropped; continue; }
+                fresh = true;
+                idleMs = 0;
+                if (wiggleActive) {
+                    g_wiggleStop.store(true);
+                    wiggler.join();
+                    wiggleActive = false;
+                    std::printf("[info] updates resumed — wiggle generator off\n");
                 }
             }
             if (fresh) stale = 0;
@@ -2060,7 +2093,7 @@ int main(int argc, char** argv) {
         if (g_stop.load()) break;
 
         // ---- (b) CPU bridge: staging -> upload buffer
-        if (fresh) std::memcpy(uploadPtr, original.data(), (size_t)W * H * 4);
+        std::memcpy(uploadPtr, original.data(), (size_t)W * H * 4);
 
         // ---- (c) acquire swapchain image (video mode only)
         uint32_t imageIndex = 0;
@@ -2150,9 +2183,17 @@ int main(int argc, char** argv) {
             barrierAll();
             // full 71-block DLSSNR chain (~1402 dispatches)
             recordChain(cmd);
-            // headpack: chain head [288,16] -> m4 head layout [288,4] (binding 4 slot)
+            // headpack (two passes): per-channel DC of the raw head, then the
+            // calibrated matched residual into the m4 head layout [288,4]
+            // (binding 4 slot). See shaders/m8/headpack.comp.
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pHeadpack.pipe);
-            PackPush hp{A(oHEAD), A(oHead4), TOK};
+            vkCmdFillBuffer(cmd, dev.buf, oHeadDC, 16, 0);
+            barrierAll();
+            HeadPush hd{A(oHEAD), A(oHead4), A(oHeadDC), TOK, 0.0f, 0};
+            vkCmdPushConstants(cmd, pHeadpack.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(hd), &hd);
+            vkCmdDispatch(cmd, (TOK + 255) / 256, 1, 1);
+            barrierAll();
+            HeadPush hp{A(oHEAD), A(oHead4), A(oHeadDC), TOK, 0.2f, 1};
             vkCmdPushConstants(cmd, pHeadpack.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(hp), &hp);
             vkCmdDispatch(cmd, (TOK + 255) / 256, 1, 1);
             barrierAll();
@@ -2309,6 +2350,18 @@ int main(int argc, char** argv) {
             dumpF("featV", (const float*)(db + dbgOffFeat), TOK * 16);
             dumpF("HEAD", (const float*)(db + dbgOffHead), TOK * 16);
             dumpF("head4", (const float*)(db + dbgOffH4), TOK * 4);
+            {   // per-channel DC vs spatial detail of the head residual
+                const float* h4 = (const float*)(db + dbgOffH4);
+                for (uint32_t c = 0; c < 4; ++c) {
+                    double mean = 0, var = 0;
+                    for (uint32_t t = 0; t < TOK; ++t) mean += h4[t * 4 + c];
+                    mean /= TOK;
+                    for (uint32_t t = 0; t < TOK; ++t) { double d = h4[t * 4 + c] - mean; var += d * d; }
+                    var /= TOK;
+                    std::printf("[dbg] head4 ch%u: mean=%.4f std=%.4f (DC-removed delta 0.25xstd=%.4f)\n",
+                                c, mean, std::sqrt(var), 0.25 * std::sqrt(var));
+                }
+            }
             auto dumpU16 = [](const char* nm, const uint16_t* p, size_t n) {
                 uint32_t mn = 0xffff, mx = 0; size_t nz = 0;
                 for (size_t i = 0; i < n; ++i) {

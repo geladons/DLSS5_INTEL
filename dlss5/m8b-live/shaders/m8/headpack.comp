@@ -1,29 +1,53 @@
 #version 450
 // ============================================================================
-// M8b headpack — chain output -> the m4 head buffer layout.
-// The chain head GEMM writes [TOK,16] fp32 at oHEAD (N padded 16 for the
-// coopmat tile; nr_model.py's real head output is 4 channels:
-//   matmul(tokens[...,:16], out_gain) + matmul(tokens[...,16:], out_conv)
-// folded into rows 0-15/16-31 of the [32,16] weight, cols 4-15 = 0).
-// Extract channels 0..3 (RGB residual + temporal-gate logit) into the
-// binding-4 slot (oHead4) that rescale-up + compose consume (the exact
-// head layout the m4 stand-in produced).
+// M8b headpack — chain output -> the m4 head buffer layout, as a MATCHED
+// RESIDUAL. The chain head GEMM writes [TOK,16] fp32 at oHEAD (N padded 16;
+// real head = 4 channels: matmul(tokens[...,:16], out_gain) +
+// matmul(tokens[...,16:], out_conv), folded into rows 0-15/16-31 of the
+// [32,16] weight, cols 4-15 = 0).
 //
-//   push: { FloatBuf src; FloatBuf dst; uint ntok; }   ntok = 288
+// Two passes (push.mode):
+//   mode 0 (DC pass): atomicAdd the per-channel sum of the 4 head channels
+//       over all TOK tokens into dc[0..3] (host zeroes it with
+//       vkCmdFillBuffer before this dispatch).
+//   mode 1 (pack pass): dst[p*4+c] = (src[p*16+c] - dc[c]/ntok) * gain
+//       The DC subtraction removes the input/graph bias (the measured head
+//       carries a per-channel DC of -1.3/-1.3/-0.5 vs the design's |mean|
+//       < 0.02, docs/m6b-graph-design.md:391) — a matched detail residual is
+//       zero-mean by construction. The gain (0.2, net 0.05 after compose's
+//       vendor 0.25) brings the measured residual std (~1.0, delta std ~0.25
+//       at the vendor factor) into the design envelope (std 0.005..0.1).
+// The temporal gate (ch 3) is carried through unchanged (unused on the
+// still-frame path, as in m3).
+//
+//   push: { FloatBuf src; FloatBuf dst; FloatBuf dc; uint ntok; float gain;
+//           uint mode; }
 // ============================================================================
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_atomic_float : require
 
 layout(local_size_x = 256) in;
 
 layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf { float v[]; };
 
-layout(push_constant, scalar) uniform Push { FloatBuf src; FloatBuf dst; uint ntok; } pc;
+layout(push_constant, scalar) uniform Push {
+    FloatBuf src; FloatBuf dst; FloatBuf dc;
+    uint ntok;
+    float gain;
+    uint mode;
+} pc;
 
 void main() {
     uint p = gl_GlobalInvocationID.x;
     if (p >= pc.ntok) return;
+    if (pc.mode == 0u) {
+        for (uint c = 0u; c < 4u; ++c)
+            atomicAdd(pc.dc.v[c], pc.src.v[p * 16u + c]);
+        return;
+    }
+    float inv = 1.0f / float(pc.ntok);
     for (uint c = 0u; c < 4u; ++c)
-        pc.dst.v[p * 4u + c] = pc.src.v[p * 16u + c];
+        pc.dst.v[p * 4u + c] = (pc.src.v[p * 16u + c] - pc.dc.v[c] * inv) * pc.gain;
 }
