@@ -77,6 +77,22 @@ docs/weights-inventory.txt. Legal: NVIDIA proprietary — local research
 use, NOT redistributable, not in git. Next: M6 — safetensors loader in the
 Vulkan runtime + wire the real graph in place of the M3 stand-in block.
 
+## M6b design (2026-09-20)
+
+- Design doc (DESIGN-ONLY): `docs/m6b-graph-design.md` — Vulkan compute executor for the
+  full 71-block DLSSNR graph, replacing the M3 stand-in block between features.comp and
+  compose.comp. Sections A-F complete: op inventory with exact publish.glsl rounding
+  contract, 278.03 MiB packed weight map (hot region = blocks 31-38, 192.04 MiB), shader/
+  dispatch plan (8x16x16 f16 coopmat, K-by-N contract, buffer-reference push constants),
+  executor architecture (~3 GB footprint @1408x768), 4-stage validation vs the NumPy
+  reference golden (no torch needed), risks.
+- Corrections established: attention is full MHA head_dim 32 (NOT GQA); branched FFN is
+  dense (NO MoE router); packed-offset tables generated from the real safetensors header
+  (`docs/pack-layout.txt`, regenerable via `docs/pack_dump.py`).
+- Perf projection: ~460 GFLOP/frame @1408x768 → est. 30-90 ms/frame (11-30 fps) until
+  optimized; first prototype = global block 31 (measures B50 coopmat rate, go/no-go).
+- Blockers: none. Torch cross-check deferred (optional). Next: M6b implementation per doc.
+
 ## Next
 
 - [ ] Toolchain install (Vulkan SDK, CMake, Python; VS Build Tools C++ workload check)
