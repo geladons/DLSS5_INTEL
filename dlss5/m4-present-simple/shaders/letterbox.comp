@@ -1,0 +1,40 @@
+#version 460
+// ============================================================================
+// M3 letterbox reduction — per-row / per-column max over the float RGB frame.
+// Feeds the host-side port of active_region() (reference
+// src/layer/nr_daemon.py:261-296). The reference runs this scan on the host
+// over the decoded frame; porting the REDUCTION to the GPU keeps the host out
+// of the pixel path (analysis: this scan was the most expensive host pass in
+// the reference frame, notes/phase57). The decision logic itself (tolerance
+// 2/255, 45% cap, symmetry, >=half area) is ported 1:1 in main.cpp on the two
+// small max arrays read back from this buffer.
+//   push a = (W, H, 0, 0);  b = (axis, 0, 0, 0)  axis 0 = rows, 1 = columns.
+// rowMax lands at v[0..H), colMax at v[2048..2048+W) (offsets in floats).
+// ============================================================================
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(std430, set = 0, binding = 1) readonly buffer RgbFull { float v[]; };
+layout(std430, set = 0, binding = 8) writeonly buffer Maxes { float m[]; };
+layout(push_constant) uniform Push { ivec4 a; ivec4 b; vec4 c; vec4 d; } pc;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (pc.b.x == 0) {
+        if (i >= uint(pc.a.y)) return;               // one thread per row
+        float mx = 0.0;
+        uint base = i * uint(pc.a.x) * 3u;
+        for (uint x = 0u; x < uint(pc.a.x); ++x) {
+            uint p = base + x * 3u;
+            mx = max(mx, max(v[p], max(v[p + 1u], v[p + 2u])));
+        }
+        m[i] = mx;                                    // rowMax[0..H)
+    } else {
+        if (i >= uint(pc.a.x)) return;               // one thread per column
+        float mx = 0.0;
+        uint stride = uint(pc.a.x) * 3u;
+        for (uint y = 0u; y < uint(pc.a.y); ++y) {
+            uint p = y * stride + i * 3u;
+            mx = max(mx, max(v[p], max(v[p + 1u], v[p + 2u])));
+        }
+        m[2048u + i] = mx;                            // colMax[2048..2048+W)
+    }
+}

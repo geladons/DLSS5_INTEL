@@ -1,0 +1,83 @@
+#version 460
+// ============================================================================
+// M3 feature assembly — the 16-channel network input volume, one pixel/thread.
+// PORT of nr_features(), src/ref/nr_image.c:84-112 (the C transcription of
+// MLX-DLSS make_features + apply_history; the NumPy original is the vendored
+// work/mlx-dlss features.py, ABSENT from this clone — the C is the ground
+// truth available in-tree).
+//
+// Per pixel, channels (nr_image.c:96-110):
+//   0..2  deterministic noise (3 ch)   -- STAND-IN, see below
+//   3     1.0                          (const)
+//   4..6  scaled colour: half(half(half(rgb)-0.5)*0.125)   (nr_image.c:96)
+//   7..9  history = scaled colour      (first-frame layout, nr_image.c:98-101)
+//   10..14 controls = (half(style), half(tone), half(structure), -1, -1)
+//   15    0.0
+//
+// STAND-IN (loud): the real channels 0-2 are MLX-DLSS deterministic_noise()
+// (extent+frame-index keyed, "four transcendentals per pixel", memoised per
+// nr_frame.py:44-62). features.py is NOT in this clone of the reference, so
+// the exact noise cannot be ported; we substitute a deterministic integer-hash
+// noise (same key inputs: y, x, channel, frame_index). The real noise is only
+// consumed by the learned graph — which is itself a STAND-IN here — so no
+// contract is broken, but the full port must swap this for the real
+// deterministic_noise() to be weight-faithful.
+//
+//   push a = (netW, netH, 0, 0);  b = (frameIndex, 0, 0, 0);
+//        c = (style, tone, structure, 0)   (style/tone/structure host-half-rounded)
+// ============================================================================
+#extension GL_GOOGLE_include_directive : require
+#include "publish.glsl"
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(std430, set = 0, binding = 4) readonly buffer NetRgb { float rgb[]; };
+layout(std430, set = 0, binding = 3) writeonly buffer Features { float f[]; };
+layout(push_constant) uniform Push { ivec4 a; ivec4 b; vec4 c; vec4 d; } pc;
+
+// STAND-IN deterministic noise (see header). Real: features.py deterministic_noise.
+float hashNoise(uint x, uint y, uint ch, uint frame) {
+    uint h = (x * 1664525u) ^ (y * 1013904223u) ^ (ch * 374761393u) ^ (frame * 668265263u);
+    h ^= h >> 15u; h *= 2246822519u; h ^= h >> 13u; h *= 3266489917u; h ^= h >> 16u;
+    return float(h & 0xFFFFFFu) / 16777216.0;
+}
+
+void main() {
+    uint p = gl_GlobalInvocationID.x;
+    uint n = uint(pc.a.x) * uint(pc.a.y);
+    if (p >= n) return;
+    uint x = p % uint(pc.a.x);
+    uint y = p / uint(pc.a.x);
+
+    float scaled[3];
+    for (uint c = 0u; c < 3u; ++c) {
+        float v = rgb[p * 3u + c];
+        // scaled_color, nr_image.c:96 — three FP16 roundings (ARCHITECTURE.md:49)
+        v = half_round(v);
+        v = half_round(v - 0.5);
+        v = half_round(v * 0.125);
+        scaled[c] = v;
+    }
+
+    float ctrl0 = half_round(pc.c.x);
+    float ctrl1 = half_round(pc.c.y);
+    float ctrl2 = half_round(pc.c.z);
+
+    float o[16];
+    o[0]  = hashNoise(x, y, 0u, uint(pc.b.x));
+    o[1]  = hashNoise(x, y, 1u, uint(pc.b.x));
+    o[2]  = hashNoise(x, y, 2u, uint(pc.b.x));
+    o[3]  = 1.0;
+    o[4]  = scaled[0];
+    o[5]  = scaled[1];
+    o[6]  = scaled[2];
+    o[7]  = scaled[0];   // first-frame history layout (nr_image.c:99-101)
+    o[8]  = scaled[1];
+    o[9]  = scaled[2];
+    o[10] = ctrl0;
+    o[11] = ctrl1;
+    o[12] = ctrl2;
+    o[13] = -1.0;        // plain game recipe (nr_frame.py build_features)
+    o[14] = -1.0;
+    o[15] = 0.0;
+    for (uint c = 0u; c < 16u; ++c) f[p * 16u + c] = o[c];
+}

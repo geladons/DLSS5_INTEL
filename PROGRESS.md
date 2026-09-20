@@ -34,6 +34,23 @@ Project: Intel Arc port of DLSS 5-style neural rendering, whole-desktop
   apiVersion 1.4.348. Full report: docs\vulkaninfo-gpu.txt — M0 gate PASSED.
 - UAC: ConsentPromptBehaviorAdmin=0 (elevate w/o prompts), SmartScreen off (owner-approved fix).
 
+## M4-SIMPLE result (2026-09-19) — PASS
+
+Live processed-desktop overlay works. Built from M3 baseline (CPU bridge,
+zero-copy explicitly DEFERRED). Run: 300 frames in 7.98 s — **avg 37.6 fps,
+rolling 39.0**, dropped 0, present FIFO via blit.comp; verify frames
+10/30/60 ALL PASS (mean|final−native| and structure > 0; deltas shrink on an
+idling desktop — expected residual physics with stand-in transform).
+Artifacts: dlss5/m4-present-simple/, docs/m4-simple.log.
+
+**Deferred to M5 (own design doc):** zero-copy live loop (m4-live-present/,
+3 timed-out attempts). Observed failure: per-frame reuse of ONE imported
+shared texture + timeline semaphore fails the wait ~frame 4
+("[FAIL] timeline wait frame N"); driver likely releases the shared texture
+lazily. M2/M3 single-shot import is fine; M3 canary re-passed at 19:37
+(driver healthy). M5 must use rotating N>=3 shared textures with per-slot
+completion tracking (skip-frame instead of stall).
+
 ## Next
 
 - [ ] Toolchain install (Vulkan SDK, CMake, Python; VS Build Tools C++ workload check)

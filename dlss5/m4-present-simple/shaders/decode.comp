@@ -1,0 +1,23 @@
+#version 460
+// ============================================================================
+// M3 decode — B8G8R8A8 storage image -> float RGB in [0,1], packed 3 floats/px.
+// PORT of reference nr_decode8(..., bgra=1): src/ref/nr_image.c:36-44.
+//   DXGI desktop capture is B8G8R8A8 -> bgra=1: R=src[2], G=src[1], B=src[0].
+// For VK_FORMAT_B8G8R8A8_UNORM an rgba8 imageLoad returns .x=B .y=G .z=R .w=A,
+// so R=c.z, G=c.y, B=c.x. Output layout choice (logged): planar-none, packed
+// RGB float32 HWC (matches the reference's contiguous (H,W,3) float32).
+// ============================================================================
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(rgba8, set = 0, binding = 0) uniform readonly image2D imgIn;
+layout(std430, set = 0, binding = 1) writeonly buffer RgbFull { float v[]; };
+
+void main() {
+    ivec2 xy = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 sz = imageSize(imgIn);
+    if (xy.x >= sz.x || xy.y >= sz.y) return;
+    vec4 c = imageLoad(imgIn, xy);          // B,G,R,A bytes as normalized floats
+    uint p = uint(xy.y) * uint(sz.x) + uint(xy.x);
+    v[p * 3u + 0u] = c.z;                   // R = src[2]  (nr_image.c:38)
+    v[p * 3u + 1u] = c.y;                   // G = src[1]  (nr_image.c:39)
+    v[p * 3u + 2u] = c.x;                   // B = src[0]  (nr_image.c:40)
+}
