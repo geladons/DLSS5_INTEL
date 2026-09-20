@@ -719,6 +719,7 @@ int main(int argc, char **argv) {
     VkDeviceSize oB38 = slot(TOK * 1024 * 2), oB39 = slot(TOK * 512 * 2), oB48 = slot(TOK * 256 * 2);
     VkDeviceSize oB69 = slot(TOK * 32 * 2);
     VkDeviceSize oMRG70 = slot(TOK * 32 * 4), oHEAD = slot(TOK * 16 * 4);
+    VkDeviceSize oDBG = slot(8320 * 1024);   // temp b31 global probes
 
     // Pre-allocate every fp32 vector slot BEFORE the buffers are sized below:
     // the upload copy spans packTotal + ar.off, so ar.off must be final here
@@ -762,7 +763,7 @@ int main(int argc, char **argv) {
     char *sp = (char *)staging.mapped;
 
     auto isBranchedExpand = [&](const std::string &n) {
-        return n.size() >= 19 && n.substr(n.size() - 19) == ".ffn_expand_weight";
+        return n.size() >= 18 && n.substr(n.size() - 18) == ".ffn_expand_weight";
     };
 
     for (auto &e : pack) {
@@ -1176,17 +1177,29 @@ int main(int argc, char **argv) {
         bar(cb);
         dSmaxG(cb, A(oSCG), A(oPRG));
         bar(cb);
+        if (idx == 31 && g_dispDbg) {   // TEMP probe: probs
+            VkBufferCopy c{oPRG, oDBG, 32 * TOK * TOK * 2};
+            vkCmdCopyBuffer(cb, dev.buf, dev.buf, 1, &c);
+        }
         dGemm(cb, famIdx, A(oPRG), A(oVG), A(oMGG), TOK, 32, TOK, 32,
-              TOK * TOK, 32, 32, gflags(EPI_NONE, false), TOK, 1024, 32);
+              TOK * TOK, 32, 32, gflags(EPI_NONE, false), TOK, 1024, 1024);
         bar(cb);
         dEw(cb, A(oMGG), 0, 0, 0, A(oATG), TOK * 1024, 3, 0);
         bar(cb);
+        if (idx == 31 && g_dispDbg) {   // TEMP probe: attended16 + pub
+            VkBufferCopy c{oATG, oDBG + 5308416, TOK * 1024 * 2};
+            vkCmdCopyBuffer(cb, dev.buf, dev.buf, 1, &c);
+        }
         dGemm(cb, famIdx, A(oATG), A(poff[tname("block%d.layer4.projection_weight", idx)]), A(oABG),
               TOK, 1024, 1024, 1, 0, 0, 0, gflags(EPI_NONE, false), 1024, 1024, 1024);
         bar(cb);
         dEw(cb, A(oABG), A(oG3), A(oBRG), A(vecOff[tname("block%d.layer4.attn_cos_skip", idx)]),
             A(pubOff), TOK * 1024, 0, 1024);
         bar(cb);
+        if (idx == 31 && g_dispDbg) {   // TEMP probe: pub
+            VkBufferCopy c{pubOff, oDBG + 5898240, TOK * 1024 * 2};
+            vkCmdCopyBuffer(cb, dev.buf, dev.buf, 1, &c);
+        }
     };
 
     // shifted-window origin per block, mirroring nr_model.recovered_window_origin.
@@ -1449,6 +1462,9 @@ int main(int argc, char **argv) {
             {"dbg_fc2", vecOff["block2.layer0.ffn_cos_skip"], 32 * 4},
             {"dbg_ac2", vecOff["block2.layer0.attn_cos_skip"], 32 * 4},
             {"dbg_bias", poff["block0.layer0.attn_bias"], 4096 * 2},
+            {"dbg31_pr", oDBG, 32 * 288 * 288 * 2},
+            {"dbg31_at", oDBG + 5308416, TOK * 1024 * 2},
+            {"dbg31_pub", oDBG + 5898240, TOK * 1024 * 2},
         };
         VkDeviceSize tot2 = 0;
         for (auto &d : dbgs) tot2 += d.bytes;

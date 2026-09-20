@@ -1,0 +1,12 @@
+boundary    family        kind           max-abs    mean-rel  bitmatch   <=1step   verdict
+b4ds        stem          contract                           100.0000% 100.0000%      True
+b22ds       encoder       contract                             2.1783%   6.3782%     False
+b30         bottleneck    contract                             1.1861%   3.6085%     False
+b38         global        contract                             1.4333%   4.4169%     False
+b39         decoder.b39   contract                             1.5984%   4.5586%     False
+b48         decoder.b48   contract                             3.9252%   9.8714%     False
+b69         decoder.b69   contract                             3.3095%   9.1363%     False
+merged70    head.merge    fp32           124.982           1                         False
+head        head          fp32           30.6265        0.25                         False
+
+M8a full-chain verdict: FAIL (contract: >=99.9% f16-bit OR >=99.9% within 1 e4m3 step; fp32: mean-rel<0.1% + max-abs<=2% of scale, strict max-rel printed)
