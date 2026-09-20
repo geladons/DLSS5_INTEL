@@ -1,0 +1,62 @@
+=== M1 DXGI Desktop Duplication build+run log ===
+started 19.09.2026 17:35:33,81 
+args: frames=300 snapint=60 timeout=500 outdir=out 
+cmake version 4.4.3
+
+CMake suite maintained and supported by Kitware (kitware.com/cmake).
+>> cmake configure 
+-- Selecting Windows SDK version 10.0.19041.0 to target Windows 10.0.22631.
+-- Configuring done (0.0s)
+-- Generating done (0.1s)
+-- Build files have been written to: C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m1-frame-capture/build
+>> cmake build 
+Microsoft (R) Build Engine version 16.11.6+a918ceb31 for .NET Framework
+Copyright (C) Microsoft Corporation. All rights reserved.
+
+C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\MSBuild\Microsoft\VC\v160\Microsoft.CppBuild.targets(499,5): warning MSB8004: Output Directory does not end with a trailing slash.  This build instance will add the slash as it is required to allow proper evaluation of the Output Directory. [C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m1-frame-capture\build\ZERO_CHECK.vcxproj]
+  1>Checking Build System
+  Building Custom Rule C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m1-frame-capture/CMakeLists.txt
+  main.cpp
+  m1dda.vcxproj -> C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m1-frame-capture\build\Release\m1dda.exe
+C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\MSBuild\Microsoft\VC\v160\Microsoft.CppBuild.targets(499,5): warning MSB8004: Output Directory does not end with a trailing slash.  This build instance will add the slash as it is required to allow proper evaluation of the Output Directory. [C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m1-frame-capture\build\ALL_BUILD.vcxproj]
+  Building Custom Rule C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m1-frame-capture/CMakeLists.txt
+>> run capture 
+=== M1: DXGI Desktop Duplication frame capture ===
+args: frames=300 snapshot_interval=60 timeout_ms=500 outdir=out wiggle=1
+
+D3D11 device: driver=HARDWARE feature_level=0xb100 adapter="Intel(R) Arc(TM) Pro B50 Graphics" (LUID 00000000:000095a2) VRAM=16206 MB
+output[0]: "\\.\DISPLAY5" attachedToDesktop=1 coords=(0,0)-(2560,1440)
+[info] DuplicateOutput1 (pin B8G8R8A8) failed: DXGI_ERROR_UNSUPPORTED 0x887a0004 — falling back
+
+Duplication active via DuplicateOutput (driver-chosen format)
+output device: "\\.\DISPLAY5"
+mode: 2560x1440 format=B8G8R8A8_UNORM rotation=IDENTITY desktopImageInSystemMemory=0
+
+[info] cursor-wiggle activity generator ON (desktop is dirty-rect driven; an idle
+       VM desktop produces zero DDA frames). Pass 0 as argv[5] to disable.
+
+capture loop: 300 attempts, snapshot every 60 acquired frames...
+staging texture: 2560x1440 format=B8G8R8A8_UNORM bpp=4
+snapshot frame 60 -> out\snapshot_60.bmp : written | luma var=9745.44 range=[0,255] B/G/R var=10320.1/10031.1/9370.8 samples=57600
+snapshot frame 120 -> out\snapshot_120.bmp : written | luma var=9745.28 range=[0,255] B/G/R var=10320.0/10030.9/9370.7 samples=57600
+snapshot frame 180 -> out\snapshot_180.bmp : written | luma var=9745.28 range=[0,255] B/G/R var=10320.0/10030.9/9370.7 samples=57600
+snapshot frame 240 -> out\snapshot_240.bmp : written | luma var=9745.28 range=[0,255] B/G/R var=10320.0/10030.9/9370.7 samples=57600
+snapshot frame 300 -> out\snapshot_300.bmp : written | luma var=9745.28 range=[0,255] B/G/R var=10320.0/10030.9/9370.7 samples=57600
+
+=== M1 summary ===
+mode: DXGI Desktop Duplication (DuplicateOutput (driver-chosen format))
+output: "\\.\DISPLAY5" adapter="Intel(R) Arc(TM) Pro B50 Graphics" driver=HARDWARE
+resolution: 2560x1440 desktop format=B8G8R8A8_UNORM (captured as B8G8R8A8)
+attempts: 300 | acquired: 300 | timeouts: 0 | updated(dirty): 37 | repeated(same): 263 | access-lost: 0 | errors: 0
+fps: avg 69.02 | interval min 3.98 ms (251.5 fps) | interval max 85.51 ms (11.7 fps)
+snapshots: 5
+  out\snapshot_60.bmp : luma var=9745.44 range=[0,255] -> REAL CONTENT (non-uniform)
+  out\snapshot_120.bmp : luma var=9745.28 range=[0,255] -> REAL CONTENT (non-uniform)
+  out\snapshot_180.bmp : luma var=9745.28 range=[0,255] -> REAL CONTENT (non-uniform)
+  out\snapshot_240.bmp : luma var=9745.28 range=[0,255] -> REAL CONTENT (non-uniform)
+  out\snapshot_300.bmp : luma var=9745.28 range=[0,255] -> REAL CONTENT (non-uniform)
+
+RESULT: PASS — 300 frames at 69.0 avg fps, 5 snapshots verified non-uniform
+m1dda exit code: 0 
+ 
+=== final exit code: 0 (ended 19.09.2026 17:35:44,25) === 
