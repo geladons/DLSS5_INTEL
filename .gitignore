@@ -1,5 +1,12 @@
 # Чужой код — только для чтения, не коммитим
 reference/
+work/
+*.safetensors
+*.dll
+*.exe
+build/
+out/
+*.bmp
 
 # Артефакты сборки / временное
 build/
