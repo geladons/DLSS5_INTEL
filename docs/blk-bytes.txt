@@ -1,0 +1,207 @@
+block0: 33924 bytes (0.03 MiB), 9 tensors
+block1: 32900 bytes (0.03 MiB), 8 tensors
+block2: 32900 bytes (0.03 MiB), 8 tensors
+block3: 32900 bytes (0.03 MiB), 8 tensors
+block4: 36996 bytes (0.04 MiB), 9 tensors
+block5: 106760 bytes (0.10 MiB), 9 tensors
+block6: 106760 bytes (0.10 MiB), 9 tensors
+block7: 106760 bytes (0.10 MiB), 9 tensors
+block8: 123144 bytes (0.12 MiB), 10 tensors
+block9: 360976 bytes (0.34 MiB), 9 tensors
+block10: 360976 bytes (0.34 MiB), 9 tensors
+block11: 360976 bytes (0.34 MiB), 9 tensors
+block12: 360976 bytes (0.34 MiB), 9 tensors
+block13: 360976 bytes (0.34 MiB), 9 tensors
+block14: 426512 bytes (0.41 MiB), 10 tensors
+block15: 1311776 bytes (1.25 MiB), 9 tensors
+block16: 1311776 bytes (1.25 MiB), 9 tensors
+block17: 1311776 bytes (1.25 MiB), 9 tensors
+block18: 1311776 bytes (1.25 MiB), 9 tensors
+block19: 1311776 bytes (1.25 MiB), 9 tensors
+block20: 1311776 bytes (1.25 MiB), 9 tensors
+block21: 1311776 bytes (1.25 MiB), 9 tensors
+block22: 1573920 bytes (1.50 MiB), 10 tensors
+block23: 3803200 bytes (3.63 MiB), 10 tensors
+block24: 3803200 bytes (3.63 MiB), 10 tensors
+block25: 3803200 bytes (3.63 MiB), 10 tensors
+block26: 3803200 bytes (3.63 MiB), 10 tensors
+block27: 3803200 bytes (3.63 MiB), 10 tensors
+block28: 3803200 bytes (3.63 MiB), 10 tensors
+block29: 3803200 bytes (3.63 MiB), 10 tensors
+block30: 4851776 bytes (4.63 MiB), 11 tensors
+block31: 25170050 bytes (24.00 MiB), 8 tensors
+block32: 25170050 bytes (24.00 MiB), 8 tensors
+block33: 25170050 bytes (24.00 MiB), 8 tensors
+block34: 25170050 bytes (24.00 MiB), 8 tensors
+block35: 25170050 bytes (24.00 MiB), 8 tensors
+block36: 25170050 bytes (24.00 MiB), 8 tensors
+block37: 25170050 bytes (24.00 MiB), 8 tensors
+block38: 25170050 bytes (24.00 MiB), 8 tensors
+block39: 1049600 bytes (1.00 MiB), 2 tensors
+block40: 3803200 bytes (3.63 MiB), 10 tensors
+block41: 3803200 bytes (3.63 MiB), 10 tensors
+block42: 3803200 bytes (3.63 MiB), 10 tensors
+block43: 3803200 bytes (3.63 MiB), 10 tensors
+block44: 3803200 bytes (3.63 MiB), 10 tensors
+block45: 3803200 bytes (3.63 MiB), 10 tensors
+block46: 3803200 bytes (3.63 MiB), 10 tensors
+block47: 3803200 bytes (3.63 MiB), 10 tensors
+block48: 1574432 bytes (1.50 MiB), 11 tensors
+block49: 1311776 bytes (1.25 MiB), 9 tensors
+block50: 1311776 bytes (1.25 MiB), 9 tensors
+block51: 1311776 bytes (1.25 MiB), 9 tensors
+block52: 1311776 bytes (1.25 MiB), 9 tensors
+block53: 1311776 bytes (1.25 MiB), 9 tensors
+block54: 1311776 bytes (1.25 MiB), 9 tensors
+block55: 1311776 bytes (1.25 MiB), 9 tensors
+block56: 426768 bytes (0.41 MiB), 11 tensors
+block57: 360976 bytes (0.34 MiB), 9 tensors
+block58: 360976 bytes (0.34 MiB), 9 tensors
+block59: 360976 bytes (0.34 MiB), 9 tensors
+block60: 360976 bytes (0.34 MiB), 9 tensors
+block61: 360976 bytes (0.34 MiB), 9 tensors
+block62: 123272 bytes (0.12 MiB), 11 tensors
+block63: 106760 bytes (0.10 MiB), 9 tensors
+block64: 106760 bytes (0.10 MiB), 9 tensors
+block65: 106760 bytes (0.10 MiB), 9 tensors
+block66: 37060 bytes (0.04 MiB), 10 tensors
+block67: 32900 bytes (0.03 MiB), 8 tensors
+block68: 32900 bytes (0.03 MiB), 8 tensors
+block69: 32900 bytes (0.03 MiB), 8 tensors
+block70: 33286 bytes (0.03 MiB), 13 tensors
+GRAND TOTAL: 291511674 bytes = 278.01 MiB (file data 291511674)
+
+blocks [0]:
+   block0.layer0.attn_bias [1, 64, 64] F16
+   block0.layer0.attn_cos_skip [32] F16
+   block0.layer0.attn_scale [1] F32
+   block0.layer0.ffn_cos_skip [32] F16
+   block0.layer0.input_adapter_weight [16, 32] F16
+   block0.layer0.projection_weight [32, 32] F16
+   block0.layer0.qkv_weight [32, 96] F16
+   block0.layer0.weight1 [32, 128] F16
+   block0.layer0.weight2 [128, 32] F16
+
+blocks [1, 2, 3, 67, 68, 69]:
+   block1.layer0.attn_bias [1, 64, 64] F16
+   block1.layer0.attn_cos_skip [32] F16
+   block1.layer0.attn_scale [1] F32
+   block1.layer0.ffn_cos_skip [32] F16
+   block1.layer0.projection_weight [32, 32] F16
+   block1.layer0.qkv_weight [32, 96] F16
+   block1.layer0.weight1 [32, 128] F16
+   block1.layer0.weight2 [128, 32] F16
+
+blocks [4]:
+   block4.layer0.attn_bias [1, 64, 64] F16
+   block4.layer0.attn_cos_skip [32] F16
+   block4.layer0.attn_scale [1] F32
+   block4.layer0.ffn_cos_skip [32] F16
+   block4.layer0.projection_weight [32, 32] F16
+   block4.layer0.qkv_weight [32, 96] F16
+   block4.layer0.weight0 [32, 64] F16
+   block4.layer0.weight1 [32, 128] F16
+   block4.layer0.weight2 [128, 32] F16
+
+blocks [5, 6, 7, 9, 10, 11, 12, 13, 15, 16, 17, 18, 19, 20, 21, 49, 50, 51, 52, 53, 54, 55, 57, 58, 59, 60, 61, 63, 64, 65]:
+   block5.layer0.attn_bias [2, 64, 64] F16
+   block5.layer0.attn_cos_skip [64] F16
+   block5.layer0.attn_scale [2] F32
+   block5.layer0.ffn_branch_projection_weight [2, 4, 32, 32] F16
+   block5.layer0.ffn_cos_skip [64] F16
+   block5.layer0.ffn_expand_weight [2, 4, 2, 32, 32] F16
+   block5.layer0.ffn_output_projection_weight [64, 64] F16
+   block5.layer0.projection_weight [64, 64] F16
+   block5.layer0.qkv_weight [64, 192] F16
+
+blocks [8, 14, 22]:
+   block8.layer0.attn_bias [2, 64, 64] F16
+   block8.layer0.attn_cos_skip [64] F16
+   block8.layer0.attn_scale [2] F32
+   block8.layer0.ffn_branch_projection_weight [2, 4, 32, 32] F16
+   block8.layer0.ffn_cos_skip [64] F16
+   block8.layer0.ffn_expand_weight [2, 4, 2, 32, 32] F16
+   block8.layer0.ffn_output_projection_weight [64, 64] F16
+   block8.layer0.projection_weight [64, 64] F16
+   block8.layer0.qkv_weight [64, 192] F16
+   block8.layer0.weight0 [64, 128] F16
+
+blocks [23, 24, 25, 26, 27, 28, 29, 40, 41, 42, 43, 44, 45, 46, 47]:
+   block23.layer0.first_projection_weight [512, 512] F16
+   block23.layer0.group_expand_weight [8, 64, 256] F16
+   block23.layer0.group_project_weight [8, 256, 64] F16
+   block23.layer1.ffn_cos_skip [512] F16
+   block23.layer1.weight3 [512, 512] F16
+   block23.layer2.attn_bias [16, 64, 64] F16
+   block23.layer2.attn_scale [16] F32
+   block23.layer2.qkv_weight [512, 1536] F16
+   block23.layer3.attn_cos_skip [512] F16
+   block23.layer3.projection_weight [512, 512] F16
+
+blocks [30]:
+   block30.layer0.first_projection_weight [512, 512] F16
+   block30.layer0.group_expand_weight [8, 64, 256] F16
+   block30.layer0.group_project_weight [8, 256, 64] F16
+   block30.layer1.ffn_cos_skip [512] F16
+   block30.layer1.weight3 [512, 512] F16
+   block30.layer2.attn_bias [16, 64, 64] F16
+   block30.layer2.attn_scale [16] F32
+   block30.layer2.qkv_weight [512, 1536] F16
+   block30.layer3.attn_cos_skip [512] F16
+   block30.layer3.projection_weight [512, 512] F16
+   block30.layer4.weight [512, 1024] F16
+
+blocks [31, 32, 33, 34, 35, 36, 37, 38]:
+   block31.layer0.weight [1024, 4096] F16
+   block31.layer1.ffn_cos_skip [1024] F16
+   block31.layer1.weight [4096, 1024] F16
+   block31.layer2.attn_scale [32] F32
+   block31.layer2.qkv_weight [1024, 3072] F16
+   block31.layer3.attention_scalar [1] F16
+   block31.layer4.attn_cos_skip [1024] F16
+   block31.layer4.projection_weight [1024, 1024] F16
+
+blocks [39]:
+   block39.layer0.conv_weight [1024, 512] F16
+   block39.layer0.inp_upsample_sin [512] F16
+
+blocks [48, 56, 62]:
+   block48.layer0.attn_bias [8, 64, 64] F16
+   block48.layer0.attn_cos_skip [256] F16
+   block48.layer0.attn_scale [8] F32
+   block48.layer0.ffn_branch_projection_weight [8, 4, 32, 32] F16
+   block48.layer0.ffn_cos_skip [256] F16
+   block48.layer0.ffn_expand_weight [8, 4, 8, 32, 32] F16
+   block48.layer0.ffn_output_projection_weight [256, 256] F16
+   block48.layer0.projection_weight [256, 256] F16
+   block48.layer0.qkv_weight [256, 768] F16
+   block48.layer0.sin [256] F16
+   block48.layer0.weight0 [512, 256] F16
+
+blocks [66]:
+   block66.layer0.attn_bias [1, 64, 64] F16
+   block66.layer0.attn_cos_skip [32] F16
+   block66.layer0.attn_scale [1] F32
+   block66.layer0.ffn_cos_skip [32] F16
+   block66.layer0.projection_weight [32, 32] F16
+   block66.layer0.qkv_weight [32, 96] F16
+   block66.layer0.sin [32] F16
+   block66.layer0.weight0 [64, 32] F16
+   block66.layer0.weight1 [32, 128] F16
+   block66.layer0.weight2 [128, 32] F16
+
+blocks [70]:
+   block70.layer0.attn_bias [1, 64, 64] F16
+   block70.layer0.attn_cos_skip [32] F16
+   block70.layer0.attn_scale [1] F32
+   block70.layer0.blend_scale [1] F16
+   block70.layer0.ffn_cos_skip [32] F16
+   block70.layer0.inp_merge_cos [32] F16
+   block70.layer0.inp_merge_sin [32] F16
+   block70.layer0.out_conv_weight [16, 4] F16
+   block70.layer0.out_gain [16, 4] F16
+   block70.layer0.projection_weight [32, 32] F16
+   block70.layer0.qkv_weight [32, 96] F16
+   block70.layer0.weight1 [32, 128] F16
+   block70.layer0.weight2 [128, 32] F16
+
