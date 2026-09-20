@@ -1,0 +1,50 @@
+=== M0 coopmat probe build+run log ===
+started 19.09.2026 17:22:53,31 
+cmake version 4.4.3
+
+CMake suite maintained and supported by Kitware (kitware.com/cmake).
+Glslang Version: 11:16.4.0
+ESSL Version: OpenGL ES GLSL 3.20 glslang Khronos. 16.4.0
+GLSL Version: 4.60 glslang Khronos. 16.4.0
+SPIR-V Version 0x00010600, Revision 1
+GLSL.std.450 Version 100, Revision 1
+Khronos Tool ID 8
+SPIR-V Generator Version 11
+GL_KHR_vulkan_glsl version 100
+ARB_GL_gl_spirv version 100
+ 
+--- attempt 1: config M=8 N=16 K=16 SUBGROUP=32 CF32=1 --- 
+>> cmake configure 
+-- Selecting Windows SDK version 10.0.19041.0 to target Windows 10.0.22631.
+-- Configuring done (0.0s)
+-- Generating done (0.1s)
+-- Build files have been written to: C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m0-coopmat-probe/build
+>> cmake build 
+Microsoft (R) Build Engine version 16.11.6+a918ceb31 for .NET Framework
+Copyright (C) Microsoft Corporation. All rights reserved.
+
+  Compiling probe.comp -> probe.spv (M=8 N=16 K=16 SG=32 CF32=1)
+  C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m0-coopmat-probe/probe.comp
+  main.cpp
+  probe.vcxproj -> C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m0-coopmat-probe\build\Release\probe.exe
+>> run probe 
+=== M0 cooperative-matrix probe (Arc Pro B50) ===
+physical devices: 2
+  candidate: Intel(R) Arc(TM) Pro B50 Graphics (api 0.1.4.348) coopmat=YES computeQ=yes
+device: Intel(R) Arc(TM) Pro B50 Graphics
+apiVersion: 1.4.348.0  driverVersion: 1663589 (Intel Corporation 101.8805)
+subgroupSize: 32
+cooperative matrix configs: 4
+  [0] M=8 N=16 K=16  A=f16 B=f16 C=f32 R=f32  sat=0 scope=SUBGROUP
+  [1] M=8 N=16 K=32  A=u8 B=u8 C=u32 R=u32  sat=0 scope=SUBGROUP
+  [2] M=8 N=16 K=32  A=s8 B=s8 C=s32 R=s32  sat=0 scope=SUBGROUP
+  [3] M=8 N=16 K=16  A=f16 B=f16 C=f16 R=f16  sat=0 scope=SUBGROUP
+CHOSEN M=8 N=16 K=16 SUBGROUP=32 CF32=1
+COMPILED M=8 N=16 K=16 SUBGROUP=32 CF32=1
+loaded 1864 bytes of SPIR-V from C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m0-coopmat-probe\build\Release\probe.spv
+checked 8 x 16 = 128 results, max rel err 0.0000%
+timing: single dispatch+sync 0.473 ms; batch avg 0.0033 ms/dispatch
+RESULT: PASS (config 8x16x16 f16, C=f32)
+probe exit code: 0 
+ 
+=== final exit code: 0 (ended 19.09.2026 17:22:58,92) === 
