@@ -719,7 +719,7 @@ int main(int argc, char **argv) {
     VkDeviceSize oB38 = slot(TOK * 1024 * 2), oB39 = slot(TOK * 512 * 2), oB48 = slot(TOK * 256 * 2);
     VkDeviceSize oB69 = slot(TOK * 32 * 2);
     VkDeviceSize oMRG70 = slot(TOK * 32 * 4), oHEAD = slot(TOK * 16 * 4);
-    VkDeviceSize oDBG = slot(8320 * 1024);   // temp b31 global probes
+    VkDeviceSize oDBG = slot(12800 * 1024);   // temp b31 global probes
 
     // Pre-allocate every fp32 vector slot BEFORE the buffers are sized below:
     // the upload copy spans packTotal + ar.off, so ar.off must be final here
@@ -1155,6 +1155,12 @@ int main(int argc, char **argv) {
         dGemm(cb, famIdx, A(cur.off), A(poff[tname("block%d.layer0.weight", idx)]), A(oHG),
               TOK, 4096, 1024, 1, 0, 0, 0, gflags(EPI_GATE_E4M3, true), 1024, 4096, 4096);
         bar(cb);
+        if (idx == 31 && g_dispDbg) {   // TEMP probe: block input + gate out
+            VkBufferCopy c{cur.off, oDBG + 6488064, TOK * 1024 * 2};
+            vkCmdCopyBuffer(cb, dev.buf, dev.buf, 1, &c);
+            VkBufferCopy c2{oHG, oDBG + 7077888, TOK * 4096 * 2};
+            vkCmdCopyBuffer(cb, dev.buf, dev.buf, 1, &c2);
+        }
         dGemm(cb, famIdx, A(oHG), A(poff[tname("block%d.layer1.weight", idx)]), A(oG3),
               TOK, 1024, 4096, 1, 0, 0, 0, gflags(EPI_NONE, false), 4096, 1024, 1024);
         bar(cb);
@@ -1163,6 +1169,10 @@ int main(int argc, char **argv) {
         bar(cb);
         dEw(cb, A(oG3), 0, 0, 0, A(oG2), TOK * 1024, 2, 0);
         bar(cb);
+        if (idx == 31 && g_dispDbg) {   // TEMP probe: ffn_out fp32
+            VkBufferCopy c{oG3, oDBG + 9437184, TOK * 1024 * 4};
+            vkCmdCopyBuffer(cb, dev.buf, dev.buf, 1, &c);
+        }
         dGemm(cb, famIdx, A(oG2), A(poff[tname("block%d.layer2.qkv_weight", idx)]), A(oPROJG),
               TOK, 3072, 1024, 1, 0, 0, 0, gflags(EPI_NONE, false), 1024, 3072, 3072);
         bar(cb);
@@ -1172,21 +1182,25 @@ int main(int argc, char **argv) {
         bar(cb);
         dCosG(cb, A(oPROJG), A(oVG), A(vecOff[tname("block%d.layer2.attn_scale.q32", idx)]), 2);
         bar(cb);
+        if (idx == 31 && g_dispDbg) {   // TEMP probe: q16/k16/v16
+            VkBufferCopy c{oQG, oDBG + 10616832, TOK * 1024 * 2};
+            vkCmdCopyBuffer(cb, dev.buf, dev.buf, 1, &c);
+            VkBufferCopy c2{oKG, oDBG + 11206656, TOK * 1024 * 2};
+            vkCmdCopyBuffer(cb, dev.buf, dev.buf, 1, &c2);
+            VkBufferCopy c3{oVG, oDBG + 11796480, TOK * 1024 * 2};
+            vkCmdCopyBuffer(cb, dev.buf, dev.buf, 1, &c3);
+        }
         dGemm(cb, famIdx, A(oQG), A(oKG), A(oSCG), TOK, TOK, 32, 32,
               32, 32, TOK * TOK, gflags(EPI_NONE, false) | F_TRANSPOSE, 1024, 1024, TOK);
         bar(cb);
         dSmaxG(cb, A(oSCG), A(oPRG));
         bar(cb);
-        if (idx == 31 && g_dispDbg) {   // TEMP probe: probs
-            VkBufferCopy c{oPRG, oDBG, 32 * TOK * TOK * 2};
-            vkCmdCopyBuffer(cb, dev.buf, dev.buf, 1, &c);
-        }
         dGemm(cb, famIdx, A(oPRG), A(oVG), A(oMGG), TOK, 32, TOK, 32,
               TOK * TOK, 32, 32, gflags(EPI_NONE, false), TOK, 1024, 1024);
         bar(cb);
         dEw(cb, A(oMGG), 0, 0, 0, A(oATG), TOK * 1024, 3, 0);
         bar(cb);
-        if (idx == 31 && g_dispDbg) {   // TEMP probe: attended16 + pub
+        if (idx == 31 && g_dispDbg) {   // TEMP probe: attended16 (kept at fixed slot)
             VkBufferCopy c{oATG, oDBG + 5308416, TOK * 1024 * 2};
             vkCmdCopyBuffer(cb, dev.buf, dev.buf, 1, &c);
         }
@@ -1196,8 +1210,8 @@ int main(int argc, char **argv) {
         dEw(cb, A(oABG), A(oG3), A(oBRG), A(vecOff[tname("block%d.layer4.attn_cos_skip", idx)]),
             A(pubOff), TOK * 1024, 0, 1024);
         bar(cb);
-        if (idx == 31 && g_dispDbg) {   // TEMP probe: pub
-            VkBufferCopy c{pubOff, oDBG + 5898240, TOK * 1024 * 2};
+        if (idx >= 31 && idx <= 38 && g_dispDbg) {   // TEMP probe: per-block publish
+            VkBufferCopy c{pubOff, oDBG + (VkDeviceSize)(idx - 31) * (TOK * 1024 * 2), TOK * 1024 * 2};
             vkCmdCopyBuffer(cb, dev.buf, dev.buf, 1, &c);
         }
     };
@@ -1462,9 +1476,21 @@ int main(int argc, char **argv) {
             {"dbg_fc2", vecOff["block2.layer0.ffn_cos_skip"], 32 * 4},
             {"dbg_ac2", vecOff["block2.layer0.attn_cos_skip"], 32 * 4},
             {"dbg_bias", poff["block0.layer0.attn_bias"], 4096 * 2},
-            {"dbg31_pr", oDBG, 32 * 288 * 288 * 2},
             {"dbg31_at", oDBG + 5308416, TOK * 1024 * 2},
-            {"dbg31_pub", oDBG + 5898240, TOK * 1024 * 2},
+            {"dbg31_pub", oDBG + 0 * (TOK * 1024 * 2), TOK * 1024 * 2},
+            {"dbg32_pub", oDBG + 1 * (TOK * 1024 * 2), TOK * 1024 * 2},
+            {"dbg33_pub", oDBG + 2 * (TOK * 1024 * 2), TOK * 1024 * 2},
+            {"dbg34_pub", oDBG + 3 * (TOK * 1024 * 2), TOK * 1024 * 2},
+            {"dbg35_pub", oDBG + 4 * (TOK * 1024 * 2), TOK * 1024 * 2},
+            {"dbg36_pub", oDBG + 5 * (TOK * 1024 * 2), TOK * 1024 * 2},
+            {"dbg37_pub", oDBG + 6 * (TOK * 1024 * 2), TOK * 1024 * 2},
+            {"dbg38_pub", oDBG + 7 * (TOK * 1024 * 2), TOK * 1024 * 2},
+            {"dbg31_in", oDBG + 6488064, TOK * 1024 * 2},
+            {"dbg31_hg", oDBG + 7077888, TOK * 4096 * 2},
+            {"dbg31_ffn", oDBG + 9437184, TOK * 1024 * 4},
+            {"dbg31_q", oDBG + 10616832, TOK * 1024 * 2},
+            {"dbg31_k", oDBG + 11206656, TOK * 1024 * 2},
+            {"dbg31_v", oDBG + 11796480, TOK * 1024 * 2},
         };
         VkDeviceSize tot2 = 0;
         for (auto &d : dbgs) tot2 += d.bytes;

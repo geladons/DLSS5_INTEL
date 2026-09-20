@@ -359,6 +359,28 @@ golden.py compare; isolation: isolate.py, quant.py, quant2.py forensics).
   30 fps until those land.
 - Blockers: none. Reference (dlss-nr-on-intel) untouched, read-only as required.
 
+### M8a validation (2026-09-20, final)
+
+- **Full-chain boundary compare (fresh no-args dumps, raw bias mode):
+  stem/encoder/bottleneck PASS at 100.0000% bitmatch** (shifted-origin fixes
+  from WIP5/6 landed). Global family: per-block publish probes show b31/b32
+  100.000% bit-exact with decay from b33 (b38: 49.21% bit / 81.96% ≤1-step).
+- **Root cause of the global decay: NOT a porting bug — inherent fp32 chaos.**
+  sensitivity.py reruns the numpy golden with float64-accumulated GEMMs; it
+  decays identically (b38: 52.17% / 84.00%). The 8× full-288-token attention
+  chain amplifies any fp32 GEMM accumulation-order seed; no fp32
+  implementation can bit-match the golden ≥99.9% at b38 (same finding as M7's
+  float64 control for single-block scores). GPU sits inside the
+  golden-vs-golden-reordered envelope.
+- Decoder/head deltas are pure cascade: hybrid.py (golden decoder fed the
+  GPU's actual b38) still diverges at b39 (2.84%) — window attention
+  compounds any seed over 30 blocks; decoder kernels are byte-identical to
+  the bit-exact stem/encoder kernels.
+- Verdict: **PASS with one documented exception** (global chaos bound).
+  Evidence scripts: cmp_b31.py, sensitivity.py, hybrid.py. Full detail:
+  docs/m8-golden.log (final entry). Chain still runs 47.0 ms/frame.
+  M8b (live pipeline swap-in) is GO.
+
 ### M8a validation (2026-09-20)
 
 - golden.py is now a FULL-CHAIN NumPy reference: all 71 blocks, every family
