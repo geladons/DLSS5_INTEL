@@ -1,0 +1,18 @@
+=== M7 graph prototype build+run log ===
+started 20.09.2026  4:41:21,61 
+cmake version 4.4.3
+
+CMake suite maintained and supported by Kitware (kitware.com/cmake).
+>> cmake configure 
+-- Selecting Windows SDK version 10.0.19041.0 to target Windows 10.0.22631.
+-- Configuring done (0.0s)
+-- Generating done (0.1s)
+-- Build files have been written to: C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/build
+>> cmake build 
+Microsoft (R) Build Engine version 16.11.6+a918ceb31 for .NET Framework
+Copyright (C) Microsoft Corporation. All rights reserved.
+
+  main.cpp
+  m7proto.vcxproj -> C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\Release\m7proto.exe
+ 
+=== final exit code: 0  (ended 20.09.2026  4:41:27,62) === 

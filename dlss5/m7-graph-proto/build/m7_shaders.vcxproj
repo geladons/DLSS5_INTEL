@@ -1,0 +1,512 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="16.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <PreferredToolArchitecture>x64</PreferredToolArchitecture>
+  </PropertyGroup>
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="MinSizeRel|x64">
+      <Configuration>MinSizeRel</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="RelWithDebInfo|x64">
+      <Configuration>RelWithDebInfo</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{CAA146C9-21A4-3E3B-BB80-CE9153615ADE}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword>
+    <WindowsTargetPlatformVersion>10.0.19041.0</WindowsTargetPlatformVersion>
+    <Platform>x64</Platform>
+    <ProjectName>m7_shaders</ProjectName>
+    <VCProjectUpgraderObjectName>NoUpgrade</VCProjectUpgraderObjectName>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Utility</ConfigurationType>
+    <CharacterSet>MultiByte</CharacterSet>
+    <PlatformToolset>v142</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Utility</ConfigurationType>
+    <CharacterSet>MultiByte</CharacterSet>
+    <PlatformToolset>v142</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'" Label="Configuration">
+    <ConfigurationType>Utility</ConfigurationType>
+    <CharacterSet>MultiByte</CharacterSet>
+    <PlatformToolset>v142</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'" Label="Configuration">
+    <ConfigurationType>Utility</ConfigurationType>
+    <CharacterSet>MultiByte</CharacterSet>
+    <PlatformToolset>v142</PlatformToolset>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <_ProjectFileVersion>10.0.20506.1</_ProjectFileVersion>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Midl>
+      <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
+      <HeaderFileName>%(Filename).h</HeaderFileName>
+      <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
+      <InterfaceIdentifierFileName>%(Filename)_i.c</InterfaceIdentifierFileName>
+      <ProxyFileName>%(Filename)_p.c</ProxyFileName>
+    </Midl>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Midl>
+      <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
+      <HeaderFileName>%(Filename).h</HeaderFileName>
+      <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
+      <InterfaceIdentifierFileName>%(Filename)_i.c</InterfaceIdentifierFileName>
+      <ProxyFileName>%(Filename)_p.c</ProxyFileName>
+    </Midl>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">
+    <Midl>
+      <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
+      <HeaderFileName>%(Filename).h</HeaderFileName>
+      <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
+      <InterfaceIdentifierFileName>%(Filename)_i.c</InterfaceIdentifierFileName>
+      <ProxyFileName>%(Filename)_p.c</ProxyFileName>
+    </Midl>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">
+    <Midl>
+      <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
+      <HeaderFileName>%(Filename).h</HeaderFileName>
+      <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
+      <InterfaceIdentifierFileName>%(Filename)_i.c</InterfaceIdentifierFileName>
+      <ProxyFileName>%(Filename)_p.c</ProxyFileName>
+    </Midl>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\CMakeFiles\12c534c5a899c2b790ce8c4a61348b1c\cosine.spv.rule">
+      <Message Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compiling cosine.comp -^&gt; cosine.spv</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">setlocal
+C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe -V --target-env vulkan1.3 -IC:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders/cosine.comp -o C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/build/cosine.spv
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\cosine.comp;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\publish.glsl;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\cosine.spv</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</LinkObjects>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compiling cosine.comp -^&gt; cosine.spv</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">setlocal
+C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe -V --target-env vulkan1.3 -IC:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders/cosine.comp -o C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/build/cosine.spv
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\cosine.comp;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\publish.glsl;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\cosine.spv</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</LinkObjects>
+      <Message Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">Compiling cosine.comp -^&gt; cosine.spv</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">setlocal
+C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe -V --target-env vulkan1.3 -IC:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders/cosine.comp -o C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/build/cosine.spv
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\cosine.comp;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\publish.glsl;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\cosine.spv</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">false</LinkObjects>
+      <Message Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">Compiling cosine.comp -^&gt; cosine.spv</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">setlocal
+C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe -V --target-env vulkan1.3 -IC:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders/cosine.comp -o C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/build/cosine.spv
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\cosine.comp;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\publish.glsl;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\cosine.spv</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">false</LinkObjects>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\CMakeFiles\12c534c5a899c2b790ce8c4a61348b1c\elementwise.spv.rule">
+      <Message Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compiling elementwise.comp -^&gt; elementwise.spv</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">setlocal
+C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe -V --target-env vulkan1.3 -IC:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders/elementwise.comp -o C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/build/elementwise.spv
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\elementwise.comp;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\publish.glsl;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\elementwise.spv</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</LinkObjects>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compiling elementwise.comp -^&gt; elementwise.spv</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">setlocal
+C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe -V --target-env vulkan1.3 -IC:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders/elementwise.comp -o C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/build/elementwise.spv
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\elementwise.comp;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\publish.glsl;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\elementwise.spv</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</LinkObjects>
+      <Message Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">Compiling elementwise.comp -^&gt; elementwise.spv</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">setlocal
+C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe -V --target-env vulkan1.3 -IC:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders/elementwise.comp -o C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/build/elementwise.spv
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\elementwise.comp;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\publish.glsl;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\elementwise.spv</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">false</LinkObjects>
+      <Message Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">Compiling elementwise.comp -^&gt; elementwise.spv</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">setlocal
+C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe -V --target-env vulkan1.3 -IC:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders/elementwise.comp -o C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/build/elementwise.spv
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\elementwise.comp;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\publish.glsl;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\elementwise.spv</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">false</LinkObjects>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\CMakeFiles\12c534c5a899c2b790ce8c4a61348b1c\gemm.spv.rule">
+      <Message Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compiling gemm.comp -^&gt; gemm.spv</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">setlocal
+C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe -V --target-env vulkan1.3 -IC:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders/gemm.comp -o C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/build/gemm.spv
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\gemm.comp;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\publish.glsl;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\gemm.spv</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</LinkObjects>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compiling gemm.comp -^&gt; gemm.spv</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">setlocal
+C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe -V --target-env vulkan1.3 -IC:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders/gemm.comp -o C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/build/gemm.spv
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\gemm.comp;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\publish.glsl;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\gemm.spv</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</LinkObjects>
+      <Message Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">Compiling gemm.comp -^&gt; gemm.spv</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">setlocal
+C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe -V --target-env vulkan1.3 -IC:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders/gemm.comp -o C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/build/gemm.spv
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\gemm.comp;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\publish.glsl;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\gemm.spv</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">false</LinkObjects>
+      <Message Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">Compiling gemm.comp -^&gt; gemm.spv</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">setlocal
+C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe -V --target-env vulkan1.3 -IC:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders/gemm.comp -o C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/build/gemm.spv
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\gemm.comp;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\publish.glsl;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\gemm.spv</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">false</LinkObjects>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\CMakeFiles\12c534c5a899c2b790ce8c4a61348b1c\round_test.spv.rule">
+      <Message Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compiling round_test.comp -^&gt; round_test.spv</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">setlocal
+C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe -V --target-env vulkan1.3 -IC:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders/round_test.comp -o C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/build/round_test.spv
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\round_test.comp;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\publish.glsl;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\round_test.spv</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</LinkObjects>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compiling round_test.comp -^&gt; round_test.spv</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">setlocal
+C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe -V --target-env vulkan1.3 -IC:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders/round_test.comp -o C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/build/round_test.spv
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\round_test.comp;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\publish.glsl;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\round_test.spv</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</LinkObjects>
+      <Message Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">Compiling round_test.comp -^&gt; round_test.spv</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">setlocal
+C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe -V --target-env vulkan1.3 -IC:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders/round_test.comp -o C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/build/round_test.spv
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\round_test.comp;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\publish.glsl;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\round_test.spv</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">false</LinkObjects>
+      <Message Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">Compiling round_test.comp -^&gt; round_test.spv</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">setlocal
+C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe -V --target-env vulkan1.3 -IC:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders/round_test.comp -o C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/build/round_test.spv
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\round_test.comp;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\publish.glsl;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\round_test.spv</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">false</LinkObjects>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\CMakeFiles\12c534c5a899c2b790ce8c4a61348b1c\softmax.spv.rule">
+      <Message Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compiling softmax.comp -^&gt; softmax.spv</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">setlocal
+C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe -V --target-env vulkan1.3 -IC:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders/softmax.comp -o C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/build/softmax.spv
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\softmax.comp;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\publish.glsl;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\softmax.spv</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</LinkObjects>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compiling softmax.comp -^&gt; softmax.spv</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">setlocal
+C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe -V --target-env vulkan1.3 -IC:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders/softmax.comp -o C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/build/softmax.spv
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\softmax.comp;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\publish.glsl;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\softmax.spv</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</LinkObjects>
+      <Message Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">Compiling softmax.comp -^&gt; softmax.spv</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">setlocal
+C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe -V --target-env vulkan1.3 -IC:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders/softmax.comp -o C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/build/softmax.spv
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\softmax.comp;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\publish.glsl;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\softmax.spv</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">false</LinkObjects>
+      <Message Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">Compiling softmax.comp -^&gt; softmax.spv</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">setlocal
+C:\VulkanSDK\1.4.357.0\Bin\glslangValidator.exe -V --target-env vulkan1.3 -IC:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/shaders/softmax.comp -o C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/build/softmax.spv
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\softmax.comp;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\shaders\publish.glsl;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\softmax.spv</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">false</LinkObjects>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\CMakeFiles\c53a13a1fc6b9bf119f7ab1e8b23c31a\m7_shaders.rule">
+      <Message Condition="'$(Configuration)|$(Platform)'=='Debug|x64'"></Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">setlocal
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\round_test.spv;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\gemm.spv;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\cosine.spv;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\softmax.spv;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\elementwise.spv;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\CMakeFiles\m7_shaders</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</LinkObjects>
+      <VerifyInputsAndOutputsExist Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</VerifyInputsAndOutputsExist>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Release|x64'"></Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">setlocal
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\round_test.spv;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\gemm.spv;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\cosine.spv;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\softmax.spv;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\elementwise.spv;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\CMakeFiles\m7_shaders</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</LinkObjects>
+      <VerifyInputsAndOutputsExist Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</VerifyInputsAndOutputsExist>
+      <Message Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'"></Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">setlocal
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\round_test.spv;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\gemm.spv;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\cosine.spv;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\softmax.spv;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\elementwise.spv;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\CMakeFiles\m7_shaders</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">false</LinkObjects>
+      <VerifyInputsAndOutputsExist Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">false</VerifyInputsAndOutputsExist>
+      <Message Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'"></Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">setlocal
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\round_test.spv;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\gemm.spv;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\cosine.spv;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\softmax.spv;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\elementwise.spv;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\CMakeFiles\m7_shaders</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">false</LinkObjects>
+      <VerifyInputsAndOutputsExist Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">false</VerifyInputsAndOutputsExist>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\CMakeLists.txt">
+      <UseUtf8Encoding>Always</UseUtf8Encoding>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Building Custom Rule C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/CMakeLists.txt</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto -BC:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/build --check-stamp-file C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/build/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeCXXInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeCommonLanguageInclude.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeGenericSystem.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeInitializeConfigs.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeLanguageInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeRCInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeSystemSpecificInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeSystemSpecificInitialize.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Compiler\CMakeCommonCompilerMacros.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Compiler\MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Compiler\MSVC.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Internal\CMakeCXXLinkerInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Internal\CMakeCommonLinkerInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Linker\MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Linker\MSVC.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Linker\Windows-MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Linker\Windows-MSVC.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Windows-Initialize.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Windows-MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Windows-MSVC.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Windows.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\WindowsPaths.cmake;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\CMakeFiles\4.4.3\CMakeCXXCompiler.cmake;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\CMakeFiles\4.4.3\CMakeRCCompiler.cmake;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\CMakeFiles\4.4.3\CMakeSystem.cmake;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\CMakeFiles\generate.stamp</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</LinkObjects>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Building Custom Rule C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/CMakeLists.txt</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto -BC:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/build --check-stamp-file C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/build/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeCXXInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeCommonLanguageInclude.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeGenericSystem.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeInitializeConfigs.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeLanguageInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeRCInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeSystemSpecificInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeSystemSpecificInitialize.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Compiler\CMakeCommonCompilerMacros.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Compiler\MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Compiler\MSVC.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Internal\CMakeCXXLinkerInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Internal\CMakeCommonLinkerInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Linker\MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Linker\MSVC.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Linker\Windows-MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Linker\Windows-MSVC.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Windows-Initialize.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Windows-MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Windows-MSVC.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Windows.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\WindowsPaths.cmake;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\CMakeFiles\4.4.3\CMakeCXXCompiler.cmake;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\CMakeFiles\4.4.3\CMakeRCCompiler.cmake;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\CMakeFiles\4.4.3\CMakeSystem.cmake;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\CMakeFiles\generate.stamp</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</LinkObjects>
+      <Message Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">Building Custom Rule C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/CMakeLists.txt</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto -BC:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/build --check-stamp-file C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/build/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeCXXInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeCommonLanguageInclude.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeGenericSystem.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeInitializeConfigs.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeLanguageInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeRCInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeSystemSpecificInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeSystemSpecificInitialize.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Compiler\CMakeCommonCompilerMacros.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Compiler\MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Compiler\MSVC.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Internal\CMakeCXXLinkerInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Internal\CMakeCommonLinkerInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Linker\MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Linker\MSVC.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Linker\Windows-MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Linker\Windows-MSVC.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Windows-Initialize.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Windows-MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Windows-MSVC.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Windows.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\WindowsPaths.cmake;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\CMakeFiles\4.4.3\CMakeCXXCompiler.cmake;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\CMakeFiles\4.4.3\CMakeRCCompiler.cmake;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\CMakeFiles\4.4.3\CMakeSystem.cmake;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\CMakeFiles\generate.stamp</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">false</LinkObjects>
+      <Message Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">Building Custom Rule C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/CMakeLists.txt</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto -BC:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/build --check-stamp-file C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m7-graph-proto/build/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeCXXInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeCommonLanguageInclude.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeGenericSystem.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeInitializeConfigs.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeLanguageInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeRCInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeSystemSpecificInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\CMakeSystemSpecificInitialize.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Compiler\CMakeCommonCompilerMacros.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Compiler\MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Compiler\MSVC.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Internal\CMakeCXXLinkerInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Internal\CMakeCommonLinkerInformation.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Linker\MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Linker\MSVC.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Linker\Windows-MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Linker\Windows-MSVC.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Windows-Initialize.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Windows-MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Windows-MSVC.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\Windows.cmake;C:\Program Files\CMake\share\cmake-4.4\Modules\Platform\WindowsPaths.cmake;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\CMakeFiles\4.4.3\CMakeCXXCompiler.cmake;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\CMakeFiles\4.4.3\CMakeRCCompiler.cmake;C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\CMakeFiles\4.4.3\CMakeSystem.cmake;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\CMakeFiles\generate.stamp</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">false</LinkObjects>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\CMakeFiles\m7_shaders">
+    </None>
+  </ItemGroup>
+  <ItemGroup />
+  <ItemGroup>
+    <ProjectReference Include="C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\ZERO_CHECK.vcxproj">
+      <Project>{DFFE7382-4147-3699-BCC8-86CB97DA23DF}</Project>
+      <Name>ZERO_CHECK</Name>
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <CopyToOutputDirectory>Never</CopyToOutputDirectory>
+    </ProjectReference>
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+  </ImportGroup>
+</Project>

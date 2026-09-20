@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="16.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\CMakeFiles\c53a13a1fc6b9bf119f7ab1e8b23c31a\generate.stamp.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{EB435914-7241-3BF7-B77B-8659F1E81A35}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

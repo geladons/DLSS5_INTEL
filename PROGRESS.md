@@ -311,3 +311,36 @@ Vulkan runtime + wire the real graph in place of the M3 stand-in block.
     Matrix contract per metadata: K-by-N, output = input @ weight.
 - Full build+run console log: docs/m6a-loader.log (gitignored, force-added).
 - Blockers: none. Exit 0.
+
+## M7 (2026-09-20) - Vulkan graph prototype: rounding kernel + global block 31: PASS
+
+Full detail: docs/m7-proto.md. Project: dlss5/m7-graph-proto (exe m7proto.exe,
+golden.py compare; isolation: isolate.py, quant.py, quant2.py forensics).
+
+- M7a rounding unit kernel: PASS - 100.0000% bit-exact vs CPU (F16C RNE) on all
+  4 contract functions (half_round, e4m3, gate_activation, e4m3(gate)) over
+  5,063,530 values (all 65536 f16 patterns + boundary vectors + 4M random).
+- M7b global block 31 (288 tokens, C=1024, H=32, full MHA + branched FFN):
+  GPU run completes; steady-state 1.664 ms/block (20-iter avg) = 4.56 TFLOP/s
+  effective; GEMM-only 3.245 ms = 2.34 TFLOP/s. Reproduced across runs (one
+  5.067 ms cold-clock outlier discarded).
+- Golden compare: 12/14 tensors pass; numerics verdict PASS with 2 documented
+  exceptions. Run-2 q16/k16/v16 failure (~1.4% bitmatch) was a golden.py
+  COMPARE bug - it flattened q16/k16/v16 in (H,T,D) order while GPU dumps are
+  token-major (T, head*32+d). Isolation proves cosine.comp 100.0000% bit-exact
+  given identical proj. After fix: h 99.9996%, q16 99.9780%, k16 99.9854%,
+  v16 99.9810%, probs 99.9887%, attended16 99.8054% bitmatch; fp32 mean-rel
+  1.5e-5..5.9e-3, max-abs <= 1.6% of scale.
+- Exceptions (both = fp32 GEMM accumulation-order noise flipping e4m3
+  boundaries; float64 control shows the strict elementwise max-rel<2%% floor is
+  unsatisfiable by ANY fp32 GEMM): scores max-abs 0.234 (7.8%% of scale,
+  0.06%% of elems; downstream probs 99.9887%% bit-exact) and block16 99.07%%
+  bitmatch / 99.86%% within-1-e4m3-step (>1-step flips confined to |v|<=0.11,
+  abs <= 0.031). Strict all-tensor pass would require bit-identical GEMM
+  accumulation - out of scope by design.
+- Full-graph go/no-go: 4.56 TFLOP/s -> 460 GF/frame = ~101 ms/frame (~10 fps),
+  marginally beyond the design honest envelope of 30-90 ms. GO for building the
+  full 71-block graph with planned mitigations (fused epilogues - cosine_v at
+  1.447 ms is the top target, barrier elision, render_scale 0.4); NO-GO for
+  30 fps until those land.
+- Blockers: none. Reference (dlss-nr-on-intel) untouched, read-only as required.

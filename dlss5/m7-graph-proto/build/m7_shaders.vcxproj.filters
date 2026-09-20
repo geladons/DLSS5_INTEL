@@ -1,0 +1,32 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="16.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\CMakeFiles\12c534c5a899c2b790ce8c4a61348b1c\cosine.spv.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\CMakeFiles\12c534c5a899c2b790ce8c4a61348b1c\elementwise.spv.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\CMakeFiles\12c534c5a899c2b790ce8c4a61348b1c\gemm.spv.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\CMakeFiles\12c534c5a899c2b790ce8c4a61348b1c\round_test.spv.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\CMakeFiles\12c534c5a899c2b790ce8c4a61348b1c\softmax.spv.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\CMakeFiles\c53a13a1fc6b9bf119f7ab1e8b23c31a\m7_shaders.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\CMakeFiles\m7_shaders" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{EB435914-7241-3BF7-B77B-8659F1E81A35}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>
