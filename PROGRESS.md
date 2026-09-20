@@ -91,3 +91,36 @@ Project: Intel Arc port of DLSS 5-style neural rendering, whole-desktop
 - Blockers: none. LESSON: DDA is dirty-rect driven — an idle VM desktop yields
   zero frames (first run: 300/300 timeouts). m1dda has a net-zero cursor-wiggle
   activity generator (argv[5]=0 disables) so the compositor produces frames.
+## M2 result (2026-09-19) - D3D11(DDA) to Vulkan external-memory interop: PASS
+- Built dlss5/m2-dxgi-vulkan-passthrough/ (C++17, DXGI/D3D11 + Vulkan SDK):
+  main.cpp + passthrough.comp (invert) + CMakeLists.txt + build.cmd.
+- Pipeline: DDA (DuplicateOutput, DISPLAY5 2560x1440 B8G8R8A8) -> CopyResource into
+  D3D11_RESOURCE_MISC_SHARED|SHARED_NTHANDLE DEFAULT texture (+ staging twin) ->
+  NT handle -> VkImage (OPTIMAL, STORAGE|TRANSFER_SRC) via
+  VkExternalMemoryImageCreateInfo + VkImportMemoryWin32HandleInfoKHR on a DEDICATED
+  allocation (driver reports requiresDedicated=1, prefersDedicated=1, 15,728,640 B)
+  -> invert compute (rgba8 storage image) -> vkCmdCopyImageToBuffer -> BMPs.
+- THE cross-API gate: VkPhysicalDeviceIDProperties.deviceLUID == DXGI adapter LUID
+  00000000:000095a2 on "Intel(R) Arc(TM) Pro B50 Graphics". NOTE: Vulkan enumerates
+  TWO physical devices with that same name (LUIDs 95a2 and 116cc) - LUID match is
+  what picks the right one; do not pick by name/index in M3.
+- Capability queries: D3D11_IMAGE->VkImage importable=1; D3D11_FENCE->semaphore
+  importable=1. Sync = D3D11.5 fence (ID3D11Device5::CreateFence, SHARED NT handle)
+  imported as Vulkan TIMELINE semaphore (vkImportSemaphoreWin32HandleKHR),
+  Signal(1) after CopyResource + Flush, vkWaitSemaphores(1) before dispatch —
+  GPU-side ordering, no host polling. Fallback (host GetCompletedValue poll) coded
+  but not needed.
+- Layout doctrine (vulkan-samples/Sascha Willems): image created initialLayout
+  UNDEFINED, first op barrier UNDEFINED->GENERAL srcAccess=0. Validated by pixels.
+- Verify: out\m2_inverted.bmp vs CPU inversion of out\m2_original.bmp (same frame):
+  B/G/R = 100.0000/100.0000/100.0000% over 3,686,400 px each; alpha preserved
+  100.0000% too. Exact equality -> interop proven bit-exact for this path.
+- Timing run 2 (steady): acquire->D3D11 ready 22.6 ms; import 102.3 ms (includes
+  one-time VkDevice creation); dispatch+copyback 12.5 ms; verify 233 ms (CPU loop);
+  total 513 ms. Run-to-run: PASS twice (first had accumulated=0, second =1).
+- Full build+run console log: docs/m2-interop.log (gitignored, force-added).
+- Blockers hit & solved: (1) SDK 10.0.19041 d3d11.h does NOT chain-include
+  d3d11_1..4.h - must #include <d3d11_4.h> explicitly for ID3D11Device5/Fence;
+  (2) Vulkan 1.4 headers renamed the KHR handle type: use
+  VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT (the old *_IMAGE_BIT name is
+  gone); (3) win32 Vulkan types need VK_USE_PLATFORM_WIN32_KHR (CMake define).

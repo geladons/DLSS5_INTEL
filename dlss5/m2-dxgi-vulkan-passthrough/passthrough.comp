@@ -1,0 +1,14 @@
+#version 460
+#extension GL_KHR_cooperative_matrix : enable
+// M2 passthrough+invert: out.rgb = 255 - in.rgb (alpha preserved).
+// Storage image is VK_FORMAT_B8G8R8A8_UNORM -> rgba8 layout qualifier.
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(rgba8, set = 0, binding = 0) uniform image2D img;
+
+void main() {
+    ivec2 xy = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 sz = imageSize(img);
+    if (xy.x >= sz.x || xy.y >= sz.y) return;
+    vec4 c = imageLoad(img, xy);
+    imageStore(img, xy, vec4(vec3(1.0) - c.rgb, c.a));
+}
