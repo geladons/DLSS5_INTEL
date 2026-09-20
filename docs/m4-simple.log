@@ -1,0 +1,126 @@
+ 
+=== M4-SIMPLE run: m4simple.exe --frames 300 --nowiggle 
+started 19.09.2026 20:26:41,57 
+[VK-FAIL] vkAllocateDescriptorSets(c.dev, &ai, setBlit.data()) -> -1000069000 at C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m4-present-simple\main.cpp:771
+=== M4-SIMPLE: live processed-desktop overlay (CPU bridge; zero-copy DEFERRED to M5) ===
+frame target: 2560x1440 B8G8R8A8, render_scale=0.55, frames=300, wiggle=0
+
+[D3D11] hardware device created, feature level 0xb100
+[DDA] DuplicateOutput active: 2560x1440 format=87 rotation=1 origin=(0,0)
+[info] cursor-wiggle activity generator ON for initial acquire (DDA is dirty-rect driven)
+[DDA] initial content frame on try 2 (acquired#2, skippedBlack=1)
+[cap] native sample mean=143.59 (0 => capture black)
+[VK] device "Intel(R) Arc(TM) Pro B50 Graphics" LUID=00000000:000095a2   <== MATCHES DXGI adapter
+[VK] device "Intel(R) Arc(TM) Pro B50 Graphics" LUID=00000000:000116cc 
+[win] overlay created: 2560x1440 at (0,0), WS_POPUP | TOPMOST | TRANSPARENT | LAYERED
+[VK] logical device up (compute+graphics family 0, swapchain ext)
+[present] format=44 images=3 mode=FIFO path=blit.comp STORAGE direct
+[bridge] upload buffer 14745600 bytes persistently mapped (CPU bridge; zero-copy deferred to M5)
+[VK] 8 compute pipelines up (M3's 7 + blit)
+exit code: 1 (ended 19.09.2026 20:26:42,67) 
+ 
+=== M4-SIMPLE run: m4simple.exe --frames 300 --nowiggle 
+started 19.09.2026 20:27:08,93 
+[VK-FAIL] vkAllocateDescriptorSets(c.dev, &ai, setBlit.data()) -> -1000069000 at C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m4-present-simple\main.cpp:771
+=== M4-SIMPLE: live processed-desktop overlay (CPU bridge; zero-copy DEFERRED to M5) ===
+frame target: 2560x1440 B8G8R8A8, render_scale=0.55, frames=300, wiggle=0
+
+[D3D11] hardware device created, feature level 0xb100
+[DDA] DuplicateOutput active: 2560x1440 format=87 rotation=1 origin=(0,0)
+[info] cursor-wiggle activity generator ON for initial acquire (DDA is dirty-rect driven)
+[DDA] initial content frame on try 1 (acquired#1, skippedBlack=0)
+[cap] native sample mean=144.15 (0 => capture black)
+[VK] device "Intel(R) Arc(TM) Pro B50 Graphics" LUID=00000000:000095a2   <== MATCHES DXGI adapter
+[VK] device "Intel(R) Arc(TM) Pro B50 Graphics" LUID=00000000:000116cc 
+[win] overlay created: 2560x1440 at (0,0), WS_POPUP | TOPMOST | TRANSPARENT | LAYERED
+[VK] logical device up (compute+graphics family 0, swapchain ext)
+[present] format=44 images=3 mode=FIFO path=blit.comp STORAGE direct
+[bridge] upload buffer 14745600 bytes persistently mapped (CPU bridge; zero-copy deferred to M5)
+[VK] 8 compute pipelines up (M3's 7 + blit)
+exit code: 1 (ended 19.09.2026 20:27:09,53) 
+ 
+=== M4-SIMPLE run: m4simple.exe --frames 300 --nowiggle 
+started 19.09.2026 20:28:21,19 
+[VK-FAIL] vkAllocateDescriptorSets(c.dev, &ai, setBlit.data()) -> -1000069000 at C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m4-present-simple\main.cpp:771
+=== M4-SIMPLE: live processed-desktop overlay (CPU bridge; zero-copy DEFERRED to M5) ===
+frame target: 2560x1440 B8G8R8A8, render_scale=0.55, frames=300, wiggle=0
+
+[D3D11] hardware device created, feature level 0xb100
+[DDA] DuplicateOutput active: 2560x1440 format=87 rotation=1 origin=(0,0)
+[info] cursor-wiggle activity generator ON for initial acquire (DDA is dirty-rect driven)
+[DDA] initial content frame on try 1 (acquired#1, skippedBlack=0)
+[cap] native sample mean=144.15 (0 => capture black)
+[VK] device "Intel(R) Arc(TM) Pro B50 Graphics" LUID=00000000:000095a2   <== MATCHES DXGI adapter
+[VK] device "Intel(R) Arc(TM) Pro B50 Graphics" LUID=00000000:000116cc 
+[win] overlay created: 2560x1440 at (0,0), WS_POPUP | TOPMOST | TRANSPARENT | LAYERED
+[VK] logical device up (compute+graphics family 0, swapchain ext)
+[present] format=44 images=3 mode=FIFO path=blit.comp STORAGE direct
+[bridge] upload buffer 14745600 bytes persistently mapped (CPU bridge; zero-copy deferred to M5)
+[VK] 8 compute pipelines up (M3's 7 + blit)
+exit code: 1 (ended 19.09.2026 20:28:21,78) 
+ 
+=== M4-SIMPLE run: m4simple.exe --frames 300 --nowiggle 
+started 19.09.2026 20:29:22,38 
+[VK-FAIL] vkAllocateDescriptorSets(c.dev, &ai, setBlit.data()) -> -1000069000 at C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m4-present-simple\main.cpp:771
+=== M4-SIMPLE: live processed-desktop overlay (CPU bridge; zero-copy DEFERRED to M5) ===
+frame target: 2560x1440 B8G8R8A8, render_scale=0.55, frames=300, wiggle=0
+
+[D3D11] hardware device created, feature level 0xb100
+[DDA] DuplicateOutput active: 2560x1440 format=87 rotation=1 origin=(0,0)
+[info] cursor-wiggle activity generator ON for initial acquire (DDA is dirty-rect driven)
+[DDA] initial content frame on try 1 (acquired#1, skippedBlack=0)
+[cap] native sample mean=144.15 (0 => capture black)
+[VK] device "Intel(R) Arc(TM) Pro B50 Graphics" LUID=00000000:000095a2   <== MATCHES DXGI adapter
+[VK] device "Intel(R) Arc(TM) Pro B50 Graphics" LUID=00000000:000116cc 
+[win] overlay created: 2560x1440 at (0,0), WS_POPUP | TOPMOST | TRANSPARENT | LAYERED
+[VK] logical device up (compute+graphics family 0, swapchain ext)
+[present] format=44 images=3 mode=FIFO path=blit.comp STORAGE direct
+[bridge] upload buffer 14745600 bytes persistently mapped (CPU bridge; zero-copy deferred to M5)
+[VK] 8 compute pipelines up (M3's 7 + blit)
+exit code: 1 (ended 19.09.2026 20:29:23,05) 
+ 
+=== M4-SIMPLE run: m4simple.exe --frames 300 --nowiggle 
+started 19.09.2026 20:30:43,91 
+=== M4-SIMPLE: live processed-desktop overlay (CPU bridge; zero-copy DEFERRED to M5) ===
+frame target: 2560x1440 B8G8R8A8, render_scale=0.55, frames=300, wiggle=0
+
+[D3D11] hardware device created, feature level 0xb100
+[DDA] DuplicateOutput active: 2560x1440 format=87 rotation=1 origin=(0,0)
+[info] cursor-wiggle activity generator ON for initial acquire (DDA is dirty-rect driven)
+[DDA] initial content frame on try 1 (acquired#1, skippedBlack=0)
+[cap] native sample mean=144.15 (0 => capture black)
+[VK] device "Intel(R) Arc(TM) Pro B50 Graphics" LUID=00000000:000095a2   <== MATCHES DXGI adapter
+[VK] device "Intel(R) Arc(TM) Pro B50 Graphics" LUID=00000000:000116cc 
+[win] overlay created: 2560x1440 at (0,0), WS_POPUP | TOPMOST | TRANSPARENT | LAYERED
+[VK] logical device up (compute+graphics family 0, swapchain ext)
+[present] format=44 images=3 mode=FIFO path=blit.comp STORAGE direct
+[bridge] upload buffer 14745600 bytes persistently mapped (CPU bridge; zero-copy deferred to M5)
+[VK] 8 compute pipelines up (M3's 7 + blit)
+[stage] frame0 upload+decode+letterbox: 9.624 ms
+[letterbox] region rows [0,1440) cols [0,2560) of 2560x1440 (host decision FIXED for the loop)
+[geometry] region 2560x1440 -> network extent 1408x768 (x0.55, nearest 64, min 320)
+[mem] intermediates device-local; readback host-coherent; blit sets 3
+[m4s] entering live loop (300 frames)
+[m4s] frame 0 | rolling 0.0 fps | dropped 0 | fresh
+[metrics] frame 10 region 2560x1440: mean|final-native| B=1.99091 G=1.92213 R=1.80781 (must be > 0)
+[metrics] structure: mean |grad(delta)| B=2.66386 G=2.96870 R=2.51000 (> 0); changed 4.47% => PASS
+[metrics] frame 30 region 2560x1440: mean|final-native| B=0.05461 G=0.06243 R=0.06517 (must be > 0)
+[metrics] structure: mean |grad(delta)| B=0.08665 G=0.09715 R=0.09931 (> 0); changed 0.59% => PASS
+[metrics] frame 60 region 2560x1440: mean|final-native| B=0.00147 G=0.00112 R=0.00060 (must be > 0)
+[metrics] structure: mean |grad(delta)| B=0.00253 G=0.00163 R=0.00092 (> 0); changed 0.10% => PASS
+[m4s] frame 60 | rolling 32.5 fps | dropped 0 | fresh
+[m4s] frame 120 | rolling 41.9 fps | dropped 0 | fresh
+[m4s] frame 180 | rolling 40.2 fps | dropped 0 | fresh
+[m4s] frame 240 | rolling 38.7 fps | dropped 0 | fresh
+[m4s] frame 299 | rolling 39.0 fps | dropped 0 | fresh
+
+=== M4-SIMPLE summary ===
+frames: 300, wall: 7.98 s, avg fps: 37.61, last rolling fps: 39.0
+dropped (DDA timeout/black/access-lost): 0
+present: FIFO, format 44, path blit.comp STORAGE
+verify frames {10,30,60}: ALL PASS
+=== M4-SIMPLE result: PASS ===
+exit code: 0 (ended 19.09.2026 20:30:54,61) 
+ 
+=== M4-SIMPLE run: m4simple.exe --frames 600 
+started 19.09.2026 20:31:27,98 
