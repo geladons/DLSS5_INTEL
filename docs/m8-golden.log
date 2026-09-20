@@ -1,0 +1,85 @@
+M8a full-chain golden validation — 2026-09-20 ~12:15 PDT
+================================================================
+
+COMMAND LOG
+-----------
+1. python golden.py <safetensors> build\Release\out        (full chain; stem|block31-era modes removed/kept)
+
+DUMP REGENERATION (critical find)
+---------------------------------
+The shipped gpu_*.f16/bin boundary dumps (11:35) were written by a
+"--to 0 --dispdbg" debug run (17 dispatches = adapter + b0 only; see
+out\_r5_dbg5.txt). Buffers past b0 were uninitialized arena. Regenerated
+with full-chain runs (1402 dispatches, 47.7 ms) before every compare.
+CAVEAT: ANY "--to N" run also overwrites the 9 boundary dumps — validation
+dumps must come from a no-args full-chain run only.
+
+BIT-EXACT STAGE-BY-STAGE VALIDATION OF BLOCK 0 (origin (0,0), H=1)
+------------------------------------------------------------------
+golden b0 internals vs GPU debug arena dumps (dbg_*.bin), maxabs:
+  adapter out   4.8e-07   (fp32 GEMM order noise)
+  ffn out       1.9e-06
+  qkv proj      3.8e-06   (windowed layout confirmed)
+  scores        0.0        (bit-exact; Q/K cosine_win publishes + scores GEMM)
+  probs         0.0        (bit-exact WITH THE BIAS AS STORED = raw; swizzled
+                            bias matches 9.4%, no bias 2.3%)
+  ctx oMGW      0.0        (probs @ e4m3(v))
+  merged oATW   0.0        (transpose_we merge + e4m3)
+  attn branch   0.0        (@ projection_weight)
+  b0 raw        3.8e-06   (gather_residual reverse-window + residual)
+=> b0 is numerically CORRECT end-to-end (raw-bias semantics).
+
+BIAS LAYOUT FINDING
+-------------------
+- Device bytes for block0 attn_bias == file bytes == raw stored order
+  (gpu==raw 1.0000, gpu==swz 0.0061), reproducible on the 12:10 exe.
+- softmax.comp reads the bias LINEARLY as logical [q,k] (no in-kernel swizzle;
+  shaders/softmax.comp:55).
+- The committed main.cpp (b4e35f1, tree clean) contains a load-time
+  fragment_swizzle for H in {1,16} + an M8_DEBUG_BIAS debug print; NEITHER the
+  swizzle nor the print manifests at runtime, across two rebuilds including a
+  forced main.obj delete + recompile (12:10:46 build compiled main.cpp; device
+  still raw at 12:11). Unresolved exe-vs-source anomaly — flagged.
+- nr_model semantics = stored order IS fragment order; recover at load
+  (docs/m6b-graph-design.md SS A.6 "Storage trap"). The running GPU consumes
+  it raw-as-logical, i.e. deviates from nr_model for H in {1,16} blocks
+  (b0-4, 23-30, 40-47, 66-70) UNLESS the golden also uses raw. golden.py
+  default = match-the-running-chain (raw); M8_BIAS_MODE=swizzle switches to
+  nr_model semantics.
+
+FULL-CHAIN BOUNDARY COMPARE (fresh 12:10-exe dumps; 9 tensors)
+--------------------------------------------------------------
+mode=raw (matches running GPU):
+  boundary    family        kind     max-abs    mean-rel  bitmatch  <=1step
+  b4ds        stem          contract                     2.0888%   6.6678%
+  b22ds       encoder       contract                     0.3418%   1.0145%
+  b30         bottleneck    contract                     0.0020%   0.0129%
+  b38         global        contract                     0.0088%   0.0278%
+  b39         decoder.b39   contract                     0.0047%   0.0183%
+  b48         decoder.b48   contract                     0.0014%   0.0027%
+  b69         decoder.b69   contract                     0.0000%   0.0000%
+  merged70    head.merge    fp32      124.982    1
+  head        head          fp32       30.6265    0.25
+mode=swizzle: b4ds 2.6150% / <=1step 7.7854% (rest ~identical).
+Verdict: FAIL all boundaries (cascade).
+
+ROOT-CAUSE ISOLATION
+--------------------
+b0 (window origin (0,0)) is bit-exact through every one of its 13 stages.
+Blocks 1-4 introduce SHIFTED window origins (-4,-4), (0,-4), (-4,0) — the
+zero-pad + crop path in partition.comp / gather_residual.comp. The b4ds
+mismatch pattern (2-3% bitmatch vs 99.9%+ expected for exact semantics)
+localizes the divergence to the shifted-origin window padding/gather path;
+everything downstream (encoder/bottleneck/global/decoder/head) cascades from
+it (chaotic graph; note b48/b69 bitmatch 0.0000 = e4m3 publishes of
+completely decorrelated values, while fp32-internal accumulation would still
+show partial correlation if only bias were wrong).
+
+VERDICT
+-------
+Golden: COMPLETE and validated correct on block 0 (every rounding point,
+every publish, raw-bias semantics). GPU chain: RUNS (48.4 ms steady,
+1402 dispatches) but FAILS full-chain validation; root cause = shifted-window
+origin handling (GPU kernels), second-order open question = bias unswizzle
+not applied by the exe (nr_model deviation for 33 blocks if not intentional).
+Blocker for PASS: GPU-side kernel fix + dump regen + rerun (both bias modes).
