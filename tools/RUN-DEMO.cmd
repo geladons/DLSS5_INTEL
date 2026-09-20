@@ -1,23 +1,21 @@
 @echo off
 chcp 65001 >nul
 REM ============================================================
-REM  DLSS5_INTEL - живая демка (M4-SIMPLE)
-REM  Что это: рабочий стол в реальном времени проходит пайплайн
-REM  "захват -> нейросеть (stand-in) -> композит" и показывается
-REM  в overlay-окне поверх всего. Транспорт рабочий на 100%;
-REM  сама модель DLSS 5 подключается в M8 (сейчас в работе).
+REM  DLSS5_INTEL - живая демка (M8B - РЕАЛЬНЫЙ DLSS 5)
+REM  Что это: рабочий стол в реальном времени проходит ПОЛНЫЙ
+REM  граф DLSSNR (71 блок, 288 токенов, настоящие веса,
+REM  ~12.8 fps @2560x1440) и показывается в overlay-окне поверх
+REM  всего. Каждый кадр реально прогоняется через нейросеть.
 REM
 REM  ВАЖНО: курсор будет слегка подрагивать - это генератор
 REM  активности (без него DDA не отдает кадры с "мёртвого"
-REM  экрана). Хотите без дёрганья - запустите RUN-DEMO-CALM.cmd,
-REM  но тогда картинка обновляется только когда вы сами что-то
-REM  двигаете/печатаете.
+REM  экрана).
 REM
 REM  Остановка: закройте это окно или Ctrl+C.
-REM  Сравнение: обработанные кадры сохраняются в
-REM  dlss5\m4-present-simple\build\Release\out\m4s_frame_*.bmp
-REM  FPS - в заголовке overlay-окна и в консоли.
+REM  Сравнение: out\m8b_native.bmp против out\m8b_processed.bmp
+REM  (кадр 30). FPS - в заголовке overlay-окна и в консоли.
+REM  Лог: docs\m8b-live.log. Старая m4-демка: RUN-DEMO-M4.cmd.
 REM ============================================================
-cd /d C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m4-present-simple\build\Release
-m4simple.exe --frames 1000000 --scale 0.55
+cd /d C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m8b-live\build\Release
+m8blive.exe --frames 1000000
 pause

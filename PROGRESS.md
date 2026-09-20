@@ -415,3 +415,23 @@ golden.py compare; isolation: isolate.py, quant.py, quant2.py forensics).
   bias modes. Golden itself is validated (b0-proven) and ready.
   
 ### M8a validation (2026-09-20) 
+### M8b (2026-09-20, final)
+- REAL DLSS 5 LIVE ON THE DESKTOP — PASS. m8blive.exe (dlss5/m8b-live) runs the full
+  71-block DLSSNR graph (288 tokens) on live DDA captures and presents the processed
+  overlay at ~12.8 fps @2560x1440 (0 DDA drops, blit STORAGE present path). Verify
+  (mean|final-native|, structure, changed%) nonzero on frames 10/30/60 in both
+  --novideo and live modes: e.g. live frame 60 B=8.39 G=12.99 R=11.72, changed 27.5%.
+  BMP pair out\m8b_native.bmp vs m8b_processed.bmp shows a clear global residual.
+- ROOT CAUSE of the zero-delta: chain HEAD was exactly 0 — every stage through b69
+  healthy (+-448), but the block-70 input merge emitted ~1e-10 and f16-underflowed
+  to 0. shaders/m8/merge.comp (inherited verbatim from m8a): (1) kind-1 used
+  uint(float16_t) numeric truncation instead of float16BitsToUint16 bit-reinterpret
+  for f16 operands; (2) both kinds read sin/cos tables as f16 while placeVecF16
+  stores them fp32. Fixed both in the m8b shader AND m8a m8-full-chain/shaders/merge.comp
+  (m8a golden artifacts prove merged70/head were never validated — gpu_head.bin all zero).
+- Chain-internal probe at frame 1: MRG70 [-115,118] matches m8a golden distribution;
+  one-shot [dbg] stats kept in main.cpp (prints once, no files).
+- Perf pass is a later milestone (chain ~47 ms isolated; loop ~78 ms end-to-end).
+  DDA drops at 6.6 fps seen mid-bring-up vanished at 12.8 fps (wiggle ON).
+- Docs: docs/m8b-live.md; log: docs/m8b-live.log; launchers: Desktop RUN-DEMO.cmd
+  (m8b) + RUN-DEMO-M4.cmd (m4).

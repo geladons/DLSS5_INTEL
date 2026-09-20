@@ -1,0 +1,29 @@
+#version 450
+// ============================================================================
+// M8b headpack — chain output -> the m4 head buffer layout.
+// The chain head GEMM writes [TOK,16] fp32 at oHEAD (N padded 16 for the
+// coopmat tile; nr_model.py's real head output is 4 channels:
+//   matmul(tokens[...,:16], out_gain) + matmul(tokens[...,16:], out_conv)
+// folded into rows 0-15/16-31 of the [32,16] weight, cols 4-15 = 0).
+// Extract channels 0..3 (RGB residual + temporal-gate logit) into the
+// binding-4 slot (oHead4) that rescale-up + compose consume (the exact
+// head layout the m4 stand-in produced).
+//
+//   push: { FloatBuf src; FloatBuf dst; uint ntok; }   ntok = 288
+// ============================================================================
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_scalar_block_layout : require
+
+layout(local_size_x = 256) in;
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf { float v[]; };
+
+layout(push_constant, scalar) uniform Push { FloatBuf src; FloatBuf dst; uint ntok; } pc;
+
+void main() {
+    uint p = gl_GlobalInvocationID.x;
+    if (p >= pc.ntok) return;
+    for (uint c = 0u; c < 4u; ++c)
+        pc.dst.v[p * 4u + c] = pc.src.v[p * 16u + c];
+}
