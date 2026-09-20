@@ -358,3 +358,38 @@ golden.py compare; isolation: isolate.py, quant.py, quant2.py forensics).
   1.447 ms is the top target, barrier elision, render_scale 0.4); NO-GO for
   30 fps until those land.
 - Blockers: none. Reference (dlss-nr-on-intel) untouched, read-only as required.
+
+### M8a validation (2026-09-20)
+
+- golden.py is now a FULL-CHAIN NumPy reference: all 71 blocks, every family
+  per m6b §A (stem/encoder branched/split512/global/decoder/head), M8a
+  neutralized-geometry fork (pool/upsample/pad8 = identity), consumes the same
+  out\x.bin (288x16), writes golden\*.npy per family boundary, compares the 9
+  gpu_* dumps. Default bias mode = as-stored (matches the running GPU);
+  M8_BIAS_MODE=swizzle = nr_model semantics. Log: docs\m8-golden.log.
+- VERDICT: FAIL — and the failure is GPU-side, not golden-side. Block 0
+  (window origin (0,0)) is validated numerically CORRECT end-to-end: every
+  one of its 13 stages matches the golden (scores/probs/ctx/merge/proj/
+  gather all maxabs 0..4e-6; bit-affine softmax, cosine publishes, e4m3
+  publishes confirmed in place).
+- Two GPU-side problems found:
+  1. Shifted-window origins (b1-b4 use (-4,-4)/(0,-4)/(-4,0); b0 was (0,0)):
+     the zero-pad+crop path (partition.comp / gather_residual.comp) diverges
+     -> b4ds bitmatch 2.09% vs >=99.9% required; all downstream boundaries
+     cascade (chaotic graph; b48/b69 fully decorrelated).
+  2. attn_bias layout: the running GPU consumes the bias in RAW stored order
+     (probs bit-exact with raw; device bytes == file bytes). nr_model §A.6
+     requires load-time unswizzle for H in {1,16}. The unswizzle + its
+     M8_DEBUG_BIAS print exist in committed main.cpp (tree clean at b4e35f1)
+     but demonstrably do not execute in the built exe — reproduced across two
+     rebuilds incl. forced main.obj delete + recompile. Unresolved exe-vs-
+     source anomaly; flagged for the GPU side. (If raw turns out to be a
+     deliberate choice it deviates from nr_model on 33 blocks.)
+- Also: the shipped 11:35 gpu_* dumps were from a "--to 0 --dispdbg" run
+  (17 dispatches; everything past b0 = uninitialized arena). Validation dumps
+  must come from a no-args full-chain run; ANY --to N run rewrites them.
+- Blockers to PASS: fix shifted-origin pad/crop in the GPU window kernels;
+  resolve the bias-unswizzle exe anomaly; regen dumps; rerun golden in both
+  bias modes. Golden itself is validated (b0-proven) and ready.
+  
+### M8a validation (2026-09-20) 

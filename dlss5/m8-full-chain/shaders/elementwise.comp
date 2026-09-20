@@ -23,6 +23,7 @@
 #extension GL_EXT_scalar_block_layout : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
 
 #include "publish.glsl"
 
@@ -55,7 +56,7 @@ void main() {
         return;
     }
     float b;
-    if (pc.kind == 4u || pc.kind == 5u) b = f16_widen(uint(HalfBuf(uint64_t(pc.b)).v[i]));
+    if (pc.kind == 4u || pc.kind == 5u) b = f16_widen(uint(float16BitsToUint16(HalfBuf(uint64_t(pc.b)).v[i])));
     else b = pc.b.v[i];
     float r = pc.a.v[i] + b * pc.d.v[i % pc.ch];
     if (pc.kind == 0u || pc.kind == 5u) {

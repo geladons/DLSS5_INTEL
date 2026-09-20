@@ -181,9 +181,13 @@ def _stem_attn(x, W, idx, C, heads):
     p = f"block{idx}.layer0"
     qkv = W[p + ".qkv_weight"]                    # [C, 3C]
     scale = W[p + ".attn_scale"]                  # [heads]
-    bias = W[p + ".attn_bias"]                    # [heads, 64, 64] (swizzled for H in {1,16})
-    if heads in (1, 16):
-        bias = bias.reshape(heads, -1)[:, FRAG_SWIZZLE].reshape(heads, 64, 64)
+    bias = W[p + ".attn_bias"]                    # [heads, 64, 64] as stored
+    # M8_BIAS_MODE=swizzle applies nr_model.recover_attention_bias_layout
+    # (matching the full-chain _window_attention switch); default = as-stored,
+    # which is what the running GPU consumes (softmax.comp reads bias linearly).
+    if os.environ.get("M8_BIAS_MODE", "").lower() in ("swz", "swizzle", "1"):
+        if heads in (1, 16):
+            bias = bias.reshape(heads, -1)[:, FRAG_SWIZZLE].reshape(heads, 64, 64)
     proj = W[p + ".projection_weight"]
     acos = W[p + ".attn_cos_skip"]
     oy, ox = stem_origin(idx)
