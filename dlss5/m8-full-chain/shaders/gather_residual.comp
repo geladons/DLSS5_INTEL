@@ -14,6 +14,7 @@
 #extension GL_EXT_scalar_block_layout : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
 
 #include "publish.glsl"
 
@@ -31,7 +32,7 @@ layout(push_constant, scalar) uniform Push {
     uint Himg, Wimg, C;
     uint padTop, padLeft;
     uint wp8;        // padded width in windows
-    uint flags;      // bit0: e4m3 publish to h
+    uint flags;      // bit0: e4m3 publish to h; bit1: b is an f16 carrier (branched FFN)
 } pc;
 
 void main() {
@@ -43,9 +44,12 @@ void main() {
     uint w = wy * pc.wp8 + wx;
     uint i = ly * 8u + lx;
     bool pub = (pc.flags & 1u) != 0u;
+    bool b16 = (pc.flags & 2u) != 0u;
     for (uint ch = 0u; ch < pc.C; ++ch) {
+        float bv = b16 ? f16_widen(uint(float16BitsToUint16(HalfBuf(pc.b).v[t * pc.C + ch])))
+                       : FloatBuf(pc.b).v[t * pc.C + ch];
         float val = FloatBuf(pc.a).v[(w * 64u + i) * pc.C + ch]
-                  + FloatBuf(pc.b).v[t * pc.C + ch] * FloatBuf(pc.d).v[ch];
+                  + bv * FloatBuf(pc.d).v[ch];
         FloatBuf(pc.c).v[t * pc.C + ch] = val;
         if (pub) HalfBuf(pc.h).v[t * pc.C + ch] = float16_t(e4m3(val));
     }

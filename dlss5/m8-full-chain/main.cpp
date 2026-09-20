@@ -22,8 +22,10 @@
 //
 // Weights: all 649 logical tensors in ONE device-local VkBuffer laid out per
 // docs/pack-layout.txt (256-aligned, 291,535,872 B). The staging memcpy does
-// the SS B.3 preprocessing: attn-bias fragment unswizzle (H in {1,16}) and the
-// branched-FFN fuse-fold (same bytes, relaid). Derived fp32 side tables
+// the SS B.3 preprocessing: the branched-FFN fuse-fold (same bytes, relaid);
+// attn_bias is consumed AS STORED (raw) — the GPU softmax reads it linearly as
+// logical [q,k] and the b0 probs validate bit-exact that way (M8a finding).
+// Derived fp32 side tables
 // (cos_skip/sin/merge vectors, global attn_scale*sqrt(32), folded [32,16] head
 // weight) live in the arena region after the pack.
 //
@@ -189,21 +191,6 @@ static float gate_cpu(float x) {
     linear += 0.89453125f;
     linear = f16_bits_to_f32(f32_to_f16(linear));
     return f16_bits_to_f32(f32_to_f16(wide * linear));
-}
-
-// fragment swizzle (nr_model._fragment_swizzle_indices) for H in {1,16} bias
-static void fragment_swizzle(uint16_t *dst, const uint16_t *src) {
-    for (int entry = 0; entry < 64 * 64; ++entry) {
-        int query = entry / 64, key = entry % 64;
-        int qy = query / 8, qx = query % 8;
-        int ky = key / 8, kx = key % 8;
-        auto bit = [](int v, int p) { return (v >> p) & 1; };
-        int idx = (bit(qy, 2) << 11) | (bit(qx, 2) << 10) | (bit(ky, 2) << 9) |
-                  (bit(kx, 2) << 8) | (bit(qy, 0) << 7) | (bit(qx, 1) << 6) |
-                  (bit(qx, 0) << 5) | (bit(ky, 0) << 4) | (bit(kx, 1) << 3) |
-                  (bit(ky, 1) << 2) | (bit(qy, 1) << 1) | bit(kx, 0);
-        dst[entry] = src[idx];
-    }
 }
 
 // ------------------------------------------------------- safetensors -------
@@ -774,11 +761,6 @@ int main(int argc, char **argv) {
     allocHost(vk, packTotal + ar.off, staging);
     char *sp = (char *)staging.mapped;
 
-    auto isBiasSwizzled = [&](const std::string &n) {
-        if (n.size() < 9 || n.substr(n.size() - 9) != ".attn_bias") return false;
-        int blk = blockIndexOf(n);
-        return blk <= 4 || (blk >= 23 && blk <= 30) || (blk >= 40 && blk <= 47) || blk >= 66;
-    };
     auto isBranchedExpand = [&](const std::string &n) {
         return n.size() >= 19 && n.substr(n.size() - 19) == ".ffn_expand_weight";
     };
@@ -787,15 +769,7 @@ int main(int argc, char **argv) {
         const Tensor &t = wf.tensors[e.name];
         const char *src = wf.bytes.data() + wf.dataBase + t.off0;
         char *dst = sp + e.off;
-        if (isBiasSwizzled(e.name)) {
-            uint64_t heads = t.shape[0];
-            if (getenv("M8_DEBUG_BIAS"))
-                std::fprintf(stderr, "[bias-swz] %s heads=%llu off=%llu first-dst-before=%u\n",
-                             e.name.c_str(), (unsigned long long)heads,
-                             (unsigned long long)e.off, *(const uint16_t *)src);
-            for (uint64_t h = 0; h < heads; ++h)
-                fragment_swizzle((uint16_t *)dst + h * 4096, (const uint16_t *)src + h * 4096);
-        } else if (isBranchedExpand(e.name)) {
+        if (isBranchedExpand(e.name)) {
             // [G,4,G,32,32] -> [G, G*32, 128]  (transpose(0,2,3,1,4), same bytes)
             uint64_t G = t.shape[0];
             const uint16_t *s = (const uint16_t *)src;
@@ -1463,6 +1437,17 @@ int main(int argc, char **argv) {
             {"dbg_b0proj", oPROJW, 512 * 96 * 4}, {"dbg_b0sc", oSCW, 512 * 64 * 4},
             {"dbg_b0pr", oPRW, 512 * 64 * 2}, {"dbg_b0mg", oMGW, 512 * 32 * 4},
             {"dbg_b0at", oATW, 512 * 32 * 2}, {"dbg_b0ab", oABW, 512 * 32 * 4},
+            {"dbg_b1raw", oRAW, TOK * 32 * 4}, {"dbg_b1pub", oG1, TOK * 32 * 2},
+            {"dbg_w1b1", poff["block1.layer0.weight1"], 32 * 128 * 2},
+            {"dbg_w1b2", poff["block2.layer0.weight1"], 32 * 128 * 2},
+            {"dbg_qkvb2", poff["block2.layer0.qkv_weight"], 32 * 96 * 2},
+            {"dbg_biasb2", poff["block2.layer0.attn_bias"], 64 * 64 * 2},
+            {"dbg_b2g3", oG3, TOK * 128 * 2},
+            {"dbg_b2g4mid", oG4, TOK * 32 * 4},
+            {"dbg_b2x16", oG1, TOK * 32 * 2},
+            {"dbg_fc1", vecOff["block1.layer0.ffn_cos_skip"], 32 * 4},
+            {"dbg_fc2", vecOff["block2.layer0.ffn_cos_skip"], 32 * 4},
+            {"dbg_ac2", vecOff["block2.layer0.attn_cos_skip"], 32 * 4},
             {"dbg_bias", poff["block0.layer0.attn_bias"], 4096 * 2},
         };
         VkDeviceSize tot2 = 0;
