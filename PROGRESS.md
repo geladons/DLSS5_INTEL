@@ -93,6 +93,20 @@ Vulkan runtime + wire the real graph in place of the M3 stand-in block.
   optimized; first prototype = global block 31 (measures B50 coopmat rate, go/no-go).
 - Blockers: none. Torch cross-check deferred (optional). Next: M6b implementation per doc.
 
+## M8a (2026-09-20, final) — GPU CHAIN RUNS
+
+Full 71-block DLSSNR chain executes on Arc Pro B50 (commit 64cb58b + doc
+update): stem 1.32 + enc 10.43 + bottleneck 6.72 + global 13.49 (4.5 TF) +
+decoder 20.94 + head 0.24 = **53.1 ms/frame; steady 48.2 ms (20-iter) ≈ 20.7
+fps** at 288 tokens (24x12 grid = the live pipeline's 0.55 render_scale
+geometry). 1402 dispatches; weights residency 325 MB one buffer; offsets
+cross-checked vs pack-layout. The async device fault from earlier runs is
+FIXED in the working tree (root cause documented in git history WIP commits).
+REMAINING: full-chain NumPy golden (golden.py main is stale — expects
+(288,1024) input; chain input is 16ch features (288,16)) + compare vs 9
+dumped boundary tensors. THEN M8b: swap into the live pipeline in place of
+standin.comp.
+
 ## Next
 
 - [ ] Toolchain install (Vulkan SDK, CMake, Python; VS Build Tools C++ workload check)

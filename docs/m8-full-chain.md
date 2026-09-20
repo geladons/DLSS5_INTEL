@@ -54,17 +54,26 @@ optional publish), merge.comp (b39/up-transition merges + b70 pre-merge).
 
 | family | blocks | status |
 |---|---|---|
-| weights residency (649 tensors, one buffer) | — | BUILDING |
-| stem (plain32 window + adapter + ds) | 0-4 | PENDING |
-| encoder (branched window 64/128/256 + ds) | 5-22 | PENDING |
-| bottleneck (split512 window) | 23-30 | PENDING |
-| global (1024 MHA ±3 cap) | 31-38 | PENDING |
-| decoder (b39 merge + split + up-transitions + branched) | 39-69 | PENDING |
-| head (b70 + merge + head GEMMs) | 70 | PENDING |
+| weights residency (649 tensors, one buffer) | — | RUNS (324.9 MB upload 1.35 s; offsets cross-checked vs pack-layout OK) |
+| stem (plain32 window + adapter + ds) | 0-4 | RUNS 1.322 ms |
+| encoder (branched window 64/128/256 + ds) | 5-22 | RUNS 10.427 ms (0.46 TF) |
+| bottleneck (split512 window) | 23-30 | RUNS 6.718 ms (1.77 TF) |
+| global (1024 MHA ±3 cap) | 31-38 | RUNS 13.494 ms (4.50 TF) |
+| decoder (b39 merge + split + up-transitions + branched) | 39-69 | RUNS 20.935 ms (0.80 TF) |
+| head (b70 + merge + head GEMMs) | 70 | RUNS 0.240 ms |
+| **FULL CHAIN (1402 dispatches)** | 0-70 | **RUNS: 53.137 ms/frame; steady 48.245 ms (20-iter avg) ≈ 20.7 fps** |
+
+VALIDATION: PENDING — golden.py compare path is stale (it reshapes x.bin to
+(288,1024); the chain input is the 16-channel feature volume, x.bin is
+(288,16)). NEEDED: full-chain NumPy golden in golden.py main (stem consumes
+16ch; every family per design §A), then compare vs the 9 dumped boundary
+tensors in build\Release\out\.
 
 ## Timings
 
-(pending)
+(see table; timestamp-measured at 288 tokens @ 24x12 grid — directly
+comparable to the live pipeline's 0.55 render_scale geometry. 53 ms beats the
+101 ms projection — projection was conservative.)
 
 ## Extrapolation to M3 real geometry
 
