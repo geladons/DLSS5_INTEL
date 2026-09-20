@@ -51,6 +51,20 @@ lazily. M2/M3 single-shot import is fine; M3 canary re-passed at 19:37
 (driver healthy). M5 must use rotating N>=3 shared textures with per-slot
 completion tracking (skip-frame instead of stall).
 
+## M5 result (2026-09-20, final) — BACKLOGGED, WIP committed (624ef99)
+
+Zero-copy live loop: 5 subagent runs + manual debugging across ~3.5 h.
+Progress: 3 rotating shared textures import cleanly (dedicated allocs),
+device-ext fix applied (ext_mem_win32 + ext_sem_win32 now enabled). REMAINING
+BLOCKER: the live loop deadlocks on the FIRST frame handoff — after DDA
+content-frame acquire, before the first slot-import print; process goes idle
+(CPU stalls, no output). The identical interop one-shot (M2/M3) is bit-exact
+fine, so this is a cyclic-use deadlock (driver lazy release + fence epochs),
+NOT a setup error. Next attempt must be a dedicated debug session with
+VK_LAYER_KHRONOS_validation + apitrace, not blind reruns. Working live demo
+remains M4-SIMPLE CPU bridge (37.6 fps). Pivoted to M6 (real graph) where
+zero-copy is not the bottleneck.
+
 ## Weights (2026-09-20) — ACQUIRED
 
 `work/mlxw/dlssnr-logical.safetensors` — 649 tensors, 291.5 MB (F16/F32),
