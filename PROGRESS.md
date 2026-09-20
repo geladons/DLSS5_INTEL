@@ -68,3 +68,26 @@ Project: Intel Arc port of DLSS 5-style neural rendering, whole-desktop
   Shader shape is injected via glslangValidator -D defines matching the runtime
   chosen config (probe writes chosen.txt beside probe.exe and exits 2 on mismatch
   so build.cmd recompiles + retries, max 3 attempts).
+
+## M1 result (2026-09-19) - DXGI Desktop Duplication capture: PASS
+
+- Built dlss5/m1-frame-capture/ (raw DXGI 1.2/1.5 + D3D11, C++17, deps: Windows
+  SDK only — dxgi.lib/d3d11.lib): main.cpp + CMakeLists.txt + build.cmd.
+- Device: D3D11 HARDWARE on Intel Arc Pro B50, feature level 11.1, VRAM 16.2 GB.
+  Output \\.\DISPLAY5, 2560x1440, rotation IDENTITY, desktop format B8G8R8A8_UNORM.
+- Duplication: IDXGIOutput5::DuplicateOutput1 pinning B8G8R8A8 was REJECTED by the
+  driver (fell back to DuplicateOutput, driver still hands B8G8R8A8 — format-flap
+  pinned path to re-test in M3). Errors for locked session / busy duplicator /
+  disconnected session are mapped to clear messages (untested paths, no blocker).
+- Capture loop: AcquireNextFrame(500ms) -> CopySubresourceRegion to staging ->
+  Map -> BGRA8 CPU buffer; DXGI_ERROR_ACCESS_LOST handled with duplication
+  re-create. Run: 300 attempts, 300 acquired, 0 timeouts, 37 dirty-updates /
+  263 same-texture repeats, 0 errors.
+- fps: avg 69.0 (interval min 3.98 ms = 251 fps, max 85.5 ms = 11.7 fps).
+- 5 snapshots out\snapshot_{60..300}.bmp (14745654 B each, 2560x1440x4+54).
+  Luma variance ≈ 9745, range [0,255] over 57.6k samples — REAL desktop content,
+  not a black screen; snapshot_60 != snapshot_300 (cursor moved between grabs).
+- Full build+run console log: docs/m1-capture.log (gitignored, force-added).
+- Blockers: none. LESSON: DDA is dirty-rect driven — an idle VM desktop yields
+  zero frames (first run: 300/300 timeouts). m1dda has a net-zero cursor-wiggle
+  activity generator (argv[5]=0 disables) so the compositor produces frames.
