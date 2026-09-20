@@ -8,7 +8,8 @@ GEMM A inputs are half_rounded to f16 at GEMM boundaries; weights are f16 values
 carried in fp32 (exact). Everything else fp32.
 
 Usage:
-  python golden.py <safetensors> <outdir>     # compute golden + compare GPU dumps
+  python golden.py <safetensors> <outdir>          # M7 global block31 + compare
+  python golden.py <safetensors> <outdir> stem     # M8a stem (blocks 0-4) vs gpu_b4ds
 """
 import json
 import math
@@ -120,6 +121,133 @@ def softmax(value):
     return e4m3(half_rounded(weights.astype(np.float32) * reciprocal.astype(np.float32)))
 
 
+# ---------------- M8a stem (blocks 0-4) ----------------
+IMG_H, IMG_W, WS = 24, 12, 8
+TOK_STEM = IMG_H * IMG_W
+
+
+def _frag_swizzle():
+    idx = []
+    for entry in range(64 * 64):
+        query, key = divmod(entry, 64)
+        qy, qx = divmod(query, 8)
+        ky, kx = divmod(key, 8)
+        bit = lambda v, p: (v >> p) & 1
+        idx.append((bit(qy, 2) << 11) | (bit(qx, 2) << 10) | (bit(ky, 2) << 9) |
+                   (bit(kx, 2) << 8) | (bit(qy, 0) << 7) | (bit(qx, 1) << 6) |
+                   (bit(qx, 0) << 5) | (bit(ky, 0) << 4) | (bit(kx, 1) << 3) |
+                   (bit(ky, 1) << 2) | (bit(qy, 1) << 1) | bit(kx, 0))
+    return np.array(idx, dtype=np.intp)
+
+
+FRAG_SWIZZLE = _frag_swizzle()
+
+
+def stem_origin(index):
+    # mirror nr_model.recovered_window_origin for blocks 0-4
+    if index == 0:
+        phase = 0
+    elif 1 <= index <= 4:
+        phase = index - 1
+    else:
+        return (0, 0)
+    return ((0, -4, 0, -4)[phase % 4], (0, -4, -4, 0)[phase % 4])
+
+
+def _partition(tokens, oy, ox, C):
+    pt, pl = -oy, -ox
+    pb = (-(IMG_H + pt)) % WS
+    pr = (-(IMG_W + pl)) % WS
+    img = tokens.reshape(IMG_H, IMG_W, C)
+    if pt or pb or pl or pr:
+        img = np.pad(img, ((pt, pb), (pl, pr), (0, 0)))
+    ph, pw = img.shape[0], img.shape[1]
+    wins = (img.reshape(ph // WS, WS, pw // WS, WS, C)
+            .transpose(0, 2, 1, 3, 4).reshape(-1, WS * WS, C))
+    return wins, pt, pl
+
+
+def _reverse(wins, pt, pl, C):
+    pb = (-(IMG_H + pt)) % WS
+    pr = (-(IMG_W + pl)) % WS
+    ph, pw = IMG_H + pt + pb, IMG_W + pl + pr
+    img = (wins.reshape(ph // WS, pw // WS, WS, WS, C)
+           .transpose(0, 2, 1, 3, 4).reshape(ph, pw, C))
+    return img[pt:pt + IMG_H, pl:pl + IMG_W, :].reshape(-1, C)
+
+
+def _stem_attn(x, W, idx, C, heads):
+    p = f"block{idx}.layer0"
+    qkv = W[p + ".qkv_weight"]                    # [C, 3C]
+    scale = W[p + ".attn_scale"]                  # [heads]
+    bias = W[p + ".attn_bias"]                    # [heads, 64, 64] (swizzled for H in {1,16})
+    if heads in (1, 16):
+        bias = bias.reshape(heads, -1)[:, FRAG_SWIZZLE].reshape(heads, 64, 64)
+    proj = W[p + ".projection_weight"]
+    acos = W[p + ".attn_cos_skip"]
+    oy, ox = stem_origin(idx)
+    xw = half_rounded(x)                       # GEMM A-input f16 rounding point
+    wins, pt, pl = _partition(xw, oy, ox, C)
+    pr = wins @ qkv                               # fp32 [nw, 64, 3C]
+    q = pr[..., :C].reshape(-1, 64, heads, 32).transpose(0, 2, 1, 3)
+    k = pr[..., C:2 * C].reshape(-1, 64, heads, 32).transpose(0, 2, 1, 3)
+    v = pr[..., 2 * C:].reshape(-1, 64, heads, 32).transpose(0, 2, 1, 3)
+    qn = cosine_normalize(q)
+    q16 = e4m3(half_rounded(qn * half_rounded(scale).reshape(1, heads, 1, 1)))
+    k16 = cosine_publish(np.ascontiguousarray(k))
+    v16 = e4m3(np.ascontiguousarray(v))
+    scores = q16 @ k16.swapaxes(-1, -2) + bias[None]
+    probs = softmax(scores).astype(np.float32)
+    merged = (probs @ v16).transpose(0, 2, 1, 3).reshape(-1, 64, C)
+    att16 = e4m3(np.ascontiguousarray(merged)).astype(np.float32)
+    branch = att16 @ proj
+    out = _reverse(branch, pt, pl, C)
+    return out + x * acos                          # cosine_residual fp32 raw
+
+
+def _stem_block(x, W, idx, C, heads=1):
+    p = f"block{idx}.layer0"
+    w1, w2 = W[p + ".weight1"], W[p + ".weight2"]
+    fcos = W[p + ".ffn_cos_skip"]
+    branch = e4m3(gate_activation(half_rounded(x) @ w1)).astype(np.float32) @ w2
+    ffn_out = branch + x * fcos
+    return _stem_attn(ffn_out, W, idx, C, heads)
+
+
+def golden_stem(W, outdir):
+    x = np.fromfile(outdir + "x.bin", dtype=np.float32).reshape(TOK_STEM, 16)
+    val = half_rounded(x) @ W["block0.layer0.input_adapter_weight"]   # [288, 32]
+    raw0 = _stem_block(val, W, 0, 32)
+    val = raw0
+    for i in (1, 2, 3):
+        val = e4m3(_stem_block(val, W, i, 32))
+    raw4 = _stem_block(val, W, 4, 32)
+    # downsample transition, avgpool2 neutralized (M8a constant grid):
+    # b4ds = e4m3( e4m3(raw4) @ weight0 )
+    b4ds = e4m3(e4m3(raw4) @ W["block4.layer0.weight0"]).astype(np.float16)
+    return {"b4ds": b4ds}
+
+
+def compare_stem(W, outdir):
+    golden = golden_stem(W, outdir)
+    print(f"{'tensor':<14}{'kind':<10}{'bitmatch':>10}{'<=1step':>10}{'verdict':>10}")
+    all_pass = True
+    for name, shape in (("b4ds", (TOK_STEM, 64)),):
+        g = golden[name].reshape(-1)
+        gpu = np.fromfile(f"{outdir}gpu_{name}.f16", dtype=np.float16).reshape(-1)
+        same = (g.view(np.uint16) == gpu.view(np.uint16))
+        bitmatch = same.mean()
+        d = np.abs(g.astype(np.float32) - gpu.astype(np.float32))
+        step = np.maximum(np.abs(g.astype(np.float32)), np.float32(2.0 ** -9)) / 8.0
+        within1 = (d / step <= 1.0).mean()
+        ok = bitmatch >= 0.999 or within1 >= 0.999
+        all_pass &= ok
+        print(f"{name:<14}{'contract':<10}{bitmatch * 100:>9.4f}%{within1 * 100:>9.4f}%{str(ok):>10}")
+    print(f"\nM8a stem verdict: {'PASS' if all_pass else 'FAIL'} "
+          f"(contract: >=99.9% f16-bit OR >=99.9% within 1 e4m3 step)")
+    return 0 if all_pass else 1
+
+
 # ---------------- weights ----------------
 def load_weights(path):
     with open(path, "rb") as f:
@@ -148,6 +276,8 @@ def main():
     if not outdir.endswith("/") and not outdir.endswith("\\"):
         outdir += "/"
     W = load_weights(st_path)
+    if len(sys.argv) > 3 and sys.argv[3] == "stem":
+        return compare_stem(W, outdir)
     x = np.fromfile(outdir + "x.bin", dtype=np.float32).reshape(TOK, CH)
 
     w0 = W["block31.layer0.weight"]              # [1024,4096]

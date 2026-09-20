@@ -562,7 +562,11 @@ struct CosPush { uint64_t a, c, d; uint32_t m, flags; };
 
 struct CosWinPush { uint64_t a, c, d; uint32_t m, flags, C, hcount; };
 
+#pragma pack(pop)  // SMaxPush: scalar layout aligns uint64 `bias` to 8 (offset 32);
+                   // pack(1) would place it at 28 -> shader reads garbage nonzero
+                   // bias -> wild BDA deref -> async device lost (M8a run-5 root cause)
 struct SMaxPush { uint64_t a, c; uint32_t m, n; float p0; uint64_t bias; uint32_t hcount; };
+#pragma pack(push, 1)
 
 struct EWPush { uint64_t a, b, c, d, h; uint32_t n, kind, ch; };
 
@@ -675,14 +679,20 @@ int main(int argc, char **argv) {
     };
 
     // ======================= 2. arena layout =================================
+    // Arena offsets are ABSOLUTE device offsets (packTotal + relative) so the
+    // dispatch BDA lambda A(o) = A0 + o addresses them correctly alongside the
+    // pack-relative poff[] weight offsets. (Run-4 dumps were all-zero because
+    // A(o) without the pack base aliased the weights region.)
     struct Ar {
+        VkDeviceSize base = 0;   // set to packTotal before first alloc
         VkDeviceSize off = 0;
         VkDeviceSize alloc(VkDeviceSize bytes) {
             VkDeviceSize a = (off + 255) & ~(VkDeviceSize)255;
             off = a + bytes;
-            return a;
+            return base + a;
         }
     } ar;
+    ar.base = packTotal;
     std::map<std::string, VkDeviceSize> vecOff;   // fp32 vector table (4 KB slots)
     auto needVec = [&](const std::string &n) {
         if (!vecOff.count(n)) { VkDeviceSize o = ar.alloc(4096); vecOff[n] = o; }
@@ -779,6 +789,10 @@ int main(int argc, char **argv) {
         char *dst = sp + e.off;
         if (isBiasSwizzled(e.name)) {
             uint64_t heads = t.shape[0];
+            if (getenv("M8_DEBUG_BIAS"))
+                std::fprintf(stderr, "[bias-swz] %s heads=%llu off=%llu first-dst-before=%u\n",
+                             e.name.c_str(), (unsigned long long)heads,
+                             (unsigned long long)e.off, *(const uint16_t *)src);
             for (uint64_t h = 0; h < heads; ++h)
                 fragment_swizzle((uint16_t *)dst + h * 4096, (const uint16_t *)src + h * 4096);
         } else if (isBranchedExpand(e.name)) {
@@ -804,7 +818,7 @@ int main(int argc, char **argv) {
         const Tensor &t = wf.tensors[n];
         VkDeviceSize o = needVec(n);
         const uint16_t *s = (const uint16_t *)(sp + it->second);
-        float *d = (float *)(sp + arenaStart + o);   // arena region, after the pack
+        float *d = (float *)(sp + o);   // arena offsets are absolute (packTotal base)
         for (uint64_t i = 0; i < t.numel(); ++i) d[i] = f16_bits_to_f32(s[i]);
     };
     for (int i = 0; i <= 70; ++i) {
@@ -834,13 +848,13 @@ int main(int argc, char **argv) {
         const Tensor &t = wf.tensors[n];
         const float *s = (const float *)(sp + poff[n]);
         VkDeviceSize o = needVec(n + ".q32");
-        float *d = (float *)(sp + arenaStart + o);
+        float *d = (float *)(sp + o);
         float sq = std::sqrt(32.0f);
         for (uint64_t j = 0; j < t.numel(); ++j) d[j] = s[j] * sq;
     }
     // folded head weight [32,16]: rows 0-15 = out_gain, 16-31 = out_conv, cols 4-15 = 0
     {
-        uint16_t *d = (uint16_t *)(sp + arenaStart + oHeadW);
+        uint16_t *d = (uint16_t *)(sp + oHeadW);
         std::memset(d, 0, 1024);
         const uint16_t *sg = (const uint16_t *)(sp + poff["block70.layer0.out_gain"]);
         const uint16_t *sc = (const uint16_t *)(sp + poff["block70.layer0.out_conv_weight"]);
@@ -874,13 +888,13 @@ int main(int argc, char **argv) {
         std::string p = outDir + "x.bin";
         std::ofstream f(p, std::ios::binary);
         f.write((const char *)x.data(), (std::streamsize)(x.size() * 4));
-        char *sx = sp + arenaStart + oX;
+        char *sx = sp + oX;
         std::memcpy(sx, x.data(), x.size() * 4);
-        uint16_t *sx16 = (uint16_t *)(sp + arenaStart + oX16);
+        uint16_t *sx16 = (uint16_t *)(sp + oX16);
         for (size_t i = 0; i < x.size(); ++i) sx16[i] = f32_to_f16(x[i]);
         VkCommandBuffer cbx = beginCmd(vk);
-        VkBufferCopy cxx{arenaStart + oX, arenaStart + oX, TOK * 16 * 4};
-        VkBufferCopy cx16{arenaStart + oX16, arenaStart + oX16, TOK * 16 * 2};
+        VkBufferCopy cxx{oX, oX, TOK * 16 * 4};
+        VkBufferCopy cx16{oX16, oX16, TOK * 16 * 2};
         vkCmdCopyBuffer(cbx, staging.buf, dev.buf, 1, &cxx);
         vkCmdCopyBuffer(cbx, staging.buf, dev.buf, 1, &cx16);
         submitWait(vk, cbx);
@@ -1439,6 +1453,40 @@ int main(int argc, char **argv) {
     }
 
     // ======================= 6. boundary dumps ==============================
+    if (g_dispDbg) {   // run-5 debug: verify arena contents reached the device
+        struct Dbg { const char *name; VkDeviceSize off; VkDeviceSize bytes; };
+        std::vector<Dbg> dbgs = {
+            {"dbg_x", oX, TOK * 16 * 4}, {"dbg_x16", oX16, TOK * 16 * 2},
+            {"dbg_ada", oADA, TOK * 32 * 4}, {"dbg_g2", oG2, TOK * 1024 * 2},
+            {"dbg_b4ds", oB4DS, TOK * 64 * 2},
+            {"dbg_b0ffn", oG4, TOK * 32 * 4}, {"dbg_b0raw", oB0RAW, TOK * 32 * 4},
+            {"dbg_b0proj", oPROJW, 512 * 96 * 4}, {"dbg_b0sc", oSCW, 512 * 64 * 4},
+            {"dbg_b0pr", oPRW, 512 * 64 * 2}, {"dbg_b0mg", oMGW, 512 * 32 * 4},
+            {"dbg_b0at", oATW, 512 * 32 * 2}, {"dbg_b0ab", oABW, 512 * 32 * 4},
+            {"dbg_bias", poff["block0.layer0.attn_bias"], 4096 * 2},
+        };
+        VkDeviceSize tot2 = 0;
+        for (auto &d : dbgs) tot2 += d.bytes;
+        Buffer rd2;
+        allocHost(vk, tot2, rd2);
+        VkCommandBuffer cb2 = beginCmd(vk);
+        VkDeviceSize o2 = 0;
+        for (auto &d : dbgs) {
+            VkBufferCopy c{d.off, o2, d.bytes};
+            vkCmdCopyBuffer(cb2, dev.buf, rd2.buf, 1, &c);
+            o2 += d.bytes;
+        }
+        submitWait(vk, cb2);
+        VkDeviceSize ro2 = 0;
+        for (auto &d : dbgs) {
+            std::string p = outDir + d.name + ".bin";
+            std::ofstream f(p, std::ios::binary);
+            f.write((const char *)rd2.mapped + ro2, (std::streamsize)d.bytes);
+            ro2 += d.bytes;
+        }
+        freeBuf(vk, rd2);
+        std::printf("debug arena dumps written\n");
+    }
     struct Dump { const char *name; VkDeviceSize off; VkDeviceSize bytes; bool f16; };
     std::vector<Dump> dumps = {
         {"b4ds", oB4DS, TOK * 64 * 2, true},
@@ -1459,7 +1507,7 @@ int main(int argc, char **argv) {
         VkCommandBuffer cb = beginCmd(vk);
         VkDeviceSize o = 0;
         for (auto &d : dumps) {
-            VkBufferCopy c{arenaStart + d.off, o, d.bytes};
+            VkBufferCopy c{d.off, o, d.bytes};
             vkCmdCopyBuffer(cb, dev.buf, rd.buf, 1, &c);
             o += d.bytes;
         }
