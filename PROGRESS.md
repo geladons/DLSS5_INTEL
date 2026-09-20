@@ -124,3 +124,70 @@ Project: Intel Arc port of DLSS 5-style neural rendering, whole-desktop
   (2) Vulkan 1.4 headers renamed the KHR handle type: use
   VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT (the old *_IMAGE_BIT name is
   gone); (3) win32 Vulkan types need VK_USE_PLATFORM_WIN32_KHR (CMake define).
+
+## M3 result (2026-09-19) - neural pass slice on the reference pipeline: PASS
+
+- Built dlss5/m3-neural-passthrough/ (C++17, D3D11/DXGI + Vulkan SDK): main.cpp
+  (~62 KB) + 8 GLSL shaders + CMakeLists.txt + build.cmd. Copied from the M2
+  skeleton; capture/import/sync doctrine unchanged (DuplicateOutput, DISPLAY5,
+  NT-handle shared texture, dedicated alloc, D3D11.5-fence -> timeline semaphore,
+  LUID 95a2 match — both "Arc Pro B50" Vulkan devices enumerated again, picked
+  by LUID, not name).
+- Pipeline ran end-to-end on a REAL captured desktop frame:
+  decode -> letterbox scan -> rescale down -> 16ch features -> STAND-IN learned
+  block -> rescale up -> residual compose -> encode -> readback -> BMPs.
+- PORTED reference components (ports verified against in-tree reference sources):
+  - nr_decode8      -> shaders/decode.comp   (ref src/ref/nr_image.c:36-44, bgra=1)
+  - nr_encode8      -> shaders/encode.comp   (ref src/ref/nr_image.c:46-63; NaN->0,
+                       unit clamp, +0.5 C-cast, alpha preserved; both full-frame and
+                       region variants)
+  - nr_compose      -> shaders/compose.comp  (ref src/ref/nr_image.c:53-76, blend=1,
+                       subtract+add both kept for the FP32 rounding)
+  - nr_features     -> shaders/features.comp (ref src/ref/nr_image.c:84-112; 16ch
+                       layout incl. first-frame history=scaled colour, controls
+                       ch10..14; ch0-2 noise = documented STAND-IN hash — the real
+                       deterministic_noise() lives in vendored mlx-dlss features.py,
+                       ABSENT from this clone)
+  - resize/axis     -> shaders/rescale.comp  (ref src/layer/nr_daemon.py:238-255;
+                       separable bilinear, weights subtract the CLIPPED low,
+                       fp32 intermediate before 2nd axis)
+  - active_region   -> host port in main.cpp  (ref src/layer/nr_daemon.py:261-296;
+                       tol 2/255, 45% cap, +-1 symmetry, area>=half; GPU row/col
+                       max reduction added, decision logic 1:1)
+  - publish.glsl    -> shaders/publish.glsl  VERBATIM (ref src/gpu/publish.glsl:
+                       half_round packHalf2x16 trick, e4m3, gate_activation —
+                       the vendor rounding contract, ARCHITECTURE.md sec.4-5);
+                       #included by features/standin/compose (not an entry point)
+- STAND-IN components (loudly labelled): ch0-2 deterministic noise (see above)
+  and the learned block itself (shaders/standin.comp: weight-free deterministic
+  Laplacian of scaled colour gated by the verbatim vendor gate_activation through
+  the e4m3/half publish chain, emitting the real 4-ch head layout). No weight
+  files exist in the reference repo (dlssnr-logical.safetensors must be extracted
+  from the user's own nvngx_dlssnr.dll) -> real 71-block U-Net port is out of scope.
+- Metrics (region = full frame 2560x1440, 8-bit, final vs native original):
+  per-channel mean|final-native| B=5.903 G=5.790 R=5.937 (>0 required); max|delta|
+  = 255 levels; delta std = 29.44; pixels changed 18.33%; spatial-structure metric
+  mean |grad(delta)| per ch B=6.724 G=6.680 R=6.698 (>0 => NOT a uniform/global
+  shift). Artifacts: out\m3_final.bmp + out\m3_nr_out.bmp (content-verified,
+  sample mean 103.25, std 101.08) + out\m3_native.bmp (raw capture diagnostic).
+- Timing (ms, per-stage serialized submit+wait): acquire->D3D11 41.8; import+sync
+  160.5 (one-time VkDevice); decode 0.79; letterbox 0.80; rescale down 171.3
+  (first-touch page faults on fresh multi-MB buffers — see steady state);
+  features 0.54; STAND-IN 0.74; rescale up 0.42; compose 0.95; encode x2 6.85;
+  host readback 39.3; TOTAL wall 762.9. Steady-state whole GPU pipeline in ONE
+  submit (3 runs): 3.886 / 4.107 / 8.930 ms min/median/max — warm ~2-4 ms.
+- Full build+run console log: docs/m3-neural.log.
+- BLOCKER found & solved (inherited from M2): the DDA acquire took the FIRST
+  frame after DuplicateOutput, which on this Arc driver is a BLACK warm-up
+  surface (m1dda snapshot_1 luma var=0 range [0,0]; content from snapshot_2 on).
+  M2's PASS was unknowingly on that black frame (invert(black)=white==255-original
+  masks it). m1's tight loop never noticed because it snapshots frames 60/120.
+  Fix in main.cpp: content-checked acquire — keep acquiring and luma-sample the
+  staging copy until a non-black frame arrives (6 s fallback accept). Post-fix
+  capture sample mean 144.27, metrics PASS.
+- What the full-model port still needs: dlssnr-logical.safetensors (649 tensors,
+  F16/F32, nr_model.py:735-760) extracted via the external MLX-DLSS extractor;
+  the resident graph runtime (xmxres.py Runtime / nr_resident.py block wrappers,
+  gemm_resident.comp + resident.comp on XMX — M0 proved 8x16x16 f16 works on B50);
+  ~2.3 GiB scratch planning at 720p-class extents; real deterministic_noise() for
+  ch0-2; temporal history (channels 7-9 / head.a gate) for live frames.

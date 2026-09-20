@@ -1,0 +1,89 @@
+=== M3 neural pass slice build+run log ===
+started 19.09.2026 18:33:03,33 
+args: outdir=out wiggle=1 scale=0.55 
+cmake version 4.4.3
+
+CMake suite maintained and supported by Kitware (kitware.com/cmake).
+Glslang Version: 11:16.4.0
+ESSL Version: OpenGL ES GLSL 3.20 glslang Khronos. 16.4.0
+GLSL Version: 4.60 glslang Khronos. 16.4.0
+SPIR-V Version 0x00010600, Revision 1
+GLSL.std.450 Version 100, Revision 1
+Khronos Tool ID 8
+SPIR-V Generator Version 11
+GL_KHR_vulkan_glsl version 100
+ARB_GL_gl_spirv version 100
+>> cmake configure 
+-- Selecting Windows SDK version 10.0.19041.0 to target Windows 10.0.22631.
+-- Configuring done (0.0s)
+-- Generating done (0.1s)
+-- Build files have been written to: C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m3-neural-passthrough/build
+>> cmake build 
+Microsoft (R) Build Engine version 16.11.6+a918ceb31 for .NET Framework
+Copyright (C) Microsoft Corporation. All rights reserved.
+
+C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\MSBuild\Microsoft\VC\v160\Microsoft.CppBuild.targets(499,5): warning MSB8004: Output Directory does not end with a trailing slash.  This build instance will add the slash as it is required to allow proper evaluation of the Output Directory. [C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m3-neural-passthrough\build\ZERO_CHECK.vcxproj]
+C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\MSBuild\Microsoft\VC\v160\Microsoft.CppBuild.targets(499,5): warning MSB8004: Output Directory does not end with a trailing slash.  This build instance will add the slash as it is required to allow proper evaluation of the Output Directory. [C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m3-neural-passthrough\build\m3_shaders.vcxproj]
+  main.cpp
+C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m3-neural-passthrough\main.cpp(709): warning C4715: '<lambda_03071fad13cb851d4aa40e598ab1111b>::operator()': not all control paths return a value [C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m3-neural-passthrough\build\m3neural.vcxproj]
+  m3neural.vcxproj -> C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m3-neural-passthrough\build\Release\m3neural.exe
+C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\MSBuild\Microsoft\VC\v160\Microsoft.CppBuild.targets(499,5): warning MSB8004: Output Directory does not end with a trailing slash.  This build instance will add the slash as it is required to allow proper evaluation of the Output Directory. [C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m3-neural-passthrough\build\ALL_BUILD.vcxproj]
+>> run neural slice 
+=== M3: neural pass slice (reference ports + STAND-IN learned block) ===
+frame target: 2560x1440 B8G8R8A8, render_scale=0.55
+
+[D3D11] hardware device created, feature level 0xb100
+[DDA] DuplicateOutput active: 2560x1440 format=87 rotation=1
+[sync] D3D11.5 fence: available (NT handle)
+[info] cursor-wiggle activity generator ON (DDA is dirty-rect driven)
+[DDA] acquired content frame on try 1 (acquired#1, skippedBlack=0, accumulated=1)
+[cap] native sample mean=144.27 (0 => capture black)
+[VK] device "Intel(R) Arc(TM) Pro B50 Graphics" LUID=00000000:000095a2   <== MATCHES DXGI adapter
+[VK] device "Intel(R) Arc(TM) Pro B50 Graphics" LUID=00000000:000116cc 
+[mem] heaps (discrete memory policy):
+[mem]   heap0: 15.83 GB deviceLocal=1 hasHostVisibleType=1
+[mem]   heap1: 16.00 GB deviceLocal=0 hasHostVisibleType=1
+[VK] logical device up (compute family 0)
+[interop] imported D3D11 image (15728640 bytes, dedicated)
+[sync] cross-API ordering: timeline semaphore SIGNALED
+[VK] 7 compute pipelines up
+[stage] decode (BGRA8 -> RGB f32 [0,1], bgra=1, nr_image.c:36-44): 0.793 ms
+[stage] letterbox: GPU row/col max + host active_region (nr_daemon.py:261-296): 0.795 ms
+[letterbox] region rows [0,1440) cols [0,2560) of 2560x1440 (tol 2/255, cap 45%, sym 1, area>=half)
+[geometry] region 2560x1440 -> network extent 1408x768 (x0.55, nearest 64, min 320; crop-back identity)
+[controls] profile=standard: ch10..14 = half(0),half(1),half(1),-1,-1 (style,tone,structure; vendor default structure=1.5)
+[mem] intermediates device-local (discrete policy); readback host-coherent
+[stage] rescale down 2560x1440 -> 1408x768 (nr_daemon.py:238-255): 171.300 ms
+[stage] features 16ch (nr_image.c:84-112; noise ch0-2 = STAND-IN hash): 0.540 ms
+[stage] STAND-IN learned block (Laplacian + vendor gate, publish.glsl chain): 0.736 ms
+[stage] rescale up head 1408x768 -> 2560x1440: 0.424 ms
+[stage] compose residual (nr_image.c:53-76, blend=1): 0.948 ms
+[stage] encode 2x (nr_encode8, nr_image.c:46-63) + image->buffer: 6.852 ms
+[timing] steady-state full GPU pipeline (decode..encode, one submit): 3.886 / 4.107 / 8.930 ms (min/median of 3)
+[out] out\m3_final.bmp
+[out] out\m3_nr_out.bmp
+
+=== M3 metrics (region 2560x1440, 8-bit, final vs native) ===
+per-channel mean|final-native|: B=5.90262 G=5.78966 R=5.93682 (0-255 scale; must be > 0)
+max|delta| = 255 levels; delta std = 29.43950; pixels changed = 18.33%
+spatial structure: mean |grad(delta)| per ch = B=6.72376 G=6.68047 R=6.69834 (> 0 => delta is NOT a uniform/global shift)
+
+=== M3 timing (ms; per-stage serialized submit+wait) ===
+acquire->D3D11 ready:  41.766
+import + cross-API sync: 160.457
+decode:                0.793
+letterbox:             0.795
+rescale down:          171.300
+features:              0.540
+STAND-IN block:        0.736
+rescale up:            0.424
+compose:               0.948
+encode x2 + copies:    6.852
+host readback (maps):  39.262
+steady-state GPU pipeline (median): 4.107
+TOTAL wall:            762.925
+
+=== M3 result: PASS ===
+m3neural exit code: 0 
+ 
+=== final exit code: 0 (ended 19.09.2026 18:33:10,98) === 

@@ -1,0 +1,75 @@
+#version 460
+// ============================================================================
+// M3 STAND-IN LEARNED BLOCK  --  *** STAND-IN ***  *** NOT THE REAL NETWORK ***
+//
+// The real graph here is the recovered 71-block U-Net (5 Swin encoder stages,
+// ViT-1D bottleneck, 5 decoder stages; 145,755,123 parameters; FP8-E4M3 weight
+// publishes), assembled resident-style in src/gpu/nr_resident.py / xmxres.py
+// from dlssnr-logical.safetensors. NO weight files exist in the reference repo
+// (they must be extracted from the user's own nvngx_dlssnr.dll via the external
+// MLX-DLSS extractor — see reference README "Build"), so porting the learned
+// block is out of scope for M3.
+//
+// What this stand-in DOES (deliberately, to exercise the real pipeline slots):
+//   * consumes the real 16-channel feature volume at the network extent
+//   * produces the real head layout: 4 channels (RGB residual + temporal-gate
+//     logit), per docs/ARCHITECTURE.md:60-62 of the reference
+//   * passes its outputs through the VERBATIM-PORTED vendor publish chain
+//     (publish.glsl: half_round + e4m3 + gate_activation) — the same rounding
+//     contract every between-GEMM publish obeys (ARCHITECTURE.md sec.4-5)
+//   * is deterministic and weight-free, with spatial structure (a Laplacian of
+//     the scaled colour gated by the vendor gate activation) so the residual
+//     composite is pixel-meaningful and verifiably NON-uniform.
+//
+//   head.rgb = e4m3( half_round( 3.0 * g * tanh(24 * L) ) )   L = laplacian/px
+//   head.a   = half_round( 32.0 * mean(|L|) )                  (gate logit)
+//   g        = gate_activation( half_round(16.0 * mean(|L|)) ) (vendor gate fn)
+//
+// What the REAL block needs: dlssnr-logical.safetensors (649 tensors,
+// fully_logical=true, F16/F32 — nr_model.py:735-760), the resident graph
+// runtime (xmxres.py Runtime, nr_resident.py block wrappers, gemm_resident.comp
+// + resident.comp on XMX), ~2.3 GiB scratch at 720p-class extents. See PROGRESS.
+//
+//   push a = (netW, netH, 0, 0)
+// ============================================================================
+#extension GL_GOOGLE_include_directive : require
+#include "publish.glsl"
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(std430, set = 0, binding = 3) readonly buffer Features { float f[]; };
+layout(std430, set = 0, binding = 4) writeonly buffer Head { float h[]; };
+layout(push_constant) uniform Push { ivec4 a; ivec4 b; vec4 c; vec4 d; } pc;
+
+void main() {
+    uint p = gl_GlobalInvocationID.x;
+    uint W = uint(pc.a.x), H = uint(pc.a.y);
+    if (p >= W * H) return;
+    uint x = p % W;
+    uint y = p / W;
+
+    // scaled colour lives in channels 4..6 (nr_features layout, nr_image.c:97-99)
+    float L[3];
+    float absSum = 0.0;
+    for (uint c = 0u; c < 3u; ++c) {
+        float ctr = f[p * 16u + 4u + c];
+        uint xm = x > 0u ? x - 1u : x;
+        uint xp = x < W - 1u ? x + 1u : x;
+        uint ym = y > 0u ? y - 1u : y;
+        uint yp = y < H - 1u ? y + 1u : y;
+        float n = f[(ym * W + x) * 16u + 4u + c];
+        float s = f[(yp * W + x) * 16u + 4u + c];
+        float w = f[(y * W + xm) * 16u + 4u + c];
+        float e = f[(y * W + xp) * 16u + 4u + c];
+        L[c] = 4.0 * ctr - n - s - w - e;    // 4-neighbour Laplacian (replicate edge)
+        absSum += abs(L[c]);
+    }
+    float m = absSum / 3.0;
+
+    // vendor gate activation (publish.glsl:31-41) on a deterministic logit
+    float g = gate_activation(half_round(16.0 * m));
+
+    h[p * 4u + 0u] = e4m3(half_round(3.0 * g * tanh(24.0 * L[0])));
+    h[p * 4u + 1u] = e4m3(half_round(3.0 * g * tanh(24.0 * L[1])));
+    h[p * 4u + 2u] = e4m3(half_round(3.0 * g * tanh(24.0 * L[2])));
+    h[p * 4u + 3u] = half_round(32.0 * m);               // temporal-gate logit
+}
