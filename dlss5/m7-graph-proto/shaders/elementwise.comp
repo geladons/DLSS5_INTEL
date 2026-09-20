@@ -1,0 +1,53 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+/*
+ * elementwise — M7b small fp32 passes (design doc SS C.2 residuals/to_half).
+ *
+ * kind 0: block-closing residual + fused E4M3 publish (doc SS A.8 wrapper form):
+ *             c[i] = a[i] + b[i] * d[i % ch]      (fp32 raw, kept for validation)
+ *             h[i] = e4m3(c[i])                   (f16 published block output)
+ * kind 1: plain fp32 residual (FFN-internal, doc SS A.7):
+ *             c[i] = a[i] + b[i] * d[i % ch]
+ * kind 2: to_half (doc SS C.2; fp32 GEMM carrier -> f16 GEMM input):
+ *             h[i] = half_round(a[i])
+ */
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+#include "publish.glsl"
+
+layout(local_size_x = 256) in;
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf { float v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer HalfBuf  { float16_t v[]; };
+
+layout(push_constant, scalar) uniform Push {
+    FloatBuf a, b, c, d;
+    HalfBuf  h;
+    uint n;          // element count
+    uint kind;
+    uint ch;         // channel count for the vector broadcast (d has `ch` entries)
+} pc;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.n) return;
+    if (pc.kind == 2u) {
+        pc.h.v[i] = float16_t(half_round(pc.a.v[i]));
+        return;
+    }
+    if (pc.kind == 3u) {
+        pc.h.v[i] = float16_t(e4m3(pc.a.v[i]));
+        return;
+    }
+    float r = pc.a.v[i] + pc.b.v[i] * pc.d.v[i % pc.ch];
+    if (pc.kind == 0u) {
+        pc.c.v[i] = r;
+        pc.h.v[i] = float16_t(e4m3(r));
+    } else {
+        pc.c.v[i] = r;
+    }
+}
