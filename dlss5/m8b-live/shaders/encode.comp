@@ -1,0 +1,55 @@
+#version 460
+// ============================================================================
+// M3 encode — float RGB -> B8G8R8A8 bytes, alpha preserved from the raw frame.
+// PORT of nr_encode8(), src/ref/nr_image.c:46-63 (bgra=1 path):
+//   value = value==value ? unit(value) : 0      (NaN -> 0, unit = clamp01)
+//   out[p*4 + (2-c)] = (uint8)(value*255 + 0.5) (B first: c=0 R -> byte 2 ...)
+//   out[p*4 + 3] = raw alpha
+// For an rgba8 view of B8G8R8A8 the byte order is (.x=B,.y=G,.z=R,.w=A).
+//
+// Two uses (push b.z): 0 = FULL-frame final image (region pixels from Final,
+//   letterbox bars / outside-region from the native decode -> bars untouched,
+//   exactly like the reference where every output pass is region-scoped,
+//   nr_daemon.py letterbox notes); 1 = region-extent nr_out image (NrOut only).
+//
+//   b.z = 0: a = (fullW, fullH, regionLeft, regionTop), b = (regionW, regionH, 0)
+//   b.z = 1: a unused;                            b = (regionW, regionH, 1)
+// ============================================================================
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(rgba8, set = 0, binding = 0) uniform readonly image2D imgIn;   // native (alpha)
+layout(std430, set = 0, binding = 1) readonly buffer RgbFull { float nat[]; };
+layout(std430, set = 0, binding = 6) readonly buffer Final { float fin[]; };
+layout(std430, set = 0, binding = 7) readonly buffer NrOut { float nro[]; };
+layout(rgba8, set = 0, binding = 9)  writeonly uniform image2D imgOut; // final or nrout
+layout(push_constant) uniform Push { ivec4 a; ivec4 b; vec4 c; vec4 d; } pc;
+
+float enc(float value) {
+    value = (value == value) ? clamp(value, 0.0, 1.0) : 0.0;
+    return float(int(value * 255.0 + 0.5)) / 255.0;   // C cast truncates after +0.5
+}
+
+void main() {
+    ivec2 xy = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 sz = imageSize(imgOut);
+    if (xy.x >= sz.x || xy.y >= sz.y) return;
+    uint fullW = uint(pc.a.x);
+    int left = pc.a.z, top = pc.a.w;
+
+    vec3 rgb;
+    if (pc.b.z == 0) {                                  // full-frame final
+        bool inRegion = xy.x >= left && xy.x < left + pc.b.x &&
+                        xy.y >= top  && xy.y < top  + pc.b.y;
+        if (inRegion) {
+            uint rp = uint(xy.y - top) * uint(pc.b.x) + uint(xy.x - left);
+            rgb = vec3(fin[rp * 3u], fin[rp * 3u + 1u], fin[rp * 3u + 2u]);
+        } else {
+            uint np = uint(xy.y) * fullW + uint(xy.x);
+            rgb = vec3(nat[np * 3u], nat[np * 3u + 1u], nat[np * 3u + 2u]);
+        }
+    } else {                                            // region nr_out
+        uint rp = uint(xy.y) * uint(pc.b.x) + uint(xy.x);
+        rgb = vec3(nro[rp * 3u], nro[rp * 3u + 1u], nro[rp * 3u + 2u]);
+    }
+    float a = imageLoad(imgIn, xy).a;                   // raw alpha preserved
+    imageStore(imgOut, xy, vec4(enc(rgb.b), enc(rgb.g), enc(rgb.r), a));
+}

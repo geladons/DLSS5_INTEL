@@ -1,0 +1,74 @@
+ 
+=== M8B-LIVE run: m8blive.exe --frames 60 --novideo 
+started 20.09.2026 14:46:54,67 
+ 
+=== M8B-LIVE run: m8blive.exe --frames 200 
+started 20.09.2026 15:31:36,26 
+=== M8B-LIVE: REAL DLSS 5 graph (71 blocks) live on the desktop, Intel Arc Pro B50 ===
+transport: m4-present-simple (CPU bridge) | core: m8-full-chain @03900ab (288 tokens, ~47 ms)
+frame target: 2560x1440 B8G8R8A8, frames=200, wiggle=1, video=1
+
+[D3D11] hardware device created, feature level 0xb100
+[DDA] DuplicateOutput active: 2560x1440 format=87 rotation=1 origin=(0,0)
+[info] cursor-wiggle activity generator ON for initial acquire (DDA is dirty-rect driven)
+[DDA] initial content frame on try 1 (acquired#1, skippedBlack=0)
+[cap] native sample mean=179.70 (0 => capture black)
+[VK] device "Intel(R) Arc(TM) Pro B50 Graphics" LUID=00000000:000095a2   <== MATCHES DXGI adapter
+[VK] device "Intel(R) Arc(TM) Pro B50 Graphics" LUID=00000000:000116cc 
+[VK] coopmat 8x16x16 f16xf16->f32: OK
+[win] overlay created: 2560x1440 at (0,0), WS_POPUP | TOPMOST | TRANSPARENT | LAYERED
+[VK] logical device up (compute+graphics family 0, swapchain + coopmat)
+[present] format=44 images=3 mode=FIFO path=blit.comp STORAGE direct
+[bridge] upload buffer 14745600 bytes persistently mapped (CPU bridge; zero-copy deferred to M5)
+[VK] 7 transport pipelines up (+ blit); standin REMOVED
+[geometry] network extent PINNED at 12x24 = 288 tokens (m8 chain grid)
+loading DLSSNR graph... (weights + chain setup; ~1-2 s, not a hang)
+safetensors: 649 tensors, data base 64976
+pack: 649 tensors (278.03 MiB)
+pack offsets cross-checked vs docs/pack-layout.txt: OK
+arena: 46.91 MB scratch after weights; one device buffer, total 324.9 MB
+weight upload: 324.9 MB in 253.5 ms (1.25 GB/s incl. preprocessing)
+[chain] weights resident, setup 1844 ms
+[chain] 12 pipelines up (10 kernels + featpack/headpack), BDA base 0xffffb8078e340000
+[stage] frame0 upload+decode+letterbox: 11.785 ms
+[letterbox] region rows [0,1440) cols [0,2560) of 2560x1440 (host decision FIXED for the loop)
+[geometry] region 2560x1440 -> network extent 12x24 (chain 288-token grid)
+[mem] intermediates device-local; readback host-coherent; blit sets 3
+[m8b] entering live loop (200 frames)
+[m8b] frame 0 | rolling 0.0 fps | dropped 0 | fresh
+[dbg] featV   n=4608 min=-5.25781 max=1 mean=-0.00311482 nonzero=87.5%
+[dbg] HEAD    n=4608 min=-4.94554 max=58.345 mean=1.1032 nonzero=25.0%
+[dbg] head4   n=1152 min=-4.94554 max=58.345 mean=4.41281 nonzero=100.0%
+[dbg] x16     n=4608 min=0x0000 max=0xc542 nonzero=87.5%
+[dbg] ADA     n=9216 min=-4.35809 max=5.12907 mean=0.177491 nonzero=100.0%
+[dbg] MRG70   n=9216 min=-115.368 max=118.158 mean=-6.09785 nonzero=100.0%
+[dbg] G2      n=9216 min=-9.28614e+18 max=9.28614e+18 mean=-3.65866e+17 nonzero=100.0%
+[dbg] headW   n=512 min=0x0000 max=0xab44 nonzero=25.0%
+[dbg] B4DS    n=18432 min=-448 max=448 mean=9.55472 nonzero=100.0% nan/inf=0 | first8: -5.5 9 30 -3.75 1.875 -16 -18 -0.4688
+[dbg] B22DS   n=147456 min=-448 max=448 mean=1.63769 nonzero=100.0% nan/inf=0 | first8: -64 48 40 160 40 36 80 -160
+[dbg] B38     n=294912 min=-448 max=448 mean=2.66555 nonzero=100.0% nan/inf=0 | first8: -176 -120 80 -80 176 -320 256 -176
+[dbg] B48     n=73728 min=-448 max=448 mean=-25.4441 nonzero=100.0% nan/inf=0 | first8: 112 -192 320 160 176 288 320 -128
+[dbg] B69     n=9216 min=-448 max=448 mean=-33.0175 nonzero=100.0% nan/inf=0 | first8: 18 88 -96 44 -4.5 -60 52 2.5
+[dbg] sinT    n=32 min=-0.341064 max=0.736816 mean=0.281882 nonzero=100.0%
+[dbg] cosT    n=32 min=-0.983887 max=1 mean=0.575806 nonzero=100.0%
+[dbg] FRS     n=9216 min=-72 max=64 mean=0.503638 nonzero=100.0% nan/inf=0 | first8: -1.125 0.2188 0.2812 0.375 0.25 1.125 -0.75 -0.5625
+[dbg] headUp  n=14745600 min=-4.03771 max=43.2754 mean=2.29241 nonzero=56.2%
+[metrics] frame 10 region 2560x1440: mean|final-native| B=12.25764 G=16.32668 R=17.72835 (must be > 0)
+[metrics] structure: mean |grad(delta)| B=0.71941 G=0.93862 R=1.45222 (> 0); changed 39.89% => PASS
+[metrics] frame 30 region 2560x1440: mean|final-native| B=9.10429 G=14.64748 R=12.62350 (must be > 0)
+[metrics] structure: mean |grad(delta)| B=0.63955 G=0.86996 R=1.24706 (> 0); changed 30.46% => PASS
+[metrics] frame 60 region 2560x1440: mean|final-native| B=8.38856 G=12.99280 R=11.71571 (must be > 0)
+[metrics] structure: mean |grad(delta)| B=0.69566 G=0.75581 R=1.18427 (> 0); changed 27.47% => PASS
+[m8b] frame 60 | rolling 12.2 fps | dropped 0 | fresh
+[m8b] frame 120 | rolling 13.8 fps | dropped 0 | fresh
+[m8b] frame 180 | rolling 12.6 fps | dropped 0 | fresh
+[m8b] frame 199 | rolling 12.6 fps | dropped 0 | fresh
+
+=== M8B-LIVE summary ===
+frames: 200, wall: 15.65 s, avg fps: 12.78, last rolling fps: 12.6
+dropped (DDA timeout/black/access-lost): 0
+present: FIFO, format 44, path blit.comp STORAGE
+chain: full 71-block DLSSNR graph @ 288 tokens (real weights, resident)
+verify frames {10,30,60}: ALL PASS
+=== M8B-LIVE result: PASS ===
+exit code: 0 (ended 20.09.2026 15:31:56,61) 

@@ -41,15 +41,18 @@ void main() {
     if (pc.kind == 0u) {
         float av = FloatBuf(pc.a).v[i];
         precise float bv = f16_widen(uint(float16BitsToUint16(HalfBuf(pc.b).v[i])));
-        precise float dv = f16_widen(uint(float16BitsToUint16(HalfBuf(pc.d).v[chn])));
+        precise float dv = FloatBuf(pc.d).v[chn];   // sin table stored fp32 (placeVecF16)
         precise float r = av + bv * dv;
         FloatBuf(pc.c).v[i] = r;
         HalfBuf(pc.h).v[i] = float16_t(e4m3(r));
     } else {
-        precise float av = f16_widen(uint(HalfBuf(pc.a).v[i]));
-        precise float bv = f16_widen(uint(HalfBuf(pc.b).v[i]));
-        precise float dv = f16_widen(uint(HalfBuf(pc.d).v[chn]));
-        precise float ev = f16_widen(uint(HalfBuf(pc.e).v[chn]));
+        // a/b are true f16 tensors (b69 out, full_res_skip): reinterpret bits.
+        // d/e are the sin/cos tables WIDENED TO FP32 by placeVecF16 on the host
+        // (float storage, one fp32 per channel) — read them as FloatBuf, not f16.
+        precise float av = f16_widen(uint(float16BitsToUint16(HalfBuf(pc.a).v[i])));
+        precise float bv = f16_widen(uint(float16BitsToUint16(HalfBuf(pc.b).v[i])));
+        precise float dv = FloatBuf(pc.d).v[chn];
+        precise float ev = FloatBuf(pc.e).v[chn];
         FloatBuf(pc.c).v[i] = av * dv + bv * ev;
     }
 }

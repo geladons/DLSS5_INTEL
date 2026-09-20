@@ -1,0 +1,42 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+/*
+ * transpose_we — M8a merge_heads (+E4M3 publish) for window attention.
+ *
+ * ctx GEMM output merged fp32 [W, H, 64, 32] (batch = W*H) ->
+ * attended16 f16 [W, 64, C] (token-major within window, channels head-major
+ * c = head*32 + d), applying the SS A.6 step-6 publish e4m3(merged) BEFORE the
+ * attention projection GEMM. One invocation per (window, local token); loops
+ * heads x head_dim.
+ */
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+#include "publish.glsl"
+
+layout(local_size_x = 32) in;
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf { float v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer HalfBuf  { float16_t v[]; };
+
+layout(push_constant, scalar) uniform Push {
+    FloatBuf a;      // merged fp32 [W, H, 64, 32]
+    HalfBuf  c;      // attended16 f16 [W, 64, C]
+    uint W, hcount;  // hcount = H heads; C = H*32
+} pc;
+
+void main() {
+    uint wi = gl_GlobalInvocationID.x;          // w*64 + t
+    if (wi >= pc.W * 64u) return;
+    uint w = wi / 64u, t = wi % 64u;
+    uint C = pc.hcount * 32u;
+    for (uint hd = 0u; hd < pc.hcount; ++hd) {
+        uint rd = ((w * pc.hcount + hd) * 64u + t) * 32u;
+        uint wr = wi * C + hd * 32u;
+        for (uint d = 0u; d < 32u; ++d)
+            pc.c.v[wr + d] = float16_t(e4m3(pc.a.v[rd + d]));
+    }
+}
