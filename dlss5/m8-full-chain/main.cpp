@@ -593,14 +593,37 @@ static int blockIndexOf(const std::string &name) {
 }
 
 static int g_to = 70;   // --to N: stop chain after block N (family bisect)
+static long g_dispCount = 0;    // dispatch ordinal (debug bisect)
+static long g_maxDisp = 1 << 30; // --maxdisp N: no-op all dispatches after the Nth
+static bool g_noBias = false;   // --nobias: window softmax w/o attn_bias read
+static bool g_dispDbg = false;  // --dispdbg: stderr ordinal per attempted dispatch
+static bool g_noTs = false;     // --nots: skip vkCmdWriteTimestamp (ts flake probe)
+static long g_barCount = 0;     // barrier ordinal
+static long g_splitN = 0;       // --split N: submit+wait every N barriers (driver probe)
+static bool g_pv1 = false;      // --pv1: PV gemm batch=1 ablation (crash probe)
+static int g_pvMode = 0;        // --pvmode N: PV gemm ablation (1=k32 2=n64 3=bkw 4=altout)
+#define DISP_GATE(tag)                                        \
+    do {                                                      \
+        ++g_dispCount;                                        \
+        if (g_dispDbg) std::fprintf(stderr, "[disp %ld] %s\n", g_dispCount, tag); \
+        if (g_dispCount > g_maxDisp) return;                  \
+    } while (0)
 
 int main(int argc, char **argv) {
     int cpuInfo[4];
     __cpuid(cpuInfo, 1);
     g_hasF16C = (cpuInfo[2] & (1 << 29)) != 0;
     // --to N: record/run blocks 0..N only (family bisect + bring-up)
-    for (int i = 1; i + 1 < argc; ++i)
-        if (std::strcmp(argv[i], "--to") == 0) g_to = std::atoi(argv[i + 1]);
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--to") == 0 && i + 1 < argc) g_to = std::atoi(argv[++i]);
+        if (std::strcmp(argv[i], "--maxdisp") == 0 && i + 1 < argc) g_maxDisp = std::atol(argv[++i]);
+        if (std::strcmp(argv[i], "--nobias") == 0) g_noBias = true;
+        if (std::strcmp(argv[i], "--dispdbg") == 0) g_dispDbg = true;
+        if (std::strcmp(argv[i], "--nots") == 0) g_noTs = true;
+        if (std::strcmp(argv[i], "--split") == 0 && i + 1 < argc) g_splitN = std::atol(argv[++i]);
+        if (std::strcmp(argv[i], "--pv1") == 0) g_pv1 = true;
+        if (std::strcmp(argv[i], "--pvmode") == 0 && i + 1 < argc) g_pvMode = std::atoi(argv[++i]);
+    }
     std::printf("M8 full-chain prototype — Arc Pro B50\n");
     std::printf("CPU F16C: %s\n", g_hasF16C ? "yes" : "no (software RNE)");
 
@@ -886,12 +909,19 @@ int main(int argc, char **argv) {
     double famFlops[6] = {0, 0, 0, 0, 0, 0};
 
     // dispatch helpers ------------------------------------------------------
-    auto bar = [&](VkCommandBuffer cb) { fullBarrier(cb, dev.buf); };
+    auto bar = [&](VkCommandBuffer &cb) {
+        fullBarrier(cb, dev.buf);
+        if (g_splitN > 0 && (++g_barCount % g_splitN) == 0) {
+            submitWait(vk, cb);   // split-submit probe: bound in-flight work
+            cb = beginCmd(vk);
+        }
+    };
     auto gflags = [&](uint32_t epi, bool narrow) { return (epi << 8) | (narrow ? F_NARROW : 0u); };
     auto dGemm = [&](VkCommandBuffer cb, int fam, uint64_t a, uint64_t b, uint64_t c,
                      uint32_t m, uint32_t n, uint32_t k, uint32_t batch,
                      uint32_t sa, uint32_t sb, uint32_t sc,
                      uint32_t flags, uint32_t lda, uint32_t ldb, uint32_t ldc) {
+        DISP_GATE("dGemm");
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pGemm.pipe);
         GemmPush p{a, b, c, m, n, k, batch, sa, sb, sc, flags, lda, ldb, ldc};
         vkCmdPushConstants(cb, pGemm.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
@@ -900,6 +930,7 @@ int main(int argc, char **argv) {
     };
     auto dEw = [&](VkCommandBuffer cb, uint64_t a, uint64_t b, uint64_t c, uint64_t d,
                    uint64_t h, uint32_t n, uint32_t kind, uint32_t ch) {
+        DISP_GATE("dEw");
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pEw.pipe);
         EWPush p{a, b, c, d, h, n, kind, ch};
         vkCmdPushConstants(cb, pEw.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
@@ -907,6 +938,7 @@ int main(int argc, char **argv) {
     };
     auto dPart = [&](VkCommandBuffer cb, uint64_t a, uint64_t c, uint32_t C,
                      uint32_t padTop, uint32_t padLeft, uint32_t wp8, bool in16) {
+        DISP_GATE("dPart");
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pPart.pipe);
         uint32_t hp8 = (IMG_H + padTop + 7) / 8;
         PartPush p{a, c, IMG_H, IMG_W, C, padTop, padLeft, wp8, in16 ? 1u : 0u};
@@ -916,6 +948,7 @@ int main(int argc, char **argv) {
     auto dGather = [&](VkCommandBuffer cb, uint64_t a, uint64_t b, uint64_t d, uint64_t c,
                        uint64_t h, uint32_t C, uint32_t padTop, uint32_t padLeft, uint32_t wp8,
                        bool pub, bool b16) {
+        DISP_GATE("dGather");
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pGather.pipe);
         GatherPush p{a, b, d, c, h, IMG_H, IMG_W, C, padTop, padLeft, wp8,
                      (pub ? 1u : 0u) | (b16 ? 2u : 0u)};
@@ -923,6 +956,7 @@ int main(int argc, char **argv) {
         vkCmdDispatch(cb, TOK, 1, 1);
     };
     auto dTrans = [&](VkCommandBuffer cb, uint64_t a, uint64_t c, uint32_t W, uint32_t H) {
+        DISP_GATE("dTrans");
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pTrans.pipe);
         TransWePush p{a, c, W, H};
         vkCmdPushConstants(cb, pTrans.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
@@ -930,12 +964,14 @@ int main(int argc, char **argv) {
     };
     auto dCosW = [&](VkCommandBuffer cb, uint64_t a, uint64_t c, uint64_t sc,
                      uint32_t W, uint32_t H, uint32_t C, uint32_t kind) {
+        DISP_GATE("dCosW");
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pCosW.pipe);
         CosWinPush p{a, c, sc, W * 64 * H, kind, C, H};
         vkCmdPushConstants(cb, pCosW.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
         vkCmdDispatch(cb, (W * 64 * H + 31) / 32, 1, 1);
     };
     auto dCosG = [&](VkCommandBuffer cb, uint64_t a, uint64_t c, uint64_t sc, uint32_t kind) {
+        DISP_GATE("dCosG");
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pCos.pipe);
         CosPush p{a, c, sc, TOK * 32, kind};
         vkCmdPushConstants(cb, pCos.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
@@ -943,12 +979,14 @@ int main(int argc, char **argv) {
     };
     auto dSmaxW = [&](VkCommandBuffer cb, uint64_t a, uint64_t c, uint32_t W, uint32_t H,
                       uint64_t bias) {
+        DISP_GATE("dSmaxW");
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pSmax.pipe);
         SMaxPush p{a, c, W * H * 64, 64, 0.0f, bias, H};
         vkCmdPushConstants(cb, pSmax.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
         vkCmdDispatch(cb, (W * H * 64 + 31) / 32, 1, 1);
     };
     auto dSmaxG = [&](VkCommandBuffer cb, uint64_t a, uint64_t c) {
+        DISP_GATE("dSmaxG");
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pSmax.pipe);
         SMaxPush p{a, c, 32 * TOK, TOK, 3.0f, 0, 0};
         vkCmdPushConstants(cb, pSmax.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
@@ -956,6 +994,7 @@ int main(int argc, char **argv) {
     };
     auto dMerge = [&](VkCommandBuffer cb, uint64_t a, uint64_t b, uint64_t c, uint64_t d,
                       uint64_t e, uint64_t h, uint32_t n, uint32_t ch, uint32_t kind) {
+        DISP_GATE("dMerge");
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pMerge.pipe);
         MergePush p{a, b, c, d, e, h, n, ch, kind};
         vkCmdPushConstants(cb, pMerge.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
@@ -974,7 +1013,7 @@ int main(int argc, char **argv) {
 
     // ---- window attention shared tail -------------------------------------
     // fam: 0 plain, 1 branched, 2 split (window families). famIdx = FLOP bucket.
-    auto recordWindowAttn = [&](VkCommandBuffer cb, int famIdx, int idx, int C, int H, int fam,
+    auto recordWindowAttn = [&](VkCommandBuffer &cb, int famIdx, int idx, int C, int H, int fam,
                                 int oy, int ox, VkDeviceSize ffnOff, bool ffn16,
                                 VkDeviceSize rawOff, VkDeviceSize pubOff, bool publish) {
         uint32_t padTop, padLeft, W;
@@ -1001,10 +1040,23 @@ int main(int argc, char **argv) {
         dGemm(cb, famIdx, A(oQW), A(oKW), A(oSCW), 64, 64, 32, W * H,
               64 * 32, 64 * 32, 64 * 64, gflags(EPI_NONE, false) | F_TRANSPOSE, 32, 32, 64);
         bar(cb);
-        dSmaxW(cb, A(oSCW), A(oPRW), W, H, A(poff[biasN]));
+        dSmaxW(cb, A(oSCW), A(oPRW), W, H, g_noBias ? 0 : A(poff[biasN]));
         bar(cb);
-        dGemm(cb, famIdx, A(oPRW), A(oVW), A(oMGW), 64, 32, 64, W * H,
-              64 * 64, 64 * 32, 64 * 32, gflags(EPI_NONE, false), 64, 32, 32);
+        if (g_pvMode == 1)
+            dGemm(cb, famIdx, A(oPRW), A(oVW), A(oMGW), 64, 32, 32, 1u,
+                  0, 0, 0, gflags(EPI_NONE, false), 64, 32, 32);
+        else if (g_pvMode == 2)
+            dGemm(cb, famIdx, A(oPRW), A(oSCW), A(oMGW), 64, 64, 64, 1u,
+                  0, 0, 0, gflags(EPI_NONE, false), 64, 64, 64);
+        else if (g_pvMode == 3)
+            dGemm(cb, famIdx, A(oPRW), A(oKW), A(oMGW), 64, 32, 64, g_pv1 ? 1u : (uint32_t)(W * H),
+                  64 * 64, 64 * 32, 64 * 32, gflags(EPI_NONE, false), 64, 32, 32);
+        else if (g_pvMode == 4)
+            dGemm(cb, famIdx, A(oPRW), A(oVW), A(oG1), 64, 32, 64, g_pv1 ? 1u : (uint32_t)(W * H),
+                  64 * 64, 64 * 32, 64 * 32, gflags(EPI_NONE, false), 64, 32, 32);
+        else
+            dGemm(cb, famIdx, A(oPRW), A(oVW), A(oMGW), 64, 32, 64, g_pv1 ? 1u : (uint32_t)(W * H),
+                  64 * 64, 64 * 32, 64 * 32, gflags(EPI_NONE, false), 64, 32, 32);
         bar(cb);
         dTrans(cb, A(oMGW), A(oATW), W, H);
         bar(cb);
@@ -1018,7 +1070,7 @@ int main(int argc, char **argv) {
 
     // FFN + attention for one window block; writes raw (always) + pub (if publish).
     // cur: input. fam: 0 plain, 1 branched, 2 split.
-    auto recordWindowBlock = [&](VkCommandBuffer cb, int famIdx, int idx, int C, int H, int fam,
+    auto recordWindowBlock = [&](VkCommandBuffer &cb, int famIdx, int idx, int C, int H, int fam,
                                  int oy, int ox, bool publish, Cur &cur,
                                  VkDeviceSize rawOff, VkDeviceSize pubOff) {
         uint32_t G = C / 32;
@@ -1088,7 +1140,7 @@ int main(int argc, char **argv) {
     };
 
     // downsample transition (pool neutralized): raw -> e4m3 -> gemm w0 (E4M3 out)
-    auto recordDs = [&](VkCommandBuffer cb, int famIdx, int idx, int C, int Cn,
+    auto recordDs = [&](VkCommandBuffer &cb, int famIdx, int idx, int C, int Cn,
                         VkDeviceSize rawOff, VkDeviceSize outOff) {
         dEw(cb, A(rawOff), 0, 0, 0, A(oG2), TOK * C, 3, 0);
         bar(cb);
@@ -1098,7 +1150,7 @@ int main(int argc, char **argv) {
     };
 
     // upsample transition (neutralized): gemm w0 -> merge with skip*sin -> e4m3
-    auto recordUp = [&](VkCommandBuffer cb, int famIdx, int idx, int Ci, int Co,
+    auto recordUp = [&](VkCommandBuffer &cb, int famIdx, int idx, int Ci, int Co,
                         Cur &cur, VkDeviceSize skipOff, VkDeviceSize out16Off) {
         dGemm(cb, famIdx, A(cur.off), A(poff[tname("block%d.layer0.weight0", idx)]), A(oG3),
               TOK, Co, Ci, 1, 0, 0, 0, gflags(EPI_NONE, false), Ci, Co, Co);
@@ -1109,7 +1161,7 @@ int main(int argc, char **argv) {
     };
 
     // global block (M7 path; input f16)
-    auto recordGlobal = [&](VkCommandBuffer cb, int famIdx, int idx, Cur &cur,
+    auto recordGlobal = [&](VkCommandBuffer &cb, int famIdx, int idx, Cur &cur,
                             VkDeviceSize rawOff, VkDeviceSize pubOff) {
         dGemm(cb, famIdx, A(cur.off), A(poff[tname("block%d.layer0.weight", idx)]), A(oHG),
               TOK, 4096, 1024, 1, 0, 0, 0, gflags(EPI_GATE_E4M3, true), 1024, 4096, 4096);
@@ -1169,10 +1221,10 @@ int main(int argc, char **argv) {
     };
 
     // ---- the chain ---------------------------------------------------------
-    auto recordChain = [&](VkCommandBuffer cb, bool timed, VkQueryPool qp) {
+    auto recordChain = [&](VkCommandBuffer &cb, bool timed, VkQueryPool qp) {
         int tq = 0;
         auto tick = [&]() {
-            if (timed) vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, qp, (uint32_t)tq++);
+            if (timed && !g_noTs) vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, qp, (uint32_t)tq++);
         };
         Cur cur{oADA, false, 32};
 
@@ -1372,6 +1424,7 @@ int main(int argc, char **argv) {
     std::printf("chain total (timestamp): %.3f ms -> %.2f TFLOP/s effective @288tok\n",
                 totalMs, (famFlops[0] + famFlops[1] + famFlops[2] + famFlops[3] +
                           famFlops[4] + famFlops[5]) / 1e12 / (totalMs / 1e3));
+    std::printf("dispatches executed: %ld (maxdisp %ld)\n", g_dispCount, g_maxDisp);
 
     // steady state: 20 back-to-back chains, no timestamps (full chain only)
     if (g_to >= 70) {
