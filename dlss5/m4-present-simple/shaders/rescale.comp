@@ -1,0 +1,82 @@
+#version 460
+// ============================================================================
+// M3 rescale — ONE axis of the reference's separable bilinear resize.
+// PORT of the `axis()` inner half of resize() in src/layer/nr_daemon.py:238-255
+// (coordinates/weights formula identical; the reference's NumPy table values
+// low/high/weight are reproduced in-shader in fp32 — same arithmetic as the
+// precomputed tables consumed by nr_resize_axis, src/ref/nr_image.c:114-145,
+// whose comment "the intermediate is deliberately rounded to FP32 before the
+// second axis" is trivially honoured: everything here is fp32).
+//
+//   centres = (i + 0.5) * (extent_in / extent_out) - 0.5        (fp32)
+//   low  = clip(floor(centres), 0, extent_in-1)   (int, then used as float)
+//   high = clip(low + 1, 0, extent_in-1)
+//   w    = clip(centres - low_clipped, 0, 1)      <-- subtracts the
+//          CLIPPED low (nr_daemon.py:251); the edge weights rely on it.
+//   out = src[low] * (1-w) + src[high] * w        per channel
+//
+// Pass geometry (both axes of one rescale use this same shader):
+//   axis = 0 (vertical):   gx = keep index (column j), gy = output row r
+//        src px base = inOff + k*inStride + j        k in {low,high}
+//   axis = 1 (horizontal): gx = output column x, gy = keep index (row y)
+//        src px base = inOff + y*inStride + k
+//
+//   a = (inStridePx, inOffPx, inAlongExtent, keepExtent)
+//   b = (outCountAlongAxis, outStridePx, axis, channels)
+//   d = (srcBinding, dstBinding, 0, 0)   -- which SSBO pair this pass uses:
+//       down: v (1->2), h (2->4);  up (4 ch): v (4->2), h (2->5)
+// ============================================================================
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(std430, set = 0, binding = 1) buffer B1 { float b1[]; };
+layout(std430, set = 0, binding = 2) buffer B2 { float b2[]; };
+layout(std430, set = 0, binding = 4) buffer B4 { float b4[]; };
+layout(std430, set = 0, binding = 5) buffer B5 { float b5[]; };
+layout(push_constant) uniform Push { ivec4 a; ivec4 b; vec4 c; vec4 d; } pc;
+
+float rd(uint buf, uint i) {
+    if (buf == 1u) return b1[i];
+    if (buf == 2u) return b2[i];
+    if (buf == 4u) return b4[i];
+    return b5[i];
+}
+void wr(uint buf, uint i, float v) {
+    if (buf == 1u) b1[i] = v;
+    else if (buf == 2u) b2[i] = v;
+    else if (buf == 4u) b4[i] = v;
+    else b5[i] = v;
+}
+
+void main() {
+    uint gx = gl_GlobalInvocationID.x;   // keep-axis index  (j or x)
+    uint gy = gl_GlobalInvocationID.y;   // along-axis output index (r or y)
+    uint keep = uint(pc.a.w);            // extent of the axis NOT being resampled
+    if (gx >= keep || gy >= uint(pc.b.x)) return;
+
+    uint srcB = uint(pc.d.x), dstB = uint(pc.d.y);
+    uint ch = uint(pc.b.w);
+    float extentIn  = float(pc.a.z);
+    float extentOut = float(pc.b.x);
+    float centre = (float(gy) + 0.5) * (extentIn / extentOut) - 0.5;
+    float fl = floor(centre);
+    int low  = int(clamp(fl, 0.0, extentIn - 1.0));
+    int high = int(clamp(fl + 1.0, 0.0, extentIn - 1.0));
+    float w = clamp(centre - float(low), 0.0, 1.0);
+
+    uint inOff = uint(pc.a.y);
+    uint inStride = uint(pc.a.x);
+    uint baseLo, baseHi;
+    if (pc.b.z == 0) {   // vertical: src px = inOff + k*inStride + j
+        baseLo = inOff + uint(low) * inStride + gx;
+        baseHi = inOff + uint(high) * inStride + gx;
+    } else {             // horizontal: src px = inOff + y*inStride + k
+        baseLo = inOff + gy * inStride + uint(low);
+        baseHi = inOff + gy * inStride + uint(high);
+    }
+    uint outBase = gy * uint(pc.b.y) + gx;
+
+    for (uint c = 0u; c < ch; ++c) {
+        float loS = rd(srcB, baseLo * ch + c);
+        float hiS = rd(srcB, baseHi * ch + c);
+        wr(dstB, outBase * ch + c, loS * (1.0 - w) + hiS * w);
+    }
+}

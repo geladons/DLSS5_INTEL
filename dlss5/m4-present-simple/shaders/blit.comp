@@ -1,0 +1,23 @@
+// M4 final blit: composite (imgFinal, B8G8R8A8) -> swapchain image.
+// Byte-identical passthrough; both images are 8-bit UNORM RGBA-family with
+// matching channel order (BGRA surface format chosen at swapchain creation),
+// so no channel swizzle is needed. Swapchain image must have been created
+// with VK_IMAGE_USAGE_STORAGE_BIT (checked at runtime; vkCmdBlitImage is the
+// fallback path when it is not supported).
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba8) readonly uniform image2D src;
+layout(set = 0, binding = 9, rgba8) writeonly uniform image2D dst;
+
+layout(push_constant) uniform Push {
+    int w;
+    int h;
+} p;
+
+void main() {
+    ivec2 xy = ivec2(gl_GlobalInvocationID.xy);
+    if (xy.x >= p.w || xy.y >= p.h) return;
+    imageStore(dst, xy, imageLoad(src, xy));
+}
