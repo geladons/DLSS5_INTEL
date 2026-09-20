@@ -355,6 +355,24 @@ static void vkInit(VkCtx &vk) {
     dci.pQueueCreateInfos = &qci;
     dci.enabledExtensionCount = 1;
     dci.ppEnabledExtensionNames = exts;
+    // shaders declare Float16/Int64/16-bit storage/memory-model/BDA/coopmat —
+    // features must be enabled or the device faults (Arc device-lost).
+    VkPhysicalDeviceFeatures fe{};
+    fe.shaderInt64 = VK_TRUE;
+    fe.shaderInt16 = VK_TRUE;
+    VkPhysicalDeviceVulkan11Features f11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
+    f11.storageBuffer16BitAccess = VK_TRUE;
+    VkPhysicalDeviceVulkan12Features f12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+    f12.shaderFloat16 = VK_TRUE;
+    f12.vulkanMemoryModel = VK_TRUE;
+    f12.bufferDeviceAddress = VK_TRUE;
+    VkPhysicalDeviceCooperativeMatrixFeaturesKHR fcm{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR};
+    fcm.cooperativeMatrix = VK_TRUE;
+    dci.pNext = &f11;
+    f11.pNext = &f12;
+    f12.pNext = &fcm;
+    dci.pEnabledFeatures = &fe;
     VK_CHECK(vkCreateDevice(vk.pd, &dci, nullptr, &vk.dev));
     vkGetDeviceQueue(vk.dev, vk.qf, 0, &vk.queue);
     vkGetPhysicalDeviceMemoryProperties(vk.pd, &vk.mem);
@@ -406,12 +424,15 @@ static void allocDev(const VkCtx &vk, VkDeviceSize size, Buffer &b) {
     VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     bci.size = size;
     bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
-                VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+                VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     VK_CHECK(vkCreateBuffer(vk.dev, &bci, nullptr, &b.buf));
     VkMemoryRequirements req;
     vkGetBufferMemoryRequirements(vk.dev, b.buf, &req);
+    VkMemoryAllocateFlagsInfo mafi{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO};
+    mafi.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
     VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    mai.pNext = &mafi;
     mai.allocationSize = req.size;
     mai.memoryTypeIndex = memType(vk, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     VK_CHECK(vkAllocateMemory(vk.dev, &mai, nullptr, &b.mem));
@@ -449,6 +470,7 @@ static void freeBuf(const VkCtx &vk, Buffer &b) {
 struct Pipeline {
     VkPipeline pipe = VK_NULL_HANDLE;
     VkPipelineLayout layout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout dsl = VK_NULL_HANDLE;   // layouts reference it — keep alive
 };
 
 static VkShaderModule loadShader(const VkCtx &vk, const std::string &path) {
@@ -482,7 +504,7 @@ static void makePipeline(const VkCtx &vk, const std::string &spv, Pipeline &out)
     cpci.layout = out.layout;
     VK_CHECK(vkCreateComputePipelines(vk.dev, VK_NULL_HANDLE, 1, &cpci, nullptr, &out.pipe));
     vkDestroyShaderModule(vk.dev, mod, nullptr);
-    vkDestroyDescriptorSetLayout(vk.dev, dsl, nullptr);
+    out.dsl = dsl;   // NOT destroyed: pipeline layout references it (device-lost on Arc otherwise)
 }
 
 static VkCommandBuffer beginCmd(const VkCtx &vk) {
@@ -570,11 +592,15 @@ static int blockIndexOf(const std::string &name) {
     return std::atoi(name.substr(5, dot - 5).c_str());
 }
 
+static int g_to = 70;   // --to N: stop chain after block N (family bisect)
+
 int main(int argc, char **argv) {
-    (void)argc; (void)argv;
     int cpuInfo[4];
     __cpuid(cpuInfo, 1);
     g_hasF16C = (cpuInfo[2] & (1 << 29)) != 0;
+    // --to N: record/run blocks 0..N only (family bisect + bring-up)
+    for (int i = 1; i + 1 < argc; ++i)
+        if (std::strcmp(argv[i], "--to") == 0) g_to = std::atoi(argv[i + 1]);
     std::printf("M8 full-chain prototype — Arc Pro B50\n");
     std::printf("CPU F16C: %s\n", g_hasF16C ? "yes" : "no (software RNE)");
 
@@ -683,7 +709,7 @@ int main(int argc, char **argv) {
         if (i >= 31 && i <= 38) {
             preVec(tname("block%d.layer1.ffn_cos_skip", i));
             preVec(tname("block%d.layer4.attn_cos_skip", i));
-            preVec(tname("block%d.layer2.attn_scale.q32", i));
+            needVec(tname("block%d.layer2.attn_scale.q32", i));   // derived: not in poff
             continue;
         }
         if ((i >= 23 && i <= 30) || (i >= 40 && i <= 47)) {
@@ -1155,6 +1181,7 @@ int main(int argc, char **argv) {
         dGemm(cb, 0, A(oX16), A(poff["block0.layer0.input_adapter_weight"]), A(oADA),
               TOK, 32, 16, 1, 0, 0, 0, gflags(EPI_NONE, false), 16, 32, 32);
         bar(cb);
+        if (g_to < 0) return;
         // b0 (plain, publish=false, raw -> dedicated; frs = e4m3(raw))
         {
             Cur c0 = cur;
@@ -1163,12 +1190,14 @@ int main(int argc, char **argv) {
             dEw(cb, A(oB0RAW), 0, 0, 0, A(oFRS), TOK * 32, 3, 0);
             bar(cb);
         }
+        if (g_to <= 0) return;
         for (int i = 1; i <= 3; ++i) {
             VkDeviceSize out = (i == 3) ? oSKIP0 : oG1;
             recordWindowBlock(cb, 0, i, 32, 1, 0, originOf(i).first, originOf(i).second, true,
                               cur, oRAW, out);
             cur = {out, true, 32};
         }
+        if (g_to <= 3) return;
         {   // b4 + ds
             Cur c4 = cur;
             recordWindowBlock(cb, 0, 4, 32, 1, 0, -4, 0, false, c4, oRAW, 0);
@@ -1176,6 +1205,7 @@ int main(int argc, char **argv) {
             cur = {oB4DS, true, 64};
         }
         tick();                                                    // post-stem
+        if (g_to <= 4) return;
 
         const int encC[] = {0, 64, 64, 64, 64, 128, 128, 128, 128, 128, 256, 256, 256, 256, 256, 256, 256, 256};
         for (int i = 5; i <= 22; ++i) {
@@ -1198,6 +1228,7 @@ int main(int argc, char **argv) {
         }
         (void)encC;
         tick();                                                    // post-enc
+        if (g_to <= 22) return;
 
         for (int i = 23; i <= 30; ++i) {
             auto o = originOf(i);
@@ -1212,6 +1243,7 @@ int main(int argc, char **argv) {
             cur = {oG1, true, 1024};
         }
         tick();                                                    // post-bottleneck
+        if (g_to <= 30) return;
 
         for (int i = 31; i <= 38; ++i) {
             VkDeviceSize out = (i == 38) ? oB38 : oG1;
@@ -1280,6 +1312,7 @@ int main(int argc, char **argv) {
             cur = {out, true, 32};
         }
         tick();                                                    // post-decoder
+        if (g_to <= 69) return;
 
         {   // b70: pre-merge -> window plain (no publish) -> head
             dMerge(cb, A(cur.off), A(oFRS), A(oMRG70), A(vecOff["block70.layer0.inp_merge_sin"]),
@@ -1340,8 +1373,8 @@ int main(int argc, char **argv) {
                 totalMs, (famFlops[0] + famFlops[1] + famFlops[2] + famFlops[3] +
                           famFlops[4] + famFlops[5]) / 1e12 / (totalMs / 1e3));
 
-    // steady state: 20 back-to-back chains, no timestamps
-    {
+    // steady state: 20 back-to-back chains, no timestamps (full chain only)
+    if (g_to >= 70) {
         VkCommandBuffer cb = beginCmd(vk);
         for (int i = 0; i < 20; ++i) recordChain(cb, false, VK_NULL_HANDLE);
         auto sw0 = clk::now();
