@@ -234,3 +234,64 @@ Vulkan runtime + wire the real graph in place of the M3 stand-in block.
   gemm_resident.comp + resident.comp on XMX — M0 proved 8x16x16 f16 works on B50);
   ~2.3 GiB scratch planning at 720p-class extents; real deterministic_noise() for
   ch0-2; temporal history (channels 7-9 / head.a gate) for live frames.
+
+## M6a result (2026-09-20) - safetensors weights resident on Arc B50: PASS
+
+- Built dlss5/m6-weights-loader/ (standalone console app, raw Vulkan C++17,
+  deps: vulkan-1 + dxgi only): main.cpp + CMakeLists.txt + build.cmd. NO
+  DDA/present plumbing — pure loader+bench. Own safetensors reader (8B LE
+  header len + hand-rolled JSON cursor; validates __metadata__.format,
+  decoded_tensor_count vs header, per-tensor shape*eltsize==offsets span,
+  8+hdr+data==file size). Whole-file read into RAM (291 MB).
+- File: work/mlxw/dlssnr-logical.safetensors — 649 tensors (F16:579, F32:70),
+  291,511,674 data bytes (278.0 MiB), ALL under blockN.layerM.* (0 non-block).
+  71 blocks (block0..block70). File load 381 ms.
+- Device pick: DXGI adapter[0] LUID 00000000:000095a2 == Vulkan device[0]
+  (TWO same-name "Intel(R) Arc(TM) Pro B50 Graphics" Vulkan devices again:
+  95a2 + 116cc — LUID match used, not index/name). Driver 101.8805, api 1.4.348.
+  Heap: 16,206 MB device-local; weights use 278.03 MB = 1.72%.
+- Upload: ONE device-local VkBuffer 291,535,872 B (278.03 MB, 256B-aligned
+  per-tensor offsets recorded in name->tensor map) via host-coherent staging;
+  71 per-block submit+fence copies for timing.
+  Staging memcpy 79.8 ms total; GPU copy 142.6 ms (~1.95 GB/s incl. submit
+  overhead; per-block min/med/max 0.147/0.433/16.169 ms; stage
+  0.008/0.434/6.815 ms). Cold weight-residency cost ~0.6 s end-to-end.
+- Verify (--verify): readback of block0.layer0.weight1 (F16 [32,128], 8192 B),
+  block10.layer0.attn_scale (F32 [4], 16 B), block35.layer2.attn_scale
+  (F32 [32], 128 B) — all 3 byte-IDENTICAL to file after device round-trip.
+- Stats (--stats, manual F16 bit-decode): block0.layer0.weight1 n=4096
+  mean=-0.001992 std=0.176710 [-0.625,+0.5625]; block35.layer0.weight
+  [1024,4096] n=4.19M mean=-0.000081 std=0.031234 [-0.203,+0.203];
+  block35.layer4.projection_weight [1024,1024] n=1.05M mean=-0.000037
+  std=0.016593 [-0.203,+0.219]. No NaN/Inf, not all-zero, means ~0,
+  std in/near the 0.02-0.2 band -> ALL PLAUSIBLE. (NOTE: task-named
+  block35.layer0.projection_weight does NOT exist in this dump; layer0's
+  matrix is named block35.layer0.weight. Loader prints a note and stats
+  both real candidates.)
+- Block/dims signature (feeds M6b graph design) — 4 architecture zones:
+  - blocks 0-4 (stem-in, 32ch): qkv[32,96], proj[32,32], weight1[32,128],
+    weight2[128,32], attn_bias[1,64,64], cos_skip[32], attn_scale[1];
+    block0 adds input_adapter_weight[16,32].
+  - blocks 5-22 (encoder, 64/128/256ch, GQA heads=ch/32): qkv[C,3C],
+    proj[C,C], ffn MoE-branch: ffn_expand_weight[H,4,H,32,32],
+    ffn_branch_projection_weight[H,4,32,32], ffn_output_projection_weight[C,C];
+    some blocks add weight0[C,2C] (skip adapter). attn_bias[H,64,64],
+    attn_scale[H] with H = C/32 (1,2,4,8 heads).
+  - blocks 23-38 (bottleneck, 512ch, H=16): split into layer roles —
+    L0 first_projection_weight[512,512] + group_expand_weight[8,64,256] +
+    group_project_weight[8,256,64]; L1 weight3[512,512] + ffn_cos_skip[512];
+    L2 qkv_weight[512,1536] + attn_bias[16,64,64] + attn_scale[16];
+    L3 projection_weight[512,512] + attn_cos_skip[512]; blocks 31-38 use the
+    fused form: L0 weight[1024,4096], L1 weight[4096,1024], L2 qkv[1024,3072],
+    L3 attention_scalar[1], L4 proj[1024,1024] (24 MB/block, the bulk);
+    block30 is the 512->1024 transition (has both group* and weight[512,1024]).
+  - blocks 39-70 (decoder, mirror of encoder): block39 conv_weight[1024,512]
+    + inp_upsample_sin[512] (channel remap); blocks 40-47 = 512ch group-attn
+    form; 48-65 mirror 22-5 descending (256/128/64ch, some add weight0[2C,C]
+    + sin[C]); 66-70 = 32ch head, block70 adds out_conv_weight[16,4],
+    out_gain[16,4], blend_scale[1], inp_merge_cos/sin[32].
+  - U-Net total: ~192 MB in blocks 31-38 (the 8x 24 MB blocks) + ~62 MB rest.
+  - attn_scale is the ONLY F32 dtype (70 tensors); everything else F16.
+    Matrix contract per metadata: K-by-N, output = input @ weight.
+- Full build+run console log: docs/m6a-loader.log (gitignored, force-added).
+- Blockers: none. Exit 0.

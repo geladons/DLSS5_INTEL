@@ -1,0 +1,381 @@
+=== M6a safetensors weights loader build+run log ===
+started 20.09.2026  2:18:41,78 
+cmake version 4.4.3
+
+CMake suite maintained and supported by Kitware (kitware.com/cmake).
+>> cmake configure 
+-- Selecting Windows SDK version 10.0.19041.0 to target Windows 10.0.22631.
+-- Configuring done (0.0s)
+-- Generating done (0.1s)
+-- Build files have been written to: C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m6-weights-loader/build
+>> cmake build 
+Microsoft (R) Build Engine version 16.11.6+a918ceb31 for .NET Framework
+Copyright (C) Microsoft Corporation. All rights reserved.
+
+  1>Checking Build System
+  Building Custom Rule C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m6-weights-loader/CMakeLists.txt
+  main.cpp
+  m6loader.vcxproj -> C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m6-weights-loader\build\Release\m6loader.exe
+  Building Custom Rule C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m6-weights-loader/CMakeLists.txt
+>> run m6loader (verify + stats) 
+=== M6a safetensors weights loader (Arc Pro B50) ===
+file: C:\Users\AI\Desktop\DLSS5_INTEL\work\mlxw\dlssnr-logical.safetensors
+file load: 291576650 bytes read in 381.22 ms
+metadata.format = dlssnr-logical-v18
+metadata.decoded_tensor_count = 649 (matches header)
+size accounting: 8 + 64968 header + 291511674 data = 291576650 bytes (matches file)
+
+--- inventory ---
+tensor count: 649
+total tensor bytes: 291511674 (278.01 MB)
+dtype histogram:  F16:579  F32:70
+block groups: 71 (blocks 0..70), non-block tensors: 0
+
+--- block summary (per-block bytes + dimension signature) ---
+block0  | 9 tensors,  1 layers,     0.03 MB
+    layer0: attn_bias[1,64,64] attn_cos_skip[32] attn_scale[1] ffn_cos_skip[32] input_adapter_weight[16,32] projection_weight[32,32] qkv_weight[32,96] weight1[32,128] weight2[128,32]
+block1  | 8 tensors,  1 layers,     0.03 MB
+    layer0: attn_bias[1,64,64] attn_cos_skip[32] attn_scale[1] ffn_cos_skip[32] projection_weight[32,32] qkv_weight[32,96] weight1[32,128] weight2[128,32]
+block2  | 8 tensors,  1 layers,     0.03 MB
+    layer0: attn_bias[1,64,64] attn_cos_skip[32] attn_scale[1] ffn_cos_skip[32] projection_weight[32,32] qkv_weight[32,96] weight1[32,128] weight2[128,32]
+block3  | 8 tensors,  1 layers,     0.03 MB
+    layer0: attn_bias[1,64,64] attn_cos_skip[32] attn_scale[1] ffn_cos_skip[32] projection_weight[32,32] qkv_weight[32,96] weight1[32,128] weight2[128,32]
+block4  | 9 tensors,  1 layers,     0.04 MB
+    layer0: attn_bias[1,64,64] attn_cos_skip[32] attn_scale[1] ffn_cos_skip[32] projection_weight[32,32] qkv_weight[32,96] weight0[32,64] weight1[32,128] weight2[128,32]
+block5  | 9 tensors,  1 layers,     0.10 MB
+    layer0: attn_bias[2,64,64] attn_cos_skip[64] attn_scale[2] ffn_branch_projection_weight[2,4,32,32] ffn_cos_skip[64] ffn_expand_weight[2,4,2,32,32] ffn_output_projection_weight[64,64] projection_weight[64,64] qkv_weight[64,192]
+block6  | 9 tensors,  1 layers,     0.10 MB
+    layer0: attn_bias[2,64,64] attn_cos_skip[64] attn_scale[2] ffn_branch_projection_weight[2,4,32,32] ffn_cos_skip[64] ffn_expand_weight[2,4,2,32,32] ffn_output_projection_weight[64,64] projection_weight[64,64] qkv_weight[64,192]
+block7  | 9 tensors,  1 layers,     0.10 MB
+    layer0: attn_bias[2,64,64] attn_cos_skip[64] attn_scale[2] ffn_branch_projection_weight[2,4,32,32] ffn_cos_skip[64] ffn_expand_weight[2,4,2,32,32] ffn_output_projection_weight[64,64] projection_weight[64,64] qkv_weight[64,192]
+block8  | 10 tensors,  1 layers,     0.12 MB
+    layer0: attn_bias[2,64,64] attn_cos_skip[64] attn_scale[2] ffn_branch_projection_weight[2,4,32,32] ffn_cos_skip[64] ffn_expand_weight[2,4,2,32,32] ffn_output_projection_weight[64,64] projection_weight[64,64] qkv_weight[64,192] weight0[64,128]
+block9  | 9 tensors,  1 layers,     0.34 MB
+    layer0: attn_bias[4,64,64] attn_cos_skip[128] attn_scale[4] ffn_branch_projection_weight[4,4,32,32] ffn_cos_skip[128] ffn_expand_weight[4,4,4,32,32] ffn_output_projection_weight[128,128] projection_weight[128,128] qkv_weight[128,384]
+block10 | 9 tensors,  1 layers,     0.34 MB
+    layer0: attn_bias[4,64,64] attn_cos_skip[128] attn_scale[4] ffn_branch_projection_weight[4,4,32,32] ffn_cos_skip[128] ffn_expand_weight[4,4,4,32,32] ffn_output_projection_weight[128,128] projection_weight[128,128] qkv_weight[128,384]
+block11 | 9 tensors,  1 layers,     0.34 MB
+    layer0: attn_bias[4,64,64] attn_cos_skip[128] attn_scale[4] ffn_branch_projection_weight[4,4,32,32] ffn_cos_skip[128] ffn_expand_weight[4,4,4,32,32] ffn_output_projection_weight[128,128] projection_weight[128,128] qkv_weight[128,384]
+block12 | 9 tensors,  1 layers,     0.34 MB
+    layer0: attn_bias[4,64,64] attn_cos_skip[128] attn_scale[4] ffn_branch_projection_weight[4,4,32,32] ffn_cos_skip[128] ffn_expand_weight[4,4,4,32,32] ffn_output_projection_weight[128,128] projection_weight[128,128] qkv_weight[128,384]
+block13 | 9 tensors,  1 layers,     0.34 MB
+    layer0: attn_bias[4,64,64] attn_cos_skip[128] attn_scale[4] ffn_branch_projection_weight[4,4,32,32] ffn_cos_skip[128] ffn_expand_weight[4,4,4,32,32] ffn_output_projection_weight[128,128] projection_weight[128,128] qkv_weight[128,384]
+block14 | 10 tensors,  1 layers,     0.41 MB
+    layer0: attn_bias[4,64,64] attn_cos_skip[128] attn_scale[4] ffn_branch_projection_weight[4,4,32,32] ffn_cos_skip[128] ffn_expand_weight[4,4,4,32,32] ffn_output_projection_weight[128,128] projection_weight[128,128] qkv_weight[128,384] weight0[128,256]
+block15 | 9 tensors,  1 layers,     1.25 MB
+    layer0: attn_bias[8,64,64] attn_cos_skip[256] attn_scale[8] ffn_branch_projection_weight[8,4,32,32] ffn_cos_skip[256] ffn_expand_weight[8,4,8,32,32] ffn_output_projection_weight[256,256] projection_weight[256,256] qkv_weight[256,768]
+block16 | 9 tensors,  1 layers,     1.25 MB
+    layer0: attn_bias[8,64,64] attn_cos_skip[256] attn_scale[8] ffn_branch_projection_weight[8,4,32,32] ffn_cos_skip[256] ffn_expand_weight[8,4,8,32,32] ffn_output_projection_weight[256,256] projection_weight[256,256] qkv_weight[256,768]
+block17 | 9 tensors,  1 layers,     1.25 MB
+    layer0: attn_bias[8,64,64] attn_cos_skip[256] attn_scale[8] ffn_branch_projection_weight[8,4,32,32] ffn_cos_skip[256] ffn_expand_weight[8,4,8,32,32] ffn_output_projection_weight[256,256] projection_weight[256,256] qkv_weight[256,768]
+block18 | 9 tensors,  1 layers,     1.25 MB
+    layer0: attn_bias[8,64,64] attn_cos_skip[256] attn_scale[8] ffn_branch_projection_weight[8,4,32,32] ffn_cos_skip[256] ffn_expand_weight[8,4,8,32,32] ffn_output_projection_weight[256,256] projection_weight[256,256] qkv_weight[256,768]
+block19 | 9 tensors,  1 layers,     1.25 MB
+    layer0: attn_bias[8,64,64] attn_cos_skip[256] attn_scale[8] ffn_branch_projection_weight[8,4,32,32] ffn_cos_skip[256] ffn_expand_weight[8,4,8,32,32] ffn_output_projection_weight[256,256] projection_weight[256,256] qkv_weight[256,768]
+block20 | 9 tensors,  1 layers,     1.25 MB
+    layer0: attn_bias[8,64,64] attn_cos_skip[256] attn_scale[8] ffn_branch_projection_weight[8,4,32,32] ffn_cos_skip[256] ffn_expand_weight[8,4,8,32,32] ffn_output_projection_weight[256,256] projection_weight[256,256] qkv_weight[256,768]
+block21 | 9 tensors,  1 layers,     1.25 MB
+    layer0: attn_bias[8,64,64] attn_cos_skip[256] attn_scale[8] ffn_branch_projection_weight[8,4,32,32] ffn_cos_skip[256] ffn_expand_weight[8,4,8,32,32] ffn_output_projection_weight[256,256] projection_weight[256,256] qkv_weight[256,768]
+block22 | 10 tensors,  1 layers,     1.50 MB
+    layer0: attn_bias[8,64,64] attn_cos_skip[256] attn_scale[8] ffn_branch_projection_weight[8,4,32,32] ffn_cos_skip[256] ffn_expand_weight[8,4,8,32,32] ffn_output_projection_weight[256,256] projection_weight[256,256] qkv_weight[256,768] weight0[256,512]
+block23 | 10 tensors,  4 layers,     3.63 MB
+    layer0: first_projection_weight[512,512] group_expand_weight[8,64,256] group_project_weight[8,256,64]
+    layer1: ffn_cos_skip[512] weight3[512,512]
+    layer2: attn_bias[16,64,64] attn_scale[16] qkv_weight[512,1536]
+    layer3: attn_cos_skip[512] projection_weight[512,512]
+block24 | 10 tensors,  4 layers,     3.63 MB
+    layer0: first_projection_weight[512,512] group_expand_weight[8,64,256] group_project_weight[8,256,64]
+    layer1: ffn_cos_skip[512] weight3[512,512]
+    layer2: attn_bias[16,64,64] attn_scale[16] qkv_weight[512,1536]
+    layer3: attn_cos_skip[512] projection_weight[512,512]
+block25 | 10 tensors,  4 layers,     3.63 MB
+    layer0: first_projection_weight[512,512] group_expand_weight[8,64,256] group_project_weight[8,256,64]
+    layer1: ffn_cos_skip[512] weight3[512,512]
+    layer2: attn_bias[16,64,64] attn_scale[16] qkv_weight[512,1536]
+    layer3: attn_cos_skip[512] projection_weight[512,512]
+block26 | 10 tensors,  4 layers,     3.63 MB
+    layer0: first_projection_weight[512,512] group_expand_weight[8,64,256] group_project_weight[8,256,64]
+    layer1: ffn_cos_skip[512] weight3[512,512]
+    layer2: attn_bias[16,64,64] attn_scale[16] qkv_weight[512,1536]
+    layer3: attn_cos_skip[512] projection_weight[512,512]
+block27 | 10 tensors,  4 layers,     3.63 MB
+    layer0: first_projection_weight[512,512] group_expand_weight[8,64,256] group_project_weight[8,256,64]
+    layer1: ffn_cos_skip[512] weight3[512,512]
+    layer2: attn_bias[16,64,64] attn_scale[16] qkv_weight[512,1536]
+    layer3: attn_cos_skip[512] projection_weight[512,512]
+block28 | 10 tensors,  4 layers,     3.63 MB
+    layer0: first_projection_weight[512,512] group_expand_weight[8,64,256] group_project_weight[8,256,64]
+    layer1: ffn_cos_skip[512] weight3[512,512]
+    layer2: attn_bias[16,64,64] attn_scale[16] qkv_weight[512,1536]
+    layer3: attn_cos_skip[512] projection_weight[512,512]
+block29 | 10 tensors,  4 layers,     3.63 MB
+    layer0: first_projection_weight[512,512] group_expand_weight[8,64,256] group_project_weight[8,256,64]
+    layer1: ffn_cos_skip[512] weight3[512,512]
+    layer2: attn_bias[16,64,64] attn_scale[16] qkv_weight[512,1536]
+    layer3: attn_cos_skip[512] projection_weight[512,512]
+block30 | 11 tensors,  5 layers,     4.63 MB
+    layer0: first_projection_weight[512,512] group_expand_weight[8,64,256] group_project_weight[8,256,64]
+    layer1: ffn_cos_skip[512] weight3[512,512]
+    layer2: attn_bias[16,64,64] attn_scale[16] qkv_weight[512,1536]
+    layer3: attn_cos_skip[512] projection_weight[512,512]
+    layer4: weight[512,1024]
+block31 | 8 tensors,  5 layers,    24.00 MB
+    layer0: weight[1024,4096]
+    layer1: ffn_cos_skip[1024] weight[4096,1024]
+    layer2: attn_scale[32] qkv_weight[1024,3072]
+    layer3: attention_scalar[1]
+    layer4: attn_cos_skip[1024] projection_weight[1024,1024]
+block32 | 8 tensors,  5 layers,    24.00 MB
+    layer0: weight[1024,4096]
+    layer1: ffn_cos_skip[1024] weight[4096,1024]
+    layer2: attn_scale[32] qkv_weight[1024,3072]
+    layer3: attention_scalar[1]
+    layer4: attn_cos_skip[1024] projection_weight[1024,1024]
+block33 | 8 tensors,  5 layers,    24.00 MB
+    layer0: weight[1024,4096]
+    layer1: ffn_cos_skip[1024] weight[4096,1024]
+    layer2: attn_scale[32] qkv_weight[1024,3072]
+    layer3: attention_scalar[1]
+    layer4: attn_cos_skip[1024] projection_weight[1024,1024]
+block34 | 8 tensors,  5 layers,    24.00 MB
+    layer0: weight[1024,4096]
+    layer1: ffn_cos_skip[1024] weight[4096,1024]
+    layer2: attn_scale[32] qkv_weight[1024,3072]
+    layer3: attention_scalar[1]
+    layer4: attn_cos_skip[1024] projection_weight[1024,1024]
+block35 | 8 tensors,  5 layers,    24.00 MB
+    layer0: weight[1024,4096]
+    layer1: ffn_cos_skip[1024] weight[4096,1024]
+    layer2: attn_scale[32] qkv_weight[1024,3072]
+    layer3: attention_scalar[1]
+    layer4: attn_cos_skip[1024] projection_weight[1024,1024]
+block36 | 8 tensors,  5 layers,    24.00 MB
+    layer0: weight[1024,4096]
+    layer1: ffn_cos_skip[1024] weight[4096,1024]
+    layer2: attn_scale[32] qkv_weight[1024,3072]
+    layer3: attention_scalar[1]
+    layer4: attn_cos_skip[1024] projection_weight[1024,1024]
+block37 | 8 tensors,  5 layers,    24.00 MB
+    layer0: weight[1024,4096]
+    layer1: ffn_cos_skip[1024] weight[4096,1024]
+    layer2: attn_scale[32] qkv_weight[1024,3072]
+    layer3: attention_scalar[1]
+    layer4: attn_cos_skip[1024] projection_weight[1024,1024]
+block38 | 8 tensors,  5 layers,    24.00 MB
+    layer0: weight[1024,4096]
+    layer1: ffn_cos_skip[1024] weight[4096,1024]
+    layer2: attn_scale[32] qkv_weight[1024,3072]
+    layer3: attention_scalar[1]
+    layer4: attn_cos_skip[1024] projection_weight[1024,1024]
+block39 | 2 tensors,  1 layers,     1.00 MB
+    layer0: conv_weight[1024,512] inp_upsample_sin[512]
+block40 | 10 tensors,  4 layers,     3.63 MB
+    layer0: first_projection_weight[512,512] group_expand_weight[8,64,256] group_project_weight[8,256,64]
+    layer1: ffn_cos_skip[512] weight3[512,512]
+    layer2: attn_bias[16,64,64] attn_scale[16] qkv_weight[512,1536]
+    layer3: attn_cos_skip[512] projection_weight[512,512]
+block41 | 10 tensors,  4 layers,     3.63 MB
+    layer0: first_projection_weight[512,512] group_expand_weight[8,64,256] group_project_weight[8,256,64]
+    layer1: ffn_cos_skip[512] weight3[512,512]
+    layer2: attn_bias[16,64,64] attn_scale[16] qkv_weight[512,1536]
+    layer3: attn_cos_skip[512] projection_weight[512,512]
+block42 | 10 tensors,  4 layers,     3.63 MB
+    layer0: first_projection_weight[512,512] group_expand_weight[8,64,256] group_project_weight[8,256,64]
+    layer1: ffn_cos_skip[512] weight3[512,512]
+    layer2: attn_bias[16,64,64] attn_scale[16] qkv_weight[512,1536]
+    layer3: attn_cos_skip[512] projection_weight[512,512]
+block43 | 10 tensors,  4 layers,     3.63 MB
+    layer0: first_projection_weight[512,512] group_expand_weight[8,64,256] group_project_weight[8,256,64]
+    layer1: ffn_cos_skip[512] weight3[512,512]
+    layer2: attn_bias[16,64,64] attn_scale[16] qkv_weight[512,1536]
+    layer3: attn_cos_skip[512] projection_weight[512,512]
+block44 | 10 tensors,  4 layers,     3.63 MB
+    layer0: first_projection_weight[512,512] group_expand_weight[8,64,256] group_project_weight[8,256,64]
+    layer1: ffn_cos_skip[512] weight3[512,512]
+    layer2: attn_bias[16,64,64] attn_scale[16] qkv_weight[512,1536]
+    layer3: attn_cos_skip[512] projection_weight[512,512]
+block45 | 10 tensors,  4 layers,     3.63 MB
+    layer0: first_projection_weight[512,512] group_expand_weight[8,64,256] group_project_weight[8,256,64]
+    layer1: ffn_cos_skip[512] weight3[512,512]
+    layer2: attn_bias[16,64,64] attn_scale[16] qkv_weight[512,1536]
+    layer3: attn_cos_skip[512] projection_weight[512,512]
+block46 | 10 tensors,  4 layers,     3.63 MB
+    layer0: first_projection_weight[512,512] group_expand_weight[8,64,256] group_project_weight[8,256,64]
+    layer1: ffn_cos_skip[512] weight3[512,512]
+    layer2: attn_bias[16,64,64] attn_scale[16] qkv_weight[512,1536]
+    layer3: attn_cos_skip[512] projection_weight[512,512]
+block47 | 10 tensors,  4 layers,     3.63 MB
+    layer0: first_projection_weight[512,512] group_expand_weight[8,64,256] group_project_weight[8,256,64]
+    layer1: ffn_cos_skip[512] weight3[512,512]
+    layer2: attn_bias[16,64,64] attn_scale[16] qkv_weight[512,1536]
+    layer3: attn_cos_skip[512] projection_weight[512,512]
+block48 | 11 tensors,  1 layers,     1.50 MB
+    layer0: attn_bias[8,64,64] attn_cos_skip[256] attn_scale[8] ffn_branch_projection_weight[8,4,32,32] ffn_cos_skip[256] ffn_expand_weight[8,4,8,32,32] ffn_output_projection_weight[256,256] projection_weight[256,256] qkv_weight[256,768] sin[256] weight0[512,256]
+block49 | 9 tensors,  1 layers,     1.25 MB
+    layer0: attn_bias[8,64,64] attn_cos_skip[256] attn_scale[8] ffn_branch_projection_weight[8,4,32,32] ffn_cos_skip[256] ffn_expand_weight[8,4,8,32,32] ffn_output_projection_weight[256,256] projection_weight[256,256] qkv_weight[256,768]
+block50 | 9 tensors,  1 layers,     1.25 MB
+    layer0: attn_bias[8,64,64] attn_cos_skip[256] attn_scale[8] ffn_branch_projection_weight[8,4,32,32] ffn_cos_skip[256] ffn_expand_weight[8,4,8,32,32] ffn_output_projection_weight[256,256] projection_weight[256,256] qkv_weight[256,768]
+block51 | 9 tensors,  1 layers,     1.25 MB
+    layer0: attn_bias[8,64,64] attn_cos_skip[256] attn_scale[8] ffn_branch_projection_weight[8,4,32,32] ffn_cos_skip[256] ffn_expand_weight[8,4,8,32,32] ffn_output_projection_weight[256,256] projection_weight[256,256] qkv_weight[256,768]
+block52 | 9 tensors,  1 layers,     1.25 MB
+    layer0: attn_bias[8,64,64] attn_cos_skip[256] attn_scale[8] ffn_branch_projection_weight[8,4,32,32] ffn_cos_skip[256] ffn_expand_weight[8,4,8,32,32] ffn_output_projection_weight[256,256] projection_weight[256,256] qkv_weight[256,768]
+block53 | 9 tensors,  1 layers,     1.25 MB
+    layer0: attn_bias[8,64,64] attn_cos_skip[256] attn_scale[8] ffn_branch_projection_weight[8,4,32,32] ffn_cos_skip[256] ffn_expand_weight[8,4,8,32,32] ffn_output_projection_weight[256,256] projection_weight[256,256] qkv_weight[256,768]
+block54 | 9 tensors,  1 layers,     1.25 MB
+    layer0: attn_bias[8,64,64] attn_cos_skip[256] attn_scale[8] ffn_branch_projection_weight[8,4,32,32] ffn_cos_skip[256] ffn_expand_weight[8,4,8,32,32] ffn_output_projection_weight[256,256] projection_weight[256,256] qkv_weight[256,768]
+block55 | 9 tensors,  1 layers,     1.25 MB
+    layer0: attn_bias[8,64,64] attn_cos_skip[256] attn_scale[8] ffn_branch_projection_weight[8,4,32,32] ffn_cos_skip[256] ffn_expand_weight[8,4,8,32,32] ffn_output_projection_weight[256,256] projection_weight[256,256] qkv_weight[256,768]
+block56 | 11 tensors,  1 layers,     0.41 MB
+    layer0: attn_bias[4,64,64] attn_cos_skip[128] attn_scale[4] ffn_branch_projection_weight[4,4,32,32] ffn_cos_skip[128] ffn_expand_weight[4,4,4,32,32] ffn_output_projection_weight[128,128] projection_weight[128,128] qkv_weight[128,384] sin[128] weight0[256,128]
+block57 | 9 tensors,  1 layers,     0.34 MB
+    layer0: attn_bias[4,64,64] attn_cos_skip[128] attn_scale[4] ffn_branch_projection_weight[4,4,32,32] ffn_cos_skip[128] ffn_expand_weight[4,4,4,32,32] ffn_output_projection_weight[128,128] projection_weight[128,128] qkv_weight[128,384]
+block58 | 9 tensors,  1 layers,     0.34 MB
+    layer0: attn_bias[4,64,64] attn_cos_skip[128] attn_scale[4] ffn_branch_projection_weight[4,4,32,32] ffn_cos_skip[128] ffn_expand_weight[4,4,4,32,32] ffn_output_projection_weight[128,128] projection_weight[128,128] qkv_weight[128,384]
+block59 | 9 tensors,  1 layers,     0.34 MB
+    layer0: attn_bias[4,64,64] attn_cos_skip[128] attn_scale[4] ffn_branch_projection_weight[4,4,32,32] ffn_cos_skip[128] ffn_expand_weight[4,4,4,32,32] ffn_output_projection_weight[128,128] projection_weight[128,128] qkv_weight[128,384]
+block60 | 9 tensors,  1 layers,     0.34 MB
+    layer0: attn_bias[4,64,64] attn_cos_skip[128] attn_scale[4] ffn_branch_projection_weight[4,4,32,32] ffn_cos_skip[128] ffn_expand_weight[4,4,4,32,32] ffn_output_projection_weight[128,128] projection_weight[128,128] qkv_weight[128,384]
+block61 | 9 tensors,  1 layers,     0.34 MB
+    layer0: attn_bias[4,64,64] attn_cos_skip[128] attn_scale[4] ffn_branch_projection_weight[4,4,32,32] ffn_cos_skip[128] ffn_expand_weight[4,4,4,32,32] ffn_output_projection_weight[128,128] projection_weight[128,128] qkv_weight[128,384]
+block62 | 11 tensors,  1 layers,     0.12 MB
+    layer0: attn_bias[2,64,64] attn_cos_skip[64] attn_scale[2] ffn_branch_projection_weight[2,4,32,32] ffn_cos_skip[64] ffn_expand_weight[2,4,2,32,32] ffn_output_projection_weight[64,64] projection_weight[64,64] qkv_weight[64,192] sin[64] weight0[128,64]
+block63 | 9 tensors,  1 layers,     0.10 MB
+    layer0: attn_bias[2,64,64] attn_cos_skip[64] attn_scale[2] ffn_branch_projection_weight[2,4,32,32] ffn_cos_skip[64] ffn_expand_weight[2,4,2,32,32] ffn_output_projection_weight[64,64] projection_weight[64,64] qkv_weight[64,192]
+block64 | 9 tensors,  1 layers,     0.10 MB
+    layer0: attn_bias[2,64,64] attn_cos_skip[64] attn_scale[2] ffn_branch_projection_weight[2,4,32,32] ffn_cos_skip[64] ffn_expand_weight[2,4,2,32,32] ffn_output_projection_weight[64,64] projection_weight[64,64] qkv_weight[64,192]
+block65 | 9 tensors,  1 layers,     0.10 MB
+    layer0: attn_bias[2,64,64] attn_cos_skip[64] attn_scale[2] ffn_branch_projection_weight[2,4,32,32] ffn_cos_skip[64] ffn_expand_weight[2,4,2,32,32] ffn_output_projection_weight[64,64] projection_weight[64,64] qkv_weight[64,192]
+block66 | 10 tensors,  1 layers,     0.04 MB
+    layer0: attn_bias[1,64,64] attn_cos_skip[32] attn_scale[1] ffn_cos_skip[32] projection_weight[32,32] qkv_weight[32,96] sin[32] weight0[64,32] weight1[32,128] weight2[128,32]
+block67 | 8 tensors,  1 layers,     0.03 MB
+    layer0: attn_bias[1,64,64] attn_cos_skip[32] attn_scale[1] ffn_cos_skip[32] projection_weight[32,32] qkv_weight[32,96] weight1[32,128] weight2[128,32]
+block68 | 8 tensors,  1 layers,     0.03 MB
+    layer0: attn_bias[1,64,64] attn_cos_skip[32] attn_scale[1] ffn_cos_skip[32] projection_weight[32,32] qkv_weight[32,96] weight1[32,128] weight2[128,32]
+block69 | 8 tensors,  1 layers,     0.03 MB
+    layer0: attn_bias[1,64,64] attn_cos_skip[32] attn_scale[1] ffn_cos_skip[32] projection_weight[32,32] qkv_weight[32,96] weight1[32,128] weight2[128,32]
+block70 | 13 tensors,  1 layers,     0.03 MB
+    layer0: attn_bias[1,64,64] attn_cos_skip[32] attn_scale[1] blend_scale[1] ffn_cos_skip[32] inp_merge_cos[32] inp_merge_sin[32] out_conv_weight[16,4] out_gain[16,4] projection_weight[32,32] qkv_weight[32,96] weight1[32,128] weight2[128,32]
+
+--- vulkan init ---
+[DXGI] adapter[0] "Intel(R) Arc(TM) Pro B50 Graphics" vendor=0x8086 LUID=00000000:000095a2 
+[DXGI] adapter[1] "Intel(R) Arc(TM) Pro B50 Graphics" vendor=0x8086 LUID=00000000:000116cc 
+[DXGI] adapter[2] "Microsoft Basic Render Driver" vendor=0x1414 LUID=00000000:0000998f (software)
+vulkan physical devices: 2
+[VK] device[0] "Intel(R) Arc(TM) Pro B50 Graphics" api 1.4.348 LUID=00000000:000095a2  <== DXGI LUID MATCH
+[VK] device[1] "Intel(R) Arc(TM) Pro B50 Graphics" api 1.4.348 LUID=00000000:000116cc
+USING device: "Intel(R) Arc(TM) Pro B50 Graphics" driver Intel Corporation (101.8805) LUID=00000000:000095a2
+memory heaps:  [0] 16206 MB DEVICE_LOCAL;  [1] 16382 MB host
+memory types: host-visible+coherent=2 device-local=0
+
+--- upload plan ---
+device buffer size: 291535872 bytes (278.03 MB), alignment 256
+
+--- staging upload (host memcpy into coherent staging) ---
+staging memcpy total: 79.83 ms (3482.6 MB/s effective)
+
+--- GPU copy (staging -> device local, per-block submits) ---
+GPU copy total: 142.60 ms (1949.5 MB/s)
+
+--- per-block breakdown ---
+staging per block: min 0.008 ms | median 0.434 ms | max 6.815 ms (n=71)
+gpu copy per block: min 0.147 ms | median 0.433 ms | max 16.169 ms (n=71)
+block timing detail (block: stage ms / gpu ms):
+  block0  (  0.03 MB):   0.012 /   0.291
+  block1  (  0.03 MB):   0.008 /   0.192
+  block2  (  0.03 MB):   0.009 /   0.204
+  block3  (  0.03 MB):   0.022 /   0.208
+  block4  (  0.04 MB):   0.013 /   0.205
+  block5  (  0.10 MB):   0.043 /   0.233
+  block6  (  0.10 MB):   0.040 /   0.233
+  block7  (  0.10 MB):   0.033 /   0.204
+  block8  (  0.12 MB):   0.038 /   0.221
+  block9  (  0.34 MB):   0.143 /   0.265
+  block10 (  0.34 MB):   0.112 /   0.260
+  block11 (  0.34 MB):   0.127 /   0.269
+  block12 (  0.34 MB):   0.115 /   0.269
+  block13 (  0.34 MB):   0.130 /   0.264
+  block14 (  0.41 MB):   0.136 /   0.263
+  block15 (  1.25 MB):   0.415 /   0.441
+  block16 (  1.25 MB):   0.486 /   0.433
+  block17 (  1.25 MB):   0.413 /   0.466
+  block18 (  1.25 MB):   0.461 /   0.481
+  block19 (  1.25 MB):   0.432 /   0.465
+  block20 (  1.25 MB):   0.469 /   0.444
+  block21 (  1.25 MB):   0.436 /   0.471
+  block22 (  1.50 MB):   0.514 /   0.487
+  block23 (  3.63 MB):   1.319 /   1.053
+  block24 (  3.63 MB):   1.379 /   1.037
+  block25 (  3.63 MB):   1.322 /   0.986
+  block26 (  3.63 MB):   1.416 /   1.029
+  block27 (  3.63 MB):   2.087 /   1.032
+  block28 (  3.63 MB):   1.563 /   1.104
+  block29 (  3.63 MB):   1.392 /   1.211
+  block30 (  4.63 MB):   1.839 /   1.372
+  block31 ( 24.00 MB):   5.770 /  13.871
+  block32 ( 24.00 MB):   5.810 /  14.246
+  block33 ( 24.00 MB):   5.372 /  10.956
+  block34 ( 24.00 MB):   5.240 /  15.113
+  block35 ( 24.00 MB):   5.293 /  14.931
+  block36 ( 24.00 MB):   6.815 /  16.169
+  block37 ( 24.00 MB):   5.585 /  14.037
+  block38 ( 24.00 MB):   5.420 /  11.909
+  block39 (  1.00 MB):   0.426 /   0.530
+  block40 (  3.63 MB):   1.350 /   1.260
+  block41 (  3.63 MB):   1.346 /   1.179
+  block42 (  3.63 MB):   1.282 /   1.065
+  block43 (  3.63 MB):   1.701 /   0.927
+  block44 (  3.63 MB):   1.377 /   0.945
+  block45 (  3.63 MB):   1.302 /   0.913
+  block46 (  3.63 MB):   1.331 /   0.926
+  block47 (  3.63 MB):   1.515 /   1.054
+  block48 (  1.50 MB):   0.567 /   0.555
+  block49 (  1.25 MB):   0.469 /   0.468
+  block50 (  1.25 MB):   0.434 /   0.424
+  block51 (  1.25 MB):   0.471 /   0.418
+  block52 (  1.25 MB):   0.433 /   0.409
+  block53 (  1.25 MB):   0.453 /   0.442
+  block54 (  1.25 MB):   0.441 /   0.421
+  block55 (  1.25 MB):   0.835 /   0.417
+  block56 (  0.41 MB):   0.158 /   0.240
+  block57 (  0.34 MB):   0.158 /   0.219
+  block58 (  0.34 MB):   0.202 /   0.234
+  block59 (  0.34 MB):   0.177 /   0.240
+  block60 (  0.34 MB):   0.124 /   0.226
+  block61 (  0.34 MB):   0.134 /   0.241
+  block62 (  0.12 MB):   0.047 /   0.198
+  block63 (  0.10 MB):   0.037 /   0.177
+  block64 (  0.10 MB):   0.034 /   0.160
+  block65 (  0.10 MB):   0.034 /   0.185
+  block66 (  0.04 MB):   0.012 /   0.164
+  block67 (  0.03 MB):   0.009 /   0.147
+  block68 (  0.03 MB):   0.010 /   0.162
+  block69 (  0.03 MB):   0.010 /   0.160
+  block70 (  0.03 MB):   0.011 /   0.168
+
+--- VRAM budget ---
+device-local buffer: 278.03 MB
+staging buffer (host heap): 278.03 MB
+device heap[0] capacity: 16206 MB -> used by weights: 278.03 MB (1.72%)
+
+--- GPU residency verification (readback, byte-exact) ---
+  block0.layer0.weight1            F16  8192 bytes: IDENTICAL
+  block10.layer0.attn_scale        F32    16 bytes: IDENTICAL
+  block35.layer2.attn_scale        F32   128 bytes: IDENTICAL
+VERIFY PASS: all 3 sample tensors byte-identical after device round-trip
+
+--- host-side sanity statistics (F16 decoded by bit ops) ---
+  NOTE: block35.layer0.projection_weight not in file (skipped)
+  block0.layer0.weight1                n=    4096 mean=-0.001992 std=0.176710 min=-0.625000 max=+0.562500 nan=0 inf=0 zero=27  -> plausible
+  block35.layer0.weight                n= 4194304 mean=-0.000081 std=0.031234 min=-0.203125 max=+0.203125 nan=0 inf=0 zero=105742  -> plausible
+  block35.layer4.projection_weight     n= 1048576 mean=-0.000037 std=0.016593 min=-0.203125 max=+0.218750 nan=0 inf=0 zero=80895  -> plausible
+weight stats verdict: ALL PLAUSIBLE
+
+--- timing summary ---
+file load      : see top of log
+staging upload : 79.83 ms
+gpu copy       : 142.60 ms
+
+RESULT: PASS
+m6loader exit code: 0 
+ 
+=== final exit code: 0 (ended 20.09.2026  2:18:50,01) === 
