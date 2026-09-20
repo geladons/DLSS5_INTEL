@@ -53,6 +53,3 @@ void main() {
         FloatBuf(pc.c).v[i] = av * dv + bv * ev;
     }
 }
-f(pc.c).v[i] = av * dv + bv * ev;
-    }
-}
