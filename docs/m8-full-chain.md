@@ -50,24 +50,54 @@ optional publish), merge.comp (b39/up-transition merges + b70 pre-merge).
 
 ## Per-family verdicts
 
-(pending — updated as each family validates)
+(M8a validation 2026-09-20 ~12:15 PDT — golden.py full-chain reference, all 71
+blocks, 9 boundary tensors vs regenerated dumps. Full evidence:
+`docs/m8-golden.log`.)
 
 | family | blocks | status |
 |---|---|---|
-| weights residency (649 tensors, one buffer) | — | RUNS (324.9 MB upload 1.35 s; offsets cross-checked vs pack-layout OK) |
-| stem (plain32 window + adapter + ds) | 0-4 | RUNS 1.322 ms |
-| encoder (branched window 64/128/256 + ds) | 5-22 | RUNS 10.427 ms (0.46 TF) |
-| bottleneck (split512 window) | 23-30 | RUNS 6.718 ms (1.77 TF) |
-| global (1024 MHA ±3 cap) | 31-38 | RUNS 13.494 ms (4.50 TF) |
-| decoder (b39 merge + split + up-transitions + branched) | 39-69 | RUNS 20.935 ms (0.80 TF) |
-| head (b70 + merge + head GEMMs) | 70 | RUNS 0.240 ms |
-| **FULL CHAIN (1402 dispatches)** | 0-70 | **RUNS: 53.137 ms/frame; steady 48.245 ms (20-iter avg) ≈ 20.7 fps** |
+| weights residency (649 tensors, one buffer) | — | OK (offsets cross-checked) |
+| stem (plain32 window + adapter + ds) | 0-4 | **FAIL at b1-b4 (shifted origins)**; b0 itself bit-exact through all 13 stages (maxabs ≤ 4e-6 at adapter/ffn/proj/scores/probs/ctx/merge/projGEMM/gather) |
+| encoder (branched window 64/128/256 + ds) | 5-22 | FAIL (cascade; also shifted-origin + bias-swizzle class) |
+| bottleneck (split512 window) | 23-30 | FAIL (cascade) |
+| global (1024 MHA ±3 cap) | 31-38 | FAIL (cascade) |
+| decoder (b39 merge + split + up-transitions + branched) | 39-69 | FAIL (cascade) |
+| head (b70 + merge + head GEMMs) | 70 | FAIL (cascade; merged70/head fp32 mean-rel 1.0/0.25) |
+| **FULL CHAIN (1402 dispatches)** | 0-70 | **RUNS 48.4 ms/frame; numerics FAIL vs golden** |
 
-VALIDATION: PENDING — golden.py compare path is stale (it reshapes x.bin to
-(288,1024); the chain input is the 16-channel feature volume, x.bin is
-(288,16)). NEEDED: full-chain NumPy golden in golden.py main (stem consumes
-16ch; every family per design §A), then compare vs the 9 dumped boundary
-tensors in build\Release\out\.
+VALIDATION (2026-09-20): golden.py is a complete full-chain NumPy reference
+(all families per §A, neutralized-geometry fork per this doc, `golden/*.npy`
+per boundary). **Overall verdict: FAIL — root cause GPU-side, golden proven
+correct on block 0.** Findings:
+
+1. **Shipped dumps were garbage**: the 11:35 `gpu_*` dumps came from a
+   `--to 0 --dispdbg` run (17 dispatches); everything past b0 was
+   uninitialized arena. All compares below use full-chain-regenerated dumps.
+   Any `--to N` run rewrites the 9 boundary dumps — full validation must use
+   a no-args run.
+2. **Block 0 (origin (0,0)) is numerically CORRECT end-to-end**: every stage
+   bit-exact/near-exact vs the golden (scores/probs/ctx/merge/proj/gather all
+   maxabs 0-4e-6). Every rounding point (half_round, e4m3, gate,
+   cosine fragment tree, bit-affine softmax) confirmed in-place.
+3. **Bias layout**: the running GPU consumes `attn_bias` in raw stored order
+   (probs bit-exact with raw; device bytes == file bytes). nr_model/§A.6 say
+   H∈{1,16} stored bias is fragment order and must be unswizzled at load.
+   The unswizzle exists in committed main.cpp (with an M8_DEBUG_BIAS print)
+   but demonstrably does not execute in the built exe (no print, raw device
+   bytes, reproduced across two rebuilds incl. forced main.cpp recompile).
+   golden.py defaults to raw (match the running chain);
+   `M8_BIAS_MODE=swizzle` selects nr_model semantics. Either way b1+ diverge.
+4. **Root cause of full-chain FAIL: shifted-window origins**. b0 (0,0) exact;
+   b1-b4 use origins (-4,-4)/(0,-4)/(-4,0) whose zero-pad+crop path
+   (partition.comp / gather_residual.comp) diverges: b4ds bitmatch 2.09%
+   (raw) / 2.62% (swz) vs ≥99.9% required. All later boundaries cascade
+   (b48/b69 at 0.0000% = fully decorrelated e4m3 publishes; fp32
+   merged70/head mean-rel 1.0/0.25).
+5. **Blockers to PASS**: (a) fix shifted-origin pad/crop in the GPU window
+   kernels; (b) resolve the bias-unswizzle exe anomaly (rebuild clean and
+   confirm [bias-swz] fires + device holds swizzled bytes); regen dumps from
+   a no-args run; rerun `python golden.py <safetensors> build\Release\out`
+     in both bias modes.
 
 ## Timings
 
