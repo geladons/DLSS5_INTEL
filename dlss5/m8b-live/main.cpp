@@ -44,8 +44,12 @@
 //     on every 100 ms DDA-acquire wake — the loop never blocks >100 ms, so
 //     hotkeys answer even mid-frame):
 //       CTRL+ALT+Q = clean quit (full Vulkan/D3D teardown, exit 0);
-//       CTRL+ALT+X = toggle the overlay: HIDDEN skips ALL processing (no DDA
-//       chain, no present, ~0% GPU) and the desktop returns to native.
+//       CTRL+ALT+X = toggle the overlay: HIDDEN = capture-only warm loop
+//       (DDA kept alive, `original` tracks the live desktop, no chain /
+//       present, ~0% GPU); SHOWN = the loop immediately processes the current
+//       capture with a reseeded fbcancel (zeroed lastPresented + seed flag),
+//       presents, and only then re-shows the window — the overlay always
+//       reappears with the CURRENT desktop, never the stale pre-hide frame.
 //   * HIGH-PASS COMPOSITE (the blue-tint fix): final = native + strength *
 //     highpass(delta), highpass = delta - boxblur(delta, 32px) as a GPU
 //     downscale+upscale pair (shaders/hpfilter.comp) on the head buffer
@@ -120,6 +124,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <deque>
 #include <fstream>
 #include <map>
@@ -415,7 +420,8 @@ struct Push { int32_t a[4]; int32_t b[4]; float c[4]; float d[4]; };
 // ------------------------------------------------------- overlay window ----
 static HWND g_hwnd = nullptr;
 static std::atomic<bool> g_stop{false};
-static std::atomic<bool> g_overlayHidden{false};  // CTRL+ALT+X: hidden = dead loop, desktop native
+static std::atomic<bool> g_overlayHidden{false};  // CTRL+ALT+X: hidden = capture-only warm loop
+static std::atomic<bool> g_resumeRequested{false}; // hidden->shown: loop must force fresh frame+reseed
 static std::atomic<bool> g_quitHotkey{false};     // CTRL+ALT+Q: clean shutdown -> exit 0
 enum { HK_QUIT = 1, HK_TOGGLE = 2 };
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -984,7 +990,9 @@ int main(int argc, char** argv) {
 
     // ---------------- global hotkeys (UX fix 2026-09-20) -------------------
     // CTRL+ALT+Q = clean quit (destroy device, exit 0); CTRL+ALT+X = toggle
-    // the overlay (hidden = ALL processing skipped, desktop back to native).
+    // the overlay (hidden = capture-only warm loop: DDA kept alive + `original`
+    // tracks the live desktop, no chain/present; unhide forces a fresh
+    // process+present with a reseeded fbcancel BEFORE the window reappears).
     // Registered by the MAIN thread: WM_HOTKEY then lands in the main-thread
     // queue, which the live loop drains via PeekMessage on every DDA-acquire
     // wake (100 ms timeout — worst-case hotkey latency ~100 ms while busy).
@@ -1013,11 +1021,22 @@ int main(int argc, char** argv) {
                 } else if (m.wParam == HK_TOGGLE) {
                     bool h = !g_overlayHidden.load();
                     g_overlayHidden.store(h);
-                    if (g_hwnd) ShowWindow(g_hwnd, h ? SW_HIDE : SW_SHOW);
+                    // HIDE: drop the overlay immediately, desktop goes native.
+                    // SHOW: defer the ShowWindow to the live loop — it first
+                    // processes the current capture (kept warm while hidden)
+                    // with a reseeded fbcancel, presents, THEN shows the window
+                    // (no stale launch-time frame flash). Without this the
+                    // swapchain still held the pre-hide image and the settle
+                    // gate (capture==our own stale output) latched forever.
+                    if (h) {
+                        if (g_hwnd) ShowWindow(g_hwnd, SW_HIDE);
+                    } else {
+                        g_resumeRequested.store(true);
+                    }
                     std::printf("[hotkey] CTRL+ALT+X - overlay %s: processing %s, desktop %s\n",
                                 h ? "HIDDEN" : "SHOWN",
-                                h ? "PAUSED (no DDA, no chain, no present)"
-                                  : "RESUMED",
+                                h ? "PAUSED (warm capture only, no chain/present)"
+                                  : "RESUMED (fresh capture + fbcancel reseed)",
                                 h ? "NATIVE (feedback loop dead)" : "ENHANCED");
                 }
             } else if (m.message == WM_QUIT) {
@@ -2199,6 +2218,7 @@ int main(int argc, char** argv) {
     long fbFrames = 0;                // processed frames with fb stats
     double fbMeanLast = 0.0;          // last full-frame mean |corrected delta| (0-255)
     bool shownOnce = false;           // overlay ShowWindow deferred to first present
+    bool needReseed = false;          // hidden->shown resume: zero+seed fbcancel on next processed frame
     double fpsFinal = 0.0;
     bool passMetrics = true;
     bool anyVerify = false;
@@ -2215,15 +2235,87 @@ int main(int argc, char** argv) {
     uint64_t prevSampleCnt = 0;
 
     while (!g_stop.load() && frame < framesTarget) {
-        // ---- (a0) HOTKEY-HIDDEN: CTRL+ALT+X hid the overlay — skip ALL
-        // processing (no DDA chain, no present, ~0% GPU). The desktop returns
-        // to its native compositing (the overlay stops covering it, so the
-        // feedback loop is dead by construction). Keep draining the queue so
-        // the show-again / quit hotkeys stay live while hidden.
+        // ---- (a0) HOTKEY-HIDDEN: CTRL+ALT+X hid the overlay. CAPTURE-ONLY
+        // warm mode: keep the Desktop Duplication session alive and keep
+        // `original`/`prevSamples` tracking the live desktop (the overlay no
+        // longer covers it), but skip the GPU chain + present entirely
+        // (~0% GPU — one staging copy per real update, nothing more). This
+        // makes the resume path instant and correct: on unhide the loop
+        // processes the CURRENT desktop (no stale launch-time frame) with a
+        // reseeded fbcancel, presents, and only then re-shows the window.
+        // Keep draining the queue so show-again / quit hotkeys stay live.
         if (g_overlayHidden.load()) {
+            DXGI_OUTDUPL_FRAME_INFO fi{};
+            ComPtr<IDXGIResource> res;
+            HRESULT hr = dup->AcquireNextFrame(50, &fi, &res);
+            if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
+                drainHotkeys();   // hotkeys stay live while parked in acquire
+                if (g_stop.load()) break;
+                continue;
+            } else if (FAILED(hr)) {
+                if (hr == DXGI_ERROR_ACCESS_LOST) {
+                    std::fprintf(stderr, "[warn] hidden-mode ACCESS_LOST - attempting one DuplicateOutput recovery\n");
+                    dup.Reset();
+                    ComPtr<IDXGIOutput1> out1;
+                    if (SUCCEEDED(output->QueryInterface(IID_PPV_ARGS(&out1))) &&
+                        SUCCEEDED(out1->DuplicateOutput(device.Get(), &dup))) {
+                        ++dropped;
+                    } else {
+                        std::fprintf(stderr, "[FAIL] duplication lost for good\n");
+                        g_stop.store(true);
+                    }
+                } else {
+                    std::fprintf(stderr, "[error] hidden AcquireNextFrame: %s\n", HrName(hr));
+                    ++dropped;
+                }
+                drainHotkeys();
+                continue;
+            }
+            ComPtr<ID3D11Texture2D> frameTex;
+            hr = res->QueryInterface(IID_PPV_ARGS(&frameTex));
+            if (FAILED(hr)) { dup->ReleaseFrame(); drainHotkeys(); continue; }
+            context->CopyResource(stagingTex.Get(), frameTex.Get());
+            context->Flush();
+            dup->ReleaseFrame();
+            D3D11_MAPPED_SUBRESOURCE ms{};
+            if (SUCCEEDED(context->Map(stagingTex.Get(), 0, D3D11_MAP_READ, 0, &ms))) {
+                double s = 0; uint64_t cnt = 0;
+                uint8_t cur[512]; const uint32_t curCap = 512;
+                for (uint32_t y = 0; y < H; y += 24) {
+                    const uint8_t* row = (const uint8_t*)ms.pData + (size_t)y * ms.RowPitch;
+                    for (uint32_t x = 0; x < W * 4; x += 1997) {
+                        s += row[x];
+                        if (cnt < curCap) cur[cnt] = row[x];
+                        ++cnt;
+                    }
+                }
+                const bool black = (cnt == 0) || (s / (double)cnt) < 1.0;
+                if (!black) {
+                    prevSampleCnt = cnt < curCap ? cnt : curCap;
+                    for (uint64_t i = 0; i < prevSampleCnt; ++i) prevSamples[i] = cur[i];
+                    for (uint32_t y = 0; y < H; ++y)
+                        std::memcpy(&original[(size_t)y * W * 4],
+                                    (const uint8_t*)ms.pData + (size_t)y * ms.RowPitch, W * 4);
+                    tLastAcquired = clk::now();
+                }
+                context->Unmap(stagingTex.Get(), 0);
+            }
             drainHotkeys();
-            Sleep(50);
             continue;
+        }
+        // ---- (a0b) RESUME: the toggle hotkey un-hid the overlay. Force an
+        // immediate process+present of the CURRENT capture (kept warm in
+        // hidden mode) — do not wait for the next desktop update, and do not
+        // let the settle gate swallow this frame. While the overlay was
+        // hidden the capture was the real desktop again; once the overlay is
+        // re-shown the capture returns to being our own last output, and the
+        // sparse-diff settle estimate drops back below the threshold — so
+        // without this forced frame the overlay would latch its stale
+        // pre-hide content forever (the bug: unhide showed the launch frame).
+        bool resumeForce = false;
+        if (g_resumeRequested.exchange(false)) {
+            resumeForce = true;
+            needReseed = true;   // fbcancel reseed: zero lastPresented + seed flag
         }
         const auto tLoopTop = clk::now();
         // ---- (a) EVENT-DRIVEN DDA capture: block up to 100 ms for a real
@@ -2233,9 +2325,9 @@ int main(int argc, char** argv) {
         // arrives. On idle the loop presents nothing and does no GPU work
         // (~0% GPU on a static screen). Optional --wiggle-idle N re-arms the
         // gentle cursor generator after N seconds of no updates (default OFF).
-        bool fresh = false;
-        double estMeanDelta = 0.0;   // sparse settle estimate (video mode)
-        {
+        bool fresh = resumeForce;   // resume: capture already current (hidden warm mode)
+        double estMeanDelta = resumeForce ? 1e9 : 0.0;   // bypass settle gate on resume
+        if (!resumeForce) {
             DXGI_OUTDUPL_FRAME_INFO fi{};
             ComPtr<IDXGIResource> res;
             HRESULT hr = dup->AcquireNextFrame(100, &fi, &res);
@@ -2360,7 +2452,7 @@ int main(int argc, char** argv) {
         // no GPU submission at all (~0% GPU when settled). The full-frame
         // mean |corrected delta| from the fbcancel GPU counter is still
         // logged for every processed frame (see fbMeanLast).
-        if (!novideo && shownOnce && estMeanDelta < settleThresh) {
+        if (!novideo && shownOnce && !resumeForce && estMeanDelta < settleThresh) {
             ++settled;
             if (settled <= 3 || (settled % 100) == 0)
                 std::printf("[m8b] settled (est mean|d|=%.3f < %.3f) - skip chain+present, keep last frame (#%ld)\n",
@@ -2459,9 +2551,28 @@ int main(int argc, char** argv) {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeFbcancel);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLayout, 0, 1,
                                     &setFinal, 0, nullptr);
+            if (needReseed) {
+                // hidden->shown resume: bufLastPresented still holds the
+                // pre-hide frame while the new capture is the CURRENT
+                // desktop. Zero it + seed fbcancel exactly like frame 0,
+                // else the first resumed delta = capture - stalePreHideFrame
+                // = a huge bogus delta that the accumulator integrates into
+                // a ghost/double image on the re-shown overlay.
+                vkCmdFillBuffer(cmd, bufLastPresented, 0, VK_WHOLE_SIZE, 0);
+                VkBufferMemoryBarrier rb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+                rb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                rb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                rb.buffer = bufLastPresented;
+                rb.size = VK_WHOLE_SIZE;
+                rb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                rb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+                vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 1, &rb, 0, nullptr);
+            }
             Push p{};
             p.a[0] = (int32_t)W; p.a[1] = (int32_t)H; p.b[0] = maxDelta * 4;
-            p.c[0] = frame == 0 ? 1.0f : 0.0f;
+            p.c[0] = (frame == 0 || needReseed) ? 1.0f : 0.0f;
+            needReseed = false;
             push(p);
             vkCmdDispatch(cmd, W / 16, H / 16, 1);
             barrierAll();
@@ -2730,6 +2841,17 @@ int main(int argc, char** argv) {
             }
             VK_CHECK(vkWaitForFences(c.dev, 1, &fence, VK_TRUE, UINT64_MAX));
             vkResetFences(c.dev, 1, &fence);
+            if (resumeForce && !novideo && g_hwnd) {
+                // Re-show only AFTER the fresh resume frame is rendered and
+                // presented (the window was still hidden during the present,
+                // so DWM holds the CURRENT desktop image): the overlay
+                // reappears with current content, never the stale pre-hide
+                // swapchain frame.
+                ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
+                SetWindowPos(g_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                std::printf("[win] overlay re-shown with fresh resume frame\n");
+            }
             gpuMs = std::chrono::duration<double, std::milli>(clk::now() - tSubmit0).count();
         }
         if (!novideo) {   // full-frame mean |corrected delta| from the fbcancel counter
@@ -2749,9 +2871,17 @@ int main(int argc, char** argv) {
                 feMs = d(0, 1); fpMs = d(1, 2); chMs = d(2, 3);
                 hpMs = d(3, 4); tailMs = d(4, 5); gpuTotMs = d(0, 5);
             }
-            std::printf("[frame] %ld processed in %.1f ms (acq %.1f fbmean %.2f bridge %.1f rec %.1f gpu %.1f "
+            const auto tNow = std::chrono::system_clock::now();
+            const std::time_t tNowT = std::chrono::system_clock::to_time_t(tNow);
+            const auto msNow = (int)(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                         tNow.time_since_epoch()).count() % 1000);
+            struct tm ltNow{};
+            localtime_s(&ltNow, &tNowT);
+            std::printf("[frame] %ld processed @ %02d:%02d:%02d.%03d%s in %.1f ms (acq %.1f fbmean %.2f bridge %.1f rec %.1f gpu %.1f "
                         "| fe %.1f fp %.1f chain %.1f hp %.1f tail %.1f)\n",
-                        frame, gpuTotMs, acqMs, fbMeanLast, bridgeMs, recMs, gpuMs,
+                        frame, ltNow.tm_hour, ltNow.tm_min, ltNow.tm_sec, msNow,
+                        resumeForce ? " RESUME" : "",
+                        gpuTotMs, acqMs, fbMeanLast, bridgeMs, recMs, gpuMs,
                         feMs, fpMs, chMs, hpMs, tailMs);
         }
         if (frame == 1) {   // one-shot chain-path statistics (min/max/mean/nonzero%)
