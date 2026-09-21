@@ -23,6 +23,12 @@
 // nr_frame.py compose() takes the same branch).
 //
 //   push a = (fullStridePx, regionTop, regionLeft, 0);  b = (regionW, regionH, 0, 0)
+// M8B (2026-09-20): c = (maxDelta01, accumulateMode, 0, 0). maxDelta01 clamps
+// the composite (enhancement) delta to +/-maxDelta/255 so the feedback loop
+// through the overlay cannot diverge (0 or >1 = legacy unclamped). In
+// accumulate mode (overlay present, c.y > 0.5) `fin` carries the SIGNED
+// composite delta (clamped) instead of the full output color — encode adds it
+// onto the last presented frame (feedback-cancellation accumulation domain).
 // ============================================================================
 #extension GL_GOOGLE_include_directive : require
 #include "publish.glsl"
@@ -42,11 +48,25 @@ void main() {
     uint y = p / uint(pc.b.x);
 
     uint natP = (uint(pc.a.y) + y) * uint(pc.a.x) + (uint(pc.a.z) + x);
+    float m = pc.c.x > 0.0 && pc.c.x < 1.0 ? pc.c.x : 1.0;   // composite (net residual) clamp
     for (uint c = 0u; c < 3u; ++c) {
         float source = nat[natP * 3u + c];
-        float predicted = clamp(source + half_round(hup[p * 4u + c]) * 0.25, 0.0, 1.0);
-        float finalv = clamp(source + 1.0 * (predicted - source), 0.0, 1.0);
-        fin[p * 3u + c] = finalv;
-        nro[p * 3u + c] = predicted;
+        float halfv = half_round(hup[p * 4u + c]) * 0.25;
+        if (pc.c.y > 0.5) {
+            // Accumulate mode (feedback cancellation): fin = corrected(source)
+            // + the network's composite residual, where ONLY the residual is
+            // clamped to +/-maxDelta/255 — the tight divergence bound lives on
+            // what the net ADDS, never on real content (else the screen could
+            // never appear from black). encode adds fin onto lastPresented:
+            //   presented(n) = capture(n) + deltaNet(n)   [echo cancels exactly]
+            float delta = clamp(halfv, -m, m);
+            fin[p * 3u + c] = source + delta;
+            nro[p * 3u + c] = clamp(source + delta, 0.0, 1.0);
+        } else {
+            float predicted = clamp(source + halfv, 0.0, 1.0);
+            float finalv = clamp(source + 1.0 * (predicted - source), 0.0, 1.0);
+            fin[p * 3u + c] = finalv;
+            nro[p * 3u + c] = predicted;
+        }
     }
 }

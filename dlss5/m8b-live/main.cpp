@@ -30,7 +30,43 @@
 // CLI: --frames N (default 300), --nowiggle, --scale S (accepted, IGNORED —
 // the network grid is pinned to the chain's 288 tokens), --novideo (no
 // overlay window/swapchain/present: capture + full chain + verify only —
-// chain-throughput sanity mode).
+// chain-throughput sanity mode), --max-delta N (feedback delta clamp,
+// default 12), --settle-thresh X (settle detection, default 0.5).
+//
+// OVERLAY FEEDBACK CANCELLATION (2026-09-20, the "rainbow explosion" fix):
+// the fullscreen topmost overlay is itself part of the desktop DDA captures,
+// so processing the raw capture re-processes our own output and the
+// composite residual compounds every frame (screen-wide color garbage,
+// GPU pegged, crash; readback metrics still "PASS" — that path was verified
+// only via --novideo, which never showed the overlay). Fix:
+//   * fbcancel.comp: corrected = clamp(capture - lastPresented, +/-4*maxDelta)
+//     (safety clamp only — real content must pass; the tight divergence
+//     bound is the composite residual clamp in compose) written as float RGB
+//     into the decode slot; the chain processes the echo-cancelled change,
+//     not the raw capture:
+//         presented(n) = capture(n) + deltaNet(n)   [echo cancels exactly]
+//     bufLastPresented = exact copy of the last presented frame (imgFinal ->
+//     buffer copy every processed frame). The kernel runs FUSED in the main
+//     frame command buffer — a separate pre-pass submission measured
+//     ~168 ms/frame (cold-queue round trip); the buffers stay DEVICE-LOCAL
+//     because host-visible STORAGE buffers fault the Arc 32.0.101.8805
+//     driver (DEVICE_LOST within two frames, measured 2026-09-20).
+//   * compose.comp: in accumulate mode only the network's composite residual
+//     is clamped to +/-maxDelta/255 (default 12) — never real content, else
+//     the screen can never appear from black (frame 0 corrects against a
+//     ZEROED lastPresented, i.e. the "delta" IS the whole desktop).
+//     `fin` = corrected + clamped residual.
+//   * encode.comp (accumulate mode): out = clamp(lastPresented + fin), i.e.
+//     presented = enhanced capture; per-frame screen motion contributed by
+//     the net is bounded by +/-maxDelta so it cannot diverge.
+//   * settle detection: when the sparse capture-sample diff (CPU, free) is
+//     below --settle-thresh the visible screen is static, so the chain +
+//     present are SKIPPED entirely before any GPU submission (~0% GPU when
+//     settled); the overlay keeps showing the last presented frame. The
+//     full-frame mean |corrected delta| comes from the fbcancel GPU counter
+//     and is logged per processed frame.
+//   * the overlay window stays hidden until the first present so the
+//     initial captures see the real desktop, never a blank swapchain client.
 // Exit codes: 0 = ran + verify-frame content checks pass, 1 = any failure.
 // ============================================================================
 #ifndef NOMINMAX
@@ -624,21 +660,31 @@ int main(int argc, char** argv) {
     long wiggleIdleSec = 0;      // --wiggle-idle N: engage the gentle cursor generator
                                  // only after N seconds with no desktop updates (default OFF)
     bool wiggleForbidden = false;   // --nowiggle: hard-disable any wiggle
+    int maxDelta = 12;           // --max-delta N: per-channel feedback-delta clamp (1/255 units)
+    double settleThresh = 0.5;   // --settle-thresh X: skip chain+present when mean|corrected delta|
+                                 // (0-255 units) stays below this (settle detection, video mode)
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--frames" && i + 1 < argc) framesTarget = std::atol(argv[++i]);
         else if (a == "--nowiggle") wiggleForbidden = true;
         else if (a == "--novideo") novideo = 1;
         else if (a == "--wiggle-idle" && i + 1 < argc) wiggleIdleSec = std::atol(argv[++i]);
+        else if (a == "--max-delta" && i + 1 < argc) maxDelta = std::atoi(argv[++i]);
+        else if (a == "--settle-thresh" && i + 1 < argc) settleThresh = std::atof(argv[++i]);
         else if (a == "--scale" && i + 1 < argc) renderScale = (float)std::atof(argv[++i]);
-        else { std::fprintf(stderr, "usage: m8blive [--frames N] [--nowiggle] [--novideo] [--scale S(ignored)] [--wiggle-idle SECS]\n"); return 1; }
+        else { std::fprintf(stderr, "usage: m8blive [--frames N] [--nowiggle] [--novideo] [--scale S(ignored)] [--wiggle-idle SECS] [--max-delta N] [--settle-thresh X]\n"); return 1; }
     }
     if (wiggleForbidden) wiggleIdleSec = 0;
+    if (maxDelta < 1) maxDelta = 1;
+    if (maxDelta > 255) maxDelta = 255;
     SetConsoleCtrlHandler(CtrlHandler, TRUE);
     std::printf("=== M8B-LIVE: REAL DLSS 5 graph (71 blocks) live on the desktop, Intel Arc Pro B50 ===\n");
     std::printf("transport: m4-present-simple (CPU bridge) | core: m8-full-chain @03900ab (288 tokens, ~47 ms)\n");
     std::printf("frame target: %ux%u B8G8R8A8, frames=%ld (processed), wiggle-idle=%lds, video=%d\n",
                 W, H, framesTarget, wiggleIdleSec, !novideo);
+    if (!novideo)
+        std::printf("feedback-cancellation: ON (echo subtract + accumulate, max-delta=%d/255, settle-thresh=%.3f)\n",
+                    maxDelta, settleThresh);
     if (renderScale != 0.55f)
         std::printf("[info] --scale ignored: network grid pinned to 12x24 = the chain's 288 tokens\n");
     std::printf("\n");
@@ -877,9 +923,12 @@ int main(int argc, char** argv) {
                                  nullptr, nullptr, hinst, nullptr);
         if (!g_hwnd) { std::fprintf(stderr, "[FAIL] CreateWindowExW %lu\n", GetLastError()); return 1; }
         SetLayeredWindowAttributes(g_hwnd, 0, 255, LWA_ALPHA);
-        ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
-        SetWindowPos(g_hwnd, HWND_TOPMOST, outX, outY, W, H, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-        std::printf("[win] overlay created: %ux%u at (%d,%d), WS_POPUP | TOPMOST | TRANSPARENT | LAYERED\n",
+        // M8B feedback fix: the window stays HIDDEN until the first present.
+        // Shown earlier, the never-presented swapchain client composites as a
+        // black rectangle over the desktop and the first DDA captures (and the
+        // frame-0 region scan) would see a black screen instead of the desktop.
+        // ShowWindow/SetWindowPos happen right before the first vkQueuePresentKHR.
+        std::printf("[win] overlay created (HIDDEN until first present): %ux%u at (%d,%d), WS_POPUP | TOPMOST | TRANSPARENT | LAYERED\n",
                     W, H, outX, outY);
         VkWin32SurfaceCreateInfoKHR sci{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
         sci.hinstance = GetModuleHandleW(nullptr);
@@ -1004,13 +1053,15 @@ int main(int argc, char** argv) {
     // ===================================================================
     VkDescriptorSetLayout dsLayout;
     {
-        VkDescriptorSetLayoutBinding binds[10]{};
+        VkDescriptorSetLayoutBinding binds[12]{};
         binds[0] = {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
         for (uint32_t i = 1; i <= 8; ++i)
             binds[i] = {i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
         binds[9] = {9, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        binds[10] = {10, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};  // bufLastPresented
+        binds[11] = {11, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};  // fbStats (mapped)
         VkDescriptorSetLayoutCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        ci.bindingCount = 10; ci.pBindings = binds;
+        ci.bindingCount = 12; ci.pBindings = binds;
         VK_CHECK(vkCreateDescriptorSetLayout(c.dev, &ci, nullptr, &dsLayout));
     }
     VkPipelineLayout pipeLayout;
@@ -1048,7 +1099,8 @@ int main(int argc, char** argv) {
     VkPipeline pipeCompose = makePipe("compose");
     VkPipeline pipeEncode = makePipe("encode");
     VkPipeline pipeBlit = makePipe("blit");
-    std::printf("[VK] 7 transport pipelines up (+ blit); standin REMOVED\n");
+    VkPipeline pipeFbcancel = makePipe("fbcancel");
+    std::printf("[VK] 7 transport pipelines up (+ blit + fbcancel); standin REMOVED\n");
 
     VkCommandPool cmdPool;
     VkCommandBuffer cmd;
@@ -1398,6 +1450,33 @@ int main(int argc, char** argv) {
     void* maxPtr = nullptr;
     VK_CHECK(vkMapMemory(c.dev, memMax, 0, 4096 * 4, 0, &maxPtr));
 
+    // ---- M8B feedback-cancellation state (video mode only; DEVICE-LOCAL:
+    // host-visible STORAGE buffers fault the Arc 32.0.101.8805 driver —
+    // measured 2026-09-20 as DEVICE_LOST within two frames):
+    //   bufLastPresented: exact copy of the last frame we presented (BGRA u8,
+    //     imgFinal -> buffer copy after every processed frame). Zeroed at
+    //     startup so the first frame's corrected delta == the raw capture.
+    //   bufFbStats: 4-byte mapped GPU counter; fbcancel adds sum(|delta|) per
+    //     frame -> full-frame mean |corrected delta| in the summary/logs.
+    VkDeviceMemory memLastP = VK_NULL_HANDLE, memFbStats = VK_NULL_HANDLE;
+    VkBuffer bufLastPresented = CreateBuf(c, (uint64_t)W * H * 4,
+                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memLastP);
+    VkBuffer bufFbStats = CreateBuf(c, 8,
+                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                &memFbStats);
+    uint32_t* fbStatsPtr = nullptr;
+    VK_CHECK(vkMapMemory(c.dev, memFbStats, 0, 8, 0, (void**)&fbStatsPtr));
+    {
+        VkCommandBuffer one = beginOneShot();
+        vkCmdFillBuffer(one, bufLastPresented, 0, VK_WHOLE_SIZE, 0);
+        vkCmdFillBuffer(one, bufFbStats, 0, VK_WHOLE_SIZE, 0);
+        submitOneShot(one);
+        std::printf("[fb] cancellation state up: lastPresented %llu B (zeroed, device-local), stats mapped\n",
+                    (unsigned long long)((uint64_t)W * H * 4));
+    }
+
     VkDescriptorPool dpool;
     VkDescriptorSet setFinal = VK_NULL_HANDLE;
     std::vector<VkDescriptorSet> setBlit(swapImages.size(), VK_NULL_HANDLE);
@@ -1583,6 +1662,8 @@ int main(int argc, char** argv) {
         writeBuf(setFinal, 5, bufHeadUp, (uint64_t)regionW * regionH * 4 * 4);
         writeBuf(setFinal, 6, bufFin, (uint64_t)regionW * regionH * 3 * 4);
         writeBuf(setFinal, 7, bufNr, (uint64_t)regionW * regionH * 3 * 4);
+        writeBuf(setFinal, 10, bufLastPresented, (uint64_t)W * H * 4);  // feedback cancellation
+        writeBuf(setFinal, 11, bufFbStats, 8);                          // settle stats
     }
     writeImg(setFinal, 9, viewFinal);
     for (size_t i = 0; i < setBlit.size(); ++i) {
@@ -2012,6 +2093,10 @@ int main(int argc, char** argv) {
     const long verifyFrames[3] = {10, 30, 60};
     int verifyIdx = 0;
     long frame = 0, dropped = 0, stale = 0;
+    long settled = 0;                 // feedback settle skips (video mode)
+    long fbFrames = 0;                // processed frames with fb stats
+    double fbMeanLast = 0.0;          // last full-frame mean |corrected delta| (0-255)
+    bool shownOnce = false;           // overlay ShowWindow deferred to first present
     double fpsFinal = 0.0;
     bool passMetrics = true;
     bool anyVerify = false;
@@ -2035,6 +2120,7 @@ int main(int argc, char** argv) {
         // screen). Optional --wiggle-idle N re-arms the gentle cursor
         // generator after N seconds of no updates (default OFF).
         bool fresh = false;
+        double estMeanDelta = 0.0;   // sparse settle estimate (video mode)
         {
             DXGI_OUTDUPL_FRAME_INFO fi{};
             ComPtr<IDXGIResource> res;
@@ -2090,6 +2176,10 @@ int main(int argc, char** argv) {
                     // sparse samples ALSO feed the wiggle discriminator: the
                     // generator only moves the cursor (~few samples), real
                     // content changes many — disengage wiggle on real change.
+                    // The same samples feed the feedback SETTLE estimate
+                    // (mean |capture - previous capture|): when the visible
+                    // screen stops changing, the corrected delta would be ~0,
+                    // so the frame is skipped before any GPU work.
                     uint8_t cur[512]; const uint32_t curCap = 512;
                     for (uint32_t y = 0; y < H; y += 24) {
                         const uint8_t* row = (const uint8_t*)ms.pData + (size_t)y * ms.RowPitch;
@@ -2102,9 +2192,16 @@ int main(int argc, char** argv) {
                     black = (cnt == 0) || (s / (double)cnt) < 1.0;
                     if (!black) {
                         uint64_t diffCnt = 0;
+                        double absSum = 0.0;
                         if (prevSampleCnt && prevSampleCnt == cnt) {
-                            for (uint64_t i = 0; i < cnt && i < curCap; ++i)
-                                if ((unsigned)std::abs((int)cur[i] - (int)prevSamples[i]) > 16) ++diffCnt;
+                            for (uint64_t i = 0; i < cnt && i < curCap; ++i) {
+                                const unsigned ad = (unsigned)std::abs((int)cur[i] - (int)prevSamples[i]);
+                                absSum += (double)ad;
+                                if (ad > 16) ++diffCnt;
+                            }
+                            estMeanDelta = absSum / (double)(cnt < curCap ? cnt : curCap);
+                        } else {
+                            estMeanDelta = 1e9;   // first frame: always process
                         }
                         if (wiggleActive && prevSampleCnt == cnt && diffCnt > 32) {
                             g_wiggleStop.store(true);
@@ -2132,7 +2229,23 @@ int main(int argc, char** argv) {
         if (g_stop.load()) break;
         const double acqMs = std::chrono::duration<double, std::milli>(clk::now() - tLoopTop).count();
 
-        // ---- (b) CPU bridge: staging -> upload buffer
+        // ---- (b) SETTLE SKIP (video mode): the visible screen (which under
+        // the opaque overlay is our own last presented frame) barely changed
+        // vs the previous capture — the frame's corrected delta would be ~0,
+        // so skip the chain + present entirely. Costs one sparse-sample diff,
+        // no GPU submission at all (~0% GPU when settled). The full-frame
+        // mean |corrected delta| from the fbcancel GPU counter is still
+        // logged for every processed frame (see fbMeanLast).
+        if (!novideo && shownOnce && estMeanDelta < settleThresh) {
+            ++settled;
+            if (settled <= 3 || (settled % 100) == 0)
+                std::printf("[m8b] settled (est mean|d|=%.3f < %.3f) - skip chain+present, keep last frame (#%ld)\n",
+                            estMeanDelta, settleThresh, settled);
+            continue;
+        }
+
+        // ---- (b2) CPU bridge: staging -> upload buffer (raw capture, for
+        // imgIn: letterbox content scan + encode alpha)
         const auto tBridge0 = clk::now();
         std::memcpy(uploadPtr, original.data(), (size_t)W * H * 4);
         const double bridgeMs =
@@ -2155,11 +2268,28 @@ int main(int argc, char** argv) {
             if (g_stop.load() && ar != VK_SUCCESS) break;
         }
 
-        // ---- (d) record frame: upload + M4 front-end + REAL CHAIN + compose + encode.
+        // ---- (d) record frame: upload + feedback cancellation + M4 front-end
+        // + REAL CHAIN + compose + encode. In video mode fbcancel (GPU kernel,
+        // fused here — a separate pre-pass submission measured ~168 ms/frame)
+        // replaces decode: it writes the corrected delta into the decode
+        // output slot; imgIn still gets the raw capture for the letterbox
+        // content scan and encode alpha.
         const bool verify = (verifyIdx < 3 && verifyFrames[verifyIdx] == frame);
         const auto tFrameStart = clk::now();
         begin();
         vkCmdResetQueryPool(cmd, tsPool, 0, 6);
+        if (!novideo) {
+            vkCmdFillBuffer(cmd, bufFbStats, 0, 8, 0);
+            VkBufferMemoryBarrier fb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+            fb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            fb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            fb.buffer = bufFbStats;
+            fb.size = 8;
+            fb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            fb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 1, &fb, 0, nullptr);
+        }
         {   // upload -> imgIn
             VkBufferMemoryBarrier bb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
             bb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -2190,14 +2320,31 @@ int main(int argc, char** argv) {
             imb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
             vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &imb);
-            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool, 0);
+        }
+        if (!novideo) {   // fbcancel: corrected = clamp(capture - lastPresented, +/-4*maxDelta)
+                          // (safety clamp only — real content must pass; the tight
+                          // divergence bound is the composite residual clamp in
+                          // compose) as float RGB into the decode slot + stats
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeFbcancel);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLayout, 0, 1,
+                                    &setFinal, 0, nullptr);
+            Push p{};
+            p.a[0] = (int32_t)W; p.a[1] = (int32_t)H; p.b[0] = maxDelta * 4;
+            push(p);
+            vkCmdDispatch(cmd, W / 16, H / 16, 1);
+            barrierAll();
         }
         {   // M4 front-end (verbatim dispatch params; region fixed)
             Push p{};
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeDecode);
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLayout, 0, 1, &setFinal, 0, nullptr);
-            vkCmdDispatch(cmd, W / 16, H / 16, 1);
-            barrierAll();
+            if (novideo) {   // decode: BGRA -> float RGB. Video mode: fbcancel
+                             // already wrote the corrected delta into bufRgb.
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeDecode);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLayout, 0, 1,
+                                        &setFinal, 0, nullptr);
+                vkCmdDispatch(cmd, W / 16, H / 16, 1);
+                barrierAll();
+            }
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool, 0);
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLetter);
             p.a[0] = (int32_t)W; p.a[1] = (int32_t)H; p.b[0] = 0; push(p);
             vkCmdDispatch(cmd, (H + 255) / 256, 1, 1);
@@ -2261,14 +2408,45 @@ int main(int argc, char** argv) {
             barrierAll();
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeCompose);
             p.a[0] = (int32_t)W; p.a[1] = region.top; p.a[2] = region.left;
-            p.b[0] = regionW; p.b[1] = regionH; push(p);
+            p.b[0] = regionW; p.b[1] = regionH;
+            p.c[0] = (float)maxDelta / 255.0f;             // composite delta clamp
+            p.c[1] = novideo ? 0.0f : 1.0f;                // accumulate mode (video)
+            push(p);
             vkCmdDispatch(cmd, ((uint64_t)regionW * regionH + 255) / 256, 1, 1);
             barrierAll();
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeEncode);
             p.a[0] = (int32_t)W; p.a[1] = (int32_t)H; p.a[2] = region.left; p.a[3] = region.top;
-            p.b[0] = regionW; p.b[1] = regionH; p.b[2] = 0; push(p);
+            p.b[0] = regionW; p.b[1] = regionH; p.b[2] = 0;
+            p.b[3] = novideo ? 0 : 1;                      // accumulate: add delta onto lastPresented
+            push(p);
             vkCmdDispatch(cmd, (W + 15) / 16, (H + 15) / 16, 1);
             barrierAll();
+            if (!novideo) {   // keep the cancellation buffer == exactly what we present
+                VkImageMemoryBarrier lb{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+                lb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                lb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                lb.image = imgFinal;
+                lb.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                lb.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+                lb.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+                lb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+                lb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                     VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &lb);
+                VkBufferImageCopy lr{};
+                lr.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                lr.imageExtent = {W, H, 1};
+                vkCmdCopyImageToBuffer(cmd, imgFinal, VK_IMAGE_LAYOUT_GENERAL, bufLastPresented, 1, &lr);
+                VkBufferMemoryBarrier lbb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+                lbb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                lbb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                lbb.buffer = bufLastPresented;
+                lbb.size = VK_WHOLE_SIZE;
+                lbb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                lbb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 1, &lbb, 0, nullptr);
+            }
             vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool, 5);
         }
         if (frame == 1) {   // one-shot debug: copy chain-path buffers for stats
@@ -2378,6 +2556,16 @@ int main(int argc, char** argv) {
             }
             VK_CHECK(vkQueueSubmit(c.queue, 1, &si, fence));
             if (!novideo) {
+                if (!shownOnce) {
+                    // deferred show: the very first presented image is already
+                    // on the swapchain, so the overlay appears with content —
+                    // never a black rectangle over the captured desktop.
+                    ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
+                    SetWindowPos(g_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                    shownOnce = true;
+                    std::printf("[win] overlay shown (first present)\n");
+                }
                 VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
                 pi.waitSemaphoreCount = 1; pi.pWaitSemaphores = &semRender;
                 pi.swapchainCount = 1; pi.pSwapchains = &swapchain;
@@ -2387,6 +2575,11 @@ int main(int argc, char** argv) {
             VK_CHECK(vkWaitForFences(c.dev, 1, &fence, VK_TRUE, UINT64_MAX));
             vkResetFences(c.dev, 1, &fence);
             gpuMs = std::chrono::duration<double, std::milli>(clk::now() - tSubmit0).count();
+        }
+        if (!novideo) {   // full-frame mean |corrected delta| from the fbcancel counter
+            const uint32_t sumAbs = *fbStatsPtr;   // host-coherent, fence-passed
+            fbMeanLast = (double)sumAbs / ((double)W * H * 3.0);
+            ++fbFrames;
         }
         {   // per-stage GPU timestamp readback + timing line
             uint64_t ts[6]{};
@@ -2400,9 +2593,9 @@ int main(int argc, char** argv) {
                 feMs = d(0, 1); fpMs = d(1, 2); chMs = d(2, 3);
                 hpMs = d(3, 4); tailMs = d(4, 5); gpuTotMs = d(0, 5);
             }
-            std::printf("[frame] %ld processed in %.1f ms (acq %.1f bridge %.1f rec %.1f gpu %.1f "
+            std::printf("[frame] %ld processed in %.1f ms (acq %.1f fbmean %.2f bridge %.1f rec %.1f gpu %.1f "
                         "| fe %.1f fp %.1f chain %.1f hp %.1f tail %.1f)\n",
-                        frame, gpuTotMs, acqMs, bridgeMs, recMs, gpuMs,
+                        frame, gpuTotMs, acqMs, fbMeanLast, bridgeMs, recMs, gpuMs,
                         feMs, fpMs, chMs, hpMs, tailMs);
         }
         if (frame == 1) {   // one-shot chain-path statistics (min/max/mean/nonzero%)
@@ -2574,6 +2767,10 @@ int main(int argc, char** argv) {
     std::printf("frames: %ld, wall: %.2f s, avg fps: %.2f, last rolling fps: %.1f\n",
                 frame, totalSec, avgFps, fpsFinal);
     std::printf("dropped (DDA timeout/black/access-lost): %ld\n", dropped);
+    if (!novideo)
+        std::printf("feedback-cancellation: %ld processed frames, %ld settled skips, "
+                    "last mean|corrected delta| = %.3f/255 (clamp +/-%d)\n",
+                    fbFrames, settled, fbMeanLast, maxDelta);
     std::printf("present: %s, format %d, path %s\n",
                 presentMode == VK_PRESENT_MODE_MAILBOX_KHR ? "MAILBOX" : "FIFO", (int)swapFormat,
                 novideo ? "none (--novideo)" : (swapStorage ? "blit.comp STORAGE" : "vkCmdCopyImage"));
@@ -2604,10 +2801,11 @@ int main(int argc, char** argv) {
     vkDestroyDescriptorPool(c.dev, dpool, nullptr);
     vkDestroyDescriptorSetLayout(c.dev, dsLayout, nullptr);
     for (VkBuffer b : {bufRgb, bufMax, bufT, bufHeadUp, bufFin, bufNr, bufRbFinal,
-                       bufRbNr, bufUpload, bufDbg})
+                       bufRbNr, bufUpload, bufDbg, bufLastPresented})
         vkDestroyBuffer(c.dev, b, nullptr);
     for (VkDeviceMemory m : {memRgb, memMax, memT, memHeadUp, memFin, memNr,
-                             memRbFinal, memRbNr, memDbg, memImgFinal, memImgNr, memImgIn, memUpload})
+                             memRbFinal, memRbNr, memDbg, memImgFinal, memImgNr, memImgIn, memUpload,
+                             memLastP})
         vkFreeMemory(c.dev, m, nullptr);
     if (cbuf.mapped) vkUnmapMemory(c.dev, cbuf.mem);
     if (cbuf.buf) vkDestroyBuffer(c.dev, cbuf.buf, nullptr);
