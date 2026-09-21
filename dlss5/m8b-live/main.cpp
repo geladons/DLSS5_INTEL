@@ -424,6 +424,76 @@ static std::atomic<bool> g_overlayHidden{false};  // CTRL+ALT+X: hidden = captur
 static std::atomic<bool> g_resumeRequested{false}; // hidden->shown: loop must force fresh frame+reseed
 static std::atomic<bool> g_quitHotkey{false};     // CTRL+ALT+Q: clean shutdown -> exit 0
 enum { HK_QUIT = 1, HK_TOGGLE = 2 };
+
+// ------------------------------------------- cursor-into-mirror (B) --------
+// DDA NEVER captures the hardware cursor: while the overlay is up, the mirror
+// is a dead photo (the capture is our own last present). Drawing the cursor
+// into the uploaded capture fixes the UX: cursor deltas ride the fbcancel
+// corrected signal, so the mirror tracks the mouse and the GPU wakes as you
+// move. Order matters: cursor is drawn AFTER the clean capture snapshot and
+// BEFORE fbcancel, and the presented composite carries it; then
+// corrected = (capture+cursorNow) - lastPresented(cursorPrev) cancels the
+// desktop and leaves the cursor delta as gentle live signal. --nocursor off.
+static bool g_cursorDraw = true;                 // --nocursor disables
+static std::vector<uint8_t> g_shapeBuf;          // raw DXGI pointer-shape buffer
+static uint32_t g_shapeW = 0, g_shapeH = 0, g_shapePitch = 0;
+static int  g_shapeType = 0;                     // DXGI_OUTDUPL_POINTER_SHAPE_TYPE_*
+static bool g_shapeValid = false;
+static int  g_curX = -1000000, g_curY = -1000000; // last-known pointer pos (desktop px)
+static bool g_curVisible = false;
+static int  g_lastDrawnX = -1000000, g_lastDrawnY = -1000000;
+static bool g_lastDrawnVis = false;
+static bool g_curDirty = false;                  // pointer state changed since last processed frame
+static long g_curDrawFrames = 0;
+static double g_curDrawUsSum = 0.0;              // avg CPU draw overhead accounting
+
+// alpha-blend the cached DXGI pointer shape over a tight WxH B8G8R8A8 frame.
+// posX/posY = pointer position (shape top-left, per the MS DDA sample), clipped.
+static void DrawCursorBGRA(uint8_t* dst, int posX, int posY) {
+    if (!g_shapeValid) return;
+    if (g_shapeType == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR ||
+        g_shapeType == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR) {
+        for (uint32_t y = 0; y < g_shapeH; ++y) {
+            const int dy = posY + (int)y;
+            if (dy < 0 || dy >= (int)H) continue;
+            const uint8_t* srow = g_shapeBuf.data() + (size_t)y * g_shapePitch;
+            for (uint32_t x = 0; x < g_shapeW; ++x) {
+                const int dx = posX + (int)x;
+                if (dx < 0 || dx >= (int)W) continue;
+                const uint8_t* s = srow + (size_t)x * 4;
+                const unsigned a = s[3];
+                if (a == 0) continue;
+                uint8_t* d = dst + ((size_t)dy * W + (size_t)dx) * 4;
+                if (a == 255) { d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = 255; continue; }
+                for (int k = 0; k < 3; ++k)
+                    d[k] = (uint8_t)((s[k] * a + d[k] * (255u - a) + 127u) / 255u);
+                d[3] = 255;
+            }
+        }
+        return;
+    }
+    // MONOCHROME: buffer = AND mask (H/2 rows, 1bpp) then XOR mask (H/2 rows, 32bpp)
+    if (g_shapeType == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME) {
+        const uint32_t halfH = g_shapeH / 2;
+        for (uint32_t y = 0; y < halfH; ++y) {
+            const int dy = posY + (int)y;
+            if (dy < 0 || dy >= (int)H) continue;
+            const uint8_t* andRow = g_shapeBuf.data() + (size_t)y * g_shapePitch;
+            const uint8_t* xorRow = g_shapeBuf.data() + ((size_t)halfH + y) * g_shapePitch;
+            for (uint32_t x = 0; x < g_shapeW; ++x) {
+                const int dx = posX + (int)x;
+                if (dx < 0 || dx >= (int)W) continue;
+                const unsigned andBit = (andRow[x >> 3] >> (7 - (x & 7))) & 1u;
+                if (andBit) continue;                    // transparent: keep desktop
+                const uint32_t xc = *(const uint32_t*)(xorRow + (size_t)x * 4);
+                if (xc == 0xFF000000u) continue;         // encoded transparent
+                uint8_t* d = dst + ((size_t)dy * W + (size_t)dx) * 4;
+                d[0] = (uint8_t)(xc & 0xFF); d[1] = (uint8_t)((xc >> 8) & 0xFF);
+                d[2] = (uint8_t)((xc >> 16) & 0xFF); d[3] = 255;
+            }
+        }
+    }
+}
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_DESTROY) { PostQuitMessage(0); return 0; }
     return DefWindowProcW(hwnd, msg, wp, lp);
@@ -705,6 +775,7 @@ int main(int argc, char** argv) {
         if (a == "--frames" && i + 1 < argc) framesTarget = std::atol(argv[++i]);
         else if (a == "--nowiggle") wiggleForbidden = true;
         else if (a == "--novideo") novideo = 1;
+        else if (a == "--nocursor") g_cursorDraw = false;
         else if (a == "--wiggle-idle" && i + 1 < argc) wiggleIdleSec = std::atol(argv[++i]);
         else if (a == "--max-delta" && i + 1 < argc) maxDelta = std::atoi(argv[++i]);
         else if (a == "--settle-thresh" && i + 1 < argc) settleThresh = std::atof(argv[++i]);
@@ -1007,6 +1078,8 @@ int main(int argc, char** argv) {
         if (okQ || okX)
             std::printf("[hotkey] registered: CTRL+ALT+Q=quit CTRL+ALT+X=toggle overlay (%s%s)\n",
                         okQ ? "Q" : "", okX ? "X" : "");
+        std::printf("[cursor] drawing hardware cursor into mirror (DDA never captures it); %s\n",
+                    g_cursorDraw ? "ON (--nocursor disables)" : "OFF (--nocursor)");
     }
     // Drain the main-thread queue; handles WM_HOTKEY actions. Called on every
     // acquire-wake so hotkeys stay live even while the loop blocks on DDA.
@@ -2210,6 +2283,30 @@ int main(int argc, char** argv) {
     // ===================================================================
     // 12. LIVE LOOP (m4 verbatim, standin block -> real chain).
     // ===================================================================
+    // Cursor-into-mirror helpers: pull the pointer shape from the duplication
+    // session when a frame signals a new one (fi.PointerShapeBufferSize > 0),
+    // track the pointer position/visibility, and flag when it changed vs the
+    // last processed frame so the settle gate cannot swallow cursor updates.
+    // Must be called between a successful AcquireNextFrame and ReleaseFrame.
+    auto fetchPointerState = [&](DXGI_OUTDUPL_FRAME_INFO& fi) {
+        if (fi.PointerShapeBufferSize > 0) {
+            g_shapeBuf.resize(fi.PointerShapeBufferSize);
+            UINT filled = 0;
+            DXGI_OUTDUPL_POINTER_SHAPE_INFO si{};
+            HRESULT hs = dup->GetFramePointerShape(&fi.PointerShapeBufferSize, g_shapeBuf.data(),
+                                                   &filled, &si);
+            if (SUCCEEDED(hs)) {
+                g_shapeW = si.Width; g_shapeH = si.Height;
+                g_shapePitch = si.Pitch; g_shapeType = (int)si.Type;
+                g_shapeValid = true;
+            }
+        }
+        g_curX = fi.PointerPosition.Position.x;
+        g_curY = fi.PointerPosition.Position.y;
+        g_curVisible = fi.PointerPosition.Visible != FALSE;
+        g_curDirty = (g_curX != g_lastDrawnX || g_curY != g_lastDrawnY ||
+                      g_curVisible != g_lastDrawnVis);
+    };
     const uint32_t regionOff = (uint32_t)(region.top * (int)W + region.left);
     const long verifyFrames[3] = {10, 30, 60};
     int verifyIdx = 0;
@@ -2276,6 +2373,7 @@ int main(int argc, char** argv) {
             if (FAILED(hr)) { dup->ReleaseFrame(); drainHotkeys(); continue; }
             context->CopyResource(stagingTex.Get(), frameTex.Get());
             context->Flush();
+            fetchPointerState(fi);   // keep pos/shape cache warm for the resume frame
             dup->ReleaseFrame();
             D3D11_MAPPED_SUBRESOURCE ms{};
             if (SUCCEEDED(context->Map(stagingTex.Get(), 0, D3D11_MAP_READ, 0, &ms))) {
@@ -2351,6 +2449,23 @@ int main(int argc, char** argv) {
                     std::printf("[info] wiggle-idle: no updates for %.0f s — engaging gentle generator\n",
                                 idleSec);
                 }
+                // cursor polling: DDA never fires on cursor-only movement, so
+                // poll the real cursor on each 100 ms wake; a moved/shown/
+                // hidden pointer forces one cursor-only process+present using
+                // the last clean capture (the mirror then tracks the mouse).
+                if (g_cursorDraw && !novideo) {
+                    CURSORINFO ci{sizeof(CURSORINFO)};
+                    if (GetCursorInfo(&ci)) {
+                        g_curX = ci.ptScreenPos.x; g_curY = ci.ptScreenPos.y;
+                        g_curVisible = (ci.flags & CURSOR_SHOWING) != 0;
+                        g_curDirty = (g_curX != g_lastDrawnX || g_curY != g_lastDrawnY ||
+                                      g_curVisible != g_lastDrawnVis);
+                        if (g_curDirty) {
+                            fresh = true;          // reuse last clean capture
+                            estMeanDelta = 1e9;    // bypass the settle gate
+                        }
+                    }
+                }
                 continue;
             } else if (FAILED(hr)) {
                 tLastAcquired = clk::now();
@@ -2376,6 +2491,7 @@ int main(int argc, char** argv) {
                 if (FAILED(hr)) { dup->ReleaseFrame(); ++dropped; continue; }
                 context->CopyResource(stagingTex.Get(), frameTex.Get());
                 context->Flush();
+                fetchPointerState(fi);   // cache shape; flag pointer moves
                 dup->ReleaseFrame();
                 bool black = true;
                 D3D11_MAPPED_SUBRESOURCE ms{};
@@ -2440,6 +2556,9 @@ int main(int argc, char** argv) {
                 fresh = true;
                 tLastAcquired = clk::now();
             }
+            // cursor moved while a real desktop update arrived: don't let the
+            // settle gate swallow the frame (the drawn cursor must be repainted).
+            if (g_cursorDraw && g_curDirty) estMeanDelta = 1e9;
             if (fresh) stale = 0;
         }
         if (g_stop.load()) break;
@@ -2464,6 +2583,26 @@ int main(int argc, char** argv) {
         // imgIn: letterbox content scan + encode alpha)
         const auto tBridge0 = clk::now();
         std::memcpy(uploadPtr, original.data(), (size_t)W * H * 4);
+        // cursor-into-mirror: composite the hardware cursor over the CLEAN
+        // capture in the upload buffer only (`original` stays cursor-free for
+        // diagnostics/verify). fbcancel then sees (capture+cursorNow) -
+        // lastPresented(cursorPrev): cursor deltas ride the corrected signal.
+        double cursorUs = 0.0;
+        if (g_cursorDraw && !novideo) {
+            if (g_curVisible && g_shapeValid) {
+                const auto tCur0 = clk::now();
+                DrawCursorBGRA((uint8_t*)uploadPtr, g_curX, g_curY);
+                cursorUs = std::chrono::duration<double, std::micro>(clk::now() - tCur0).count();
+                g_curDrawUsSum += cursorUs;
+                ++g_curDrawFrames;
+            }
+            g_lastDrawnX = g_curX; g_lastDrawnY = g_curY; g_lastDrawnVis = g_curVisible;
+            g_curDirty = false;
+            if (g_curDrawFrames > 0 && (g_curDrawFrames % 200) == 0)
+                std::printf("[cursor] avg draw %.1f us over %ld drawn frames (shape %ux%u type %d)\n",
+                            g_curDrawUsSum / (double)g_curDrawFrames, g_curDrawFrames,
+                            g_shapeW, g_shapeH, g_shapeType);
+        }
         const double bridgeMs =
             std::chrono::duration<double, std::milli>(clk::now() - tBridge0).count();
 
