@@ -1,0 +1,73 @@
+#version 460
+// ============================================================================
+// M8B high-pass filter for the composite residual (color-drift kill) —
+// 2026-09-20 UX fix. Live user testing found the whole screen gains a BLUE
+// TINT over time: with the desktop static, the capture IS our own last
+// presented frame, the fbcancel-corrected delta is ~0, and the network's
+// composite residual is added onto the accumulation EVERY processed frame:
+//   presented(n) = presented(n-1) + residual(n)
+// so any correlated (DC / low-frequency) component of the residual — e.g. a
+// per-channel bias toward blue — integrates frame over frame until the
+// equilibrium shift is plainly visible (bounded by the compose clamp at
+// +/-maxDelta/255 per frame, so it accrues over minutes, "over time").
+//
+// Fix: high-pass the residual before it is added. The composite becomes
+//   final = native + strength * highpass(delta)
+//   highpass(delta) = delta - boxblur(delta, K)        (K = S px, here S=32)
+// implemented as a cheap GPU downscale+upscale pair (2 dispatches, ~2 reads/
+// px — vs ~4K reads/px for a separable K-tap blur; the down/up pair IS the
+// box filter with kernel S, DC removed exactly):
+//   mode 0 (downscale): lo[y,x] = mean of the SxS box of hup.rgb at (x*S,y*S)
+//                         (edges clamped; mean over the ACTUAL sample count)
+//   mode 1 (subtract):  hup.rgb[p] -= lo[p/S]   (in place; each thread only
+//                         touches its own element -> no cross-thread hazard)
+// The 4th head channel (temporal-gate logit) is left untouched.
+//
+//   push a = (regionW, regionH, S, mode)
+// The low-frequency image goes to binding 12 (small scratch). --colorpass 1
+// bypasses both dispatches (legacy full-color composite).
+// ============================================================================
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(std430, set = 0, binding = 5) buffer HeadUp { float hup[]; };
+layout(std430, set = 0, binding = 12) buffer LowRes { float lo[]; };
+layout(push_constant) uniform Push { ivec4 a; ivec4 b; vec4 c; vec4 d; } pc;
+
+void main() {
+    uint rw = uint(pc.a.x), rh = uint(pc.a.y);
+    uint S = uint(pc.a.z);
+    uint mode = uint(pc.a.w);
+    if (mode == 0u) {                    // downscale: box-average into lo
+        uint lw = (rw + S - 1u) / S;
+        uint lh = (rh + S - 1u) / S;
+        uint x = gl_GlobalInvocationID.x, y = gl_GlobalInvocationID.y;
+        if (x >= lw || y >= lh) return;
+        uint x0 = x * S, y0 = y * S;
+        float acc0 = 0.0, acc1 = 0.0, acc2 = 0.0;
+        uint cnt = 0u;
+        for (uint dy = 0u; dy < S; ++dy) {
+            uint yy = min(y0 + dy, rh - 1u);
+            for (uint dx = 0u; dx < S; ++dx) {
+                uint xx = min(x0 + dx, rw - 1u);
+                uint p = (yy * rw + xx) * 4u;
+                acc0 += hup[p + 0u];
+                acc1 += hup[p + 1u];
+                acc2 += hup[p + 2u];
+                ++cnt;
+            }
+        }
+        uint lp = (y * lw + x) * 3u;
+        float inv = 1.0 / float(cnt);
+        lo[lp + 0u] = acc0 * inv;
+        lo[lp + 1u] = acc1 * inv;
+        lo[lp + 2u] = acc2 * inv;
+    } else {                             // subtract the low-frequency image
+        uint x = gl_GlobalInvocationID.x, y = gl_GlobalInvocationID.y;
+        if (x >= rw || y >= rh) return;
+        uint lw = (rw + S - 1u) / S;
+        uint p = (y * rw + x) * 4u;
+        uint lp = ((y / S) * lw + (x / S)) * 3u;
+        hup[p + 0u] -= lo[lp + 0u];
+        hup[p + 1u] -= lo[lp + 1u];
+        hup[p + 2u] -= lo[lp + 2u];
+    }
+}
