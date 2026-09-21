@@ -2293,7 +2293,7 @@ int main(int argc, char** argv) {
             g_shapeBuf.resize(fi.PointerShapeBufferSize);
             UINT filled = 0;
             DXGI_OUTDUPL_POINTER_SHAPE_INFO si{};
-            HRESULT hs = dup->GetFramePointerShape(&fi.PointerShapeBufferSize, g_shapeBuf.data(),
+            HRESULT hs = dup->GetFramePointerShape(fi.PointerShapeBufferSize, g_shapeBuf.data(),
                                                    &filled, &si);
             if (SUCCEEDED(hs)) {
                 g_shapeW = si.Width; g_shapeH = si.Height;
