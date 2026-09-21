@@ -973,6 +973,7 @@ int main(int argc, char** argv) {
     if (wiggleForbidden) wiggleIdleSec = 0;
     if (maxDelta < 1) maxDelta = 1;
     if (maxDelta > 255) maxDelta = 255;
+    if (refreshMs < 50) refreshMs = 50;
     if (strength < 0.0f) strength = 0.0f;
     if (strength > 2.0f) strength = 2.0f;
     colorpass = colorpass ? 1 : 0;
@@ -2763,13 +2764,23 @@ int main(int argc, char** argv) {
         // no GPU submission at all (~0% GPU when settled). The full-frame
         // mean |corrected delta| from the fbcancel GPU counter is still
         // logged for every processed frame (see fbMeanLast).
-        if (!novideo && shownOnce && !resumeForce && estMeanDelta < settleThresh) {
+        // STALENESS BOUND: the sparse estimate (every 24th row, 1997-byte
+        // stride, 512 samples) misses localized real changes — a small window
+        // opening in an unsampled band reads est=0 and the overlay would show
+        // a stale frame forever while the user "can't click anything" (the
+        // click works, the screen just never updates). So even when settled,
+        // force a full process+present at least every --refresh-ms (default
+        // 800 ms). Idle cost: one 51 ms chain per 800 ms (~6% GPU).
+        bool forceRefresh = !novideo && shownOnce &&
+            std::chrono::duration<double, std::milli>(clk::now() - tLastProcessed).count() >= (double)refreshMs;
+        if (!novideo && shownOnce && !resumeForce && !forceRefresh && estMeanDelta < settleThresh) {
             ++settled;
             if (settled <= 3 || (settled % 100) == 0)
                 std::printf("[m8b] settled (est mean|d|=%.3f < %.3f) - skip chain+present, keep last frame (#%ld)\n",
                             estMeanDelta, settleThresh, settled);
             continue;
         }
+        tLastProcessed = clk::now();
 
         // ---- (b2) CPU bridge: staging -> upload buffer (raw capture, for
         // imgIn: letterbox content scan + encode alpha)
