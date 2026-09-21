@@ -96,3 +96,62 @@ dlss5\m8b-live\runm8b.cmd --frames 200  # live overlay (log -> docs\m8b-live.log
 build\Release\m8blive.exe --frames 40 --novideo   # headless verify
 ```
 Launcher: C:\Users\AI\Desktop\RUN-DEMO.cmd (m8blive.exe) / RUN-DEMO-M4.cmd (m4).
+
+
+## DARKNESS ROOT CAUSE + FIX (2026-09-20, final)
+
+### Symptom
+Live overlay structure correct but the whole screen rendered DARK
+(~18%-brightness structured image); GDI screenshots and DDA dumps agreed the
+screen was really dark; video-mode imgFinal readback dark too; fbmean stayed
+healthy ~12; `--novideo` readbacks were BRIGHT (misleading - that path has no
+overlay/feedback).
+
+### Root cause: frame-0 safety-clamp lock-in (NOT alpha, NOT sRGB)
+All three alpha suspects were checked and are clean: imgFinal/readback alpha
+is 255 everywhere (BMP byte check), swapchain format=44 =
+VK_FORMAT_B8G8R8A8_UNORM (no sRGB in play), compositeAlpha=OPAQUE was already
+chosen (supported=0x9) and is now forced + logged. The real mechanism is the
+feedback-cancellation seed:
+- bufLastPresented starts ZEROED. Frame 0's fbcancel computes
+  `corrected = clamp(capture - 0, +/-4*maxDelta)` = `min(desktop, 48)/255`
+  per channel: a structured image capped at ~18% brightness.
+- encode presents it; bufLastPresented becomes that dark frame.
+- From frame 1 on, `corrected = clamp(capture - lastPresented, +/-48)` and
+  the capture IS the dark presented frame, so corrected ~= 0 and the loop
+  STABILIZES on the dark frame forever (stable fixed point: presented dark ->
+  capture dark -> delta ~ 0 -> stays dark). fbmean ~12 is just the wiggle
+  cursor echo (cursor is in the DDA capture but not in our presented frame).
+- The same clamp bug also explains why it could never self-correct: the only
+  "escape" signal (capture vs lastPresented difference) is ~0 by construction.
+
+### Fix (minimal)
+- `shaders/fbcancel.comp`: new SEED mode (push c.x=1, set for frame==0 only in
+  main.cpp): pass the capture UNclamped when lastPresented is still all-zero -
+  the "delta" IS the whole desktop at frame 0 and must seed the accumulation,
+  not be strangled by the transient safety bound. Normal frames unchanged.
+- Hardening (correctness, not the bug): overlay window is no longer
+  WS_EX_LAYERED (LWA + swapchain goes through DWM alpha paths) - plain
+  TOPMOST|TRANSPARENT popup; compositeAlpha forced OPAQUE with a loud warning
+  if unsupported; encode.comp writes A=1.0 explicitly (presented overlay is
+  opaque by construction).
+
+### Evidence (screen-verified)
+- Live run `--frames 60 --wiggle-idle 3`: frame 0 fbmean 40.8 -> 13.4 flat
+  across frames 9-14 (bounded, no divergence); verify frame 10 metrics PASS
+  (mean|final-native| B=0.458 G=0.123 R=0.502, structure PASS, changed 65%).
+- REAL screen screenshot (ui.ps1): BRIGHT desktop - vivid wallpaper, light
+  taskbar, readable windows, no global darkening/tint (out\_seedfix_live.png).
+- DDA ground truth of the displayed screen (out\_seedfix_dda2.png): BRIGHT -
+  the displayed image is truly bright, not a capture artifact.
+- Readback == screenshot == DDA, all bright: present path faithful.
+- Idle: 6300+ settle-skips at est mean|d|=0.000, zero GPU submissions while
+  static (event-driven idle intact); fbmean flat 13.38-13.47 over all frames.
+
+### Known follow-up (not the darkness bug)
+Fullscreen feedback can never observe the TRUE desktop (opaque overlay covers
+it; DDA sees only our own last frame + cursor). When frames process
+continuously, the network's correlated hue residual integrates at up to
++/-12/255 per processed frame (visible as the mild wallpaper hue shift) - a
+design limitation of fullscreen self-feedback, gated in practice by the
+settle-skip (drift only accrues while real activity processes frames).

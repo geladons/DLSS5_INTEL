@@ -1,6 +1,6 @@
 #version 460
 // ============================================================================
-// M3 encode — float RGB -> B8G8R8A8 bytes, alpha preserved from the raw frame.
+// M3 encode — float RGB -> B8G8R8A8 bytes, alpha FORCED opaque (M8B fix).
 // PORT of nr_encode8(), src/ref/nr_image.c:46-63 (bgra=1 path):
 //   value = value==value ? unit(value) : 0      (NaN -> 0, unit = clamp01)
 //   out[p*4 + (2-c)] = (uint8)(value*255 + 0.5) (B first: c=0 R -> byte 2 ...)
@@ -40,7 +40,10 @@ void main() {
     if (xy.x >= sz.x || xy.y >= sz.y) return;
     uint fullW = uint(pc.a.x);
     int left = pc.a.z, top = pc.a.w;
-    float a = imageLoad(imgIn, xy).a;                   // raw alpha preserved
+    float a = 1.0;   // M8B DARKNESS FIX (2026-09-20): the presented overlay is
+                     // composited OPAQUE (compositeAlpha=OPAQUE, non-layered
+                     // window); never propagate capture alpha into the final
+                     // image. (Desktop captures happen to be A=255 anyway.)
 
     if (pc.b.z == 0 && pc.b.w != 0) {                   // ACCUMULATE (feedback cancellation)
         bool inRegion = xy.x >= left && xy.x < left + pc.b.x &&

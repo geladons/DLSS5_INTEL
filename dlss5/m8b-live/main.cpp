@@ -45,6 +45,11 @@
 //     into the decode slot; the chain processes the echo-cancelled change,
 //     not the raw capture:
 //         presented(n) = capture(n) + deltaNet(n)   [echo cancels exactly]
+//     SEED (darkness fix 2026-09-20): on the FIRST processed frame the push
+//     flag c.x=1 passes the capture UNclamped. Frame 0 corrects against a
+//     ZEROED lastPresented (the "delta" IS the whole desktop); clamping it
+//     to the +/-48 safety bound presented an ~18%-brightness structured
+//     image that the loop then stabilized on forever - the dark overlay.
 //     bufLastPresented = exact copy of the last presented frame (imgFinal ->
 //     buffer copy every processed frame). The kernel runs FUSED in the main
 //     frame command buffer — a separate pre-pass submission measured
@@ -928,7 +933,7 @@ int main(int argc, char** argv) {
         // black rectangle over the desktop and the first DDA captures (and the
         // frame-0 region scan) would see a black screen instead of the desktop.
         // ShowWindow/SetWindowPos happen right before the first vkQueuePresentKHR.
-        std::printf("[win] overlay created (HIDDEN until first present): %ux%u at (%d,%d), WS_POPUP | TOPMOST | TRANSPARENT | LAYERED\n",
+        std::printf("[win] overlay created (HIDDEN until first present): %ux%u at (%d,%d), WS_POPUP | TOPMOST | TRANSPARENT (NOT layered - DWM opaque path)\n",
                     W, H, outX, outY);
         VkWin32SurfaceCreateInfoKHR sci{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
         sci.hinstance = GetModuleHandleW(nullptr);
@@ -1027,9 +1032,10 @@ int main(int argc, char** argv) {
         swapImages.resize(ni);
         vkGetSwapchainImagesKHR(c.dev, swapchain, &ni, swapImages.data());
         for (auto im : swapImages) swapViews.push_back(CreateView(c, im, swapFormat));
-        std::printf("[present] format=%d images=%u mode=%s path=%s\n", (int)swapFormat, ni,
+        std::printf("[present] format=%d images=%u mode=%s path=%s compositeAlpha=OPAQUE(supported=0x%x)\n", (int)swapFormat, ni,
                     presentMode == VK_PRESENT_MODE_MAILBOX_KHR ? "MAILBOX" : "FIFO",
-                    swapStorage ? "blit.comp STORAGE direct" : "vkCmdCopyImage");
+                    swapStorage ? "blit.comp STORAGE direct" : "vkCmdCopyImage",
+                    surfCaps.supportedCompositeAlpha);
     }
 
     // ===================================================================
@@ -2332,12 +2338,20 @@ int main(int argc, char** argv) {
         if (!novideo) {   // fbcancel: corrected = clamp(capture - lastPresented, +/-4*maxDelta)
                           // (safety clamp only — real content must pass; the tight
                           // divergence bound is the composite residual clamp in
-                          // compose) as float RGB into the decode slot + stats
+                          // compose) as float RGB into the decode slot + stats.
+                          // SEED: on the FIRST processed frame (frame==0) the
+                          // push flag c.x=1 makes fbcancel pass the capture
+                          // UNclamped: lastPresented is still all-zero there, so
+                          // the "delta" IS the whole desktop and clamping it to
+                          // +/-4*maxDelta (48/255) presented an ~18%-brightness
+                          // structured image that the feedback loop then
+                          // stabilized on forever (the darkness bug).
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeFbcancel);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLayout, 0, 1,
                                     &setFinal, 0, nullptr);
             Push p{};
             p.a[0] = (int32_t)W; p.a[1] = (int32_t)H; p.b[0] = maxDelta * 4;
+            p.c[0] = frame == 0 ? 1.0f : 0.0f;
             push(p);
             vkCmdDispatch(cmd, W / 16, H / 16, 1);
             barrierAll();

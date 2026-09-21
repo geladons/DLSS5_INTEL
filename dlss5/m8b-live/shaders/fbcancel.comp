@@ -39,6 +39,7 @@
 // frames, measured 2026-09-20).
 //
 //   push a = (w, h, 0, 0);  b = (safetyClampInt, 0, 0, 0)
+//          c.x = 1.0 -> SEED frame (first processed frame only)
 // ============================================================================
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 layout(rgba8, set = 0, binding = 0) uniform readonly image2D imgIn;    // raw capture
@@ -54,14 +55,31 @@ void main() {
     vec4 c = imageLoad(imgIn, xy);            // BGRA view: .x=B .y=G .z=R .w=A
     uint lp = lastp[p];
     int m = pc.b.x;                           // generous safety clamp (maxDelta*4)
-    // BGRA byte order: byte0=B (bits 0-7), byte1=G (bits 8-15), byte2=R (16-23).
-    // RgbFull channel order (same as decode.comp): 0=R, 1=G, 2=B.
-    int dR = clamp(int(c.z * 255.0 + 0.5) - int((lp >> 16) & 0xFFu), -m, m);
-    int dG = clamp(int(c.y * 255.0 + 0.5) - int((lp >> 8) & 0xFFu), -m, m);
-    int dB = clamp(int(c.x * 255.0 + 0.5) - int(lp & 0xFFu), -m, m);
+    int dR, dG, dB;
+    if (pc.c.x > 0.5) {
+        // SEED frame (first processed frame): bufLastPresented is all-zero, so
+        // the "corrected delta" IS the whole desktop. It must pass UNclamped:
+        // with the +-4*maxDelta safety clamp the entire screen would be capped
+        // at 48/255 (~18% grey, structure preserved) and the cancellation
+        // loop would stabilize on that dark frame FOREVER - capture(dark)
+        // ~= lastPresented(dark) -> fbmean ~ small -> no escape. That dark
+        // structured lock-in was the M8B "dark/color-shifted overlay" bug
+        // (DDA + GDI agreed the screen was dark; video-mode readback dark;
+        // fbmean healthy ~12 - all consistent with a stable dark fixed point).
+        dR = int(c.z * 255.0 + 0.5);
+        dG = int(c.y * 255.0 + 0.5);
+        dB = int(c.x * 255.0 + 0.5);
+    } else {
+        // BGRA byte order: byte0=B (bits 0-7), byte1=G (bits 8-15), byte2=R (16-23).
+        // RgbFull channel order (same as decode.comp): 0=R, 1=G, 2=B.
+        dR = clamp(int(c.z * 255.0 + 0.5) - int((lp >> 16) & 0xFFu), -m, m);
+        dG = clamp(int(c.y * 255.0 + 0.5) - int((lp >> 8) & 0xFFu), -m, m);
+        dB = clamp(int(c.x * 255.0 + 0.5) - int(lp & 0xFFu), -m, m);
+    }
     v[p * 3u + 0u] = float(dR) * (1.0 / 255.0);
     v[p * 3u + 1u] = float(dG) * (1.0 / 255.0);
     v[p * 3u + 2u] = float(dB) * (1.0 / 255.0);
-    // u32 counter: max sum = W*H*3*(4*maxDelta) = 2.1e9 < 4.29e9 at defaults.
+    // u32 counter: normal-path max = W*H*3*(4*maxDelta) = 2.1e9; seed-path max
+    // = W*H*3*255 = 2.8e9; both < 4.29e9 at 2560x1440 defaults.
     atomicAdd(sumAbs, uint(abs(dR) + abs(dG) + abs(dB)));
 }

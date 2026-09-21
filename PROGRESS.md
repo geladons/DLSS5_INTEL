@@ -457,3 +457,23 @@ golden.py compare; isolation: isolate.py, quant.py, quant2.py forensics).
 - Final verify `--frames 40 --novideo`: frames 10/30 PASS, mean|d| ~3.3-4.7,
   out\m8b_processed.bmp -> PNG INSPECTED clean (no rainbow/red shift).
 - Net: 4.2 (static arrival pace) -> 11.8 fps (content-paced); GPU/frame ~50 ms.
+
+
+## M8b darkness fix (2026-09-20) — ROOT CAUSE FOUND + FIXED, screen-verified
+
+- **Root cause:** frame-0 fbcancel safety-clamp lock-in. With bufLastPresented
+  zeroed, frame 0 corrected = clamp(capture, +/-48) = min(desktop,48)/255 ->
+  presents an ~18%-brightness structured frame; the feedback loop then
+  stabilizes on it forever (capture(dark) ~= lastPresented(dark), fbmean ~12 =
+  cursor echo only). NOT alpha (A=255 verified), NOT sRGB (format 44 UNORM),
+  compositeAlpha OPAQUE already chosen (now forced + logged).
+- **Fix:** fbcancel SEED mode (push c.x=1 on frame==0) passes the capture
+  unclamped to seed the accumulation; hardening: non-layered TOPMOST popup,
+  forced OPAQUE compositeAlpha, encode writes A=1.0.
+- **Verified:** live 60-frame run - screen BRIGHT (GDI screenshot +
+  DDA ground truth + imgFinal readback all agree), fbmean flat/bounded,
+  settle-skip + GPU-idle intact (6300 idle polls, 0 submissions).
+- **Known follow-up:** fullscreen self-feedback can't see the true desktop;
+  correlated network hue residual integrates <=12/255 per processed frame
+  (mild wallpaper hue shift) - design limitation, gated by settle-skip.
+- Commit: see git log (m8b: frame-0 fbcancel safety-clamp lock-in ...).
