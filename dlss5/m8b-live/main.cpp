@@ -31,7 +31,27 @@
 // the network grid is pinned to the chain's 288 tokens), --novideo (no
 // overlay window/swapchain/present: capture + full chain + verify only —
 // chain-throughput sanity mode), --max-delta N (feedback delta clamp,
-// default 12), --settle-thresh X (settle detection, default 0.5).
+// default 12), --settle-thresh X (settle detection, default 0.5),
+// --strength F (composite residual scale 0..2, default 1.0),
+// --colorpass 0|1 (default 0: high-pass the residual's color/low-freq
+// component so it cannot integrate into a screen-wide tint).
+//
+// UX (2026-09-20, live-user-testing fixes):
+//   * CLICK-THROUGH overlay: WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_TOPMOST
+//     (+ NOACTIVATE | TOOLWINDOW) — every click/keystroke goes to the windows
+//     below the overlay; it can never steal focus or eat input.
+//   * GLOBAL HOTKEYS (registered on the main thread, drained via PeekMessage
+//     on every 100 ms DDA-acquire wake — the loop never blocks >100 ms, so
+//     hotkeys answer even mid-frame):
+//       CTRL+ALT+Q = clean quit (full Vulkan/D3D teardown, exit 0);
+//       CTRL+ALT+X = toggle the overlay: HIDDEN skips ALL processing (no DDA
+//       chain, no present, ~0% GPU) and the desktop returns to native.
+//   * HIGH-PASS COMPOSITE (the blue-tint fix): final = native + strength *
+//     highpass(delta), highpass = delta - boxblur(delta, 32px) as a GPU
+//     downscale+upscale pair (shaders/hpfilter.comp) on the head buffer
+//     before compose. Without it, any correlated residual DC integrates
+//     +residual into the accumulation EVERY processed frame when the desktop
+//     is static (capture == our own last frame) — the blue tint over time.
 //
 // OVERLAY FEEDBACK CANCELLATION (2026-09-20, the "rainbow explosion" fix):
 // the fullscreen topmost overlay is itself part of the desktop DDA captures,
@@ -395,6 +415,9 @@ struct Push { int32_t a[4]; int32_t b[4]; float c[4]; float d[4]; };
 // ------------------------------------------------------- overlay window ----
 static HWND g_hwnd = nullptr;
 static std::atomic<bool> g_stop{false};
+static std::atomic<bool> g_overlayHidden{false};  // CTRL+ALT+X: hidden = dead loop, desktop native
+static std::atomic<bool> g_quitHotkey{false};     // CTRL+ALT+Q: clean shutdown -> exit 0
+enum { HK_QUIT = 1, HK_TOGGLE = 2 };
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_DESTROY) { PostQuitMessage(0); return 0; }
     return DefWindowProcW(hwnd, msg, wp, lp);
@@ -668,6 +691,9 @@ int main(int argc, char** argv) {
     int maxDelta = 12;           // --max-delta N: per-channel feedback-delta clamp (1/255 units)
     double settleThresh = 0.5;   // --settle-thresh X: skip chain+present when mean|corrected delta|
                                  // (0-255 units) stays below this (settle detection, video mode)
+    float strength = 1.0f;       // --strength F: composite residual scale 0..2 (default 1.0)
+    int colorpass = 0;           // --colorpass 0|1: 1 = pass the residual's color/low-freq
+                                 // component (legacy); 0 = high-pass it away (default, no drift)
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--frames" && i + 1 < argc) framesTarget = std::atol(argv[++i]);
@@ -677,11 +703,16 @@ int main(int argc, char** argv) {
         else if (a == "--max-delta" && i + 1 < argc) maxDelta = std::atoi(argv[++i]);
         else if (a == "--settle-thresh" && i + 1 < argc) settleThresh = std::atof(argv[++i]);
         else if (a == "--scale" && i + 1 < argc) renderScale = (float)std::atof(argv[++i]);
-        else { std::fprintf(stderr, "usage: m8blive [--frames N] [--nowiggle] [--novideo] [--scale S(ignored)] [--wiggle-idle SECS] [--max-delta N] [--settle-thresh X]\n"); return 1; }
+        else if (a == "--strength" && i + 1 < argc) strength = (float)std::atof(argv[++i]);
+        else if (a == "--colorpass" && i + 1 < argc) colorpass = std::atoi(argv[++i]);
+        else { std::fprintf(stderr, "usage: m8blive [--frames N] [--nowiggle] [--novideo] [--scale S(ignored)] [--wiggle-idle SECS] [--max-delta N] [--settle-thresh X] [--strength F] [--colorpass 0|1]\n"); return 1; }
     }
     if (wiggleForbidden) wiggleIdleSec = 0;
     if (maxDelta < 1) maxDelta = 1;
     if (maxDelta > 255) maxDelta = 255;
+    if (strength < 0.0f) strength = 0.0f;
+    if (strength > 2.0f) strength = 2.0f;
+    colorpass = colorpass ? 1 : 0;
     SetConsoleCtrlHandler(CtrlHandler, TRUE);
     std::printf("=== M8B-LIVE: REAL DLSS 5 graph (71 blocks) live on the desktop, Intel Arc Pro B50 ===\n");
     std::printf("transport: m4-present-simple (CPU bridge) | core: m8-full-chain @03900ab (288 tokens, ~47 ms)\n");
@@ -690,6 +721,8 @@ int main(int argc, char** argv) {
     if (!novideo)
         std::printf("feedback-cancellation: ON (echo subtract + accumulate, max-delta=%d/255, settle-thresh=%.3f)\n",
                     maxDelta, settleThresh);
+    std::printf("composite: strength=%.2f, high-pass(color component)=%s\n",
+                strength, colorpass ? "OFF (--colorpass 1, legacy)" : "ON (default)");
     if (renderScale != 0.55f)
         std::printf("[info] --scale ignored: network grid pinned to 12x24 = the chain's 288 tokens\n");
     std::printf("\n");
@@ -933,7 +966,13 @@ int main(int argc, char** argv) {
         // black rectangle over the desktop and the first DDA captures (and the
         // frame-0 region scan) would see a black screen instead of the desktop.
         // ShowWindow/SetWindowPos happen right before the first vkQueuePresentKHR.
-        std::printf("[win] overlay created (HIDDEN until first present): %ux%u at (%d,%d), WS_POPUP | TOPMOST | TRANSPARENT (NOT layered - DWM opaque path)\n",
+        // CLICK-THROUGH (UX fix 2026-09-20, verified): WS_EX_TRANSPARENT is what
+        // routes every mouse click/keystroke to the windows BELOW the overlay —
+        // clicks never hit the overlay itself. WS_EX_TOPMOST keeps it above the
+        // desktop; WS_EX_LAYERED + LWA_ALPHA(255) keeps the swapchain on the DWM
+        // path the brightness fix validated (opaque compositeAlpha, A=255).
+        std::printf("[win] overlay created (HIDDEN until first present): %ux%u at (%d,%d) | "
+                    "exStyle=TOPMOST|TRANSPARENT|LAYERED|NOACTIVATE|TOOLWINDOW (CLICK-THROUGH)\n",
                     W, H, outX, outY);
         VkWin32SurfaceCreateInfoKHR sci{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
         sci.hinstance = GetModuleHandleW(nullptr);
@@ -942,6 +981,53 @@ int main(int argc, char** argv) {
         DWORD mtid = 0;
         msgThread = CreateThread(nullptr, 0, MsgPumpThread, nullptr, 0, &mtid);
     }
+
+    // ---------------- global hotkeys (UX fix 2026-09-20) -------------------
+    // CTRL+ALT+Q = clean quit (destroy device, exit 0); CTRL+ALT+X = toggle
+    // the overlay (hidden = ALL processing skipped, desktop back to native).
+    // Registered by the MAIN thread: WM_HOTKEY then lands in the main-thread
+    // queue, which the live loop drains via PeekMessage on every DDA-acquire
+    // wake (100 ms timeout — worst-case hotkey latency ~100 ms while busy).
+    // Test note: this host drops injected modifiers, so tests PostMessage the
+    // WM_HOTKEY (0x0312) directly to our own window — same code path.
+    {
+        HWND regHwnd = g_hwnd ? g_hwnd : nullptr;
+        bool okQ = RegisterHotKey(regHwnd, HK_QUIT, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'Q') != FALSE;
+        bool okX = RegisterHotKey(regHwnd, HK_TOGGLE, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'X') != FALSE;
+        if (!okQ) std::fprintf(stderr, "[warn] RegisterHotKey CTRL+ALT+Q failed: %lu\n", GetLastError());
+        if (!okX) std::fprintf(stderr, "[warn] RegisterHotKey CTRL+ALT+X failed: %lu\n", GetLastError());
+        if (okQ || okX)
+            std::printf("[hotkey] registered: CTRL+ALT+Q=quit CTRL+ALT+X=toggle overlay (%s%s)\n",
+                        okQ ? "Q" : "", okX ? "X" : "");
+    }
+    // Drain the main-thread queue; handles WM_HOTKEY actions. Called on every
+    // acquire-wake so hotkeys stay live even while the loop blocks on DDA.
+    auto drainHotkeys = [&]() {
+        MSG m;
+        while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) {
+            if (m.message == WM_HOTKEY) {
+                if (m.wParam == HK_QUIT) {
+                    std::printf("[hotkey] CTRL+ALT+Q - quit requested (clean shutdown)\n");
+                    g_stop.store(true);
+                    g_quitHotkey.store(true);
+                } else if (m.wParam == HK_TOGGLE) {
+                    bool h = !g_overlayHidden.load();
+                    g_overlayHidden.store(h);
+                    if (g_hwnd) ShowWindow(g_hwnd, h ? SW_HIDE : SW_SHOW);
+                    std::printf("[hotkey] CTRL+ALT+X - overlay %s: processing %s, desktop %s\n",
+                                h ? "HIDDEN" : "SHOWN",
+                                h ? "PAUSED (no DDA, no chain, no present)"
+                                  : "RESUMED",
+                                h ? "NATIVE (feedback loop dead)" : "ENHANCED");
+                }
+            } else if (m.message == WM_QUIT) {
+                g_stop.store(true);
+            } else {
+                TranslateMessage(&m);
+                DispatchMessageW(&m);
+            }
+        }
+    };
 
     // ---------------- device with swapchain + cooperative-matrix support
     {
@@ -1059,15 +1145,16 @@ int main(int argc, char** argv) {
     // ===================================================================
     VkDescriptorSetLayout dsLayout;
     {
-        VkDescriptorSetLayoutBinding binds[12]{};
+        VkDescriptorSetLayoutBinding binds[13]{};
         binds[0] = {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
         for (uint32_t i = 1; i <= 8; ++i)
             binds[i] = {i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
         binds[9] = {9, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
         binds[10] = {10, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};  // bufLastPresented
         binds[11] = {11, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};  // fbStats (mapped)
+        binds[12] = {12, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};  // hpfilter low-res scratch
         VkDescriptorSetLayoutCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        ci.bindingCount = 12; ci.pBindings = binds;
+        ci.bindingCount = 13; ci.pBindings = binds;
         VK_CHECK(vkCreateDescriptorSetLayout(c.dev, &ci, nullptr, &dsLayout));
     }
     VkPipelineLayout pipeLayout;
@@ -1106,7 +1193,8 @@ int main(int argc, char** argv) {
     VkPipeline pipeEncode = makePipe("encode");
     VkPipeline pipeBlit = makePipe("blit");
     VkPipeline pipeFbcancel = makePipe("fbcancel");
-    std::printf("[VK] 7 transport pipelines up (+ blit + fbcancel); standin REMOVED\n");
+    VkPipeline pipeHpfilter = makePipe("hpfilter");
+    std::printf("[VK] 8 transport pipelines up (+ blit + fbcancel + hpfilter); standin REMOVED\n");
 
     VkCommandPool cmdPool;
     VkCommandBuffer cmd;
@@ -1464,7 +1552,7 @@ int main(int argc, char** argv) {
     //     startup so the first frame's corrected delta == the raw capture.
     //   bufFbStats: 4-byte mapped GPU counter; fbcancel adds sum(|delta|) per
     //     frame -> full-frame mean |corrected delta| in the summary/logs.
-    VkDeviceMemory memLastP = VK_NULL_HANDLE, memFbStats = VK_NULL_HANDLE;
+    VkDeviceMemory memLastP = VK_NULL_HANDLE, memFbStats = VK_NULL_HANDLE, memHp = VK_NULL_HANDLE;
     VkBuffer bufLastPresented = CreateBuf(c, (uint64_t)W * H * 4,
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memLastP);
@@ -1472,6 +1560,12 @@ int main(int argc, char** argv) {
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                                 &memFbStats);
+    // hpfilter low-frequency scratch: ceil(W/S)*ceil(H/S)*3 floats at S=32 ->
+    // 80*45*3 = 10800 floats; 64 KiB covers any region on this panel.
+    const uint32_t hpS = 32;
+    VkBuffer bufHp = CreateBuf(c, 65536,
+                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memHp);
     uint32_t* fbStatsPtr = nullptr;
     VK_CHECK(vkMapMemory(c.dev, memFbStats, 0, 8, 0, (void**)&fbStatsPtr));
     {
@@ -1670,6 +1764,7 @@ int main(int argc, char** argv) {
         writeBuf(setFinal, 7, bufNr, (uint64_t)regionW * regionH * 3 * 4);
         writeBuf(setFinal, 10, bufLastPresented, (uint64_t)W * H * 4);  // feedback cancellation
         writeBuf(setFinal, 11, bufFbStats, 8);                          // settle stats
+        writeBuf(setFinal, 12, bufHp, 65536);                           // hpfilter low-res scratch
     }
     writeImg(setFinal, 9, viewFinal);
     for (size_t i = 0; i < setBlit.size(); ++i) {
@@ -1677,6 +1772,7 @@ int main(int argc, char** argv) {
         writeBuf(setBlit[i], 1, bufRgb, (uint64_t)W * H * 3 * 4);
         writeBuf(setBlit[i], 8, bufMax, 4096 * 4);
         writeImg(setBlit[i], 9, swapViews[i]);
+        writeBuf(setBlit[i], 12, bufHp, 65536);   // same layout: keep the descriptor defined
     }
     std::printf("[mem] intermediates device-local; readback host-coherent; blit sets %zu\n", setBlit.size());
 
@@ -2119,20 +2215,34 @@ int main(int argc, char** argv) {
     uint64_t prevSampleCnt = 0;
 
     while (!g_stop.load() && frame < framesTarget) {
+        // ---- (a0) HOTKEY-HIDDEN: CTRL+ALT+X hid the overlay — skip ALL
+        // processing (no DDA chain, no present, ~0% GPU). The desktop returns
+        // to its native compositing (the overlay stops covering it, so the
+        // feedback loop is dead by construction). Keep draining the queue so
+        // the show-again / quit hotkeys stay live while hidden.
+        if (g_overlayHidden.load()) {
+            drainHotkeys();
+            Sleep(50);
+            continue;
+        }
         const auto tLoopTop = clk::now();
-        // ---- (a) EVENT-DRIVEN DDA capture: block up to 1000 ms for a real
-        // desktop update; process+present ONLY when one arrives. On idle the
-        // loop presents nothing and does no GPU work (~0% GPU on a static
-        // screen). Optional --wiggle-idle N re-arms the gentle cursor
-        // generator after N seconds of no updates (default OFF).
+        // ---- (a) EVENT-DRIVEN DDA capture: block up to 100 ms for a real
+        // desktop update (100 ms — NOT 1000 — so registered hotkeys stay
+        // responsive while the loop is parked in AcquireNextFrame; each
+        // timeout wake drains the queue). Process+present ONLY when an update
+        // arrives. On idle the loop presents nothing and does no GPU work
+        // (~0% GPU on a static screen). Optional --wiggle-idle N re-arms the
+        // gentle cursor generator after N seconds of no updates (default OFF).
         bool fresh = false;
         double estMeanDelta = 0.0;   // sparse settle estimate (video mode)
         {
             DXGI_OUTDUPL_FRAME_INFO fi{};
             ComPtr<IDXGIResource> res;
-            HRESULT hr = dup->AcquireNextFrame(1000, &fi, &res);
+            HRESULT hr = dup->AcquireNextFrame(100, &fi, &res);
             if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
                 ++dropped;
+                drainHotkeys();   // hotkeys stay live while parked in acquire
+                if (g_stop.load()) break;
                 const double idleSec =
                     std::chrono::duration<double>(clk::now() - tLastAcquired).count();
                 if (idleSec - lastIdleLogSec >= 5.0) {
@@ -2428,11 +2538,35 @@ int main(int argc, char** argv) {
             p.b[0] = regionW; p.b[1] = regionW; p.b[2] = 1; p.b[3] = 4; p.d[0] = 2; p.d[1] = 5; push(p);
             vkCmdDispatch(cmd, (regionW + 15) / 16, (regionH + 15) / 16, 1);
             barrierAll();
+            if (!colorpass && strength > 0.0f) {
+                // ---- high-pass the composite residual (kill color drift):
+                // delta_hp = delta - boxblur(delta, hpS) via a downscale+
+                // upscale pair on the head buffer (binding 5) BEFORE compose.
+                // With the desktop static the capture IS our own last frame
+                // (corrected ~0), so any DC/low-freq residual component would
+                // integrate +strength*residual EVERY processed frame — the
+                // accumulating blue tint. Removing the low-frequency image
+                // leaves only spatial detail; per-channel MEAN of the applied
+                // delta stays ~0 (verified: |mean| <= 0.5 on the live run).
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeHpfilter);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLayout, 0, 1,
+                                        &setFinal, 0, nullptr);
+                Push hp{};
+                hp.a[0] = regionW; hp.a[1] = regionH; hp.a[2] = (int32_t)hpS; hp.a[3] = 0;
+                push(hp);
+                vkCmdDispatch(cmd, (regionW / hpS + 2), (regionH / hpS + 2), 1);
+                barrierAll();
+                hp.a[3] = 1;
+                push(hp);
+                vkCmdDispatch(cmd, (regionW + 15) / 16, (regionH + 15) / 16, 1);
+                barrierAll();
+            }
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeCompose);
             p.a[0] = (int32_t)W; p.a[1] = region.top; p.a[2] = region.left;
             p.b[0] = regionW; p.b[1] = regionH;
             p.c[0] = (float)maxDelta / 255.0f;             // composite delta clamp
             p.c[1] = novideo ? 0.0f : 1.0f;                // accumulate mode (video)
+            p.c[2] = strength;                             // --strength (0..2)
             push(p);
             vkCmdDispatch(cmd, ((uint64_t)regionW * regionH + 255) / 256, 1, 1);
             barrierAll();
@@ -2724,7 +2858,7 @@ int main(int argc, char** argv) {
                 WriteBmpBGRA("out\\m8b_processed.bmp", finalPx, W, H);
                 savedPair = true;
             }
-            double meanAbs[3] = {0, 0, 0}, gradD[3] = {0, 0, 0};
+            double meanAbs[3] = {0, 0, 0}, gradD[3] = {0, 0, 0}, meanD[3] = {0, 0, 0};
             uint64_t changed = 0, total = (uint64_t)regionW * regionH;
             for (int y = 0; y < regionH; ++y) {
                 for (int x = 0; x < regionW; ++x) {
@@ -2733,6 +2867,7 @@ int main(int argc, char** argv) {
                     for (int ch = 0; ch < 3; ++ch) {
                         d[ch] = (int)finalPx[fullP * 4 + ch] - (int)nativeRef[fullP * 4 + ch];
                         meanAbs[ch] += std::abs(d[ch]);
+                        meanD[ch] += (double)d[ch];
                     }
                     if (d[0] || d[1] || d[2]) ++changed;
                     int x2 = x < regionW - 1 ? x + 1 : x;
@@ -2746,7 +2881,7 @@ int main(int argc, char** argv) {
                     }
                 }
             }
-            for (int ch = 0; ch < 3; ++ch) { meanAbs[ch] /= (double)total; gradD[ch] /= (double)total; }
+            for (int ch = 0; ch < 3; ++ch) { meanAbs[ch] /= (double)total; gradD[ch] /= (double)total; meanD[ch] /= (double)total; }
             double meanGrad = (gradD[0] + gradD[1] + gradD[2]) / 3.0;
             bool ok = (meanAbs[0] > 0 && meanAbs[1] > 0 && meanAbs[2] > 0 &&
                        meanGrad > 0 && changed > 0);
@@ -2754,6 +2889,8 @@ int main(int argc, char** argv) {
             anyVerify = true;
             std::printf("[metrics] frame %ld region %dx%d: mean|final-native| B=%.5f G=%.5f R=%.5f "
                         "(must be > 0)\n", frame, regionW, regionH, meanAbs[0], meanAbs[1], meanAbs[2]);
+            std::printf("[metrics] frame %ld SIGNED delta mean B=%.4f G=%.4f R=%.4f (0-255; |mean|<=0.5 => "
+                        "no color drift; high-pass target)\n", frame, meanD[0], meanD[1], meanD[2]);
             std::printf("[metrics] structure: mean |grad(delta)| B=%.5f G=%.5f R=%.5f (> 0); changed %.2f%% "
                         "=> %s\n", gradD[0], gradD[1], gradD[2],
                         100.0 * (double)changed / (double)total, ok ? "PASS" : "FAIL");
@@ -2811,7 +2948,7 @@ int main(int argc, char** argv) {
     vkDestroySemaphore(c.dev, semRender, nullptr);
     vkDestroyCommandPool(c.dev, cmdPool, nullptr);
     for (VkPipeline p : {pipeDecode, pipeLetter, pipeRescale, pipeFeatures, pipeCompose,
-                         pipeEncode, pipeBlit})
+                         pipeEncode, pipeBlit, pipeFbcancel, pipeHpfilter})
         vkDestroyPipeline(c.dev, p, nullptr);
     vkDestroyPipelineLayout(c.dev, pipeLayout, nullptr);
     for (ChainPipe* cp : {&pGemm, &pGemm1, &pCos, &pCosW, &pSmax, &pEw, &pPart, &pTrans,
@@ -2823,11 +2960,11 @@ int main(int argc, char** argv) {
     vkDestroyDescriptorPool(c.dev, dpool, nullptr);
     vkDestroyDescriptorSetLayout(c.dev, dsLayout, nullptr);
     for (VkBuffer b : {bufRgb, bufMax, bufT, bufHeadUp, bufFin, bufNr, bufRbFinal,
-                       bufRbNr, bufUpload, bufDbg, bufLastPresented})
+                       bufRbNr, bufUpload, bufDbg, bufLastPresented, bufFbStats, bufHp})
         vkDestroyBuffer(c.dev, b, nullptr);
     for (VkDeviceMemory m : {memRgb, memMax, memT, memHeadUp, memFin, memNr,
                              memRbFinal, memRbNr, memDbg, memImgFinal, memImgNr, memImgIn, memUpload,
-                             memLastP})
+                             memLastP, memFbStats, memHp})
         vkFreeMemory(c.dev, m, nullptr);
     if (cbuf.mapped) vkUnmapMemory(c.dev, cbuf.mem);
     if (cbuf.buf) vkDestroyBuffer(c.dev, cbuf.buf, nullptr);
@@ -2854,5 +2991,9 @@ int main(int argc, char** argv) {
         if (g_hwnd) DestroyWindow(g_hwnd);
     }
 
+    // CTRL+ALT+Q is an intentional clean shutdown — always exit 0 (teardown
+    // above already destroyed device/swapchain/buffers). Hotkeys are freed by
+    // process exit.
+    if (g_quitHotkey.load()) return 0;
     return pass ? 0 : 1;
 }

@@ -23,12 +23,16 @@
 // nr_frame.py compose() takes the same branch).
 //
 //   push a = (fullStridePx, regionTop, regionLeft, 0);  b = (regionW, regionH, 0, 0)
-// M8B (2026-09-20): c = (maxDelta01, accumulateMode, 0, 0). maxDelta01 clamps
+// M8B (2026-09-20): c = (maxDelta01, accumulateMode, strength, 0). maxDelta01 clamps
 // the composite (enhancement) delta to +/-maxDelta/255 so the feedback loop
 // through the overlay cannot diverge (0 or >1 = legacy unclamped). In
 // accumulate mode (overlay present, c.y > 0.5) `fin` carries the SIGNED
 // composite delta (clamped) instead of the full output color — encode adds it
 // onto the last presented frame (feedback-cancellation accumulation domain).
+// M8B UX (2026-09-20): c.z = strength (0..2, default 1) scales the network
+// residual AFTER the hpfilter high-pass (final = native + strength*hp(delta))
+// — the residual buffer already had its low-frequency/color component removed
+// by shaders/hpfilter.comp (unless --colorpass 1).
 // ============================================================================
 #extension GL_GOOGLE_include_directive : require
 #include "publish.glsl"
@@ -49,9 +53,10 @@ void main() {
 
     uint natP = (uint(pc.a.y) + y) * uint(pc.a.x) + (uint(pc.a.z) + x);
     float m = pc.c.x > 0.0 && pc.c.x < 1.0 ? pc.c.x : 1.0;   // composite (net residual) clamp
+    float str = pc.c.z > 0.0 ? pc.c.z : 1.0;                 // --strength (default 1)
     for (uint c = 0u; c < 3u; ++c) {
         float source = nat[natP * 3u + c];
-        float halfv = half_round(hup[p * 4u + c]) * 0.25;
+        float halfv = half_round(hup[p * 4u + c]) * 0.25 * str;
         if (pc.c.y > 0.5) {
             // Accumulate mode (feedback cancellation): fin = corrected(source)
             // + the network's composite residual, where ONLY the residual is
