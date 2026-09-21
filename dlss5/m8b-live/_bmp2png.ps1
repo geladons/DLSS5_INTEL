@@ -1,5 +1,6 @@
-param([string]$src, [string]$dst)
+param([string]$In, [string]$Out)
 Add-Type -AssemblyName System.Drawing
-$b = [System.Drawing.Bitmap]::FromFile($src)
-$b.Save($dst, [System.Drawing.Imaging.ImageFormat]::Png)
-$b.Dispose()
+$bmp = [System.Drawing.Bitmap]::FromFile($In)
+$bmp.Save($Out, [System.Drawing.Imaging.ImageFormat]::Png)
+$bmp.Dispose()
+Write-Output "saved $Out"
