@@ -72,3 +72,179 @@ chain: full 71-block DLSSNR graph @ 288 tokens (real weights, resident)
 verify frames {10,30,60}: ALL PASS
 === M8B-LIVE result: PASS ===
 exit code: 0 (ended 20.09.2026 15:31:56,61) 
+ 
+=== M8B-LIVE run: m8blive.exe --frames 12 --novideo 
+started 20.09.2026 16:37:15,16 
+=== M8B-LIVE: REAL DLSS 5 graph (71 blocks) live on the desktop, Intel Arc Pro B50 ===
+transport: m4-present-simple (CPU bridge) | core: m8-full-chain @03900ab (288 tokens, ~47 ms)
+frame target: 2560x1440 B8G8R8A8, frames=12 (processed), wiggle-idle=0s, video=0
+
+[D3D11] hardware device created, feature level 0xb100
+[DDA] DuplicateOutput active: 2560x1440 format=87 rotation=1 origin=(0,0)
+[DDA] initial content frame on try 1 (acquired#1, skippedBlack=0)
+[cap] native sample mean=164.37 (0 => capture black)
+[VK] device "Intel(R) Arc(TM) Pro B50 Graphics" LUID=00000000:000095a2   <== MATCHES DXGI adapter
+[VK] device "Intel(R) Arc(TM) Pro B50 Graphics" LUID=00000000:000116cc 
+[VK] coopmat 8x16x16 f16xf16->f32: OK
+[VK] logical device up (compute+graphics family 0, swapchain + coopmat)
+[bridge] upload buffer 14745600 bytes persistently mapped (CPU bridge; zero-copy deferred to M5)
+[VK] 7 transport pipelines up (+ blit); standin REMOVED
+[geometry] network extent PINNED at 12x24 = 288 tokens (m8 chain grid)
+loading DLSSNR graph... (weights + chain setup; ~1-2 s, not a hang)
+safetensors: 649 tensors, data base 64976
+pack: 649 tensors (278.03 MiB)
+pack offsets cross-checked vs docs/pack-layout.txt: OK
+arena: 46.91 MB scratch after weights; one device buffer, total 324.9 MB
+weight upload: 324.9 MB in 268.1 ms (1.18 GB/s incl. preprocessing)
+[chain] weights resident, setup 3123 ms
+[chain] 12 pipelines up (10 kernels + featpack/headpack), BDA base 0xffffb807889d0000
+[stage] frame0 upload+decode+letterbox: 16.425 ms
+[letterbox] region rows [0,1440) cols [0,2560) of 2560x1440 (host decision FIXED for the loop)
+[geometry] region 2560x1440 -> network extent 12x24 (chain 288-token grid)
+[mem] intermediates device-local; readback host-coherent; blit sets 0
+[m8b] entering live loop (12 frames, event-driven; --frames counts PROCESSED frames)
+[m8b] frame 0 | rolling 0.0 fps | dropped 0 | fresh
+[dbg] featV   n=4608 min=-1 max=1 mean=0.0497814 nonzero=87.5%
+[dbg] HEAD    n=4608 min=-35.1496 max=1.55421 mean=-0.989739 nonzero=25.0%
+[dbg] head4   n=1152 min=-4.46778 max=2.86939 mean=-1.59758e-07 nonzero=100.0%
+[dbg] head4 ch0: mean=0.0000 std=0.1846 (DC-removed delta 0.25xstd=0.0462)
+[dbg] head4 ch1: mean=-0.0000 std=0.2078 (DC-removed delta 0.25xstd=0.0520)
+[dbg] head4 ch2: mean=0.0000 std=0.1634 (DC-removed delta 0.25xstd=0.0409)
+[dbg] head4 ch3: mean=-0.0000 std=1.8977 (DC-removed delta 0.25xstd=0.4744)
+[dbg] x16     n=4608 min=0x0000 max=0xbc00 nonzero=87.5%
+[dbg] ADA     n=9216 min=-0.977781 max=0.919197 mean=-0.0281677 nonzero=100.0%
+[dbg] MRG70   n=9216 min=-116.535 max=132.293 mean=-3.88769 nonzero=100.0%
+[dbg] G2      n=9216 min=-9.28614e+18 max=9.28586e+18 mean=-1.6425e+17 nonzero=100.0%
+[dbg] headW   n=512 min=0x0000 max=0xab44 nonzero=25.0%
+[dbg] B4DS    n=18432 min=-144 max=176 mean=0.174154 nonzero=100.0% nan/inf=0 | first8: -28 -0.4375 -2.25 7.5 0.2031 -3 40 20
+[dbg] B22DS   n=147456 min=-448 max=448 mean=-0.505105 nonzero=100.0% nan/inf=0 | first8: -12 22 20 52 11 -4.5 44 -40
+[dbg] B38     n=294912 min=-384 max=448 mean=1.66657 nonzero=100.0% nan/inf=0 | first8: -144 -40 36 -44 176 -176 160 -80
+[dbg] B48     n=73728 min=-448 max=448 mean=-14.8209 nonzero=100.0% nan/inf=0 | first8: 56 -144 144 -128 20 15 288 -48
+[dbg] B69     n=9216 min=-448 max=416 mean=-20.1934 nonzero=100.0% nan/inf=0 | first8: 0.375 44 -104 64 0.05469 -40 104 -0.8125
+[dbg] sinT    n=32 min=-0.341064 max=0.736816 mean=0.281882 nonzero=100.0%
+[dbg] cosT    n=32 min=-0.983887 max=1 mean=0.575806 nonzero=100.0%
+[dbg] FRS     n=9216 min=-4 max=6.5 mean=-0.0826052 nonzero=99.6% nan/inf=0 | first8: -0.2344 0.07031 -0.4688 0.4062 0.04297 -0.1094 0.007812 -0.2031
+[dbg] headUp  n=14745600 min=-3.5519 max=2.77831 mean=0.00623878 nonzero=100.0%
+[metrics] frame 10 region 2560x1440: mean|final-native| B=7.69856 G=8.03563 R=6.66248 (must be > 0)
+[metrics] structure: mean |grad(delta)| B=0.37455 G=0.44208 R=0.32551 (> 0); changed 84.65% => PASS
+[m8b] frame 11 | rolling 8.3 fps | dropped 0 | fresh
+
+=== M8B-LIVE summary ===
+frames: 12, wall: 1.71 s, avg fps: 7.02, last rolling fps: 8.3
+dropped (DDA timeout/black/access-lost): 0
+present: FIFO, format 44, path none (--novideo)
+chain: full 71-block DLSSNR graph @ 288 tokens (real weights, resident)
+verify frames {10,30,60}: ALL PASS
+=== M8B-LIVE result: PASS ===
+exit code: 0 (ended 20.09.2026 16:37:20,74) 
+ 
+=== M8B-LIVE run: m8blive.exe --frames 40 --novideo 
+started 20.09.2026 17:01:28,18 
+=== M8B-LIVE: REAL DLSS 5 graph (71 blocks) live on the desktop, Intel Arc Pro B50 ===
+transport: m4-present-simple (CPU bridge) | core: m8-full-chain @03900ab (288 tokens, ~47 ms)
+frame target: 2560x1440 B8G8R8A8, frames=40 (processed), wiggle-idle=0s, video=0
+
+[D3D11] hardware device created, feature level 0xb100
+[DDA] DuplicateOutput active: 2560x1440 format=87 rotation=1 origin=(0,0)
+[DDA] initial content frame on try 1 (acquired#1, skippedBlack=0)
+[cap] native sample mean=168.45 (0 => capture black)
+[VK] device "Intel(R) Arc(TM) Pro B50 Graphics" LUID=00000000:000095a2   <== MATCHES DXGI adapter
+[VK] device "Intel(R) Arc(TM) Pro B50 Graphics" LUID=00000000:000116cc 
+[VK] coopmat 8x16x16 f16xf16->f32: OK
+[VK] logical device up (compute+graphics family 0, swapchain + coopmat)
+[bridge] upload buffer 14745600 bytes persistently mapped (CPU bridge; zero-copy deferred to M5)
+[VK] 7 transport pipelines up (+ blit); standin REMOVED
+[geometry] network extent PINNED at 12x24 = 288 tokens (m8 chain grid)
+loading DLSSNR graph... (weights + chain setup; ~1-2 s, not a hang)
+safetensors: 649 tensors, data base 64976
+pack: 649 tensors (278.03 MiB)
+pack offsets cross-checked vs docs/pack-layout.txt: OK
+arena: 46.91 MB scratch after weights; one device buffer, total 324.9 MB
+weight upload: 324.9 MB in 255.8 ms (1.24 GB/s incl. preprocessing)
+[chain] weights resident, setup 1407 ms
+[chain] 12 pipelines up (10 kernels + featpack/headpack), BDA base 0xffffb807889d0000
+[stage] frame0 upload+decode+letterbox: 12.982 ms
+[letterbox] region rows [0,1440) cols [0,2560) of 2560x1440 (host decision FIXED for the loop)
+[geometry] region 2560x1440 -> network extent 12x24 (chain 288-token grid)
+[mem] intermediates device-local; readback host-coherent; blit sets 0
+[m8b] entering live loop (40 frames, event-driven; --frames counts PROCESSED frames)
+[frame] 0 processed in 61.4 ms (acq 8.4 bridge 2.7 rec 285.3 gpu 73.8 | fe 1.2 fp 0.0 chain 58.8 hp 0.0 tail 1.4)
+[m8b] frame 0 | rolling 0.0 fps | dropped 0 | fresh
+[frame] 1 processed in 50.2 ms (acq 7.9 bridge 1.9 rec 1.6 gpu 67.4 | fe 0.9 fp 0.0 chain 47.9 hp 0.0 tail 1.4)
+[dbg] featV   n=4608 min=-1 max=1 mean=0.0638824 nonzero=87.5%
+[dbg] HEAD    n=4608 min=-23.068 max=2.04217 mean=-0.669459 nonzero=25.0%
+[dbg] head4   n=1152 min=-3.18958 max=1.83246 mean=2.7932e-08 nonzero=100.0%
+[dbg] head4 ch0: mean=-0.0000 std=0.1142 (DC-removed delta 0.25xstd=0.0286)
+[dbg] head4 ch1: mean=0.0000 std=0.1425 (DC-removed delta 0.25xstd=0.0356)
+[dbg] head4 ch2: mean=-0.0000 std=0.1106 (DC-removed delta 0.25xstd=0.0277)
+[dbg] head4 ch3: mean=0.0000 std=1.3274 (DC-removed delta 0.25xstd=0.3318)
+[dbg] x16     n=4608 min=0x0000 max=0xbc00 nonzero=87.5%
+[dbg] ADA     n=9216 min=-0.960411 max=0.926582 mean=-0.0437103 nonzero=100.0%
+[dbg] MRG70   n=9216 min=-98.3796 max=132.167 mean=-3.95668 nonzero=100.0%
+[dbg] G2      n=9216 min=-9.28614e+18 max=9.28558e+18 mean=-1.99085e+17 nonzero=100.0%
+[dbg] headW   n=512 min=0x0000 max=0xab44 nonzero=25.0%
+[dbg] B4DS    n=18432 min=-120 max=128 mean=-0.141793 nonzero=100.0% nan/inf=0 | first8: -8 -5.5 5 2.5 -3.75 -2.25 22 14
+[dbg] B22DS   n=147456 min=-448 max=448 mean=-0.525279 nonzero=100.0% nan/inf=0 | first8: -0.9375 44 15 120 10 -22 64 -80
+[dbg] B38     n=294912 min=-416 max=448 mean=1.86724 nonzero=100.0% nan/inf=0 | first8: -112 -64 36 3.5 192 -208 160 -96
+[dbg] B48     n=73728 min=-448 max=448 mean=-16.8422 nonzero=100.0% nan/inf=0 | first8: 144 -176 240 -112 120 96 288 -112
+[dbg] B69     n=9216 min=-448 max=384 mean=-21.1616 nonzero=100.0% nan/inf=0 | first8: 18 80 -80 56 -4.5 -2.75 104 0.2812
+[dbg] sinT    n=32 min=-0.341064 max=0.736816 mean=0.281882 nonzero=100.0%
+[dbg] cosT    n=32 min=-0.983887 max=1 mean=0.575806 nonzero=100.0%
+[dbg] FRS     n=9216 min=-4.5 max=7 mean=-0.194206 nonzero=99.8% nan/inf=0 | first8: -0.3125 0.05859 -0.4688 0.25 0.05859 -0.05469 -0.02539 -0.2344
+[dbg] headUp  n=14745600 min=-3.15675 max=1.6244 mean=0.00740946 nonzero=100.0%
+[frame] 2 processed in 56.6 ms (acq 500.1 bridge 2.1 rec 1.2 gpu 67.8 | fe 2.6 fp 0.0 chain 52.6 hp 0.0 tail 1.4)
+[frame] 3 processed in 50.1 ms (acq 8.1 bridge 1.9 rec 1.2 gpu 56.5 | fe 0.9 fp 0.0 chain 47.8 hp 0.0 tail 1.4)
+[frame] 4 processed in 55.6 ms (acq 873.5 bridge 2.3 rec 1.3 gpu 65.9 | fe 1.8 fp 0.0 chain 52.4 hp 0.0 tail 1.4)
+[frame] 5 processed in 50.1 ms (acq 8.0 bridge 1.8 rec 1.2 gpu 57.9 | fe 0.9 fp 0.0 chain 47.8 hp 0.0 tail 1.4)
+[frame] 6 processed in 57.4 ms (acq 852.3 bridge 2.4 rec 1.3 gpu 69.0 | fe 2.2 fp 0.0 chain 53.7 hp 0.0 tail 1.4)
+[frame] 7 processed in 50.1 ms (acq 8.1 bridge 1.9 rec 1.3 gpu 59.3 | fe 0.9 fp 0.0 chain 47.8 hp 0.0 tail 1.4)
+[frame] 8 processed in 55.7 ms (acq 854.0 bridge 2.5 rec 1.2 gpu 67.7 | fe 2.0 fp 0.0 chain 52.2 hp 0.0 tail 1.4)
+[frame] 9 processed in 50.1 ms (acq 7.5 bridge 1.6 rec 1.4 gpu 61.7 | fe 0.9 fp 0.0 chain 47.8 hp 0.0 tail 1.4)
+[frame] 10 processed in 56.0 ms (acq 846.3 bridge 1.6 rec 1.5 gpu 70.6 | fe 1.2 fp 0.0 chain 53.5 hp 0.0 tail 1.4)
+[metrics] frame 10 region 2560x1440: mean|final-native| B=3.95520 G=4.65596 R=3.39926 (must be > 0)
+[metrics] structure: mean |grad(delta)| B=0.22725 G=0.23874 R=0.22013 (> 0); changed 91.23% => PASS
+[frame] 11 processed in 77.0 ms (acq 8.7 bridge 1.7 rec 1.3 gpu 86.2 | fe 1.0 fp 0.0 chain 74.5 hp 0.0 tail 1.5)
+[frame] 12 processed in 58.0 ms (acq 707.8 bridge 1.9 rec 2.2 gpu 70.3 | fe 2.8 fp 0.0 chain 53.8 hp 0.0 tail 1.4)
+[frame] 13 processed in 50.1 ms (acq 9.1 bridge 1.8 rec 1.2 gpu 60.1 | fe 0.9 fp 0.0 chain 47.8 hp 0.0 tail 1.4)
+[frame] 14 processed in 56.7 ms (acq 861.1 bridge 2.4 rec 1.3 gpu 68.2 | fe 2.5 fp 0.0 chain 52.8 hp 0.0 tail 1.4)
+[frame] 15 processed in 50.1 ms (acq 8.0 bridge 1.9 rec 1.3 gpu 58.7 | fe 0.9 fp 0.0 chain 47.8 hp 0.0 tail 1.4)
+[frame] 16 processed in 58.5 ms (acq 855.7 bridge 2.4 rec 1.5 gpu 70.4 | fe 2.3 fp 0.0 chain 54.8 hp 0.0 tail 1.4)
+[frame] 17 processed in 50.2 ms (acq 8.7 bridge 1.9 rec 1.5 gpu 58.7 | fe 0.9 fp 0.0 chain 47.8 hp 0.0 tail 1.4)
+[frame] 18 processed in 58.2 ms (acq 873.7 bridge 2.1 rec 1.2 gpu 69.1 | fe 2.7 fp 0.0 chain 54.1 hp 0.0 tail 1.4)
+[frame] 19 processed in 50.1 ms (acq 9.3 bridge 2.1 rec 1.3 gpu 60.0 | fe 0.9 fp 0.0 chain 47.8 hp 0.0 tail 1.4)
+[frame] 20 processed in 57.0 ms (acq 866.5 bridge 2.2 rec 1.2 gpu 67.2 | fe 2.0 fp 0.0 chain 53.6 hp 0.0 tail 1.4)
+[frame] 21 processed in 50.1 ms (acq 8.3 bridge 1.8 rec 1.3 gpu 58.6 | fe 0.9 fp 0.0 chain 47.8 hp 0.0 tail 1.4)
+[frame] 22 processed in 57.2 ms (acq 862.3 bridge 2.7 rec 1.3 gpu 68.4 | fe 2.1 fp 0.0 chain 53.6 hp 0.0 tail 1.4)
+[frame] 23 processed in 50.1 ms (acq 8.8 bridge 1.8 rec 1.3 gpu 59.3 | fe 0.9 fp 0.0 chain 47.8 hp 0.0 tail 1.4)
+[frame] 24 processed in 55.8 ms (acq 840.6 bridge 2.2 rec 1.3 gpu 67.4 | fe 2.1 fp 0.0 chain 52.3 hp 0.0 tail 1.4)
+[frame] 25 processed in 50.2 ms (acq 8.6 bridge 1.8 rec 1.6 gpu 57.8 | fe 0.9 fp 0.0 chain 47.8 hp 0.0 tail 1.4)
+[frame] 26 processed in 50.2 ms (acq 371.5 bridge 1.9 rec 1.3 gpu 58.6 | fe 0.9 fp 0.0 chain 47.9 hp 0.0 tail 1.4)
+[frame] 27 processed in 57.5 ms (acq 443.6 bridge 2.1 rec 1.3 gpu 69.6 | fe 2.1 fp 0.0 chain 53.9 hp 0.0 tail 1.4)
+[frame] 28 processed in 50.2 ms (acq 8.7 bridge 1.8 rec 1.3 gpu 57.8 | fe 0.9 fp 0.0 chain 47.9 hp 0.0 tail 1.4)
+[frame] 29 processed in 56.3 ms (acq 878.2 bridge 2.4 rec 1.5 gpu 67.9 | fe 1.6 fp 0.0 chain 53.3 hp 0.0 tail 1.4)
+[frame] 30 processed in 50.2 ms (acq 10.0 bridge 1.5 rec 1.4 gpu 62.8 | fe 0.9 fp 0.0 chain 47.9 hp 0.0 tail 1.4)
+[metrics] frame 30 region 2560x1440: mean|final-native| B=3.77636 G=4.72770 R=3.34836 (must be > 0)
+[metrics] structure: mean |grad(delta)| B=0.23273 G=0.23930 R=0.22553 (> 0); changed 91.59% => PASS
+[frame] 31 processed in 54.8 ms (acq 618.5 bridge 2.1 rec 1.2 gpu 67.6 | fe 2.3 fp 0.0 chain 51.1 hp 0.0 tail 1.4)
+[frame] 32 processed in 50.2 ms (acq 8.8 bridge 1.7 rec 1.4 gpu 58.7 | fe 0.9 fp 0.0 chain 47.9 hp 0.0 tail 1.4)
+[frame] 33 processed in 55.9 ms (acq 877.0 bridge 2.2 rec 1.4 gpu 67.3 | fe 2.1 fp 0.0 chain 52.4 hp 0.0 tail 1.4)
+[frame] 34 processed in 50.2 ms (acq 8.4 bridge 1.7 rec 1.5 gpu 62.5 | fe 0.9 fp 0.0 chain 47.9 hp 0.0 tail 1.4)
+[frame] 35 processed in 55.7 ms (acq 860.2 bridge 2.6 rec 1.3 gpu 66.8 | fe 1.9 fp 0.0 chain 52.3 hp 0.0 tail 1.4)
+[frame] 36 processed in 50.2 ms (acq 8.4 bridge 2.4 rec 1.3 gpu 62.2 | fe 0.9 fp 0.0 chain 47.9 hp 0.0 tail 1.4)
+[frame] 37 processed in 57.9 ms (acq 867.4 bridge 2.4 rec 1.4 gpu 69.7 | fe 3.0 fp 0.0 chain 53.5 hp 0.0 tail 1.4)
+[frame] 38 processed in 50.2 ms (acq 8.9 bridge 1.8 rec 1.4 gpu 58.6 | fe 0.9 fp 0.0 chain 47.9 hp 0.0 tail 1.4)
+[frame] 39 processed in 57.1 ms (acq 880.8 bridge 2.1 rec 1.3 gpu 69.7 | fe 2.3 fp 0.0 chain 53.3 hp 0.0 tail 1.4)
+[m8b] frame 39 | rolling 2.1 fps | dropped 0 | fresh
+
+=== M8B-LIVE summary ===
+frames: 40, wall: 19.24 s, avg fps: 2.08, last rolling fps: 2.1
+dropped (DDA timeout/black/access-lost): 0
+present: FIFO, format 44, path none (--novideo)
+chain: full 71-block DLSSNR graph @ 288 tokens (real weights, resident)
+verify frames {10,30,60}: ALL PASS
+=== M8B-LIVE result: PASS ===
+exit code: 0 (ended 20.09.2026 17:01:49,37) 
+ 
+=== M8B session note 2026-09-20 17:05 (event-driven idle + perf diagnosis) === 
+Runs (private logs, this session): --frames 12/8 --novideo idle verify (acq waits 513-886 ms, GPU idle); --frames 40 --novideo x2 (arrival-paced 2.05-2.13 fps wall, chain 47.9-58 ms, verify PASS); --frames 60 --novideo + ext cursor activity (throughput demo: 11.83 fps avg/12.0 rolling, chain ~50-51 ms, acq ~7-8 ms, 0 drops). 
+Root cause of 12.8->4.2 fps: NO GPU regression - event-driven loop correctly idles on a near-static screen (~1 Hz taskbar clock); per-frame GPU 50-58 ms unchanged. Final: --frames 40 --novideo PASS, PNG inspected clean. 

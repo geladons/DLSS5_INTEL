@@ -1,15 +1,56 @@
 # M8b-live — REAL DLSS 5 live on the desktop via Arc Pro B50 (FINAL, 2026-09-20)
 
 ## Verdict: PASS — the full 71-block DLSSNR graph runs live on the desktop
-Overlay presents the chain-processed frame at ~12.8 fps (2560x1440 capture,
+Overlay presents the chain-processed frame at ~12 fps (2560x1440 capture,
 288-token grid), verify metrics nonzero on frames 10/30/60, result PASS.
+Composite/format bug FIXED (no rainbow/overexposure, PNG-verified) and the
+live loop is now EVENT-DRIVEN: zero GPU burn while the screen is static.
+
+## Event-driven idle (user priority, 2026-09-20 final)
+- Live loop blocks on `IDXGIOutputDuplication::AcquireNextFrame(1000 ms)`.
+  Frame acquired -> process + present. Timeout -> NOTHING: no chain, no
+  present, no readback, no submit (GPU ~0% on a static screen). Idle
+  heartbeat every ~5 s: `[m8b] idle, waiting for updates (Ns ...)`.
+- Per-frame timing line: `[frame] n processed in X ms (acq .. bridge .. rec ..
+  gpu .. | fe .. fp .. chain .. hp .. tail ..)` via vkCmdWriteTimestamp
+  (query pool, 6 slots) + CPU timers.
+- Verified on static screen: alternating `acq 8 ms` (frame pending) and
+  `acq 513-886 ms` (blocking waits, zero GPU work between) — 40 frames paced
+  at ~1 Hz by the taskbar clock, wall 19.2 s, GPU idle throughout the gaps.
+- Cursor wiggle REMOVED from the default path. `--wiggle-idle N` (default
+  OFF) engages the gentle generator after N wall-clock seconds without any
+  acquired frame; it now disengages only on REAL screen content (sample-diff
+  discriminator: wiggle moves only the cursor ~<10 sparse samples, real
+  changes hit >32) instead of pulsing off on its own frames.
+- `--frames` counts PROCESSED frames.
+
+## Perf regression 12.8 -> 4.2 fps: root cause = NO GPU regression
+Per-stage timestamps (6-slot query pool) on the live loop, 40-frame runs:
+- chain 47.9-58 ms (unchanged vs m8a 47), featpack ~0, headpack ~0,
+  front-end 0.7-3 ms, tail (rescale-up+compose+encode) 1.2-2.3 ms,
+  CPU bridge ~2 ms, command record ~1.3 ms. Suspects (a)-(d) all cleared:
+  headpack/composite are sub-ms; rescale/features unchanged; no per-frame
+  vkDeviceWaitIdle (only the fence); the [dbg] probe is frame==1-guarded.
+- The 4.2 fps wall-clock was ARRIVAL-PACED, not GPU: with the always-on
+  wiggle gone (user demand), a near-static screen (taskbar clock ~1 Hz)
+  starves DDA; the event-driven loop correctly idles, so wall fps collapses
+  while per-frame processing stays ~50-58 ms.
+- Throughput with continuous content (external cursor activity, equivalent
+  to a busy screen): `--frames 60 --novideo` = 11.83 fps avg / 12.0 rolling,
+  every frame acq ~7-8 ms, chain ~50-51 ms, 0 drops — >=10 fps target met.
+- Net: 4.2 (static-screen arrival pace) -> 11.8 fps (content-paced stream).
 
 ## Numbers (this final run)
-- `--frames 40 --novideo` : verify frames 10,30 ALL PASS
-  - frame 10: mean|final-native| B=26.81 G=30.44 R=20.20; |grad(delta)| B=1.58 G=1.73 R=1.42; changed 51.99%
-  - frame 30: mean|final-native| B=26.99 G=31.05 R=23.38; |grad(delta)| B=1.62 G=1.75 R=1.43; changed 51.31%
-  - avg 11.47 fps, 0 dropped
-- `--frames 200` (live overlay, wiggle ON, blit STORAGE present path): ALL PASS
+- `--frames 40 --novideo` (event-driven, wiggle OFF): verify frames 10,30
+  ALL PASS; frame 10 mean|d| B=3.95 G=4.65 R=3.40; frame 30 B=3.78 G=4.73
+  R=3.35; changed ~91%; out\m8b_processed.bmp -> PNG INSPECTED: clean, no
+  rainbow/red shift (subtle matched residual, mean|d| ~4-5 of 255).
+- `--frames 60 --novideo` + continuous cursor activity (busy-screen equiv):
+  11.83 fps avg / 12.0 rolling, 0 drops, chain ~50-51 ms steady.
+- `--frames 40 --novideo` on static screen: 2.08 fps wall (arrival-paced by
+  design), acq waits 513-886 ms with GPU idle, 0 drops.
+- `--frames 200` (earlier, wiggle ON, blit STORAGE present path): ALL PASS,
+  avg 12.78 fps — the pre-idle-loop baseline.
   - frame 10: mean|final-native| B=12.26 G=16.33 R=17.73; changed 39.89%
   - frame 30: mean|final-native| B= 9.10 G=14.65 R=12.62; changed 30.46%
   - frame 60: mean|final-native| B= 8.39 G=12.99 R=11.72; changed 27.47%
