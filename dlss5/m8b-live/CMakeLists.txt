@@ -25,7 +25,7 @@ set(SHADER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/shaders)
 set(M8_SHADER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/shaders/m8)
 
 # m4 transport/front-end shaders (standin removed — replaced by the real chain)
-set(SHADERS decode letterbox rescale features compose encode blit)
+set(SHADERS decode letterbox rescale features compose encode blit fbcancel)
 set(SPV_OUTPUTS "")
 foreach(S ${SHADERS})
     set(SPV ${CMAKE_CURRENT_BINARY_DIR}/${S}.spv)

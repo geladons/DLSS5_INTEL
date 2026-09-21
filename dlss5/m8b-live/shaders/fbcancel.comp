@@ -1,0 +1,67 @@
+#version 460
+// ============================================================================
+// M8B feedback cancellation (overlay echo removal) — 2026-09-20.
+//
+// The borderless topmost overlay is itself part of the desktop that DDA
+// captures, so a raw capture contains our OWN last presented frame. Feeding
+// that back through the enhancer re-processes already-processed content and
+// the per-frame residual compounds without bound — the "rainbow explosion"
+// (screen-wide color garbage within seconds, GPU pegged, crash; readback
+// metrics still "PASS" because that path was verified only via --novideo,
+// which never shows the overlay).
+//
+// This kernel subtracts the last presented frame from the capture
+// (echo-cancellation style) and writes the corrected delta as float RGB into
+// the decode output slot (binding 1); a GENEROUS safety clamp (maxDelta*4,
+// default 48/255) bounds pathological transients only — real desktop changes
+// must pass through or the screen can never appear from black (frame 0
+// corrects against a ZEROED lastPresented, i.e. the "delta" IS the desktop).
+// The rest of the chain then processes
+//   corrected = clamp(capture - lastPresented, +/-maxDelta*4)
+// instead of the raw capture. The encode stage adds the processed composite
+// delta (clamped to +/-maxDelta, default 12/255 — the tight bound lives
+// THERE, on the network residual) back onto bufLastPresented (binding 10),
+// so the presented frame is a bounded accumulation:
+//   presented(n) = presented(n-1) + corrected(n) + deltaNet(n)
+//                = capture(n) + deltaNet(n)        [echo cancels exactly]
+// which is exactly "enhanced capture" with the feedback loop algebraically
+// unrolled: the composite residual can no longer compound (the old bug:
+// presented(n) = f(presented(n-1)) iterated, residual added every pass,
+// rainbow explosion within seconds).
+//
+// It also accumulates sum(|delta|) over the frame (binding 11) for the host
+// settle statistics. NOTE: a separate pre-pass submission for this kernel
+// measured ~168 ms/frame (cold-queue round trip per processed frame), so it
+// runs FUSED in the main frame command buffer; the settle SKIP decision is
+// made on the CPU from sparse capture samples (main.cpp) so a settled frame
+// costs no GPU submission at all. All buffers are DEVICE-LOCAL: host-visible
+// STORAGE buffers fault the Arc 32.0.101.8805 driver (DEVICE_LOST in 2
+// frames, measured 2026-09-20).
+//
+//   push a = (w, h, 0, 0);  b = (safetyClampInt, 0, 0, 0)
+// ============================================================================
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(rgba8, set = 0, binding = 0) uniform readonly image2D imgIn;    // raw capture
+layout(std430, set = 0, binding = 1) writeonly buffer RgbFull { float v[]; };
+layout(std430, set = 0, binding = 10) readonly buffer LastP { uint lastp[]; };  // BGRA u32/px
+layout(std430, set = 0, binding = 11) buffer FbStats { uint sumAbs; };
+layout(push_constant) uniform Push { ivec4 a; ivec4 b; vec4 c; vec4 d; } pc;
+
+void main() {
+    ivec2 xy = ivec2(gl_GlobalInvocationID.xy);
+    if (xy.x >= pc.a.x || xy.y >= pc.a.y) return;
+    uint p = uint(xy.y) * uint(pc.a.x) + uint(xy.x);
+    vec4 c = imageLoad(imgIn, xy);            // BGRA view: .x=B .y=G .z=R .w=A
+    uint lp = lastp[p];
+    int m = pc.b.x;                           // generous safety clamp (maxDelta*4)
+    // BGRA byte order: byte0=B (bits 0-7), byte1=G (bits 8-15), byte2=R (16-23).
+    // RgbFull channel order (same as decode.comp): 0=R, 1=G, 2=B.
+    int dR = clamp(int(c.z * 255.0 + 0.5) - int((lp >> 16) & 0xFFu), -m, m);
+    int dG = clamp(int(c.y * 255.0 + 0.5) - int((lp >> 8) & 0xFFu), -m, m);
+    int dB = clamp(int(c.x * 255.0 + 0.5) - int(lp & 0xFFu), -m, m);
+    v[p * 3u + 0u] = float(dR) * (1.0 / 255.0);
+    v[p * 3u + 1u] = float(dG) * (1.0 / 255.0);
+    v[p * 3u + 2u] = float(dB) * (1.0 / 255.0);
+    // u32 counter: max sum = W*H*3*(4*maxDelta) = 2.1e9 < 4.29e9 at defaults.
+    atomicAdd(sumAbs, uint(abs(dR) + abs(dG) + abs(dB)));
+}

@@ -12,8 +12,13 @@
 //   exactly like the reference where every output pass is region-scoped,
 //   nr_daemon.py letterbox notes); 1 = region-extent nr_out image (NrOut only).
 //
-//   b.z = 0: a = (fullW, fullH, regionLeft, regionTop), b = (regionW, regionH, 0)
-//   b.z = 1: a unused;                            b = (regionW, regionH, 1)
+//   b.z = 0: a = (fullW, fullH, regionLeft, regionTop), b = (regionW, regionH, 0, mode)
+//   b.z = 1: a unused;                            b = (regionW, regionH, 1, 0)
+// M8B (2026-09-20): b.w = 1 = feedback-cancellation ACCUMULATE mode (overlay
+// runs only). `fin`/region and `nat`/outside carry SIGNED deltas; the output
+// byte is lastPresented(byte) + delta, clamped to [0,255] — i.e. the presented
+// frame moves at most +/-maxDelta per channel per processed frame, which is
+// what makes the overlay feedback loop bounded. b.w = 0 = legacy direct color.
 // ============================================================================
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 layout(rgba8, set = 0, binding = 0) uniform readonly image2D imgIn;   // native (alpha)
@@ -21,6 +26,7 @@ layout(std430, set = 0, binding = 1) readonly buffer RgbFull { float nat[]; };
 layout(std430, set = 0, binding = 6) readonly buffer Final { float fin[]; };
 layout(std430, set = 0, binding = 7) readonly buffer NrOut { float nro[]; };
 layout(rgba8, set = 0, binding = 9)  writeonly uniform image2D imgOut; // final or nrout
+layout(std430, set = 0, binding = 10) readonly buffer LastP { uint lastp[]; }; // BGRA u32/px
 layout(push_constant) uniform Push { ivec4 a; ivec4 b; vec4 c; vec4 d; } pc;
 
 float enc(float value) {
@@ -34,6 +40,28 @@ void main() {
     if (xy.x >= sz.x || xy.y >= sz.y) return;
     uint fullW = uint(pc.a.x);
     int left = pc.a.z, top = pc.a.w;
+    float a = imageLoad(imgIn, xy).a;                   // raw alpha preserved
+
+    if (pc.b.z == 0 && pc.b.w != 0) {                   // ACCUMULATE (feedback cancellation)
+        bool inRegion = xy.x >= left && xy.x < left + pc.b.x &&
+                        xy.y >= top  && xy.y < top  + pc.b.y;
+        vec3 d;                                          // R,G,B deltas
+        if (inRegion) {
+            uint rp = uint(xy.y - top) * uint(pc.b.x) + uint(xy.x - left);
+            d = vec3(fin[rp * 3u], fin[rp * 3u + 1u], fin[rp * 3u + 2u]);
+        } else {
+            uint np = uint(xy.y) * fullW + uint(xy.x);
+            d = vec3(nat[np * 3u], nat[np * 3u + 1u], nat[np * 3u + 2u]);
+        }
+        uint np = uint(xy.y) * fullW + uint(xy.x);
+        uint lp = lastp[np];
+        int r = clamp(int((lp >> 16) & 0xFFu) + int(round(d.x * 255.0)), 0, 255);
+        int g = clamp(int((lp >> 8) & 0xFFu)  + int(round(d.y * 255.0)), 0, 255);
+        int b = clamp(int(lp & 0xFFu)         + int(round(d.z * 255.0)), 0, 255);
+        imageStore(imgOut, xy, vec4(float(b) * (1.0 / 255.0), float(g) * (1.0 / 255.0),
+                                    float(r) * (1.0 / 255.0), a));
+        return;
+    }
 
     vec3 rgb;
     if (pc.b.z == 0) {                                  // full-frame final
@@ -50,6 +78,5 @@ void main() {
         uint rp = uint(xy.y) * uint(pc.b.x) + uint(xy.x);
         rgb = vec3(nro[rp * 3u], nro[rp * 3u + 1u], nro[rp * 3u + 2u]);
     }
-    float a = imageLoad(imgIn, xy).a;                   // raw alpha preserved
     imageStore(imgOut, xy, vec4(enc(rgb.b), enc(rgb.g), enc(rgb.r), a));
 }
