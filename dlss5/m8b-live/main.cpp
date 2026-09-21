@@ -320,6 +320,189 @@ static std::string LuidStr(const LUID& l) {
     return buf;
 }
 
+// -------------------------------------- Sunshine-aware capture session ----
+// M8c: the desktop the game runs on can MOVE (Sunshine/Moonlight virtual
+// displays; adapters appear/disappear). Capture setup therefore enumerates
+// ALL DXGI adapters + outputs up front, picks ONE output by a strict
+// priority, and creates the D3D11 device ON that output's adapter:
+//   (a) --output NAME substring (case-insensitive; "display5" matches
+//       "\\.\DISPLAY5");
+//   (b) attached output whose DesktopCoordinates CONTAIN the cursor (the
+//       interactive session is where the user is);
+//   (c) attached PRIMARY output (top-left at virtual (0,0));
+//   (d) first attached output.
+// Startup and ACCESS_LOST recovery share this one path (CapBuild / CapPick).
+// NOTE: bool functions here must NOT use HR_CHECK (its `return 1` would
+// read as success) — every failure path returns false explicitly.
+struct Cap {
+    ComPtr<IDXGIAdapter1> adapter;
+    ComPtr<ID3D11Device> device;
+    ComPtr<ID3D11DeviceContext> context;
+    ComPtr<IDXGIOutput> output;
+    ComPtr<IDXGIOutputDuplication> dup;
+    ComPtr<ID3D11Texture2D> stagingTex;
+    int outX = 0, outY = 0;
+    std::string outName, adapterName;
+    LUID adapterLuid{};
+};
+
+static bool StrContainsI(const char* hay, const char* needle) {
+    if (!hay || !needle || !*needle) return false;
+    const size_t hl = std::strlen(hay), nl = std::strlen(needle);
+    for (size_t i = 0; i + nl <= hl; ++i)
+        if (_strnicmp(hay + i, needle, nl) == 0) return true;
+    return false;
+}
+
+// Enumerate every adapter/output; print the inventory table; pick the capture
+// target by the priority above. Fills adapter/output/origin/names/luid only
+// (no device — that is CapBuildFromPick).
+static bool CapPickInto(Cap& c, const char* prefName) {
+    c = Cap{};
+    ComPtr<IDXGIFactory1> factory;
+    HRESULT hr = CreateDXGIFactory1(IID_PPV_ARGS(&factory));
+    if (FAILED(hr)) {
+        std::fprintf(stderr, "[FAIL] CreateDXGIFactory1: %s\n", HrName(hr));
+        return false;
+    }
+    POINT cur{};
+    const bool haveCursor = (GetCursorPos(&cur) != 0);
+
+    struct Cand {
+        ComPtr<IDXGIAdapter1> a;
+        ComPtr<IDXGIOutput> o;
+        DXGI_OUTPUT_DESC d;
+        std::string devName, adpName;
+        LUID luid;
+    };
+    std::vector<Cand> attached;
+
+    std::printf("[cap] DXGI inventory (adapter x outputs):\n");
+    UINT ai = 0;
+    ComPtr<IDXGIAdapter1> a1;
+    while (factory->EnumAdapters1(ai, &a1) != DXGI_ERROR_NOT_FOUND) {
+        DXGI_ADAPTER_DESC ad{};
+        a1->GetDesc(&ad);
+        char an[256] = {0};
+        WideCharToMultiByte(CP_UTF8, 0, ad.Description, -1, an, sizeof(an) - 1, nullptr, nullptr);
+        ComPtr<IDXGIOutput> o;
+        UINT oi = 0;
+        while (a1->EnumOutputs(oi, &o) != DXGI_ERROR_NOT_FOUND) {
+            DXGI_OUTPUT_DESC d{};
+            o->GetDesc(&d);
+            char dn[128] = {0};
+            WideCharToMultiByte(CP_UTF8, 0, d.DeviceName, -1, dn, sizeof(dn) - 1, nullptr, nullptr);
+            const bool primary =
+                (d.DesktopCoordinates.left == 0 && d.DesktopCoordinates.top == 0);
+            std::printf("  [a%u] %-44s | %-16s | attached=%d primary=%d rect=(%d,%d)-(%d,%d)\n",
+                        ai, an, dn, (int)d.AttachedToDesktop, (int)primary,
+                        d.DesktopCoordinates.left, d.DesktopCoordinates.top,
+                        d.DesktopCoordinates.right, d.DesktopCoordinates.bottom);
+            if (d.AttachedToDesktop) {
+                Cand cc;
+                cc.a = a1; cc.o = o; cc.d = d;
+                cc.devName = dn; cc.adpName = an; cc.luid = ad.AdapterLuid;
+                attached.push_back(cc);
+            }
+            ++oi;
+            o.Reset();
+        }
+        ++ai;
+        a1.Reset();
+    }
+    if (attached.empty()) {
+        std::fprintf(stderr, "[FAIL] no attached DXGI output\n");
+        return false;
+    }
+
+    auto containsCursor = [&](const Cand& cc) {
+        return haveCursor &&
+               cur.x >= cc.d.DesktopCoordinates.left && cur.x < cc.d.DesktopCoordinates.right &&
+               cur.y >= cc.d.DesktopCoordinates.top && cur.y < cc.d.DesktopCoordinates.bottom;
+    };
+    const Cand* pick = nullptr;
+    const char* rule = "";
+    if (prefName && prefName[0]) {
+        for (const auto& cc : attached)
+            if (StrContainsI(cc.devName.c_str(), prefName)) { pick = &cc; rule = "--output"; break; }
+        if (!pick)
+            std::printf("[warn] --output '%s' matched no attached output - auto-picking\n", prefName);
+    }
+    if (!pick) { for (const auto& cc : attached) if (containsCursor(cc)) { pick = &cc; rule = "cursor"; break; } }
+    if (!pick) { for (const auto& cc : attached) if (cc.d.DesktopCoordinates.left == 0 && cc.d.DesktopCoordinates.top == 0) { pick = &cc; rule = "primary"; break; } }
+    if (!pick) { pick = &attached.front(); rule = "first-attached"; }
+
+    c.adapter = pick->a;
+    c.output = pick->o;
+    c.adapterLuid = pick->luid;
+    c.adapterName = pick->adpName;
+    c.outName = pick->devName;
+    c.outX = pick->d.DesktopCoordinates.left;
+    c.outY = pick->d.DesktopCoordinates.top;
+    std::printf("[cap] picked '%s' on adapter '%s' (luid %s) origin=(%d,%d), rule=%s\n",
+                c.outName.c_str(), c.adapterName.c_str(), LuidStr(c.adapterLuid).c_str(),
+                c.outX, c.outY, rule);
+    return true;
+}
+
+// Create the D3D11 device ON the picked adapter, duplicate the picked output,
+// enforce the compile-time frame contract (2560x1440 B8G8R8A8 — a different
+// resolution fails LOUDLY here, out of scope by design) and create the
+// staging texture. Prints the [D3D11]/[DDA] active lines.
+static bool CapBuildFromPick(Cap& c) {
+    UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+    D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
+    D3D_FEATURE_LEVEL got = (D3D_FEATURE_LEVEL)0;
+    HRESULT hr = D3D11CreateDevice(c.adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, flags,
+                                   levels, ARRAYSIZE(levels), D3D11_SDK_VERSION,
+                                   &c.device, &got, &c.context);
+    if (FAILED(hr)) {
+        std::fprintf(stderr, "[FAIL] D3D11CreateDevice: %s\n", HrName(hr));
+        return false;
+    }
+    std::printf("[D3D11] hardware device created on adapter '%s' (luid %s), feature level 0x%x\n",
+                c.adapterName.c_str(), LuidStr(c.adapterLuid).c_str(), (unsigned)got);
+
+    ComPtr<IDXGIOutput1> out1;
+    hr = c.output->QueryInterface(IID_PPV_ARGS(&out1));
+    if (FAILED(hr)) {
+        std::fprintf(stderr, "[FAIL] IDXGIOutput1 QI: %s\n", HrName(hr));
+        return false;
+    }
+    hr = out1->DuplicateOutput(c.device.Get(), &c.dup);
+    if (FAILED(hr)) {
+        std::fprintf(stderr, "[FAIL] DuplicateOutput: %s\n", HrName(hr));
+        return false;
+    }
+    DXGI_OUTDUPL_DESC dd{};
+    c.dup->GetDesc(&dd);
+    std::printf("[DDA] DuplicateOutput active: %ux%u format=%d rotation=%d origin=(%d,%d)\n",
+                (unsigned)dd.ModeDesc.Width, (unsigned)dd.ModeDesc.Height,
+                (int)dd.ModeDesc.Format, (int)dd.Rotation, c.outX, c.outY);
+    if (dd.ModeDesc.Width != W || dd.ModeDesc.Height != H ||
+        dd.ModeDesc.Format != DXGI_FORMAT_B8G8R8A8_UNORM) {
+        std::fprintf(stderr, "[FAIL] expected %ux%u B8G8R8A8\n", W, H);
+        return false;
+    }
+    D3D11_TEXTURE2D_DESC sd{};
+    sd.Width = W; sd.Height = H; sd.MipLevels = 1; sd.ArraySize = 1;
+    sd.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    sd.SampleDesc = {1, 0};
+    sd.Usage = D3D11_USAGE_STAGING; sd.BindFlags = 0;
+    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ; sd.MiscFlags = 0;
+    hr = c.device->CreateTexture2D(&sd, nullptr, &c.stagingTex);
+    if (FAILED(hr)) {
+        std::fprintf(stderr, "[FAIL] staging CreateTexture2D: 0x%08lx\n", (unsigned long)hr);
+        return false;
+    }
+    return true;
+}
+
+static bool CapBuild(Cap& c, const char* prefName) {
+    if (!CapPickInto(c, prefName)) return false;
+    return CapBuildFromPick(c);
+}
+
 // -------------------------------------------------- vulkan small helpers --
 struct VkCtx {
     VkInstance inst;
@@ -770,19 +953,22 @@ int main(int argc, char** argv) {
     float strength = 1.0f;       // --strength F: composite residual scale 0..2 (default 1.0)
     int colorpass = 0;           // --colorpass 0|1: 1 = pass the residual's color/low-freq
                                  // component (legacy); 0 = high-pass it away (default, no drift)
+    std::string outPref;         // --output NAME: capture-output preference (substring,
+                                 // case-insensitive, e.g. "DISPLAY5"; empty = auto)
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--frames" && i + 1 < argc) framesTarget = std::atol(argv[++i]);
         else if (a == "--nowiggle") wiggleForbidden = true;
         else if (a == "--novideo") novideo = 1;
         else if (a == "--nocursor") g_cursorDraw = false;
+        else if (a == "--output" && i + 1 < argc) outPref = argv[++i];
         else if (a == "--wiggle-idle" && i + 1 < argc) wiggleIdleSec = std::atol(argv[++i]);
         else if (a == "--max-delta" && i + 1 < argc) maxDelta = std::atoi(argv[++i]);
         else if (a == "--settle-thresh" && i + 1 < argc) settleThresh = std::atof(argv[++i]);
         else if (a == "--scale" && i + 1 < argc) renderScale = (float)std::atof(argv[++i]);
         else if (a == "--strength" && i + 1 < argc) strength = (float)std::atof(argv[++i]);
         else if (a == "--colorpass" && i + 1 < argc) colorpass = std::atoi(argv[++i]);
-        else { std::fprintf(stderr, "usage: m8blive [--frames N] [--nowiggle] [--novideo] [--scale S(ignored)] [--wiggle-idle SECS] [--max-delta N] [--settle-thresh X] [--strength F] [--colorpass 0|1]\n"); return 1; }
+        else { std::fprintf(stderr, "usage: m8blive [--frames N] [--nowiggle] [--novideo] [--nocursor] [--output NAME] [--scale S(ignored)] [--wiggle-idle SECS] [--max-delta N] [--settle-thresh X] [--strength F] [--colorpass 0|1]\n"); return 1; }
     }
     if (wiggleForbidden) wiggleIdleSec = 0;
     if (maxDelta < 1) maxDelta = 1;
@@ -806,75 +992,20 @@ int main(int argc, char** argv) {
     CreateDirectoryA("out", nullptr);
 
     // ===================================================================
-    // 1. D3D11 hardware device + DDA (M4 path; staging texture only).
+    // 1. Sunshine-aware DDA capture session: enumerate ALL adapters/outputs,
+    //    pick by (--output > cursor > primary > first attached), create the
+    //    D3D11 device ON the picked output's adapter (Cap* helpers above).
     // ===================================================================
-    ComPtr<ID3D11Device> device;
-    ComPtr<ID3D11DeviceContext> context;
-    {
-        UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
-        D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
-        D3D_FEATURE_LEVEL got = (D3D_FEATURE_LEVEL)0;
-        HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags,
-                                       levels, ARRAYSIZE(levels), D3D11_SDK_VERSION,
-                                       &device, &got, &context);
-        if (FAILED(hr)) { std::fprintf(stderr, "[FAIL] D3D11CreateDevice: %s\n", HrName(hr)); return 1; }
-        std::printf("[D3D11] hardware device created, feature level 0x%x\n", (unsigned)got);
-    }
-    ComPtr<IDXGIDevice> dxgiDevice;
-    HR_CHECK(device->QueryInterface(IID_PPV_ARGS(&dxgiDevice)));
-    ComPtr<IDXGIAdapter> adapter;
-    HR_CHECK(dxgiDevice->GetAdapter(&adapter));
-    DXGI_ADAPTER_DESC adesc{};
-    adapter->GetDesc(&adesc);
-
-    ComPtr<IDXGIOutput> output;
-    int outX = 0, outY = 0;
-    {
-        ComPtr<IDXGIOutput> o;
-        UINT i = 0;
-        ComPtr<IDXGIOutput> firstAttached, display5;
-        while (adapter->EnumOutputs(i, &o) != DXGI_ERROR_NOT_FOUND) {
-            DXGI_OUTPUT_DESC d{};
-            o->GetDesc(&d);
-            char n[128] = {0};
-            WideCharToMultiByte(CP_UTF8, 0, d.DeviceName, -1, n, sizeof(n) - 1, nullptr, nullptr);
-            if (d.AttachedToDesktop && !firstAttached) firstAttached = o;
-            if (d.AttachedToDesktop && std::strcmp(n, "\\\\.\\DISPLAY5") == 0) display5 = o;
-            ++i; o.Reset();
-        }
-        output = display5 ? display5 : firstAttached;
-        if (!output) { std::fprintf(stderr, "[FAIL] no attached output\n"); return 1; }
-        DXGI_OUTPUT_DESC od{};
-        output->GetDesc(&od);
-        outX = od.DesktopCoordinates.left;
-        outY = od.DesktopCoordinates.top;
-    }
-    ComPtr<IDXGIOutputDuplication> dup;
-    {
-        ComPtr<IDXGIOutput1> out1;
-        HR_CHECK(output->QueryInterface(IID_PPV_ARGS(&out1)));
-        HRESULT hr = out1->DuplicateOutput(device.Get(), &dup);
-        if (FAILED(hr)) { std::fprintf(stderr, "[FAIL] DuplicateOutput: %s\n", HrName(hr)); return 1; }
-        DXGI_OUTDUPL_DESC dd{};
-        dup->GetDesc(&dd);
-        std::printf("[DDA] DuplicateOutput active: %ux%u format=%d rotation=%d origin=(%d,%d)\n",
-                    (unsigned)dd.ModeDesc.Width, (unsigned)dd.ModeDesc.Height,
-                    (int)dd.ModeDesc.Format, (int)dd.Rotation, outX, outY);
-        if (dd.ModeDesc.Width != W || dd.ModeDesc.Height != H ||
-            dd.ModeDesc.Format != DXGI_FORMAT_B8G8R8A8_UNORM) {
-            std::fprintf(stderr, "[FAIL] expected %ux%u B8G8R8A8\n", W, H); return 1;
-        }
-    }
-    ComPtr<ID3D11Texture2D> stagingTex;
-    {
-        D3D11_TEXTURE2D_DESC sd{};
-        sd.Width = W; sd.Height = H; sd.MipLevels = 1; sd.ArraySize = 1;
-        sd.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-        sd.SampleDesc = {1, 0};
-        sd.Usage = D3D11_USAGE_STAGING; sd.BindFlags = 0;
-        sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ; sd.MiscFlags = 0;
-        HR_CHECK(device->CreateTexture2D(&sd, nullptr, &stagingTex));
-    }
+    Cap cap;
+    if (!CapBuild(cap, outPref.empty() ? nullptr : outPref.c_str())) return 1;
+    ComPtr<ID3D11Device> device = cap.device;
+    ComPtr<ID3D11DeviceContext> context = cap.context;
+    ComPtr<IDXGIOutput> output = cap.output;
+    ComPtr<IDXGIOutputDuplication> dup = cap.dup;
+    ComPtr<ID3D11Texture2D> stagingTex = cap.stagingTex;
+    int outX = cap.outX, outY = cap.outY;
+    LUID curAdapterLuid = cap.adapterLuid;
+    std::string curOutName = cap.outName;
 
     // ===================================================================
     // 2. Initial content-checked DDA frame (M3/M4 doctrine).
@@ -890,44 +1021,61 @@ int main(int argc, char** argv) {
         std::printf("[info] cursor-wiggle generator armed (wiggle-idle=%lds)\n", wiggleIdleSec);
     }
     {
-        auto tAcquireBegin = clk::now();
-        auto deadline = tAcquireBegin + std::chrono::seconds(8);
-        auto acceptAnyAt = tAcquireBegin + std::chrono::seconds(6);
-        bool got = false;
-        int tries = 0, acquired = 0, skippedBlack = 0;
-        while (clk::now() < deadline && !got && !g_stop.load()) {
-            ++tries;
-            DXGI_OUTDUPL_FRAME_INFO fi{};
-            ComPtr<IDXGIResource> res;
-            HRESULT hr = dup->AcquireNextFrame(500, &fi, &res);
-            if (hr == DXGI_ERROR_WAIT_TIMEOUT) continue;
-            if (FAILED(hr)) { std::fprintf(stderr, "[error] AcquireNextFrame: %s\n", HrName(hr)); continue; }
-            ComPtr<ID3D11Texture2D> frameTex;
-            hr = res->QueryInterface(IID_PPV_ARGS(&frameTex));
-            if (FAILED(hr)) { dup->ReleaseFrame(); continue; }
-            ++acquired;
-            context->CopyResource(stagingTex.Get(), frameTex.Get());
-            context->Flush();
-            dup->ReleaseFrame();
-            bool black = true;
-            D3D11_MAPPED_SUBRESOURCE ms{};
-            if (SUCCEEDED(context->Map(stagingTex.Get(), 0, D3D11_MAP_READ, 0, &ms))) {
-                double s = 0; uint64_t cnt = 0;
-                for (uint32_t y = 0; y < H; y += 24) {
-                    const uint8_t* row = (const uint8_t*)ms.pData + (size_t)y * ms.RowPitch;
-                    for (uint32_t x = 0; x < W * 4; x += 1997) { s += row[x]; ++cnt; }
+        const auto tAcquireBegin = clk::now();
+        const auto acceptAnyAt = tAcquireBegin + std::chrono::seconds(6);
+        // One acquire window; returns true the moment an acceptable frame is
+        // sitting in stagingTex. The generator (when the caller armed one) is
+        // stopped by the caller right after — same stop logic as before.
+        auto acquireUntil = [&](std::chrono::steady_clock::time_point deadline) -> bool {
+            bool got = false;
+            int tries = 0, acquired = 0, skippedBlack = 0;
+            while (clk::now() < deadline && !got && !g_stop.load()) {
+                ++tries;
+                DXGI_OUTDUPL_FRAME_INFO fi{};
+                ComPtr<IDXGIResource> res;
+                HRESULT hr = dup->AcquireNextFrame(500, &fi, &res);
+                if (hr == DXGI_ERROR_WAIT_TIMEOUT) continue;
+                if (FAILED(hr)) { std::fprintf(stderr, "[error] AcquireNextFrame: %s\n", HrName(hr)); continue; }
+                ComPtr<ID3D11Texture2D> frameTex;
+                hr = res->QueryInterface(IID_PPV_ARGS(&frameTex));
+                if (FAILED(hr)) { dup->ReleaseFrame(); continue; }
+                ++acquired;
+                context->CopyResource(stagingTex.Get(), frameTex.Get());
+                context->Flush();
+                dup->ReleaseFrame();
+                bool black = true;
+                D3D11_MAPPED_SUBRESOURCE ms{};
+                if (SUCCEEDED(context->Map(stagingTex.Get(), 0, D3D11_MAP_READ, 0, &ms))) {
+                    double s = 0; uint64_t cnt = 0;
+                    for (uint32_t y = 0; y < H; y += 24) {
+                        const uint8_t* row = (const uint8_t*)ms.pData + (size_t)y * ms.RowPitch;
+                        for (uint32_t x = 0; x < W * 4; x += 1997) { s += row[x]; ++cnt; }
+                    }
+                    context->Unmap(stagingTex.Get(), 0);
+                    black = (cnt == 0) || (s / (double)cnt) < 1.0;
                 }
-                context->Unmap(stagingTex.Get(), 0);
-                black = (cnt == 0) || (s / (double)cnt) < 1.0;
+                if (black && clk::now() < acceptAnyAt) { ++skippedBlack; continue; }
+                got = true;
+                std::printf("[DDA] initial %s frame on try %d (acquired#%d, skippedBlack=%d)\n",
+                            black ? "FALLBACK-black" : "content", tries, acquired, skippedBlack);
             }
-            if (black && clk::now() < acceptAnyAt) { ++skippedBlack; continue; }
-            got = true;
-            std::printf("[DDA] initial %s frame on try %d (acquired#%d, skippedBlack=%d)\n",
-                        black ? "FALLBACK-black" : "content", tries, acquired, skippedBlack);
-        }
+            return got;
+        };
+        bool got = acquireUntil(tAcquireBegin + std::chrono::seconds(8));
         // The initial acquire is done — always stop the generator here; the
         // live loop re-arms it only after wiggleIdleSec of continuous idleness.
         if (wiggler.joinable()) { g_wiggleStop.store(true); wiggler.join(); }
+        // M8c startup starvation fallback: an idle (e.g. night-time) desktop
+        // yields NO DDA frames at all. Unless --nowiggle, jiggle the cursor
+        // for up to 12 more seconds — desktop updates then flow and the first
+        // frame lands (the generator stops the moment one does).
+        if (!got && !wiggleForbidden && !g_stop.load()) {
+            std::printf("[info] desktop idle - temporary wiggle for first frame\n");
+            g_wiggleStop.store(false);
+            wiggler = std::thread(WiggleThread);
+            got = acquireUntil(clk::now() + std::chrono::seconds(12));
+            if (wiggler.joinable()) { g_wiggleStop.store(true); wiggler.join(); }
+        }
         if (!got) { std::fprintf(stderr, "[FAIL] no DDA frame within ~8s\n"); return 1; }
         D3D11_MAPPED_SUBRESOURCE ms{};
         HR_CHECK(context->Map(stagingTex.Get(), 0, D3D11_MAP_READ, 0, &ms));
@@ -971,8 +1119,8 @@ int main(int argc, char** argv) {
             LUID l{};
             if (id.deviceLUIDValid) std::memcpy(&l, id.deviceLUID, VK_LUID_SIZE);
             bool match = id.deviceLUIDValid &&
-                         l.HighPart == adesc.AdapterLuid.HighPart &&
-                         l.LowPart == adesc.AdapterLuid.LowPart;
+                         l.HighPart == curAdapterLuid.HighPart &&
+                         l.LowPart == curAdapterLuid.LowPart;
             std::printf("[VK] device \"%s\" LUID=%s %s\n", p2.properties.deviceName,
                         id.deviceLUIDValid ? LuidStr(l).c_str() : "(invalid)",
                         match ? "  <== MATCHES DXGI adapter" : "");
@@ -2316,6 +2464,56 @@ int main(int argc, char** argv) {
     double fbMeanLast = 0.0;          // last full-frame mean |corrected delta| (0-255)
     bool shownOnce = false;           // overlay ShowWindow deferred to first present
     bool needReseed = false;          // hidden->shown resume: zero+seed fbcancel on next processed frame
+
+    // M8c ACCESS_LOST recovery (shared by hidden + visible loops): the
+    // duplication session died (display mode change, output detach, TDR,
+    // Sunshine/Moonlight moving the game to another display). Re-enumerate
+    // ALL adapters, re-pick by the priority rule, re-duplicate; only when
+    // the pick landed on a DIFFERENT adapter do we recreate device+context+
+    // stagingTex. fbcancel gets needReseed either way. The overlay window
+    // does NOT move on a switch (it was created once from the initial
+    // outX/outY) — accepted, noted in the switch log line.
+    auto recoverAccessLost = [&](const char* mode) -> bool {
+        Cap np;
+        if (!CapPickInto(np, outPref.empty() ? nullptr : outPref.c_str())) {
+            std::fprintf(stderr, "[FAIL] %s-mode ACCESS_LOST: no attached output to re-pick\n", mode);
+            return false;
+        }
+        if (np.adapterLuid.LowPart == curAdapterLuid.LowPart &&
+            np.adapterLuid.HighPart == curAdapterLuid.HighPart) {
+            // Same adapter: keep device/context/stagingTex — re-duplicate only.
+            dup.Reset();
+            ComPtr<IDXGIOutput1> out1;
+            if (FAILED(np.output->QueryInterface(IID_PPV_ARGS(&out1))) ||
+                FAILED(out1->DuplicateOutput(device.Get(), &dup))) {
+                std::fprintf(stderr, "[FAIL] %s-mode ACCESS_LOST: re-duplicate failed\n", mode);
+                return false;
+            }
+        } else {
+            if (!CapBuildFromPick(np)) {
+                std::fprintf(stderr, "[FAIL] %s-mode ACCESS_LOST: rebuild on adapter '%s' failed\n",
+                             mode, np.adapterName.c_str());
+                return false;
+            }
+            device = np.device;
+            context = np.context;
+            stagingTex = np.stagingTex;
+            dup = np.dup;
+            curAdapterLuid = np.adapterLuid;
+            std::printf("[capture] device recreated on adapter '%s'\n", np.adapterName.c_str());
+        }
+        if (curOutName != np.outName)
+            std::printf("[capture] output switch: %s -> %s (overlay stays at its initial position)\n",
+                        curOutName.c_str(), np.outName.c_str());
+        else
+            std::printf("[capture] re-picked same output %s\n", np.outName.c_str());
+        output = np.output;
+        outX = np.outX;
+        outY = np.outY;
+        curOutName = np.outName;
+        needReseed = true;   // fbcancel reseed: zero lastPresented + seed flag
+        return true;
+    };
     double fpsFinal = 0.0;
     bool passMetrics = true;
     bool anyVerify = false;
@@ -2351,11 +2549,8 @@ int main(int argc, char** argv) {
                 continue;
             } else if (FAILED(hr)) {
                 if (hr == DXGI_ERROR_ACCESS_LOST) {
-                    std::fprintf(stderr, "[warn] hidden-mode ACCESS_LOST - attempting one DuplicateOutput recovery\n");
-                    dup.Reset();
-                    ComPtr<IDXGIOutput1> out1;
-                    if (SUCCEEDED(output->QueryInterface(IID_PPV_ARGS(&out1))) &&
-                        SUCCEEDED(out1->DuplicateOutput(device.Get(), &dup))) {
+                    std::fprintf(stderr, "[warn] hidden-mode ACCESS_LOST - rebuilding capture session\n");
+                    if (recoverAccessLost("hidden")) {
                         ++dropped;
                     } else {
                         std::fprintf(stderr, "[FAIL] duplication lost for good\n");
@@ -2470,11 +2665,8 @@ int main(int argc, char** argv) {
             } else if (FAILED(hr)) {
                 tLastAcquired = clk::now();
                 if (hr == DXGI_ERROR_ACCESS_LOST) {
-                    std::fprintf(stderr, "[warn] ACCESS_LOST - attempting one DuplicateOutput recovery\n");
-                    dup.Reset();
-                    ComPtr<IDXGIOutput1> out1;
-                    if (SUCCEEDED(output->QueryInterface(IID_PPV_ARGS(&out1))) &&
-                        SUCCEEDED(out1->DuplicateOutput(device.Get(), &dup))) {
+                    std::fprintf(stderr, "[warn] ACCESS_LOST - rebuilding capture session\n");
+                    if (recoverAccessLost("visible")) {
                         ++dropped;
                     } else {
                         std::fprintf(stderr, "[FAIL] duplication lost for good\n");
@@ -2591,7 +2783,11 @@ int main(int argc, char** argv) {
         if (g_cursorDraw && !novideo) {
             if (g_curVisible && g_shapeValid) {
                 const auto tCur0 = clk::now();
-                DrawCursorBGRA((uint8_t*)uploadPtr, g_curX, g_curY);
+                // g_curX/Y are VIRTUAL-screen coords; the captured frame starts
+                // at (outX,outY). Identical while the picked output sits at the
+                // origin (today's topology); keeps the mirror cursor correct if
+                // an ACCESS_LOST switch ever lands on an offset display.
+                DrawCursorBGRA((uint8_t*)uploadPtr, g_curX - outX, g_curY - outY);
                 cursorUs = std::chrono::duration<double, std::micro>(clk::now() - tCur0).count();
                 g_curDrawUsSum += cursorUs;
                 ++g_curDrawFrames;
