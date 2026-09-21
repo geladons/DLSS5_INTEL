@@ -478,3 +478,17 @@ golden.py compare; isolation: isolate.py, quant.py, quant2.py forensics).
   (mild wallpaper hue shift) - design limitation, gated by settle-skip.
 - Commit: see git log (m8b: frame-0 fbcancel safety-clamp lock-in ...).
 `n## 2026-09-21 M8c PASS (de2d594) - Sunshine-aware capture`n- Root cause of 02:38 starvation: idle desktop (DDA=updates-only), NOT Sunshine. DuplicateOutput coexists with sunshine.exe fine.`n- Cap struct + CapBuild: multi-adapter DXGI enum, output pick = --output NAME > cursor > primary > first attached, device on picked adapter.`n- --output flag; startup wiggle fallback (+12s) on idle desktop; ACCESS_LOST re-picks + rebuilds (CPU bridge = cross-adapter safe).`n- Verify: 60-frame + 30-frame video runs PASS (rule=cursor pick, verify ALL PASS), Sunshine running.`n- Cursor CONFIRMED painted+positioned via DDA snapshot (GDI screenshots cannot see the overlay - direct flip).`n
+
+### M8b settle-gate refresh fix (2026-09-21) - VERIFIED
+- Commit 1be426c was INCOMPLETE (used refreshMs/tLastProcessed undeclared, 3x C2065).
+  Fix: declare `long refreshMs = 800` + `--refresh-ms N` CLI + `tLastProcessed` init.
+- Build NOTE: VS BuildTools instance lost its VS Installer registration between
+  09:29 and 13:18 (vswhere returns 0 instances; toolset on disk is intact).
+  Verified build via direct MSBuild.exe on build\m8blive.vcxproj. build.cmd
+  blocked until the registration is repaired (re-run BuildTools bootstrapper).
+- Verify runs: (1) --frames 30 + external cursor wiggle: PASS, verify {10,30,60}
+  ALL PASS, 0 drops, ~19 fps, signed delta ~0 (no color drift). (2) --frames 12
+  passive: PASS. (3) Gate-forced A/B (--settle-thresh 255): refresh 800 ->
+  forced cadence ~1 Hz despite permanent settle; refresh 600000 -> stall
+  reproduced (frame 0 only, settled skips accumulate). Bug #1 root-cause
+  fix VERIFIED. Cosmetic: forced-refresh acquire waits count as "dropped".

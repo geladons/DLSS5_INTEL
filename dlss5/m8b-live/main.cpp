@@ -950,6 +950,8 @@ int main(int argc, char** argv) {
     int maxDelta = 12;           // --max-delta N: per-channel feedback-delta clamp (1/255 units)
     double settleThresh = 0.5;   // --settle-thresh X: skip chain+present when mean|corrected delta|
                                  // (0-255 units) stays below this (settle detection, video mode)
+    long refreshMs = 800;        // --refresh-ms N: full process+present at least every N ms even
+                                 // when the settle estimate says "settled" (stale-screen bound)
     float strength = 1.0f;       // --strength F: composite residual scale 0..2 (default 1.0)
     int colorpass = 0;           // --colorpass 0|1: 1 = pass the residual's color/low-freq
                                  // component (legacy); 0 = high-pass it away (default, no drift)
@@ -965,10 +967,11 @@ int main(int argc, char** argv) {
         else if (a == "--wiggle-idle" && i + 1 < argc) wiggleIdleSec = std::atol(argv[++i]);
         else if (a == "--max-delta" && i + 1 < argc) maxDelta = std::atoi(argv[++i]);
         else if (a == "--settle-thresh" && i + 1 < argc) settleThresh = std::atof(argv[++i]);
+        else if (a == "--refresh-ms" && i + 1 < argc) refreshMs = std::atol(argv[++i]);
         else if (a == "--scale" && i + 1 < argc) renderScale = (float)std::atof(argv[++i]);
         else if (a == "--strength" && i + 1 < argc) strength = (float)std::atof(argv[++i]);
         else if (a == "--colorpass" && i + 1 < argc) colorpass = std::atoi(argv[++i]);
-        else { std::fprintf(stderr, "usage: m8blive [--frames N] [--nowiggle] [--novideo] [--nocursor] [--output NAME] [--scale S(ignored)] [--wiggle-idle SECS] [--max-delta N] [--settle-thresh X] [--strength F] [--colorpass 0|1]\n"); return 1; }
+        else { std::fprintf(stderr, "usage: m8blive [--frames N] [--nowiggle] [--novideo] [--nocursor] [--output NAME] [--scale S(ignored)] [--wiggle-idle SECS] [--max-delta N] [--settle-thresh X] [--refresh-ms N] [--strength F] [--colorpass 0|1]\n"); return 1; }
     }
     if (wiggleForbidden) wiggleIdleSec = 0;
     if (maxDelta < 1) maxDelta = 1;
@@ -2464,6 +2467,7 @@ int main(int argc, char** argv) {
     long fbFrames = 0;                // processed frames with fb stats
     double fbMeanLast = 0.0;          // last full-frame mean |corrected delta| (0-255)
     bool shownOnce = false;           // overlay ShowWindow deferred to first present
+    auto tLastProcessed = clk::now(); // settle-gate staleness bound (force refresh cadence)
     bool needReseed = false;          // hidden->shown resume: zero+seed fbcancel on next processed frame
 
     // M8c ACCESS_LOST recovery (shared by hidden + visible loops): the
