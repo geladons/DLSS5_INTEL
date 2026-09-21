@@ -435,3 +435,25 @@ golden.py compare; isolation: isolate.py, quant.py, quant2.py forensics).
   DDA drops at 6.6 fps seen mid-bring-up vanished at 12.8 fps (wiggle ON).
 - Docs: docs/m8b-live.md; log: docs/m8b-live.log; launchers: Desktop RUN-DEMO.cmd
   (m8b) + RUN-DEMO-M4.cmd (m4).
+
+### M8b (2026-09-20, perf+idle)
+- EVENT-DRIVEN IDLE live loop (user priority): block on AcquireNextFrame(1000 ms);
+  process+present only on a fresh frame; on timeout do NOTHING (no chain/present/
+  readback/submit — GPU ~0% on static screen). Idle heartbeat every ~5 s. Cursor
+  wiggle removed from default; `--wiggle-idle N` (default OFF) engages the gentle
+  generator after N wall-clock seconds without any acquired frame, disengages only
+  on REAL content (sparse-sample diff: cursor-only <10 samples, real >32 — no more
+  pulse-off-on-own-frames). `--frames` counts processed frames. Per-stage timing
+  via vkCmdWriteTimestamp (6-slot query pool) + CPU timers: `[frame] n processed in
+  X ms (acq/bridge/rec/gpu | fe/fp/chain/hp/tail)`.
+- Verified idle: static screen -> acq waits 513-886 ms between ~1 Hz taskbar-clock
+  updates, GPU idle throughout; processed frames ~50-58 ms each.
+- PERF REGRESSION 12.8 -> 4.2 fps ROOT-CAUSED: NO GPU regression. Timestamps show
+  chain 47.9-58 ms (unchanged), featpack/headpack ~0, fe 0.7-3 ms, tail 1.2-2.3 ms,
+  bridge ~2 ms. The 4.2 fps wall-clock was ARRIVAL-PACED: with the always-on wiggle
+  gone, a near-static screen starves DDA and the event-driven loop correctly idles.
+  With continuous content the stream sustains 11.83 fps avg / 12.0 rolling
+  (--frames 60 --novideo, acq ~7-8 ms, chain ~50-51 ms, 0 drops) — >=10 fps target.
+- Final verify `--frames 40 --novideo`: frames 10/30 PASS, mean|d| ~3.3-4.7,
+  out\m8b_processed.bmp -> PNG INSPECTED clean (no rainbow/red shift).
+- Net: 4.2 (static arrival pace) -> 11.8 fps (content-paced); GPU/frame ~50 ms.

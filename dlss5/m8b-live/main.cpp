@@ -1066,6 +1066,20 @@ int main(int argc, char** argv) {
         VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
         VK_CHECK(vkCreateFence(c.dev, &fci, nullptr, &fence));
     }
+    // per-stage GPU timestamp instrumentation (Task 2 perf diagnosis):
+    // slots 0..5 written at front-end start/end, featpack end, chain end,
+    // headpack end, encode end. Deltas * limits.timestampPeriod = ns.
+    VkQueryPool tsPool = VK_NULL_HANDLE;
+    float tsPeriodNs = 1.0f;
+    {
+        VkQueryPoolCreateInfo qpci{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+        qpci.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        qpci.queryCount = 6;
+        VK_CHECK(vkCreateQueryPool(c.dev, &qpci, nullptr, &tsPool));
+        VkPhysicalDeviceProperties pp{};
+        vkGetPhysicalDeviceProperties(c.pd, &pp);
+        tsPeriodNs = pp.limits.timestampPeriod;
+    }
     VkSemaphore semImage = VK_NULL_HANDLE, semRender = VK_NULL_HANDLE;
     {
         VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
@@ -2007,10 +2021,14 @@ int main(int argc, char** argv) {
     std::printf("[m8b] entering live loop (%ld frames, event-driven; --frames counts PROCESSED frames)\n",
                 framesTarget);
     const auto tLoopStart = clk::now();
-    uint64_t idleMs = 0;          // continuous idleness (ms)
+    auto tLastAcquired = tLoopStart;   // wall-clock of last acquired frame (idle reference)
+    double lastIdleLogSec = 0.0;       // idle heartbeat logger
     bool wiggleActive = false;    // wiggle-idle generator currently running
+    uint8_t prevSamples[512]{};   // last frame's sparse samples (wiggle discriminator)
+    uint64_t prevSampleCnt = 0;
 
     while (!g_stop.load() && frame < framesTarget) {
+        const auto tLoopTop = clk::now();
         // ---- (a) EVENT-DRIVEN DDA capture: block up to 1000 ms for a real
         // desktop update; process+present ONLY when one arrives. On idle the
         // loop presents nothing and does no GPU work (~0% GPU on a static
@@ -2023,20 +2041,25 @@ int main(int argc, char** argv) {
             HRESULT hr = dup->AcquireNextFrame(1000, &fi, &res);
             if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
                 ++dropped;
-                idleMs += 1000;
-                if (idleMs % 5000 == 0)
+                const double idleSec =
+                    std::chrono::duration<double>(clk::now() - tLastAcquired).count();
+                if (idleSec - lastIdleLogSec >= 5.0) {
+                    lastIdleLogSec = idleSec;
                     std::printf("[m8b] idle, waiting for updates (%.0f s; %ld processed; %.2f fps)\n",
-                                idleMs / 1000.0, frame, fpsFinal);
-                if (wiggleIdleSec > 0 && !wiggleActive && idleMs >= (uint64_t)wiggleIdleSec * 1000) {
+                                idleSec, frame, fpsFinal);
+                }
+                // --wiggle-idle N: after N wall-clock seconds without ANY
+                // acquired frame, engage the gentle generator (default OFF).
+                if (wiggleIdleSec > 0 && !wiggleActive && idleSec >= (double)wiggleIdleSec) {
                     g_wiggleStop.store(false);
                     wiggler = std::thread(WiggleThread);
                     wiggleActive = true;
-                    std::printf("[info] wiggle-idle: no updates for %ld s — engaging gentle generator\n",
-                                wiggleIdleSec);
+                    std::printf("[info] wiggle-idle: no updates for %.0f s — engaging gentle generator\n",
+                                idleSec);
                 }
                 continue;
             } else if (FAILED(hr)) {
-                idleMs = 0;
+                tLastAcquired = clk::now();
                 if (hr == DXGI_ERROR_ACCESS_LOST) {
                     std::fprintf(stderr, "[warn] ACCESS_LOST - attempting one DuplicateOutput recovery\n");
                     dup.Reset();
@@ -2064,12 +2087,34 @@ int main(int argc, char** argv) {
                 D3D11_MAPPED_SUBRESOURCE ms{};
                 if (SUCCEEDED(context->Map(stagingTex.Get(), 0, D3D11_MAP_READ, 0, &ms))) {
                     double s = 0; uint64_t cnt = 0;
+                    // sparse samples ALSO feed the wiggle discriminator: the
+                    // generator only moves the cursor (~few samples), real
+                    // content changes many — disengage wiggle on real change.
+                    uint8_t cur[512]; const uint32_t curCap = 512;
                     for (uint32_t y = 0; y < H; y += 24) {
                         const uint8_t* row = (const uint8_t*)ms.pData + (size_t)y * ms.RowPitch;
-                        for (uint32_t x = 0; x < W * 4; x += 1997) { s += row[x]; ++cnt; }
+                        for (uint32_t x = 0; x < W * 4; x += 1997) {
+                            s += row[x];
+                            if (cnt < curCap) cur[cnt] = row[x];
+                            ++cnt;
+                        }
                     }
                     black = (cnt == 0) || (s / (double)cnt) < 1.0;
                     if (!black) {
+                        uint64_t diffCnt = 0;
+                        if (prevSampleCnt && prevSampleCnt == cnt) {
+                            for (uint64_t i = 0; i < cnt && i < curCap; ++i)
+                                if ((unsigned)std::abs((int)cur[i] - (int)prevSamples[i]) > 16) ++diffCnt;
+                        }
+                        if (wiggleActive && prevSampleCnt == cnt && diffCnt > 32) {
+                            g_wiggleStop.store(true);
+                            wiggler.join();
+                            wiggleActive = false;
+                            std::printf("[info] real screen activity resumed (%llu changed samples) — wiggle generator off\n",
+                                        (unsigned long long)diffCnt);
+                        }
+                        prevSampleCnt = cnt < curCap ? cnt : curCap;
+                        for (uint64_t i = 0; i < prevSampleCnt; ++i) prevSamples[i] = cur[i];
                         bool isVerify = (verifyIdx < 3 && verifyFrames[verifyIdx] == frame);
                         for (uint32_t y = 0; y < H; ++y)
                             std::memcpy(&original[(size_t)y * W * 4],
@@ -2080,20 +2125,18 @@ int main(int argc, char** argv) {
                 }
                 if (black) { ++dropped; continue; }
                 fresh = true;
-                idleMs = 0;
-                if (wiggleActive) {
-                    g_wiggleStop.store(true);
-                    wiggler.join();
-                    wiggleActive = false;
-                    std::printf("[info] updates resumed — wiggle generator off\n");
-                }
+                tLastAcquired = clk::now();
             }
             if (fresh) stale = 0;
         }
         if (g_stop.load()) break;
+        const double acqMs = std::chrono::duration<double, std::milli>(clk::now() - tLoopTop).count();
 
         // ---- (b) CPU bridge: staging -> upload buffer
+        const auto tBridge0 = clk::now();
         std::memcpy(uploadPtr, original.data(), (size_t)W * H * 4);
+        const double bridgeMs =
+            std::chrono::duration<double, std::milli>(clk::now() - tBridge0).count();
 
         // ---- (c) acquire swapchain image (video mode only)
         uint32_t imageIndex = 0;
@@ -2114,7 +2157,9 @@ int main(int argc, char** argv) {
 
         // ---- (d) record frame: upload + M4 front-end + REAL CHAIN + compose + encode.
         const bool verify = (verifyIdx < 3 && verifyFrames[verifyIdx] == frame);
+        const auto tFrameStart = clk::now();
         begin();
+        vkCmdResetQueryPool(cmd, tsPool, 0, 6);
         {   // upload -> imgIn
             VkBufferMemoryBarrier bb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
             bb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -2145,6 +2190,7 @@ int main(int argc, char** argv) {
             imb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
             vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &imb);
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool, 0);
         }
         {   // M4 front-end (verbatim dispatch params; region fixed)
             Push p{};
@@ -2173,6 +2219,7 @@ int main(int argc, char** argv) {
             p.c[0] = 0.0f; p.c[1] = 1.0f; p.c[2] = 1.0f; push(p);
             vkCmdDispatch(cmd, ((uint64_t)netW * netH + 255) / 256, 1, 1);
             barrierAll();
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool, 1);
         }
         {   // ==== REAL DLSS 5 CHAIN (replaces the m4 stand-in block) ====
             // featpack: features fp32 [288,16] -> chain input f16 (oX16)
@@ -2181,8 +2228,10 @@ int main(int argc, char** argv) {
             vkCmdPushConstants(cmd, pFeatpack.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(fp), &fp);
             vkCmdDispatch(cmd, (TOK * 16 + 255) / 256, 1, 1);
             barrierAll();
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool, 2);
             // full 71-block DLSSNR chain (~1402 dispatches)
             recordChain(cmd);
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool, 3);
             // headpack (two passes): per-channel DC of the raw head, then the
             // calibrated matched residual into the m4 head layout [288,4]
             // (binding 4 slot). See shaders/m8/headpack.comp.
@@ -2197,6 +2246,7 @@ int main(int argc, char** argv) {
             vkCmdPushConstants(cmd, pHeadpack.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(hp), &hp);
             vkCmdDispatch(cmd, (TOK + 255) / 256, 1, 1);
             barrierAll();
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool, 4);
         }
         {   // rescale up (4ch head -> region) + compose + encode (verbatim M4)
             Push p{};
@@ -2219,6 +2269,7 @@ int main(int argc, char** argv) {
             p.b[0] = regionW; p.b[1] = regionH; p.b[2] = 0; push(p);
             vkCmdDispatch(cmd, (W + 15) / 16, (H + 15) / 16, 1);
             barrierAll();
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool, 5);
         }
         if (frame == 1) {   // one-shot debug: copy chain-path buffers for stats
             VkBufferCopy cp[16]{};
@@ -2311,9 +2362,13 @@ int main(int argc, char** argv) {
                                  0, 0, nullptr, 0, nullptr, 1, &pb);
         }
         VK_CHECK(vkEndCommandBuffer(cmd));
+        const double recMs =
+            std::chrono::duration<double, std::milli>(clk::now() - tFrameStart).count();
+        double gpuMs = 0;
 
         // ---- (e) submit (wait acquire, signal render) + present + FULL wait.
         {
+            const auto tSubmit0 = clk::now();
             VkPipelineStageFlags st = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
             VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
             si.commandBufferCount = 1; si.pCommandBuffers = &cmd;
@@ -2331,6 +2386,24 @@ int main(int argc, char** argv) {
             }
             VK_CHECK(vkWaitForFences(c.dev, 1, &fence, VK_TRUE, UINT64_MAX));
             vkResetFences(c.dev, 1, &fence);
+            gpuMs = std::chrono::duration<double, std::milli>(clk::now() - tSubmit0).count();
+        }
+        {   // per-stage GPU timestamp readback + timing line
+            uint64_t ts[6]{};
+            VkResult qr = vkGetQueryPoolResults(c.dev, tsPool, 0, 6, sizeof(ts), ts,
+                                                sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+            double feMs = 0, fpMs = 0, chMs = 0, hpMs = 0, tailMs = 0, gpuTotMs = 0;
+            if (qr == VK_SUCCESS) {
+                auto d = [&](int i, int j) {
+                    return (double)(ts[j] - ts[i]) * (double)tsPeriodNs / 1e6;
+                };
+                feMs = d(0, 1); fpMs = d(1, 2); chMs = d(2, 3);
+                hpMs = d(3, 4); tailMs = d(4, 5); gpuTotMs = d(0, 5);
+            }
+            std::printf("[frame] %ld processed in %.1f ms (acq %.1f bridge %.1f rec %.1f gpu %.1f "
+                        "| fe %.1f fp %.1f chain %.1f hp %.1f tail %.1f)\n",
+                        frame, gpuTotMs, acqMs, bridgeMs, recMs, gpuMs,
+                        feMs, fpMs, chMs, hpMs, tailMs);
         }
         if (frame == 1) {   // one-shot chain-path statistics (min/max/mean/nonzero%)
             auto dumpF = [](const char* nm, const float* p, size_t n) {
@@ -2514,6 +2587,7 @@ int main(int argc, char** argv) {
     vkUnmapMemory(c.dev, memMax);
     if (wiggler.joinable()) { g_wiggleStop.store(true); wiggler.join(); }
     vkDestroyFence(c.dev, fence, nullptr);
+    vkDestroyQueryPool(c.dev, tsPool, nullptr);
     vkDestroySemaphore(c.dev, semImage, nullptr);
     vkDestroySemaphore(c.dev, semRender, nullptr);
     vkDestroyCommandPool(c.dev, cmdPool, nullptr);
