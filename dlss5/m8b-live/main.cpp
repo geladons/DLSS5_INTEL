@@ -2217,6 +2217,14 @@ int main(int argc, char** argv) {
                             std::memcpy(&original[(size_t)y * W * 4],
                                         (const uint8_t*)ms.pData + (size_t)y * ms.RowPitch, W * 4);
                         if (isVerify) nativeRef = original;
+                        // DIAG(one-shot): dump the DDA capture of the DISPLAYED
+                        // overlay (frame>=1 shows our own present) — GDI BitBlt
+                        // screen grabs mis-render the flip-model swapchain, so
+                        // this DDA frame is the ground truth of what's on screen.
+                        if (frame == 1 || frame == 2)
+                            WriteBmpBGRA(frame == 1 ? "out\\m8b_dda_overlay1.bmp"
+                                                    : "out\\m8b_dda_overlay2.bmp",
+                                         original, W, H);
                     }
                     context->Unmap(stagingTex.Get(), 0);
                 }
