@@ -477,3 +477,4 @@ golden.py compare; isolation: isolate.py, quant.py, quant2.py forensics).
   correlated network hue residual integrates <=12/255 per processed frame
   (mild wallpaper hue shift) - design limitation, gated by settle-skip.
 - Commit: see git log (m8b: frame-0 fbcancel safety-clamp lock-in ...).
+`n## 2026-09-21 M8c PASS (de2d594) - Sunshine-aware capture`n- Root cause of 02:38 starvation: idle desktop (DDA=updates-only), NOT Sunshine. DuplicateOutput coexists with sunshine.exe fine.`n- Cap struct + CapBuild: multi-adapter DXGI enum, output pick = --output NAME > cursor > primary > first attached, device on picked adapter.`n- --output flag; startup wiggle fallback (+12s) on idle desktop; ACCESS_LOST re-picks + rebuilds (CPU bridge = cross-adapter safe).`n- Verify: 60-frame + 30-frame video runs PASS (rule=cursor pick, verify ALL PASS), Sunshine running.`n- Cursor CONFIRMED painted+positioned via DDA snapshot (GDI screenshots cannot see the overlay - direct flip).`n
