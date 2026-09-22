@@ -546,3 +546,14 @@ invisibility knobs. Experiment plan in DEV_STATE "Next steps" item 0.
   m1dda snapshot: no colored lines, clean tracking.
 - STILL OPEN: (A) overlay hides normal windows (architectural, needs product
   decision: auto-lower on foreground change / windowed-overlay (WGC) mode).
+
+### 2026-09-22 10:15 - OWNER VERDICT: product unusable (freezes on click, garbage on motion)
+Full handoff written to docs/HANDOFF_NEXT_AGENT.md. Key points: (L1) fullscreen
+opaque topmost overlay cannot work for interactive desktop - re-architect to
+WGC per-window mode; (L2) network input contract wrong: stand-in noise ch0-2
+(real deterministic_noise at work/mlx-dlss/python/mlxdlss/features.py:87, was
+available all along), no temporal history; chain validated only vs synthetic
+goldens - never visually on real content; (L3) B1/B2 output fixes hold
+(27d1667), bug #4 analysis stands. Verification lessons: --frames verify gates
+PASS ON GARBAGE; only DDA snapshots of real interactive scenarios + owner
+eyes count. Demo stopped, desktop freed.
