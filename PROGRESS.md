@@ -517,3 +517,15 @@ compose vendor 0.25 = net residual scale 0.05; post-DC head std ~0.017 ->
 entirely. Old "visible" runs (8-17/255) predate DC-removal/gain/resgate.
 DC-removal + hpfilter kill the drift and must STAY; GAIN and RESGATE are the
 invisibility knobs. Experiment plan in DEV_STATE "Next steps" item 0.
+
+### 2026-09-21/22 night: owner correction + env fixes
+- Owner 22:25: bugs NOT fixed in real use (colors/trails/stalls/COLORED LINES).
+  Real-scenario repro confirmed: (A) opaque topmost overlay HIDES normal windows
+  (Notepad opens behind it); (B) colored line artifacts + clamp-distorted motion
+  (fbcancel +-48/255 clamp makes real changes arrive over multiple frames).
+  Evidence: dlss5\m1-frame-captureuild\Release\out_live3\snapshot_5.bmp.
+  Prior "FIXED" claims were synthetic-test-only; DEV_STATE corrected.
+- VS BuildTools env: root cause = Setup.Configuration COM registration missing
+  from ALL registry views (vswhere/cmake enumerate 0 even after full reinstall).
+  Fixed pragmatically: fresh install (instance 8350b0c9) + toolset merged from
+  BuildTools.bak + build.cmd NMake fallback. build.cmd verified working.
