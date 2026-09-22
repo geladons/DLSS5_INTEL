@@ -934,7 +934,7 @@ struct MergePush { uint64_t a, b, c, d, e, h; uint32_t n, ch, kind; };
 struct PackPush { uint64_t src, dst; uint32_t n; };
 // headpack two-pass push: mode 0 accumulates per-channel DC, mode 1 writes
 // the calibrated matched residual (see shaders/m8/headpack.comp).
-struct HeadPush { uint64_t src, dst, dc; uint32_t ntok; float gain; uint32_t mode; };
+struct HeadPush { uint64_t src, dst, dc; uint32_t ntok; float gain; uint32_t mode; uint32_t cols; };
 #pragma pack(pop)
 
 enum { EPI_NONE = 0, EPI_E4M3 = 1, EPI_GATE = 2, EPI_GATE_E4M3 = 3, EPI_HALF = 4 };
@@ -1641,7 +1641,7 @@ int main(int argc, char** argv) {
     // m8b bridge slots: features output (fp32 [288,16]) + packed head ([288,4])
     VkDeviceSize oFeatV = slot(TOK * 16 * 4);
     VkDeviceSize oHead4 = slot(TOK * 4 * 4);
-    VkDeviceSize oHeadDC = slot(16);   // headpack per-channel DC accumulator
+    VkDeviceSize oHeadDC = slot(1024);  // headpack per-ROW DC accumulator (24 rows x 4 ch; B1 fix)
 
     auto preVec = [&](const std::string &n) { if (poff.count(n)) needVec(n); };
     for (int i = 0; i <= 70; ++i) {
@@ -2937,7 +2937,19 @@ int main(int argc, char** argv) {
                                      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 1, &rb, 0, nullptr);
             }
             Push p{};
-            p.a[0] = (int32_t)W; p.a[1] = (int32_t)H; p.b[0] = maxDelta * 4;
+            // ADAPTIVE SAFETY CLAMP (bug B2, 2026-09-22): the fixed +/-4*maxDelta
+            // (48/255) clamp bounds pathological feedback, but it also STRANGLES
+            // real changes - a window move is a +/-255 delta that then arrives
+            // distorted over ~6 processed frames ("broken colors / trails"). The
+            // CPU already computed the sparse change estimate (estMeanDelta) for
+            // the settle gate BEFORE this dispatch: when it says REAL CHANGE
+            // (>=4/255 mean, far above the static-echo noise floor <0.5), open
+            // the clamp to full range so the presented frame tracks reality in
+            // ONE frame. Static frames keep the tight divergence bound. The
+            // algebraic bound on feedback divergence is compose's residual clamp
+            // (+/-maxDelta), not this one, so opening it on real change is safe.
+            p.a[0] = (int32_t)W; p.a[1] = (int32_t)H;
+            p.b[0] = (estMeanDelta >= 4.0) ? 255 : maxDelta * 4;
             p.c[0] = (frame == 0 || needReseed) ? 1.0f : 0.0f;
             needReseed = false;
             push(p);
@@ -2989,17 +3001,18 @@ int main(int argc, char** argv) {
             // full 71-block DLSSNR chain (~1402 dispatches)
             recordChain(cmd);
             vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool, 3);
-            // headpack (two passes): per-channel DC of the raw head, then the
-            // calibrated matched residual into the m4 head layout [288,4]
-            // (binding 4 slot). See shaders/m8/headpack.comp.
+            // headpack (two passes): per-token-ROW DC of the raw head (bug B1:
+            // global DC left +/-1.4/255 row biases = colored bands on screen),
+            // then the calibrated matched residual into the m4 head layout
+            // [288,4] (binding 4 slot). See shaders/m8/headpack.comp.
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pHeadpack.pipe);
-            vkCmdFillBuffer(cmd, dev.buf, oHeadDC, 16, 0);
+            vkCmdFillBuffer(cmd, dev.buf, oHeadDC, 1024, 0);
             barrierAll();
-            HeadPush hd{A(oHEAD), A(oHead4), A(oHeadDC), TOK, 0.0f, 0};
+            HeadPush hd{A(oHEAD), A(oHead4), A(oHeadDC), TOK, 0.0f, 0, 12};
             vkCmdPushConstants(cmd, pHeadpack.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(hd), &hd);
             vkCmdDispatch(cmd, (TOK + 255) / 256, 1, 1);
             barrierAll();
-            HeadPush hp{A(oHEAD), A(oHead4), A(oHeadDC), TOK, 0.2f, 1};
+            HeadPush hp{A(oHEAD), A(oHead4), A(oHeadDC), TOK, 0.2f, 1, 12};
             vkCmdPushConstants(cmd, pHeadpack.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(hp), &hp);
             vkCmdDispatch(cmd, (TOK + 255) / 256, 1, 1);
             barrierAll();
@@ -3280,6 +3293,23 @@ int main(int argc, char** argv) {
                     var /= TOK;
                     std::printf("[dbg] head4 ch%u: mean=%.4f std=%.4f (DC-removed delta 0.25xstd=%.4f)\n",
                                 c, mean, std::sqrt(var), 0.25 * std::sqrt(var));
+                }
+                // BUG-B1 probe (2026-09-22): per-token-ROW DC of the residual.
+                // Colored lines at fixed y on screen => row-scale DC that the
+                // global DC pass cannot see. Grid is 12x24; print per-row means
+                // for both 12-col and 24-col layouts, ch0..2, in 1/255 units.
+                for (uint32_t cols = 12; cols <= 24; cols += 12) {
+                    uint32_t rows = TOK / cols;
+                    std::printf("[dbg] head4 rowDC (%u cols x %u rows), 1/255 units:\n", cols, rows);
+                    for (uint32_t r = 0; r < rows; ++r) {
+                        double m[3] = {0, 0, 0};
+                        for (uint32_t k = 0; k < cols; ++k)
+                            for (uint32_t c = 0; c < 3; ++c) m[c] += h4[(r * cols + k) * 4 + c];
+                        for (uint32_t c = 0; c < 3; ++c) m[c] /= cols;
+                        std::printf("[dbg]   row %2u: B %+.3f  G %+.3f  R %+.3f\n",
+                                    r, m[0] * 0.25 * 0.2 * 255.0, m[1] * 0.25 * 0.2 * 255.0,
+                                    m[2] * 0.25 * 0.2 * 255.0);
+                    }
                 }
             }
             auto dumpU16 = [](const char* nm, const uint16_t* p, size_t n) {

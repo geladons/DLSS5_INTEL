@@ -21,7 +21,12 @@
 // still-frame path, as in m3).
 //
 //   push: { FloatBuf src; FloatBuf dst; FloatBuf dc; uint ntok; float gain;
-//           uint mode; }
+//           uint mode; uint cols; }
+//   BUG-B1 FIX (2026-09-22): the DC pass is now PER TOKEN ROW (row = p/cols),
+//   not global. Measured row DC reached +/-1.4/255 in B with anti-correlated R
+//   (probe: [dbg] head4 rowDC) - the global pass could not see it and it
+//   painted colored horizontal bands (60px tall) on screen. dc[] must hold
+//   rows*4 floats (24*4*4 = 384 B; the host slot is 1024 B).
 // ============================================================================
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_buffer_reference2 : require
@@ -37,17 +42,19 @@ layout(push_constant, scalar) uniform Push {
     uint ntok;
     float gain;
     uint mode;
+    uint cols;
 } pc;
 
 void main() {
     uint p = gl_GlobalInvocationID.x;
     if (p >= pc.ntok) return;
+    uint row = p / pc.cols;
     if (pc.mode == 0u) {
         for (uint c = 0u; c < 4u; ++c)
-            atomicAdd(pc.dc.v[c], pc.src.v[p * 16u + c]);
+            atomicAdd(pc.dc.v[row * 4u + c], pc.src.v[p * 16u + c]);
         return;
     }
-    float inv = 1.0f / float(pc.ntok);
+    float inv = 1.0f / float(pc.cols);
     for (uint c = 0u; c < 4u; ++c)
-        pc.dst.v[p * 4u + c] = (pc.src.v[p * 16u + c] - pc.dc.v[c] * inv) * pc.gain;
+        pc.dst.v[p * 4u + c] = (pc.src.v[p * 16u + c] - pc.dc.v[row * 4u + c] * inv) * pc.gain;
 }
