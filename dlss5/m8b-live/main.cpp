@@ -602,6 +602,8 @@ struct Push { int32_t a[4]; int32_t b[4]; float c[4]; float d[4]; };
 
 // ------------------------------------------------------- overlay window ----
 static HWND g_hwnd = nullptr;
+static bool g_overlayExcluded = false;   // WDA_EXCLUDEFROMCAPTURE applied
+static bool g_echoFreeWanted = true;     // --echo-free 0|1 (default 1)
 static std::atomic<bool> g_stop{false};
 static std::atomic<bool> g_overlayHidden{false};  // CTRL+ALT+X: hidden = capture-only warm loop
 static std::atomic<bool> g_resumeRequested{false}; // hidden->shown: loop must force fresh frame+reseed
@@ -967,6 +969,18 @@ int main(int argc, char** argv) {
                                  // 0 = off). The network residual is weighted by the real
                                  // per-pixel change magnitude so it cannot integrate on a
                                  // static background (owner bug #2, blue tint).
+    long paceMs = 66;            // --pace-ms N: min wall-clock interval between PROCESSED
+                                 // frames in video mode (default 66 => <=15 fps). Leaves
+                                 // DWM GPU headroom; the fix for the whole-desktop freeze
+                                 // when the user interacts (back-to-back 51 ms chains +
+                                 // blocking FIFO presents starved composition).
+    int temporal = 0;            // --temporal 0|1: 0 = calibrated still-frame headpack residual
+                                 // (default; clean live A/B 2026-09-22); 1 = vendor temporal
+                                 // path (history in features 7-9 + compose_temporal). ON HOLD:
+                                 // at the event-driven ~1 Hz cadence the history blend ghosts
+                                 // moving windows and its residual reintroduces row lines;
+                                 // needs realtime cadence to be valid (owner screenshots
+                                 // 2026-09-22 ~10:55).
     std::string outPref;         // --output NAME: capture-output preference (substring,
                                  // case-insensitive, e.g. "DISPLAY5"; empty = auto)
     for (int i = 1; i < argc; ++i) {
@@ -985,12 +999,17 @@ int main(int argc, char** argv) {
         else if (a == "--strength" && i + 1 < argc) strength = (float)std::atof(argv[++i]);
         else if (a == "--colorpass" && i + 1 < argc) colorpass = std::atoi(argv[++i]);
         else if (a == "--resgate" && i + 1 < argc) resGate = std::atol(argv[++i]);
-        else { std::fprintf(stderr, "usage: m8blive [--frames N] [--nowiggle] [--novideo] [--nocursor] [--cursor-draw] [--output NAME] [--scale S(ignored)] [--wiggle-idle SECS] [--max-delta N] [--settle-thresh X] [--refresh-ms N] [--strength F] [--colorpass 0|1] [--resgate T]\n"); return 1; }
+        else if (a == "--pace-ms" && i + 1 < argc) paceMs = std::atol(argv[++i]);
+        else if (a == "--temporal" && i + 1 < argc) temporal = std::atoi(argv[++i]);
+        else if (a == "--echo-free" && i + 1 < argc) g_echoFreeWanted = std::atoi(argv[++i]) != 0;
+        else { std::fprintf(stderr, "usage: m8blive [--frames N] [--nowiggle] [--novideo] [--nocursor] [--cursor-draw] [--output NAME] [--scale S(ignored)] [--wiggle-idle SECS] [--max-delta N] [--settle-thresh X] [--refresh-ms N] [--strength F] [--colorpass 0|1] [--resgate T] [--pace-ms N] [--temporal 0|1] [--echo-free 0|1]\n"); return 1; }
     }
     if (wiggleForbidden) wiggleIdleSec = 0;
     if (maxDelta < 1) maxDelta = 1;
     if (maxDelta > 255) maxDelta = 255;
     if (refreshMs < 50) refreshMs = 50;
+    if (paceMs < 0) paceMs = 0;
+    temporal = temporal ? 1 : 0;
     if (strength < 0.0f) strength = 0.0f;
     if (strength > 2.0f) strength = 2.0f;
     colorpass = colorpass ? 1 : 0;
@@ -1206,6 +1225,26 @@ int main(int argc, char** argv) {
                                  nullptr, nullptr, hinst, nullptr);
         if (!g_hwnd) { std::fprintf(stderr, "[FAIL] CreateWindowExW %lu\n", GetLastError()); return 1; }
         SetLayeredWindowAttributes(g_hwnd, 0, 255, LWA_ALPHA);
+        // ECHO-FREE PIPELINE (fundamental fix, 2026-09-22): exclude the overlay
+        // from ALL screen capture (WDA_EXCLUDEFROMCAPTURE = 0x11, Win10 2004+).
+        // DDA then delivers the TRUE desktop (windows BEHIND the overlay are
+        // captured as if it did not exist), which kills the entire class of
+        // feedback bugs at the root:
+        //   - no echo of our own output into the chain input (fbcancel and
+        //     the accumulate compose become unnecessary and are bypassed);
+        //   - colors are the native desktop + residual, not a feedback-loop
+        //     equilibrium (owner: "colors are wrong everywhere except windows
+        //     above the overlay"; fbmean sat at ~11/255);
+        //   - windows opened under the overlay BECOME VISIBLE in the next
+        //     processed frame (the Layer-A "overlay hides everything" pain).
+        if (g_echoFreeWanted) {
+            if (SetWindowDisplayAffinity(g_hwnd, 0x11)) {
+                g_overlayExcluded = true;
+                std::printf("[win] overlay EXCLUDED from capture (WDA_EXCLUDEFROMCAPTURE) - echo-free absolute pipeline\n");
+            } else {
+                std::fprintf(stderr, "[warn] SetWindowDisplayAffinity failed (%lu) - legacy feedback pipeline\n", GetLastError());
+            }
+        }
         // M8B feedback fix: the window stays HIDDEN until the first present.
         // Shown earlier, the never-presented swapchain client composites as a
         // black rectangle over the desktop and the first DDA captures (and the
@@ -1406,7 +1445,7 @@ int main(int argc, char** argv) {
     // ===================================================================
     VkDescriptorSetLayout dsLayout;
     {
-        VkDescriptorSetLayoutBinding binds[13]{};
+        VkDescriptorSetLayoutBinding binds[16]{};
         binds[0] = {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
         for (uint32_t i = 1; i <= 8; ++i)
             binds[i] = {i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
@@ -1414,8 +1453,11 @@ int main(int argc, char** argv) {
         binds[10] = {10, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};  // bufLastPresented
         binds[11] = {11, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};  // fbStats (mapped)
         binds[12] = {12, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};  // hpfilter low-res scratch
+        binds[13] = {13, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};  // bufHist (temporal history)
+        binds[14] = {14, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};  // oHEAD range (raw head)
+        binds[15] = {15, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};  // oHeadDC range (row DC)
         VkDescriptorSetLayoutCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        ci.bindingCount = 13; ci.pBindings = binds;
+        ci.bindingCount = 16; ci.pBindings = binds;
         VK_CHECK(vkCreateDescriptorSetLayout(c.dev, &ci, nullptr, &dsLayout));
     }
     VkPipelineLayout pipeLayout;
@@ -1455,7 +1497,8 @@ int main(int argc, char** argv) {
     VkPipeline pipeBlit = makePipe("blit");
     VkPipeline pipeFbcancel = makePipe("fbcancel");
     VkPipeline pipeHpfilter = makePipe("hpfilter");
-    std::printf("[VK] 8 transport pipelines up (+ blit + fbcancel + hpfilter); standin REMOVED\n");
+    VkPipeline pipeTemporal = makePipe("temporal");
+    std::printf("[VK] 9 transport pipelines up (+ blit + fbcancel + hpfilter + temporal); standin REMOVED\n");
 
     VkCommandPool cmdPool;
     VkCommandBuffer cmd;
@@ -1962,6 +2005,10 @@ int main(int argc, char** argv) {
                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memFin);
     VkBuffer bufNr = CreateBuf(c, (uint64_t)regionW * regionH * 3 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memNr);
+    // temporal history: scaled_color domain previous composed output, [TOK,3] fp32
+    VkDeviceMemory memHist = VK_NULL_HANDLE;
+    VkBuffer bufHist = CreateBuf(c, (uint64_t)TOK * 3 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memHist);
     VkBuffer bufRbFinal = CreateBuf(c, (uint64_t)W * H * 4,
                               VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
@@ -2026,6 +2073,9 @@ int main(int argc, char** argv) {
         writeBuf(setFinal, 10, bufLastPresented, (uint64_t)W * H * 4);  // feedback cancellation
         writeBuf(setFinal, 11, bufFbStats, 8);                          // settle stats
         writeBuf(setFinal, 12, bufHp, 65536);                           // hpfilter low-res scratch
+        writeBuf(setFinal, 13, bufHist, (uint64_t)TOK * 3 * 4);         // temporal history
+        writeBufRange(setFinal, 14, dev.buf, oHEAD, (uint64_t)TOK * 16 * 4);  // raw head (temporal)
+        writeBufRange(setFinal, 15, dev.buf, oHeadDC, 1024);            // head row-DC (temporal)
     }
     writeImg(setFinal, 9, viewFinal);
     for (size_t i = 0; i < setBlit.size(); ++i) {
@@ -2801,6 +2851,15 @@ int main(int argc, char** argv) {
                             estMeanDelta, settleThresh, settled);
             continue;
         }
+        // ---- (b1) PRESENT PACING (freeze fix): never process more often than
+        // --pace-ms (default 66 => <=15 fps). Real desktop updates arrive at
+        // 100+ fps; without a cap the loop ran a 51 ms chain + blocking FIFO
+        // present per update and starved DWM composition (owner: "clicks
+        // freeze the desktop"). The stale bound above still guarantees >=1
+        // processed frame per --refresh-ms. forceRefresh/resume bypass.
+        if (!novideo && !resumeForce && !forceRefresh && paceMs > 0 &&
+            std::chrono::duration<double, std::milli>(clk::now() - tLastProcessed).count() < (double)paceMs)
+            continue;
         tLastProcessed = clk::now();
 
         // ---- (b2) CPU bridge: staging -> upload buffer (raw capture, for
@@ -2835,20 +2894,29 @@ int main(int argc, char** argv) {
             std::chrono::duration<double, std::milli>(clk::now() - tBridge0).count();
 
         // ---- (c) acquire swapchain image (video mode only)
+        // BOUNDED (freeze fix): the old UINT64_MAX wait could park the whole
+        // thread inside the driver for seconds under FIFO + fullscreen
+        // composed-mode transitions - hotkeys dead, desktop looks frozen,
+        // kill via Task Manager. Now: 50 ms tries with a hotkey drain between
+        // them; if no image frees up after ~4 tries we SKIP this frame (the
+        // DDA frame was already released; nothing GPU-side was recorded yet).
         uint32_t imageIndex = 0;
         if (!novideo) {
-            VkResult ar;
-            for (;;) {
-                ar = vkAcquireNextImageKHR(c.dev, swapchain, UINT64_MAX, semImage, VK_NULL_HANDLE, &imageIndex);
-                if (ar == VK_SUCCESS || ar == VK_SUBOPTIMAL_KHR) break;
+            VkResult ar = VK_NOT_READY;
+            bool got = false;
+            for (int tries = 0; tries < 4 && !g_stop.load(); ++tries) {
+                ar = vkAcquireNextImageKHR(c.dev, swapchain, 50000000ull, semImage, VK_NULL_HANDLE, &imageIndex);
+                if (ar == VK_SUCCESS || ar == VK_SUBOPTIMAL_KHR) { got = true; break; }
                 if (ar == VK_ERROR_OUT_OF_DATE_KHR) {
                     std::fprintf(stderr, "[warn] swapchain OUT_OF_DATE - ending run\n");
                     g_stop.store(true);
                     break;
                 }
-                break;
+                if (ar == VK_TIMEOUT || ar == VK_NOT_READY) { drainHotkeys(); continue; }
+                break;   // any other error: fall through to the old behavior
             }
             if (g_stop.load() && ar != VK_SUCCESS) break;
+            if (!got && (ar == VK_TIMEOUT || ar == VK_NOT_READY)) continue;   // skip frame, stay responsive
         }
 
         // ---- (d) record frame: upload + feedback cancellation + M4 front-end
@@ -2904,7 +2972,14 @@ int main(int argc, char** argv) {
             vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &imb);
         }
-        if (!novideo) {   // fbcancel: corrected = clamp(capture - lastPresented, +/-4*maxDelta)
+        const bool reseedThisFrame = (frame == 0 || needReseed);   // also gates
+            // the temporal-history validity for features (first frame / resume)
+        // echoFree: overlay excluded from capture -> DDA delivers the TRUE
+        // desktop; no echo, no feedback: skip fbcancel entirely, decode the
+        // raw capture like --novideo, compose/encode in absolute mode.
+        const bool echoFree = !novideo && g_overlayExcluded;
+        if (echoFree) needReseed = false;   // no fbcancel state to reseed
+        if (!novideo && !echoFree) {   // fbcancel: corrected = clamp(capture - lastPresented, +/-4*maxDelta)
                           // (safety clamp only — real content must pass; the tight
                           // divergence bound is the composite residual clamp in
                           // compose) as float RGB into the decode slot + stats.
@@ -2950,7 +3025,7 @@ int main(int argc, char** argv) {
             // (+/-maxDelta), not this one, so opening it on real change is safe.
             p.a[0] = (int32_t)W; p.a[1] = (int32_t)H;
             p.b[0] = (estMeanDelta >= 4.0) ? 255 : maxDelta * 4;
-            p.c[0] = (frame == 0 || needReseed) ? 1.0f : 0.0f;
+            p.c[0] = reseedThisFrame ? 1.0f : 0.0f;
             needReseed = false;
             push(p);
             vkCmdDispatch(cmd, W / 16, H / 16, 1);
@@ -2958,8 +3033,9 @@ int main(int argc, char** argv) {
         }
         {   // M4 front-end (verbatim dispatch params; region fixed)
             Push p{};
-            if (novideo) {   // decode: BGRA -> float RGB. Video mode: fbcancel
-                             // already wrote the corrected delta into bufRgb.
+            if (novideo || echoFree) {   // decode: BGRA -> float RGB. Legacy video
+                                         // mode: fbcancel already wrote the
+                                         // corrected delta into bufRgb.
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeDecode);
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLayout, 0, 1,
                                         &setFinal, 0, nullptr);
@@ -2985,7 +3061,13 @@ int main(int argc, char** argv) {
             barrierAll();
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeFeatures);
             p.a[0] = netW; p.a[1] = netH; p.b[0] = (int32_t)(frame & 0x7fffffff);
-            p.c[0] = 0.0f; p.c[1] = 1.0f; p.c[2] = 1.0f; push(p);
+            p.c[0] = 0.0f; p.c[1] = 1.0f; p.c[2] = 1.0f;
+            // temporal: channels 7-9 come from bufHist (last frame's composed
+            // output, scaled domain); on frame 0 / reseed / --temporal 0 the
+            // shader falls back to the vendor first-frame layout (scaled color).
+            p.d[0] = (temporal && !reseedThisFrame) ? 1.0f : 0.0f;
+            p.d[1] = 0.0f; p.d[2] = 0.0f; p.d[3] = 0.0f;
+            push(p);
             vkCmdDispatch(cmd, ((uint64_t)netW * netH + 255) / 256, 1, 1);
             barrierAll();
             vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool, 1);
@@ -3001,6 +3083,29 @@ int main(int argc, char** argv) {
             // full 71-block DLSSNR chain (~1402 dispatches)
             recordChain(cmd);
             vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool, 3);
+            if (temporal) {
+                // TEMPORAL PATH (vendor compose_temporal at token res + the
+                // calibrated per-row head DC compensation): mode 0 accumulates
+                // per-row head DC (binding 15, oHeadDC range), mode 1 reads the
+                // raw head (binding 14 = oHEAD) + this frame's features
+                // (binding 3: ch4-6 color, ch7-9 history), writes the residual
+                // (out-color)*4 into binding 4 (oHead4) and the next-frame
+                // history (scaled domain) into binding 13. See temporal.comp.
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeTemporal);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLayout, 0, 1,
+                                        &setFinal, 0, nullptr);
+                vkCmdFillBuffer(cmd, dev.buf, oHeadDC, 1024, 0);
+                barrierAll();
+                Push tp{};
+                tp.a[0] = (int32_t)TOK; tp.a[1] = 12; tp.a[2] = 0;   // ntok, cols, mode 0
+                push(tp);
+                vkCmdDispatch(cmd, (TOK + 255) / 256, 1, 1);
+                barrierAll();
+                tp.a[2] = 1;                                          // mode 1
+                push(tp);
+                vkCmdDispatch(cmd, (TOK + 255) / 256, 1, 1);
+                barrierAll();
+            } else {
             // headpack (two passes): per-token-ROW DC of the raw head (bug B1:
             // global DC left +/-1.4/255 row biases = colored bands on screen),
             // then the calibrated matched residual into the m4 head layout
@@ -3016,6 +3121,7 @@ int main(int argc, char** argv) {
             vkCmdPushConstants(cmd, pHeadpack.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(hp), &hp);
             vkCmdDispatch(cmd, (TOK + 255) / 256, 1, 1);
             barrierAll();
+            }
             vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool, 4);
         }
         {   // rescale up (4ch head -> region) + compose + encode (verbatim M4)
@@ -3056,7 +3162,7 @@ int main(int argc, char** argv) {
             p.a[0] = (int32_t)W; p.a[1] = region.top; p.a[2] = region.left;
             p.b[0] = regionW; p.b[1] = regionH;
             p.c[0] = (float)maxDelta / 255.0f;             // composite delta clamp
-            p.c[1] = novideo ? 0.0f : 1.0f;                // accumulate mode (video)
+            p.c[1] = (novideo || echoFree) ? 0.0f : 1.0f;  // accumulate mode (legacy video)
             p.c[2] = strength;                             // --strength (0..2)
             p.d[0] = (float)resGate;                       // residual gate threshold (1/255; 0=off)
             push(p);
@@ -3065,11 +3171,11 @@ int main(int argc, char** argv) {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeEncode);
             p.a[0] = (int32_t)W; p.a[1] = (int32_t)H; p.a[2] = region.left; p.a[3] = region.top;
             p.b[0] = regionW; p.b[1] = regionH; p.b[2] = 0;
-            p.b[3] = novideo ? 0 : 1;                      // accumulate: add delta onto lastPresented
+            p.b[3] = (novideo || echoFree) ? 0 : 1;        // accumulate: add delta onto lastPresented
             push(p);
             vkCmdDispatch(cmd, (W + 15) / 16, (H + 15) / 16, 1);
             barrierAll();
-            if (!novideo) {   // keep the cancellation buffer == exactly what we present
+            if (!novideo && !echoFree) {   // keep the cancellation buffer == exactly what we present
                 VkImageMemoryBarrier lb{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
                 lb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
                 lb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -3234,8 +3340,10 @@ int main(int argc, char** argv) {
                 std::printf("[win] overlay re-shown with fresh resume frame\n");
             }
             gpuMs = std::chrono::duration<double, std::milli>(clk::now() - tSubmit0).count();
+            drainHotkeys();   // the submit+present+fence wait above can take
+                              // ~250 ms under FIFO - keep quit/toggle live
         }
-        if (!novideo) {   // full-frame mean |corrected delta| from the fbcancel counter
+        if (!novideo && !echoFree) {   // full-frame mean |corrected delta| from the fbcancel counter
             const uint32_t sumAbs = *fbStatsPtr;   // host-coherent, fence-passed
             fbMeanLast = (double)sumAbs / ((double)W * H * 3.0);
             ++fbFrames;

@@ -1,235 +1,89 @@
-# DEV_STATE.md - where we are (updated 2026-09-22 ~10:15 by Kimi)
+# DEV_STATE.md - where we are (updated 2026-09-22 ~11:10 by Kimi)
 
 ## One-line status
-OWNER VERDICT 2026-09-22 09:59: the product is NOT usable - clicks FREEZE the
-desktop (kill via Task Manager), dynamic content shows DIGITAL GARBAGE. All
-prior "FIXED+VERIFIED" claims applied to synthetic tests only.
->>> NEXT AGENT: START AT docs\HANDOFF_NEXT_AGENT.md <<<
-Short version: (L1) the fullscreen opaque topmost overlay cannot coexist with
-an interactive desktop - needs re-architecture to per-window/WGC mode;
-(L2) the network input is WRONG (stand-in noise ch0-2 - the real
-deterministic_noise() EXISTS at work/mlx-dlss/python/mlxdlss/features.py:87;
-no temporal history) and was never visually validated on real content;
-(L3) output pipeline defects B1/B2 are fixed (27d1667), bug #4 (invisible
-enhancement) quantified in Next steps item 0.
-  (A) THE OVERLAY HIDES ALL NORMAL WINDOWS: it is an OPAQUE TOPMOST FULLSCREEN
-      window - Notepad opened during the test is INVISIBLE (it opens UNDER the
-      overlay; only windows with their own topmost flag, e.g. Task Manager
-      "always on top", the Kimi window, render above). The owner's "zалипание/
-      clicks pass through but nothing shows" IS THIS: their new windows open
-      behind our overlay and the DDA capture can never see them. --refresh-ms
-      just re-renders the same stale content more often - it does NOT fix this.
-      This is ARCHITECTURAL, not a gate bug. Product options for the next
-      agent: auto-drop the overlay below other windows on foreground change /
-      interactive mode toggle / per-window mode (WGC) instead of fullscreen.
-  (B) COLORED LINES + BROKEN COLORS DURING MOTION: the live snapshot shows
-      short colored horizontal streaks (green/yellow/magenta) at fixed y bands
-      (y~270, 550, 780, 970 at 1440p) IN THE PRESENTED FRAME, and color/structure
-      errors while content moves. Hypotheses:
-      - fbcancel safety clamp +/-48/255: a window move is a +/-255 delta; the
-        presented frame only absorbs <=48/255 per processed frame, so during
-        and after motion the screen shows partially-tracked smeared content
-        ("цветопередача нарушена, шлейфы"). The clamp is a divergence bound,
-        but it makes REAL changes arrive distorted over multiple frames.
-      - row-DC in the residual: headpack removes the GLOBAL per-channel mean
-        only; a per-token-ROW bias survives, hpfilter (S=32 box) does not kill
-        row-scale DC -> integrates on moving pixels (resgate w=1 there) ->
-        colored horizontal lines at fixed rows. Next test: extend headpack DC
-        removal to per-row, or subtract a per-row mean of the head output
-        before compose; re-run the live scenario.
-WHAT STILL HOLDS from the earlier work: the accumulation defenses do prevent
-slow global drift on STATIC content (100-frame test, DDA A/B). The ghost-cursor
-fix is real (no painted cursor = no permanent ghosts). But those were the
-minor issues. THE MAJOR OWNER PAIN (A + B) IS OPEN.
-Bug #4 (imperceptible enhancement) is real but secondary next to (A)/(B).
+ECHO-FREE PIPELINE SHIPPED (this commit): the overlay is now excluded from
+capture via WDA_EXCLUDEFROMCAPTURE -> DDA sees the TRUE desktop through the
+overlay. Root-causes killed at once: wrong colors (feedback equilibrium is
+gone), windows hidden behind the overlay (they are captured + presented),
+blue-tint/drift class (no accumulate loop in the default path). Freeze class
+addressed: bounded swapchain acquire (no more UINT64_MAX parks), hotkey drain
+after every present, present pacing cap (--pace-ms, default 66 = <=15 fps).
 
-UPDATE 2026-09-22 09:50 - (B) SPLIT, BOTH HALVES FIXED + VERIFIED:
-(B1) COLORED LINES: root cause = per-token-ROW DC in the chain head residual
-   (measured +/-1.4/255 B, anti-correlated R via a new [dbg] head4 rowDC
-   probe) - the headpack DC pass was GLOBAL and could not see row biases.
-   FIXED: headpack DC pass is now per-row (dc[] 24x4 floats, cols=12 push
-   field). Post-fix probe: rowDC all 0.000; verify PASS; live DDA snapshot
-   out_live4 vs out_live3 (before): colored bands GONE.
-(B2) CLAMP-DISTORTED MOTION: fbcancel safety clamp is now ADAPTIVE - opens to
-   full 255/255 when the CPU sparse estimate (estMeanDelta >= 4) says real
-   change, stays at 4*maxDelta on static frames. Divergence still bounded by
-   the compose residual clamp.
-STILL OPEN: (A) - architectural. Normal windows open BEHIND the opaque topmost
-fullscreen overlay (re-verified 09:45: the test Notepad is invisible while TM/
-Kimi render above it). This is THE owner-facing "stale/broken" experience and
-needs a product decision: (1) auto-lower the overlay when a normal window
-becomes foreground (restore on desktop focus), (2) windowed-overlay mode
-covering only a target window (WGC per-window capture, NeuralScreen-style),
-or (3) demo-only fullscreen mode. Until (A) is decided+implemented, the
-fullscreen demo cannot be "fixed" - it is working as designed, and the design
-hides the desktop.
+OWNER: re-test with Desktop\RUN-DEMO.cmd. Expected: normal colors everywhere
+(not just Task Manager), windows visible, no freezes; enhancement is SUBTLE
+(mean|d| ~0.2/255 on the static wallpaper - see "quality ceiling" below).
+Hotkeys: CTRL+ALT+X hide/show, CTRL+ALT+Q quit (now responsive).
 
-## Milestones (all PASS unless noted)
-- M0 coopmat probe, M1 DDA capture, M2 D3D11<->Vulkan interop (bit-exact),
-  M3 neural slice, M4 live overlay (37 fps), M6a weights resident (278 MiB),
-  M7 numerics contract VERIFIED (bit-exact vs CPU goldens, benign fp32 exceptions),
-  M8a full 71-block chain validated (47 ms/frame), M8b REAL DLSS live (verify PASS),
-  M8c Sunshine-aware capture (de2d594, see below).
-- BACKLOGGED: M5 zero-copy (deadlock on frame-4; needs VK validation + apitrace).
+## What changed this session (2026-09-22 10:10-11:10)
+1. REPRO (owner scenario): notepad opened behind the overlay was invisible
+   (Layer A confirmed 3rd time); during motion the loop processed ~1 Hz while
+   DDA delivered 140 fps; every frame blocked ~240 ms in submit+present+fence.
+2. FREEZE FIXES (main.cpp):
+   - swapchain acquire: UINT64_MAX -> 50 ms tries x4 with drainHotkeys()
+     between; on persistent NOT_READY the frame is SKIPPED, thread never parks.
+   - drainHotkeys() after every present+fence wait.
+   - present pacing --pace-ms (default 66): max ~15 processed fps, GPU idle
+     between frames -> DWM keeps composition headroom.
+3. INPUT CONTRACT (Layer 2a): features.comp channels 0-2 are now the REAL
+   vendor deterministic_noise() (uint32-exact port of
+   work/mlx-dlss/python/mlxdlss/features.py:87; transcendentals fp32, result
+   half-rounded). The old integer-hash stand-in is gone. Also fixed silently:
+   shaders/publish.glsl half_round is a NO-OP on this Arc driver (packHalf2x16
+   folding) - features.comp/temporal.comp now use a local manual bit-exact
+   halfr() (same code as m8/publish.glsl).
+4. TEMPORAL PATH (Layer 2b, --temporal 0|1, DEFAULT OFF): features 7-9 carry
+   real history from a new bufHist slot; new temporal.comp implements vendor
+   compose_temporal (predicted + alpha*(history-predicted), BLEND_SCALE
+   0.73974609375) at token res, with per-row zero-mean residual (B1 lesson).
+   ON HOLD: at the event-driven ~1 Hz cadence history blending GHOSTS moving
+   windows and the stronger residual re-showed row lines (owner screenshots
+   10:55). Revisit only with realtime cadence (per-window game mode).
+5. ECHO-FREE (the fundamental one): SetWindowDisplayAffinity(hwnd, 0x11).
+   When active (default; --echo-free 0 for legacy): fbcancel skipped, decode
+   feeds the raw capture, compose/encode run ABSOLUTE (no accumulate), no
+   lastPresented mirror. fbmean stays 0.00 by design. Verified: notepad opened
+   behind the overlay appears in the PRESENTED frame (out\m8b_frame_30.bmp),
+   colors faithful, mean|d| 0.20/255, verify ALL PASS, gpu/frame 66 ms.
 
-## M8c (2026-09-21 morning) - committed de2d594 (code) + 60ae26d (docs)
-Sunshine-aware capture in m8b-live\main.cpp: Cap struct {device,context,dup,
-stagingTex,output,outX,outY}; CapBuild/CapBuildFromPick shared by startup and
-ACCESS_LOST recovery. Startup enumerates ALL DXGI adapters/outputs, prints an
-inventory table, picks by priority: --output NAME substring > output containing
-the cursor (GetCursorPos) > primary > first attached; D3D11 device is created ON
-the picked output's adapter. Startup starvation (idle desktop) -> temporary
-WiggleThread up to +12s. ACCESS_LOST -> re-enumerate + re-pick + rebuild
-(cross-adapter safe: CPU-bridge transport). Verified: 60/30-frame video runs
-PASS with Sunshine running; cursor painted correctly (confirmed via DDA snapshot,
-NOT GDI - see AGENTS.md).
+## Quality ceiling (honest, open)
+The chain runs at a PINNED 12x24 = 288-token grid for ANY content: a 2560x1440
+desktop is downscaled to 24x12 (~107 px/token) before the network sees it.
+That is far off the vendor's operating point, so the residual is low-frequency
+tone junk, not detail: measured head DC -0.7..-1.3 (design expects |mean|<0.02)
+which is WHY the per-row DC calibration exists, and why "enhancement" is
+invisible on static content. This is the owner's "no DLSS5 improvement visible"
+- it is a DESIGN ceiling, not a bug in this pipeline. The real fix is the
+per-window mode (WGC capture of a game/video window at render-like resolution
+-> adequate token density) per docs\windows-port-plan.md sec.1 + NeuralScreen's
+OpenWgc pattern. THAT is the next milestone (Layer 1 proper).
 
-## UNCOMMITTED WORKING-TREE CHANGE (not built, not tested!)
-Settle-gate staleness fix (partial fix for owner bug #1 below), in main.cpp:
-- New CLI --refresh-ms N (default 800; clamped >=50).
-- Live loop: `tLastProcessed` timestamp + `forceRefresh` bypass in the settle
-  gate (line ~2770): full process+present at least every refreshMs even when the
-  sparse settle estimate says "settled". Idle cost ~6% GPU (51 ms chain / 800 ms).
-TO FINISH: run build.cmd, verify compile, run `runm8b.cmd --frames 30` with
-cursor kept moving (or --wiggle-idle 1) -> check docs\m8b-live.log for periodic
-processed frames + verify PASS -> commit.
+## Numbers (current build, echo-free default)
+- Chain ~50-56 ms/frame, e2e ~59 ms, gpu (submit+present+fence) ~66 ms (was
+  ~240 ms in the feedback build).
+- Verify: --novideo 31 frames ALL PASS (temporal 0 and 1); video 35 frames
+  ALL PASS with a window opened mid-run.
+- New CLI: --pace-ms N (66), --temporal 0|1 (0), --echo-free 0|1 (1).
 
-## BUG #1 PARTIAL FIX - build/verify of the mechanism only (13:25-13:31 PDT)
-> NOTE 23:20: this fixed the SETTLE GATE stall only. It does NOT fix the
-> owner's stale-screen scenario, whose real cause is (A) in One-line status
-> (overlay hides windows). Keep the patch (it bounds staleness) but do not
-> claim bug #1 fixed.
-The 1be426c patch was INCOMPLETE: it used `refreshMs` and `tLastProcessed`
-without declaring them (3x C2065) - the commit could never have compiled.
-Added: `long refreshMs = 800` decl, `--refresh-ms N` CLI parse + usage line,
-`auto tLastProcessed = clk::now()` before the live loop. Nothing else changed.
-NOTE: build.cmd itself is currently BROKEN on this host (see VS registration
-issue below); the verify build was done by invoking MSBuild.exe directly on the
-existing build\m8blive.vcxproj (same cl.exe 14.29 toolset, same flags).
-Verification runs (all on Sunshine host, overlay video mode):
-1. `--frames 30` + external cursor-wiggle loop: PASS, verify {10,30,60} ALL
-   PASS, 0 drops, ~19 fps, signed delta mean ~0 (no color drift at frame 10).
-2. `--frames 12` passive run (active desktop): PASS, verify ALL PASS.
-3. Mechanism A/B with the gate FORCED always-closed (--settle-thresh 255):
-   A) default --refresh-ms 800: 4 processed frames at ~0.8-1.0 s cadence
-      despite every loop iteration reading "settled" -> the forceRefresh
-      bypass carries the cadence. This is the bug #1 fix working.
-   B) --refresh-ms 600000 (refresh effectively off): stall reproduced -
-      frame 0 only, settled skips accumulate forever (the old 10:51
-      behavior: 867 skips / 6 frames). Only difference = the new flag.
-   => bug #1 root-cause fix VERIFIED. Cosmetic note: at forced-refresh pace
-      the long AcquireNextFrame waits count as "dropped (DDA timeout)" in the
-      summary; that counter is acquire-timeout accounting, not real drops.
+## Batch files (desktop + tools\ are in sync now)
+- RUN-DEMO.cmd: m8blive --frames 1000000 (all defaults; honest wall text).
+- RUN-DEMO-CALM.cmd: + --wiggle-idle 30.
+- RUN-DEMO-M4.cmd: legacy stand-in transport demo (unchanged, historical).
 
-## OWNER UX BUGS - STATUS AS OF 23:20 PDT (CORRECTED; earlier "FIXED" claims
-## were synthetic-test-only - see One-line status (A)/(B))
-1. STALE SCREEN - NOT FIXED (misdiagnosed): the true cause is the opaque
-   topmost fullscreen overlay hiding normal windows (see One-line status (A)).
-   The 5b80cda refresh fix only bounds how long the overlay shows its own stale
-   content; it cannot show windows that open behind it.
-   A/B verified with the gate forced closed (--settle-thresh 255): refresh 800
-   -> ~1 Hz forced cadence; refresh 600000 -> stall reproduced. The only
-   difference is the new flag. NOTE the forced cadence is ~1 Hz (not 1.25)
-   because the loop blocks in AcquireNextFrame(1000 ms) between iterations.
-2. BLUE TINT - PARTIALLY FIXED, owner's color complaint OPEN. The slow GLOBAL
-   accumulation on static content IS fixed (verified). But the owner's
-   "цветопередача нарушена" + COLORED LINES in real use are a DIFFERENT defect:
-   row-scale DC in the residual (headpack removes the global per-channel mean
-   only) + the +/-48/255 fbcancel clamp distorting real motion (see (B) in
-   One-line status). Both hypotheses are testable: per-row DC subtraction in
-   headpack; adaptive/full-pass clamp for large real deltas.
-3. MOUSE TRAILS - PARTIALLY FIXED. The PERMANENT ghost grid (painted cursor
-   never erases) is fixed (005086b, DDA-verified). Motion smearing remains via
-   the clamp path ((B)) - presented content lags real changes by multiple
-   frames while deltas exceed 48/255.
-4. NO VISIBLE ENHANCEMENT - honest report, NOT a bug: the anti-drift defenses
-   intentionally make the residual tiny on static content (per-frame mean|d|
-   0.03-0.1/255, changed <2% on the owner's static photo). On dynamic content
-   the residual is clearly visible (old --frames 200 run: mean|d| 8-17/255,
-   changed 27-40%). Tuning path for the owner: --strength 1.5-2.0 for a
-   stronger effect on the photo scenario; a proper visual A/B needs game/video
-   content in motion (suggest the owner runs a game via Moonlight and compares
-   CTRL+ALT+X toggle). A quality/temporal pass was planned anyway.
+## Next steps (order)
+1. OWNER RE-TEST: RUN-DEMO.cmd - colors, window visibility, freeze behavior.
+2. WGC per-window mode (the owner's core ask: games/video at proper token
+   density, overlay limited to the target window rect). Big rock.
+3. If owner wants a STRONGER visible effect on the desktop meanwhile:
+   --strength 1.5-2.0 (safe: hpfilter+resgate still active).
+4. Perf fusion (cosine_v et al.) for a 30 fps path; M5 zero-copy backlog.
+5. temporal re-enable experiment ONLY at realtime cadence (after #2).
 
-## OPEN QUESTIONS / WATCH ITEMS
-- ADAPTER LUID CHANGED: 95a2 -> 9a8b across a host re-enumeration (seen in the
-  20:37 run log). Not a bug - M8c picks by dynamic LUID match - but AGENTS.md's
-  hardcoded "LUID ...95a2" is stale. LUIDs are per-boot; never hardcode.
-- ENV REGRESSION (2026-09-21..22) - RESOLVED WITH CAVEFATS: root cause was the
-  VS Setup.Configuration COM discovery: its CLSID/ProgID registration is
-  ABSENT from every registry view (vswhere and COM enumeration return 0
-  instances even though _Instances state.json is valid - verified after a
-  FULL BuildTools reinstall which also produced a fresh instance 8350b0c9
-  that vswhere STILL cannot see). The old toolset files were merged from
-  BuildTools.bak into the registered instance dir; build.cmd WORKS again
-  (VS generator + cached CMakeCache) and now auto-falls back to
-  NMake+vcvars64 (build-nmake\ + sync to build\Release) for cold configures.
-  Backups: BuildTools.bak, _vsbt_backup\, _vsbt_*.cmd/.ps1/_*.log helpers.
-  If cmake ever reports "instance is not known to the Visual Studio
-  Installer" again, the COM registration broke anew - do not reinstall,
-  the NMake fallback in build.cmd covers it.
-- --wiggle-idle re-arm suspect: 2026-09-21 ~11:04 run with --wiggle-idle 1 armed
-  at startup ("[info] cursor-wiggle generator armed") but the live loop never
-  printed "wiggle-idle: no updates ... engaging" despite 40+s of idle, and no
-  cursor-forced frames appeared (settled skips continued). Either the re-arm
-  branch is not reached or the wiggle thread dies. The startup-wiggle path WAS
-  verified historically (M1). Investigate lines ~2620-2676.
-- Frame pacing: ADDRESSED by --refresh-ms (forces ~1 Hz processed cadence on an
-  idle desktop; no cursor moves needed). External wiggle helper for tests:
-  dlss5\m8b-live\_wiggle_loop.ps1 (SendInput SetCursorPos loop, start via
-  _wiggle_start.cmd; ui.ps1 move X Y also works).
-- RUN-DEMO wall text still says "~12-20 fps"; actual is ~12 fps active, idle 0.
-
-## Numbers (current build, video mode)
-- Chain: ~50-52 ms/frame (fe 0.7 / fp 0.0 / chain 50-57 / tail 1.7-2.8),
-  e2e processed frame ~54 ms (~18-19 fps potential; live pacing is event-driven).
-- fbcancel: max-delta 12/255 (compose), 48/255 (fbcancel clamp), settle 0.5.
-- Weights resident 325 MB; DDA acq ~7-13 ms when frames flow.
-- Perf path to 30 fps: fusion (M8b note: cosine_v 1.447 ms is the top target;
-  chain 47 ms isolated, ~101 ms naive full-graph).
-
-## Evidence / where things are
-- Owner screenshot: C:\Users\AI\.kimi_openclaw\workspace\chat-attachments\
-  attachment-20260921-105537-f5ee95.png (blue tint visible on photo).
-- Live log: docs\m8b-live.log (also PROGRESS.md = milestone log).
-- Cursor-verify crop (M8c, DDA method): done via m1dda; methodology in
-  C:\Users\AI\.kimi_openclaw\workspace\memory\2026-09-21.md.
-- M8c handoff detail: dlss5\m8b-live\out\M8C_HANDOFF.md.
-- Agent session memory: C:\Users\AI\.kimi_openclaw\workspace\memory\2026-09-21.md.
-
-## Next steps (suggested order)
--0. SUPERSEDES item 0: owner 22:25 CORRECTED the 22:16 feedback - "nothing
-   changed" meant EVERYTHING IS STILL BROKEN: colors, trails, stalls, COLORED
-   LINES. Item 0's magnitude analysis stays valid for bug #4 but is NOT the
-   top priority. TOP PRIORITIES from the real-scenario repro (23:05,
-   out_live3\snapshot_5.bmp = ground truth, and One-line status (A)/(B)):
-   (A) OVERLAY HIDES NORMAL WINDOWS - architectural; needs a product decision
-       (auto-lower on foreground change / interactive-mode toggle / WGC
-       per-window mode). Until then the owner's "open window" UX cannot work.
-   (B) COLORED LINES + clamp-distorted motion - testable fixes: per-row DC in
-       headpack; adaptive fbcancel clamp (full-pass on large real deltas,
-       bounded accumulate for the echo). Repro method: RUN-DEMO + open/move
-       a window + m1dda snapshots (see Evidence).
-   FIRST-HYPTHESIS ANALYSIS for the next agent (quantified from this session):
-   - headpack gain = 0.2, and compose applies the vendor 0.25 factor ->
-     NET residual scale = 0.05. Measured post-DC head4 std ~0.017
-     ([dbg] head4 ch*: std=0.0172/0.0115/0.0179) -> residual RMS at the
-     screen ~0.017*0.05*255 ~= 0.2/255 per frame. Invisible by construction.
-   - resgate 4/255 zeroes the residual on everything that changes less than
-     4/255 per frame -> on the owner's static photo nearly ALL pixels are
-     gated off.
-   - The pre-fix runs that looked "visible" (mean|d| 8-17/255, changed 27-40%)
-     had NO DC removal, NO gain 0.2, NO resgate - they were also the runs that
-     drifted blue. Current pipeline is ~10-50x more conservative.
-   - SAFE vs UNSAFE knobs: headpack DC-removal and hpfilter are what kill the
-     BLUE DRIFT - keep them. GAIN and RESGATE are the invisibility knobs.
-   RECOMMENDED EXPERIMENT SEQUENCE: (a) measure residual magnitude on DYNAMIC
-   content (game/video) with the current build; (b) --strength 2.0 run + DDA
-   A/B crops; (c) if still weak, raise headpack gain 0.2 -> 0.5..1.0 (net
-   0.125..0.25) and/or relax resgate to 2/255, re-run the 100-frame
-   accumulation test each time to confirm drift stays dead; (d) owner A/B.
-1. OWNER RE-TEST dynamic content: RUN-DEMO.cmd during a game via Moonlight.
-2. Repair VS BuildTools registration (re-run bootstrapper) so build.cmd works;
-   until then use _build_msb.cmd (MSBuild on the cached vcxproj).
-3. Perf fusion pass (30 fps path: cosine_v fusion et al.); M5 zero-copy debug;
-   game-mode window targeting; quality/temporal pass.
+## Watch items carried over
+- LUIDs are per-boot; never hardcode (95a2 -> 9a8b -> 968b observed).
+- VS Setup.Configuration COM discovery still broken; build.cmd NMake fallback
+  works (used for this commit's builds).
+- GDI screenshots cannot see the overlay; DDA now CANNOT see it either (by
+  design, WDA_EXCLUDEFROMCAPTURE). Ground truth of the PRESENTED frame =
+  verify readbacks out\m8b_frame_{10,30,60}.bmp; ground truth of the DESKTOP =
+  m1dda snapshots.
+- --wiggle-idle re-arm suspect (DEV_STATE history) - untested this session.
