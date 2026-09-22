@@ -529,3 +529,20 @@ invisibility knobs. Experiment plan in DEV_STATE "Next steps" item 0.
   from ALL registry views (vswhere/cmake enumerate 0 even after full reinstall).
   Fixed pragmatically: fresh install (instance 8350b0c9) + toolset merged from
   BuildTools.bak + build.cmd NMake fallback. build.cmd verified working.
+
+### Bug B1+B2 fixes (2026-09-22 09:20-09:50)
+- B1 COLORED LINES root-caused and fixed: [dbg] head4 rowDC probe measured per-token-row
+  DC up to +/-1.4/255 in B (anti-correlated R) that the GLOBAL headpack DC pass
+  could not see - it painted 60px colored bands on screen. Fix: headpack DC pass
+  is now PER ROW (dc[] = 24 rows x 4 ch, 1024B slot, cols=12 in push). Probe after
+  fix: rowDC all 0.000, verify PASS. Evidence: out_live3 (before, lines visible) vs
+  out_live4 (after, clean) DDA snapshots.
+- B2 ADAPTIVE FBCANCEL CLAMP: the fixed +/-48/255 safety clamp strangled real
+  changes (window move = +/-255 delta arrived distorted over ~6 frames). Now the
+  clamp opens to full 255 when the CPU sparse estimate (estMeanDelta) says REAL
+  CHANGE (>=4/255), stays tight on static frames. Divergence is still bounded by
+  compose residual clamp (+/-maxDelta).
+- Both verified: --frames 30 verify ALL PASS; live RUN-DEMO + window move +
+  m1dda snapshot: no colored lines, clean tracking.
+- STILL OPEN: (A) overlay hides normal windows (architectural, needs product
+  decision: auto-lower on foreground change / windowed-overlay (WGC) mode).

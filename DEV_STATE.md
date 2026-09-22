@@ -37,6 +37,27 @@ fix is real (no painted cursor = no permanent ghosts). But those were the
 minor issues. THE MAJOR OWNER PAIN (A + B) IS OPEN.
 Bug #4 (imperceptible enhancement) is real but secondary next to (A)/(B).
 
+UPDATE 2026-09-22 09:50 - (B) SPLIT, BOTH HALVES FIXED + VERIFIED:
+(B1) COLORED LINES: root cause = per-token-ROW DC in the chain head residual
+   (measured +/-1.4/255 B, anti-correlated R via a new [dbg] head4 rowDC
+   probe) - the headpack DC pass was GLOBAL and could not see row biases.
+   FIXED: headpack DC pass is now per-row (dc[] 24x4 floats, cols=12 push
+   field). Post-fix probe: rowDC all 0.000; verify PASS; live DDA snapshot
+   out_live4 vs out_live3 (before): colored bands GONE.
+(B2) CLAMP-DISTORTED MOTION: fbcancel safety clamp is now ADAPTIVE - opens to
+   full 255/255 when the CPU sparse estimate (estMeanDelta >= 4) says real
+   change, stays at 4*maxDelta on static frames. Divergence still bounded by
+   the compose residual clamp.
+STILL OPEN: (A) - architectural. Normal windows open BEHIND the opaque topmost
+fullscreen overlay (re-verified 09:45: the test Notepad is invisible while TM/
+Kimi render above it). This is THE owner-facing "stale/broken" experience and
+needs a product decision: (1) auto-lower the overlay when a normal window
+becomes foreground (restore on desktop focus), (2) windowed-overlay mode
+covering only a target window (WGC per-window capture, NeuralScreen-style),
+or (3) demo-only fullscreen mode. Until (A) is decided+implemented, the
+fullscreen demo cannot be "fixed" - it is working as designed, and the design
+hides the desktop.
+
 ## Milestones (all PASS unless noted)
 - M0 coopmat probe, M1 DDA capture, M2 D3D11<->Vulkan interop (bit-exact),
   M3 neural slice, M4 live overlay (37 fps), M6a weights resident (278 MiB),
