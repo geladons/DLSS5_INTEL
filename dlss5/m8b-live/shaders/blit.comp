@@ -14,10 +14,12 @@ layout(set = 0, binding = 9, rgba8) writeonly uniform image2D dst;
 layout(push_constant) uniform Push {
     int w;
     int h;
+    int offX;   // M8b window mode: read the region subrect of imgFinal
+    int offY;
 } p;
 
 void main() {
     ivec2 xy = ivec2(gl_GlobalInvocationID.xy);
     if (xy.x >= p.w || xy.y >= p.h) return;
-    imageStore(dst, xy, imageLoad(src, xy));
+    imageStore(dst, xy, imageLoad(src, xy + ivec2(p.offX, p.offY)));
 }

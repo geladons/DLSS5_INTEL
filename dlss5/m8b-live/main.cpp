@@ -252,6 +252,30 @@ static void WiggleThread() {
 }
 
 // ------------------------------------------- reference ports (host logic) --
+// --window TITLE helper: first visible top-level window whose title contains
+// the substring (case-insensitive). Skips our own overlay/console windows.
+struct WinFindCtx { const char* needle; HWND found; };
+static BOOL CALLBACK WinFindCb(HWND h, LPARAM lp) {
+    WinFindCtx* ctx = (WinFindCtx*)lp;
+    if (!IsWindowVisible(h)) return TRUE;
+    if (GetWindow(h, GW_OWNER)) return TRUE;
+    char title[512];
+    int n = GetWindowTextA(h, title, (int)sizeof(title));
+    if (n <= 0) return TRUE;
+    char lc[512]; char nd[512];
+    for (int i = 0; i <= n && i < 511; ++i) lc[i] = (char)tolower((unsigned char)title[i]);
+    int m = (int)strlen(ctx->needle);
+    for (int i = 0; i < m && i < 511; ++i) nd[i] = (char)tolower((unsigned char)ctx->needle[i]);
+    lc[n < 511 ? n : 511] = 0; nd[m < 511 ? m : 511] = 0;
+    if (strstr(lc, nd) && GetConsoleWindow() != h) { ctx->found = h; return FALSE; }
+    return TRUE;
+}
+static HWND FindWindowByTitle(const std::string& needle) {
+    WinFindCtx ctx{needle.c_str(), nullptr};
+    EnumWindows(WinFindCb, (LPARAM)&ctx);
+    return ctx.found;
+}
+
 struct Region { int top, bottom, left, right; };
 static Region ActiveRegion(const float* rowMax, const float* colMax, int height, int width) {
     const float tolerance = 2.0f / 255.0f;
@@ -981,6 +1005,11 @@ int main(int argc, char** argv) {
                                  // moving windows and its residual reintroduces row lines;
                                  // needs realtime cadence to be valid (owner screenshots
                                  // 2026-09-22 ~10:55).
+    float headGain = 0.2f;       // --gain F: headpack residual gain (default 0.2 = the
+                                 // calibrated invisible-safe value; 1.0 = full vendor-scale
+                                 // residual after per-row DC removal -> VISIBLE effect).
+    std::string winTitle;        // --window TITLE: per-window mode - capture/crop the target
+                                 // window's client area, overlay covers only that rect.
     std::string outPref;         // --output NAME: capture-output preference (substring,
                                  // case-insensitive, e.g. "DISPLAY5"; empty = auto)
     for (int i = 1; i < argc; ++i) {
@@ -1001,8 +1030,10 @@ int main(int argc, char** argv) {
         else if (a == "--resgate" && i + 1 < argc) resGate = std::atol(argv[++i]);
         else if (a == "--pace-ms" && i + 1 < argc) paceMs = std::atol(argv[++i]);
         else if (a == "--temporal" && i + 1 < argc) temporal = std::atoi(argv[++i]);
+        else if (a == "--gain" && i + 1 < argc) headGain = (float)std::atof(argv[++i]);
         else if (a == "--echo-free" && i + 1 < argc) g_echoFreeWanted = std::atoi(argv[++i]) != 0;
-        else { std::fprintf(stderr, "usage: m8blive [--frames N] [--nowiggle] [--novideo] [--nocursor] [--cursor-draw] [--output NAME] [--scale S(ignored)] [--wiggle-idle SECS] [--max-delta N] [--settle-thresh X] [--refresh-ms N] [--strength F] [--colorpass 0|1] [--resgate T] [--pace-ms N] [--temporal 0|1] [--echo-free 0|1]\n"); return 1; }
+        else if (a == "--window" && i + 1 < argc) winTitle = argv[++i];
+        else { std::fprintf(stderr, "usage: m8blive [--frames N] [--nowiggle] [--novideo] [--nocursor] [--cursor-draw] [--output NAME] [--scale S(ignored)] [--wiggle-idle SECS] [--max-delta N] [--settle-thresh X] [--refresh-ms N] [--strength F] [--colorpass 0|1] [--resgate T] [--pace-ms N] [--temporal 0|1] [--echo-free 0|1] [--gain F] [--window TITLE]\n"); return 1; }
     }
     if (wiggleForbidden) wiggleIdleSec = 0;
     if (maxDelta < 1) maxDelta = 1;
@@ -1045,6 +1076,41 @@ int main(int argc, char** argv) {
     int outX = cap.outX, outY = cap.outY;
     LUID curAdapterLuid = cap.adapterLuid;
     std::string curOutName = cap.outName;
+
+    // ---- --window: per-window mode. Resolve the target NOW (its client rect
+    // decides the overlay position/size AND the processing region). The loop
+    // tracks position changes (same size) and exits cleanly on resize/close.
+    bool winMode = false;
+    HWND targetHwnd = nullptr;
+    Region winRegion{};   // client rect relative to the output origin
+    if (!winTitle.empty()) {
+        if (novideo) {
+            std::fprintf(stderr, "[FAIL] --window needs video mode (drop --novideo)\n"); return 1;
+        }
+        targetHwnd = FindWindowByTitle(winTitle);
+        if (!targetHwnd) {
+            std::fprintf(stderr, "[FAIL] --window: no visible top-level window containing \"%s\"\n",
+                         winTitle.c_str());
+            return 1;
+        }
+        RECT crc{}; GetClientRect(targetHwnd, &crc);
+        POINT pt{0, 0}; ClientToScreen(targetHwnd, &pt);
+        int wl = pt.x, wt = pt.y, wr = pt.x + (crc.right - crc.left), wb = pt.y + (crc.bottom - crc.top);
+        // clamp to the captured output
+        wl = std::max(wl, outX); wt = std::max(wt, outY);
+        wr = std::min(wr, outX + (int)W); wb = std::min(wb, outY + (int)H);
+        if (wr - wl < 64 || wb - wt < 64) {
+            std::fprintf(stderr, "[FAIL] --window: target client area too small/off-screen (%dx%d)\n",
+                         wr - wl, wb - wt);
+            return 1;
+        }
+        winRegion = Region{wt - outY, wb - outY, wl - outX, wr - outX};
+        winMode = true;
+        char ttl[128]; GetWindowTextA(targetHwnd, ttl, (int)sizeof(ttl));
+        std::printf("[win] --window \"%s\": hwnd=%p client %dx%d at screen (%d,%d) -> region rows [%d,%d) cols [%d,%d)\n",
+                    ttl, (void*)targetHwnd, crc.right - crc.left, crc.bottom - crc.top, wl, wt,
+                    winRegion.top, winRegion.bottom, winRegion.left, winRegion.right);
+    }
 
     // ===================================================================
     // 2. Initial content-checked DDA frame (M3/M4 doctrine).
@@ -1220,8 +1286,12 @@ int main(int argc, char** argv) {
         wc.hCursor = LoadCursorW(nullptr, (LPCWSTR)IDC_ARROW);
         if (!RegisterClassW(&wc)) { std::fprintf(stderr, "[FAIL] RegisterClassW %lu\n", GetLastError()); return 1; }
         DWORD exStyle = WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
+        const int ovlX = winMode ? outX + winRegion.left : outX;
+        const int ovlY = winMode ? outY + winRegion.top : outY;
+        const int ovlW = winMode ? (winRegion.right - winRegion.left) : (int)W;
+        const int ovlH = winMode ? (winRegion.bottom - winRegion.top) : (int)H;
         g_hwnd = CreateWindowExW(exStyle, wc.lpszClassName, L"DLSS5_INTEL m8b",
-                                 WS_POPUP, outX, outY, W, H,
+                                 WS_POPUP, ovlX, ovlY, ovlW, ovlH,
                                  nullptr, nullptr, hinst, nullptr);
         if (!g_hwnd) { std::fprintf(stderr, "[FAIL] CreateWindowExW %lu\n", GetLastError()); return 1; }
         SetLayeredWindowAttributes(g_hwnd, 0, 255, LWA_ALPHA);
@@ -1255,9 +1325,9 @@ int main(int argc, char** argv) {
         // clicks never hit the overlay itself. WS_EX_TOPMOST keeps it above the
         // desktop; WS_EX_LAYERED + LWA_ALPHA(255) keeps the swapchain on the DWM
         // path the brightness fix validated (opaque compositeAlpha, A=255).
-        std::printf("[win] overlay created (HIDDEN until first present): %ux%u at (%d,%d) | "
-                    "exStyle=TOPMOST|TRANSPARENT|LAYERED|NOACTIVATE|TOOLWINDOW (CLICK-THROUGH)\n",
-                    W, H, outX, outY);
+        std::printf("[win] overlay created (HIDDEN until first present): %dx%d at (%d,%d) | "
+                    "exStyle=TOPMOST|TRANSPARENT|LAYERED|NOACTIVATE|TOOLWINDOW (CLICK-THROUGH)%s\n",
+                    ovlW, ovlH, ovlX, ovlY, winMode ? " WINDOW-MODE" : "");
         VkWin32SurfaceCreateInfoKHR sci{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
         sci.hinstance = GetModuleHandleW(nullptr);
         sci.hwnd = g_hwnd;
@@ -1402,7 +1472,10 @@ int main(int argc, char** argv) {
         ci.minImageCount = imageCount;
         ci.imageFormat = swapFormat;
         ci.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
-        ci.imageExtent = {W, H};
+        // window mode: the swapchain covers only the target window's rect
+        ci.imageExtent = winMode ? VkExtent2D{(uint32_t)(winRegion.right - winRegion.left),
+                                              (uint32_t)(winRegion.bottom - winRegion.top)}
+                                 : VkExtent2D{W, H};
         ci.imageArrayLayers = 1;
         ci.imageUsage = swapStorage ? (VkImageUsageFlags)(VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)
                                     : (VkImageUsageFlags)VK_IMAGE_USAGE_TRANSFER_DST_BIT;
@@ -1977,6 +2050,11 @@ int main(int argc, char** argv) {
         std::printf("[stage] frame0 upload+decode+letterbox: %.3f ms\n", ms);
         const float* m = (const float*)maxPtr;
         region = ActiveRegion(m, m + 2048, (int)H, (int)W);
+        if (winMode) {
+            region = winRegion;   // --window: the region IS the target client rect
+            std::printf("[letterbox] --window override: region rows [%d,%d) cols [%d,%d)\n",
+                        region.top, region.bottom, region.left, region.right);
+        }
         std::printf("[letterbox] region rows [%d,%d) cols [%d,%d) of %ux%u (host decision FIXED for the loop)\n",
                     region.top, region.bottom, region.left, region.right, W, H);
     }
@@ -2598,10 +2676,54 @@ int main(int argc, char** argv) {
     auto tLastAcquired = tLoopStart;   // wall-clock of last acquired frame (idle reference)
     double lastIdleLogSec = 0.0;       // idle heartbeat logger
     bool wiggleActive = false;    // wiggle-idle generator currently running
+    bool iconicHidden = false;    // --window: overlay hidden while target minimized
     uint8_t prevSamples[512]{};   // last frame's sparse samples (wiggle discriminator)
     uint64_t prevSampleCnt = 0;
 
     while (!g_stop.load() && frame < framesTarget) {
+        // ---- (a-1) --window tracking: follow moves (same size), pause while
+        // minimized (overlay hidden), exit cleanly on close/resize (region-
+        // sized GPU buffers are allocated once, so a resize needs a restart).
+        if (winMode && targetHwnd) {
+            if (!IsWindow(targetHwnd)) {
+                std::fprintf(stderr, "[win] target window closed - ending run\n");
+                break;
+            }
+            if (IsIconic(targetHwnd)) {
+                if (shownOnce && !iconicHidden) {
+                    ShowWindow(g_hwnd, SW_HIDE);
+                    iconicHidden = true;
+                    std::printf("[win] target minimized - overlay paused\n");
+                }
+                // drain DDA so the queue does not back up; keep hotkeys live
+                DXGI_OUTDUPL_FRAME_INFO fi{}; ComPtr<IDXGIResource> res;
+                HRESULT ihr = dup->AcquireNextFrame(50, &fi, &res);
+                if (SUCCEEDED(ihr)) dup->ReleaseFrame();
+                drainHotkeys();
+                continue;
+            }
+            if (iconicHidden) {   // restored: re-show with a fresh frame
+                iconicHidden = false;
+                g_resumeRequested.store(true);
+                std::printf("[win] target restored - resuming\n");
+            }
+            RECT crc{}; GetClientRect(targetHwnd, &crc);
+            POINT pt{0, 0}; ClientToScreen(targetHwnd, &pt);
+            const int cw = crc.right - crc.left, ch = crc.bottom - crc.top;
+            const int wl = pt.x - outX, wt = pt.y - outY;
+            if (cw != regionW || ch != regionH) {
+                std::fprintf(stderr, "[win] target resized (%dx%d -> %dx%d) - restart required, ending\n",
+                             regionW, regionH, cw, ch);
+                break;
+            }
+            if (wl != region.left || wt != region.top) {
+                region.left = wl; region.top = wt;
+                region.right = wl + regionW; region.bottom = wt + regionH;
+                if (g_hwnd && shownOnce && !g_overlayHidden.load())
+                    SetWindowPos(g_hwnd, HWND_TOPMOST, outX + wl, outY + wt, 0, 0,
+                                 SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            }
+        }
         // ---- (a0) HOTKEY-HIDDEN: CTRL+ALT+X hid the overlay. CAPTURE-ONLY
         // warm mode: keep the Desktop Duplication session alive and keep
         // `original`/`prevSamples` tracking the live desktop (the overlay no
@@ -3117,7 +3239,7 @@ int main(int argc, char** argv) {
             vkCmdPushConstants(cmd, pHeadpack.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(hd), &hd);
             vkCmdDispatch(cmd, (TOK + 255) / 256, 1, 1);
             barrierAll();
-            HeadPush hp{A(oHEAD), A(oHead4), A(oHeadDC), TOK, 0.2f, 1, 12};
+            HeadPush hp{A(oHEAD), A(oHead4), A(oHeadDC), TOK, headGain, 1, 12};
             vkCmdPushConstants(cmd, pHeadpack.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(hp), &hp);
             vkCmdDispatch(cmd, (TOK + 255) / 256, 1, 1);
             barrierAll();
@@ -3267,14 +3389,22 @@ int main(int argc, char** argv) {
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLayout, 0, 1,
                                         &setBlit[imageIndex], 0, nullptr);
                 Push p{};
-                p.a[0] = (int32_t)W; p.a[1] = (int32_t)H;
+                // window mode: swapchain = region-sized, blit the region subrect
+                p.a[0] = winMode ? regionW : (int32_t)W;
+                p.a[1] = winMode ? regionH : (int32_t)H;
+                p.a[2] = winMode ? region.left : 0;
+                p.a[3] = winMode ? region.top : 0;
                 push(p);
-                vkCmdDispatch(cmd, W / 16, H / 16, 1);
+                vkCmdDispatch(cmd, (uint32_t)((winMode ? regionW : (int)W) + 15) / 16,
+                              (uint32_t)((winMode ? regionH : (int)H) + 15) / 16, 1);
             } else {
                 VkImageCopy cp{};
                 cp.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
                 cp.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-                cp.extent = {W, H, 1};
+                cp.srcOffset = {(int32_t)(winMode ? region.left : 0),
+                                (int32_t)(winMode ? region.top : 0), 0};
+                cp.extent = {(uint32_t)(winMode ? regionW : (int)W),
+                             (uint32_t)(winMode ? regionH : (int)H), 1};
                 vkCmdCopyImage(cmd, imgFinal, VK_IMAGE_LAYOUT_GENERAL,
                                swapImages[imageIndex], VK_IMAGE_LAYOUT_GENERAL, 1, &cp);
             }

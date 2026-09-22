@@ -69,14 +69,31 @@ OpenWgc pattern. THAT is the next milestone (Layer 1 proper).
 - RUN-DEMO-CALM.cmd: + --wiggle-idle 30.
 - RUN-DEMO-M4.cmd: legacy stand-in transport demo (unchanged, historical).
 
+## WINDOW MODE SHIPPED (same day, second commit): --window TITLE
+Per-window mode: resolves the target by title substring, crops the DDA capture
+to its client rect (region = window), the overlay covers ONLY that rect and
+follows position moves; resize/close ends the run cleanly; minimize pauses.
+Combined with echo-free capture the desktop stays fully usable. Verified live
+on the owner's Photos window (1309x1039): defaults = invisible-safe
+(mean|d| 0.45/255); --gain 1.0 --colorpass 1 = clearly VISIBLE model effect
+(mean|d| 10-15/255, tone/vibrance grade, structure intact, no lines).
+IMPORTANT DIAGNOSTIC LANDMINE: out\m8b_processed.bmp is written ONLY at
+verify frame 30 - any --frames N < 31 run leaves a STALE pair (cost me two
+A/B runs; identical metrics were the tell).
+New CLI: --gain F (headpack residual gain, default 0.2). New batch:
+tools\RUN-WINDOW-DEMO.cmd (+ desktop copy) - takes the title as %1.
+
 ## Next steps (order)
-1. OWNER RE-TEST: RUN-DEMO.cmd - colors, window visibility, freeze behavior.
-2. WGC per-window mode (the owner's core ask: games/video at proper token
-   density, overlay limited to the target window rect). Big rock.
-3. If owner wants a STRONGER visible effect on the desktop meanwhile:
-   --strength 1.5-2.0 (safe: hpfilter+resgate still active).
-4. Perf fusion (cosine_v et al.) for a 30 fps path; M5 zero-copy backlog.
-5. temporal re-enable experiment ONLY at realtime cadence (after #2).
+1. OWNER RE-TEST: RUN-WINDOW-DEMO.cmd anime (Photos window) - judge the
+   effect; then Desktop\RUN-DEMO.cmd for the fullscreen path.
+2. Token-density study: 288 tokens over a window is still coarse; check
+   whether the m8 chain extent is truly pinned or parameterizable (GEMM
+   strides derive from TOK; attention is O(TOK^2); m8a goldens are
+   288-specific). If it scales: --tokens for denser grids on small windows.
+3. True WGC capture (removes the DDA fullscreen dependency), Vulkan-layer
+   game attach - per docs\windows-port-plan.md.
+4. Perf fusion (cosine_v et al.); M5 zero-copy backlog.
+5. temporal re-enable ONLY at realtime cadence.
 
 ## Watch items carried over
 - LUIDs are per-boot; never hardcode (95a2 -> 9a8b -> 968b observed).
