@@ -616,8 +616,16 @@ enum { HK_QUIT = 1, HK_TOGGLE = 2 };
 // move. Order matters: cursor is drawn AFTER the clean capture snapshot and
 // BEFORE fbcancel, and the presented composite carries it; then
 // corrected = (capture+cursorNow) - lastPresented(cursorPrev) cancels the
-// desktop and leaves the cursor delta as gentle live signal. --nocursor off.
-static bool g_cursorDraw = true;                 // --nocursor disables
+// desktop and leaves the cursor delta as gentle live signal.
+//
+// BUG #3 (2026-09-21, REPRODUCED): the painted cursor NEVER erases. It enters
+// bufLastPresented -> the next capture echoes it -> fbcancel sees
+// echo(cursorOld) - lastPresented(cursorOld) = 0 -> nothing subtracts it ->
+// every cursor position paints a PERMANENT ghost (measured: a 5x5 grid of 25
+// ghost cursors after one wiggle pass). The user sees the REAL hardware
+// cursor anyway (DWM draws it above our topmost overlay), so the paint is
+// pure harm. DEFAULT IS NOW OFF; --cursor-draw keeps the legacy path.
+static bool g_cursorDraw = false;                // --cursor-draw enables (default OFF, bug #3)
 static std::vector<uint8_t> g_shapeBuf;          // raw DXGI pointer-shape buffer
 static uint32_t g_shapeW = 0, g_shapeH = 0, g_shapePitch = 0;
 static int  g_shapeType = 0;                     // DXGI_OUTDUPL_POINTER_SHAPE_TYPE_*
@@ -967,6 +975,7 @@ int main(int argc, char** argv) {
         else if (a == "--nowiggle") wiggleForbidden = true;
         else if (a == "--novideo") novideo = 1;
         else if (a == "--nocursor") g_cursorDraw = false;
+        else if (a == "--cursor-draw") g_cursorDraw = true;
         else if (a == "--output" && i + 1 < argc) outPref = argv[++i];
         else if (a == "--wiggle-idle" && i + 1 < argc) wiggleIdleSec = std::atol(argv[++i]);
         else if (a == "--max-delta" && i + 1 < argc) maxDelta = std::atoi(argv[++i]);
@@ -976,7 +985,7 @@ int main(int argc, char** argv) {
         else if (a == "--strength" && i + 1 < argc) strength = (float)std::atof(argv[++i]);
         else if (a == "--colorpass" && i + 1 < argc) colorpass = std::atoi(argv[++i]);
         else if (a == "--resgate" && i + 1 < argc) resGate = std::atol(argv[++i]);
-        else { std::fprintf(stderr, "usage: m8blive [--frames N] [--nowiggle] [--novideo] [--nocursor] [--output NAME] [--scale S(ignored)] [--wiggle-idle SECS] [--max-delta N] [--settle-thresh X] [--refresh-ms N] [--strength F] [--colorpass 0|1] [--resgate T]\n"); return 1; }
+        else { std::fprintf(stderr, "usage: m8blive [--frames N] [--nowiggle] [--novideo] [--nocursor] [--cursor-draw] [--output NAME] [--scale S(ignored)] [--wiggle-idle SECS] [--max-delta N] [--settle-thresh X] [--refresh-ms N] [--strength F] [--colorpass 0|1] [--resgate T]\n"); return 1; }
     }
     if (wiggleForbidden) wiggleIdleSec = 0;
     if (maxDelta < 1) maxDelta = 1;
@@ -1238,7 +1247,8 @@ int main(int argc, char** argv) {
             std::printf("[hotkey] registered: CTRL+ALT+Q=quit CTRL+ALT+X=toggle overlay (%s%s)\n",
                         okQ ? "Q" : "", okX ? "X" : "");
         std::printf("[cursor] drawing hardware cursor into mirror (DDA never captures it); %s\n",
-                    g_cursorDraw ? "ON (--nocursor disables)" : "OFF (--nocursor)");
+                    g_cursorDraw ? "ON (--cursor-draw, LEGACY: painted cursors never erase - bug #3)"
+                                 : "OFF (default; the real hardware cursor stays visible above the overlay)");
     }
     // Drain the main-thread queue; handles WM_HOTKEY actions. Called on every
     // acquire-wake so hotkeys stay live even while the loop blocks on DDA.
