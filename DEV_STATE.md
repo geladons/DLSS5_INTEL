@@ -1,10 +1,11 @@
-# DEV_STATE.md - where we are (updated 2026-09-21 ~20:45 PDT by Kimi)
+# DEV_STATE.md - where we are (updated 2026-09-21 ~22:20 PDT by Kimi)
 
 ## One-line status
-ALL FOUR owner UX bugs addressed: #1 stale screen FIXED+VERIFIED (5b80cda),
-#2 blue tint FIXED+VERIFIED (ec08838 + headpack DC + hpfilter), #3 mouse
-trails FIXED+VERIFIED (005086b), #4 enhancement visibility = honest report
-below (not a bug - a tuning/expectations item). RUN-DEMO is the owner build.
+Owner bugs #1-#3 FIXED + VERIFIED (stable, clean screen: no stale, no tint,
+no trails). OWNER RE-TEST 22:16: "practically NOTHING changed" visually - the
+enhancement itself is imperceptible on the current conservative pipeline.
+Bug #4 (residual magnitude) is THE next work; quantified analysis + experiment
+plan in "Next steps" item 0. All committed (5b80cda..124f241 + this note).
 
 ## Milestones (all PASS unless noted)
 - M0 coopmat probe, M1 DDA capture, M2 D3D11<->Vulkan interop (bit-exact),
@@ -143,11 +144,30 @@ Verification runs (all on Sunshine host, overlay video mode):
 - Agent session memory: C:\Users\AI\.kimi_openclaw\workspace\memory\2026-09-21.md.
 
 ## Next steps (suggested order)
-1. OWNER RE-TEST: RUN-DEMO.cmd on the real scenarios (photo in Photos, a game
-   via Moonlight). All four bugs have verified fixes in 5b80cda..005086b.
-2. Bug #4 tuning: owner A/B with --strength 1.5 / 2.0 on the photo scenario;
-   visual A/B on dynamic content (game video); then decide default strength.
-3. Repair VS BuildTools registration (re-run bootstrapper) so build.cmd works;
+0. OWNER FEEDBACK 2026-09-21 22:16: re-test of the fixed build -> "practically
+   NOTHING changed" visually. All drift/trail/stale fixes HOLD (screen is
+   stable and clean), but the ENHANCEMENT ITSELF is now imperceptible. Bug #4
+   is THE priority and it is a magnitude problem, not a perception problem.
+   FIRST-HYPTHESIS ANALYSIS for the next agent (quantified from this session):
+   - headpack gain = 0.2, and compose applies the vendor 0.25 factor ->
+     NET residual scale = 0.05. Measured post-DC head4 std ~0.017
+     ([dbg] head4 ch*: std=0.0172/0.0115/0.0179) -> residual RMS at the
+     screen ~0.017*0.05*255 ~= 0.2/255 per frame. Invisible by construction.
+   - resgate 4/255 zeroes the residual on everything that changes less than
+     4/255 per frame -> on the owner's static photo nearly ALL pixels are
+     gated off.
+   - The pre-fix runs that looked "visible" (mean|d| 8-17/255, changed 27-40%)
+     had NO DC removal, NO gain 0.2, NO resgate - they were also the runs that
+     drifted blue. Current pipeline is ~10-50x more conservative.
+   - SAFE vs UNSAFE knobs: headpack DC-removal and hpfilter are what kill the
+     BLUE DRIFT - keep them. GAIN and RESGATE are the invisibility knobs.
+   RECOMMENDED EXPERIMENT SEQUENCE: (a) measure residual magnitude on DYNAMIC
+   content (game/video) with the current build; (b) --strength 2.0 run + DDA
+   A/B crops; (c) if still weak, raise headpack gain 0.2 -> 0.5..1.0 (net
+   0.125..0.25) and/or relax resgate to 2/255, re-run the 100-frame
+   accumulation test each time to confirm drift stays dead; (d) owner A/B.
+1. OWNER RE-TEST dynamic content: RUN-DEMO.cmd during a game via Moonlight.
+2. Repair VS BuildTools registration (re-run bootstrapper) so build.cmd works;
    until then use _build_msb.cmd (MSBuild on the cached vcxproj).
-4. Perf fusion pass (30 fps path: cosine_v fusion et al.); M5 zero-copy debug;
+3. Perf fusion pass (30 fps path: cosine_v fusion et al.); M5 zero-copy debug;
    game-mode window targeting; quality/temporal pass.

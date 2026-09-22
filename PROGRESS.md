@@ -508,3 +508,12 @@ golden.py compare; isolation: isolate.py, quant.py, quant2.py forensics).
   intentionally tiny on static content; --strength 1.5-2.0 is the tuning path.
 - Env: VS BuildTools lost installer registration (use _build_msb.cmd until the
   bootstrapper repair); adapter LUID changed 95a2 -> 9a8b (dynamic pick OK).
+
+### OWNER RE-TEST 2026-09-21 22:16 - enhancement imperceptible
+Owner on the fixed build: "practically NOTHING changed" visually. Fixes #1-#3
+hold (screen stable/clean). Root quantification for bug #4: headpack gain 0.2 x
+compose vendor 0.25 = net residual scale 0.05; post-DC head std ~0.017 ->
+~0.2/255 RMS at the screen; resgate 4/255 gates off the static photo almost
+entirely. Old "visible" runs (8-17/255) predate DC-removal/gain/resgate.
+DC-removal + hpfilter kill the drift and must STAY; GAIN and RESGATE are the
+invisibility knobs. Experiment plan in DEV_STATE "Next steps" item 0.
