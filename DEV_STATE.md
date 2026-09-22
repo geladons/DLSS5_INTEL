@@ -83,7 +83,34 @@ A/B runs; identical metrics were the tell).
 New CLI: --gain F (headpack residual gain, default 0.2). New batch:
 tools\RUN-WINDOW-DEMO.cmd (+ desktop copy) - takes the title as %1.
 
+## M9 FINDING (2026-09-22 ~12:00) - THE REAL QUALITY ROOT CAUSE
+The vendor network extent is NOT 288 tokens. NetworkGeometry.vendor_aligned
+(work/mlx-dlss/python/mlxdlss/features.py:36-40): network extent = the IMAGE
+extent aligned to 64, minimum 320 - per-PIXEL features; the graph downsamples
+internally (24x12 -> 12x6 are INTERNAL to the chain). Our 12x24 grid = feeding
+a 24x12-PIXEL thumbnail: the model literally cannot see faces -> its residual
+can only be low-frequency tone junk (the "digital garbage + slight color
+change" the owner reports).
+VALIDATED WITH NVIDIA'S OWN WEIGHTS via the torch reference (CPU, venv at
+work\_ref_test\.venv): owner's photo 1920x1200 -> ref_full.png: 68 s network,
+mean|d| 7.3/255, 79% pixels touched = subtle denoise/refine, structure 1:1.
+At 512x320: 6.2 s network. Conclusion: the model on flat 2D photos does
+REFINEMENT, not the promo face-regeneration (that marketing is in-game DLSS 5
+with motion vectors/depth/G-buffer inputs we do not have on the desktop).
+Expectation set with the owner via _ref_test\_ffN.png vs _ffP.png crops.
+PERF MATH: reference CPU does 164k tokens in 6.2 s; our Vulkan chain does 288
+tokens in 50 ms (tiny-grid overhead dominated). At real extents the B50 GPU
+should be vastly more efficient per token - a 512x320 window at proper density
+is plausibly realtime; a 1309x1039 window (aligned 1344x1088 = 1.46M tokens)
+is ~seconds/frame until perf work lands.
+NEXT MILESTONE (M9): generalize the chain to arbitrary extents (multiples of
+64, >=320): runtime IMG_W/IMG_H, window-attention batching beyond the 8-window
+bucket, GEMM M dims, offset arithmetic. Validate vs torch reference on
+photo_512 (work/_ref_test) - the harness now exists. Then wire into m8b-live
+window mode.
+
 ## Next steps (order)
+0. M9 (above) SUPERSEDES the old list - extent generalization is THE quality fix.
 1. OWNER RE-TEST: RUN-WINDOW-DEMO.cmd anime (Photos window) - judge the
    effect; then Desktop\RUN-DEMO.cmd for the fullscreen path.
 2. Token-density study: 288 tokens over a window is still coarse; check
