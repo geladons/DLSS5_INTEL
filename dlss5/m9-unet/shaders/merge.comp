@@ -1,0 +1,58 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+/*
+ * merge — M8a transition merges (fp32, widening f16 operands exactly).
+ *
+ * kind 0: decoder/upsample transition merge (SS A.9):
+ *             c[i] = a[i] + widen(b[i]) * widen(d[i % ch])          (fp32 raw)
+ *             h[i] = e4m3(c[i])                                    (published)
+ *          a = projection GEMM output fp32 [T, C]; b = skip f16 [T, C]
+ *          (b30 output / encoder skips); d = sin vector f16 [C].
+ * kind 1: b70 pre-merge (SS A.9 final merge, raw FP32, no publish):
+ *             c[i] = widen(a[i]) * widen(d[i % ch]) + widen(b[i]) * widen(e[i % ch])
+ *          a = upsampled value f16 [T, C] (b69 out), b = full_res_skip f16,
+ *          d = inp_merge_sin f16 [C], e = inp_merge_cos f16 [C].
+ */
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+
+#include "publish.glsl"
+
+layout(local_size_x = 256) in;
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf { float v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer HalfBuf  { float16_t v[]; };
+
+layout(push_constant, scalar) uniform Push {
+    uint64_t a, b, c, d, e, h;
+    uint n;          // element count = T*C
+    uint ch;         // channel count for vector broadcast
+    uint kind;
+} pc;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.n) return;
+    uint chn = i % pc.ch;
+    if (pc.kind == 0u) {
+        float av = FloatBuf(pc.a).v[i];
+        precise float bv = f16_widen(uint(float16BitsToUint16(HalfBuf(pc.b).v[i])));
+        precise float dv = FloatBuf(pc.d).v[chn];   // sin table stored fp32 (placeVecF16)
+        precise float r = av + bv * dv;
+        FloatBuf(pc.c).v[i] = r;
+        HalfBuf(pc.h).v[i] = float16_t(e4m3(r));
+    } else {
+        // a/b are true f16 tensors (b69 out, full_res_skip): reinterpret bits.
+        // d/e are the sin/cos tables WIDENED TO FP32 by placeVecF16 on the host
+        // (float storage, one fp32 per channel) — read them as FloatBuf, not f16.
+        precise float av = f16_widen(uint(float16BitsToUint16(HalfBuf(pc.a).v[i])));
+        precise float bv = f16_widen(uint(float16BitsToUint16(HalfBuf(pc.b).v[i])));
+        precise float dv = FloatBuf(pc.d).v[chn];
+        precise float ev = FloatBuf(pc.e).v[chn];
+        FloatBuf(pc.c).v[i] = av * dv + bv * ev;
+    }
+}

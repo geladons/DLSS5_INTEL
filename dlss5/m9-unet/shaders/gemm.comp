@@ -1,0 +1,147 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+/*
+ * gemm — M7b cooperative-matrix GEMM, adapted from the reference
+ * src/gpu/gemm_resident.comp (READ-ONLY study) to this prototype's shapes.
+ *
+ *   C[M,N] (+batch) = A[M,K] @ B[K,N]        (flags bit0 = 0: B row-major KxN)
+ *   C[M,N] (+batch) = A[M,K] @ B[N,K]^T      (flags bit0 = 1: B row-major NxK,
+ *                                             consumed via a ColumnMajor coopmat
+ *                                             load = the transpose for free,
+ *                                             design doc SS C.1 "matmul_nt")
+ *
+ * FP16 operands, FP32 accumulator (coopmat config 8x16x16 f16xf16->f32, M0-proven).
+ * One subgroup per workgroup, register block RM=2 x RN=2 -> 16x32 tile; every shape
+ * used by global block 31 is a whole multiple of 16x32 (M=288, N in {4096,1024,3072,
+ * 288,32}), so no tail handling is needed at this prototype stage.
+ *
+ * A is float16 (a separate to_half pass handles fp32 carriers, exactly like the
+ * reference runtime's rt.to_half; the design's in-kernel A_F32 fold is a later
+ * optimization). Epilogues run on the accumulator's own components and the matrix
+ * stores straight to global (reference notes/phase38 rule: store only into an array
+ * of the matrix's own component type; the narrow f16 path stages through shared
+ * memory for coalesced 4-wide stores).
+ *
+ * flags: bit0 TRANSPOSE_B | bit12 narrow(f16 out) | bits 8-11 EPI (0 NONE,1 E4M3,
+ * 2 GATE, 3 GATE_E4M3, 4 HALF — design doc SS C.1, xmxres.EPI_*).
+ */
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_shader_subgroup_basic : require
+
+#include "publish.glsl"
+
+layout(local_size_x = 32) in;
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer HalfBuf  { float16_t v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf { float     v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 8)  buffer Half4Buf { f16vec4   v4[]; };
+
+layout(push_constant, scalar) uniform Push {
+    HalfBuf a, b;
+    FloatBuf c;      // fp32 out, or f16 out when bit12 of flags is set (bitcast)
+    uint m, n, k, batch;
+    uint sa, sb, sc; // per-batch element strides
+    uint flags;
+    uint lda, ldb, ldc;  // row strides; 0 = dense default (k / n / n)
+} pc;
+
+const uint TM = 8, TN = 16, TK = 16;
+#ifndef GEMM_RN
+const uint RM = 2, RN = 2;   // default 16x32 tile per subgroup
+#else
+const uint RM = 2, RN = uint(GEMM_RN);   // M8a head variant: GEMM_RN=1 -> 16x16 tile
+#endif
+const uint BM = TM * RM, BN = TN * RN;
+
+shared float stage[BM * BN];   // narrow-store staging only
+
+void main() {
+    uint row = gl_WorkGroupID.y * BM, col = gl_WorkGroupID.x * BN;
+    if (row >= pc.m || col >= pc.n) return;
+    uint batch = gl_WorkGroupID.z;
+    uint ao = batch * pc.sa, bo = batch * pc.sb, co = batch * pc.sc;
+
+    uint lda = pc.lda != 0u ? pc.lda : pc.k;
+    uint ldb = pc.ldb != 0u ? pc.ldb : ((pc.flags & 1u) != 0u ? pc.k : pc.n);
+    uint ldc = pc.ldc != 0u ? pc.ldc : pc.n;
+
+    coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> acc[RM][RN];
+    for (uint i = 0u; i < RM; i++)
+        for (uint j = 0u; j < RN; j++)
+            acc[i][j] = coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(0.0);
+    coopmat<float16_t, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA> a[RM];
+    coopmat<float16_t, gl_ScopeSubgroup, TK, TN, gl_MatrixUseB> b[RN];
+
+    if ((pc.flags & 1u) != 0u) {
+        // B stored row-major as (N, K): element (n, k) at n*ldb + k. A ColumnMajor
+        // coopmat load of that buffer yields the (K, N) tile = B^T.
+        for (uint k = 0u; k < pc.k; k += TK) {
+            for (uint i = 0u; i < RM; i++)
+                coopMatLoad(a[i], pc.a.v, ao + (row + i * TM) * lda + k, lda,
+                            gl_CooperativeMatrixLayoutRowMajor);
+            for (uint j = 0u; j < RN; j++)
+                coopMatLoad(b[j], pc.b.v, bo + (col + j * TN) * ldb + k, ldb,
+                            gl_CooperativeMatrixLayoutColumnMajor);
+            for (uint i = 0u; i < RM; i++)
+                for (uint j = 0u; j < RN; j++)
+                    acc[i][j] = coopMatMulAdd(a[i], b[j], acc[i][j]);
+        }
+    } else {
+        for (uint k = 0u; k < pc.k; k += TK) {
+            for (uint i = 0u; i < RM; i++)
+                coopMatLoad(a[i], pc.a.v, ao + (row + i * TM) * lda + k, lda,
+                            gl_CooperativeMatrixLayoutRowMajor);
+            for (uint j = 0u; j < RN; j++)
+                coopMatLoad(b[j], pc.b.v, bo + k * ldb + col + j * TN, ldb,
+                            gl_CooperativeMatrixLayoutRowMajor);
+            for (uint i = 0u; i < RM; i++)
+                for (uint j = 0u; j < RN; j++)
+                    acc[i][j] = coopMatMulAdd(a[i], b[j], acc[i][j]);
+        }
+    }
+
+    uint epilogue = (pc.flags >> 8) & 0xFu;
+    bool narrow = (pc.flags & 0x1000u) != 0u;
+
+    if (epilogue == 0u && !narrow) {
+        for (uint i = 0u; i < RM; i++)
+            for (uint j = 0u; j < RN; j++)
+                coopMatStore(acc[i][j], pc.c.v, co + (row + i * TM) * ldc + col + j * TN,
+                             ldc, gl_CooperativeMatrixLayoutRowMajor);
+        return;
+    }
+
+    for (uint i = 0u; i < RM; i++)
+        for (uint j = 0u; j < RN; j++) {
+            for (uint e = 0u; e < acc[i][j].length(); e++)
+                acc[i][j][e] = publish(epilogue, acc[i][j][e]);
+            if (narrow) {
+                coopMatStore(acc[i][j], stage, i * TM * BN + j * TN, BN,
+                             gl_CooperativeMatrixLayoutRowMajor);
+                continue;
+            }
+            coopMatStore(acc[i][j], pc.c.v, co + (row + i * TM) * ldc + col + j * TN,
+                         ldc, gl_CooperativeMatrixLayoutRowMajor);
+        }
+    if (!narrow) return;
+
+    subgroupMemoryBarrierShared();
+    subgroupBarrier();
+    for (uint e = gl_LocalInvocationID.x * 4u; e < BM * BN; e += 32u * 4u) {
+        uint at = co + (row + e / BN) * ldc + col + e % BN;
+        if ((at & 3u) == 0u && (uint(uint64_t(pc.c)) & 7u) == 0u) {
+            Half4Buf(uint64_t(pc.c)).v4[at >> 2] =
+                f16vec4(float(stage[e]), float(stage[e + 1u]),
+                        float(stage[e + 2u]), float(stage[e + 3u]));
+        } else {
+            for (uint i = 0u; i < 4u; ++i)
+                HalfBuf(uint64_t(pc.c)).v[at + i] = float16_t(stage[e + i]);
+        }
+    }
+}

@@ -1,0 +1,91 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+/*
+ * softmax — M7b bit-affine approximate softmax (design doc SS A.6 step 5, exact
+ * chain; mirrors the SOFTMAX path of the reference src/gpu/attention.comp).
+ *
+ * One invocation per score row. scores fp32 [batch=heads, 288, 288]; probs out
+ * f16 same shape. p0 != 0 applies the symmetric +-p0 logit cap (global blocks,
+ * GLOBAL_ATTENTION_LOGIT_CAP = 3.0) BEFORE the half_round, matching
+ * nr_model's clip ahead of vendor_approximate_softmax. No attention bias on
+ * global blocks.
+ *
+ * Chain (fp32 math, one rounding per step, `precise` against FMA contraction):
+ *   a = half_round(score); a = a*0.044921875 + 1.30078125; clamp(1.03125, 1.5693359375)
+ *   packed = f16bits(a.lo) | f16bits(a.hi) << 16;  transformed = (packed << 5) + 0x7FF88000
+ *   weights = the two f16 in transformed   (coupled pair — bit-affine across halves)
+ *   total   = fp32 row sum of weights, rounded ONCE to f16
+ *   recip   = half_round(1 / total)
+ *   probs   = e4m3(half_round(weight * recip))
+ */
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+
+#include "publish.glsl"
+
+layout(local_size_x = 32) in;
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf { float v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer HalfBuf  { float16_t v[]; };
+
+layout(push_constant, scalar) uniform Push {
+    FloatBuf a;      // scores fp32 [rows, n]
+    HalfBuf  c;      // probs f16 [rows, n]
+    uint m;          // rows = heads * tokens
+    uint n;          // tokens per row (even)
+    float p0;        // symmetric logit cap; 0 = none
+    uint64_t bias;   // M8a: optional f16 attn_bias base (window blocks); 0 = none
+    uint hcount;     // M8a: heads per window for bias indexing; 0 = none
+    uint nReal;      // M9: global blocks — real (unpadded) tokens per row; 0 = n
+} pc;
+
+void weights_at(uint base, uint i, out float w0, out float w1) {
+    if (pc.nReal != 0u && i >= pc.nReal) { w0 = 0.0; w1 = 0.0; return; }
+    vec2 affine;
+    for (uint j = 0u; j < 2u; j++) {
+        float logit = pc.a.v[base + i + j];
+        if (pc.bias != 0u) {
+            // window attention: row = ((w*hcount + h)*64 + tq); col = tk.
+            uint row = base / pc.n;         // (base = row * n)
+            uint h = (row >> 6u) % pc.hcount;
+            uint tq = row & 63u;
+            uint tk = i + j;
+            uint bb = float16BitsToUint16(HalfBuf(pc.bias).v[h * 4096u + tq * 64u + tk]);
+            logit += f16_widen(bb);
+        }
+        if (pc.p0 != 0.0) logit = clamp(logit, -pc.p0, pc.p0);
+        precise float scaled = half_round(logit) * 0.044921875;
+        scaled += 1.30078125;
+        affine[j] = clamp(scaled, 1.03125, 1.5693359375);
+    }
+    uint transformed = (packHalf2x16(affine) << 5) + 0x7FF88000u;
+    vec2 weights = unpackHalf2x16(transformed);
+    w0 = weights.x;
+    w1 = weights.y;
+}
+
+void main() {
+    uint row = gl_GlobalInvocationID.x;
+    if (row >= pc.m) return;
+    uint base = row * pc.n;
+
+    float total = 0.0;
+    float w0, w1;
+    for (uint i = 0u; i < pc.n; i += 2u) {
+        weights_at(base, i, w0, w1);
+        total += w0;          // fp32 accumulation, as numpy's sum(dtype=float16)
+        total += w1;
+    }
+    float reciprocal = half_round(1.0 / half_round(total));
+    for (uint i = 0u; i < pc.n; i += 2u) {
+        weights_at(base, i, w0, w1);
+        precise float p0 = w0 * reciprocal;
+        precise float p1 = w1 * reciprocal;
+        pc.c.v[base + i]      = float16_t(e4m3(half_round(p0)));
+        pc.c.v[base + i + 1u] = float16_t(e4m3(half_round(p1)));
+    }
+}

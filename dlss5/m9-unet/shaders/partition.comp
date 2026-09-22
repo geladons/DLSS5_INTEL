@@ -1,0 +1,61 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+/*
+ * partition — M8a image-order -> window-order gather with shifted-origin pad.
+ *
+ * Design doc SS A.4 / nr_model.partition_windows + np.pad(constant 0):
+ *   out[w, i, c] = in[y, x, c]   where w = (wy,wx) window, i = (ly,lx) local token,
+ *   y = wy*8 + ly - padTop, x = wx*8 + lx - padLeft; 0 for out-of-image tokens.
+ * in is either fp32 (half_rounded into f16 — attention reads the FFN carrier) or f16
+ * (branched FFN residual, already e4m3-published; half_round is then a no-op, we read
+ * the f16 verbatim). One invocation per (window, local token) row; loops channels.
+ */
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+
+#include "publish.glsl"
+
+layout(local_size_x = 32) in;
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf { float v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer HalfBuf  { float16_t v[]; };
+
+layout(push_constant, scalar) uniform Push {
+    uint64_t a;      // in: fp32 image [Himg*Wimg*C] or f16 (flags bit0)
+    uint64_t c;      // out: f16 windows [W*64*C]
+    uint Himg, Wimg, C;
+    uint padTop, padLeft;
+    uint wp8;        // padded width in windows (Wp/8); W = (Hp/8)*wp8
+    uint flags;      // bit0: input is f16
+} pc;
+
+void main() {
+    uint wi = gl_GlobalInvocationID.x;          // w*64 + i
+    uint nw = (pc.Himg + pc.padTop + 7u) / 8u * pc.wp8;
+    if (wi >= nw * 64u) return;
+    uint w = wi / 64u, i = wi % 64u;
+    uint wy = w / pc.wp8, wx = w % pc.wp8;
+    uint ly = i / 8u, lx = i % 8u;
+    int y = int(wy * 8u + ly) - int(pc.padTop);
+    int x = int(wx * 8u + lx) - int(pc.padLeft);
+    bool valid = y >= 0 && y < int(pc.Himg) && x >= 0 && x < int(pc.Wimg);
+    uint dst = wi * pc.C;
+    if ((pc.flags & 1u) != 0u) {
+        float16_t z16 = float16_t(0.0);
+        for (uint ch = 0u; ch < pc.C; ++ch) {
+            float16_t val = z16;
+            if (valid) val = HalfBuf(pc.a).v[(uint(y) * pc.Wimg + uint(x)) * pc.C + ch];
+            HalfBuf(pc.c).v[dst + ch] = val;
+        }
+    } else {
+        for (uint ch = 0u; ch < pc.C; ++ch) {
+            float val = 0.0;
+            if (valid) val = half_round(FloatBuf(pc.a).v[(uint(y) * pc.Wimg + uint(x)) * pc.C + ch]);
+            HalfBuf(pc.c).v[dst + ch] = float16_t(val);
+        }
+    }
+}

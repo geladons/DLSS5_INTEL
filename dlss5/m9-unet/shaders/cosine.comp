@@ -1,0 +1,90 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+/*
+ * cosine — M7b Q/K cosine publish + V plain E4M3 publish (design doc SS A.5, A.6).
+ *
+ * One invocation per (token, head) 32-channel vector. The 32-dim cosine normalize
+ * runs the vendor fragment tree with fp16 semantics (each op a float32 expression
+ * rounded once to half — see attention.comp in the reference, which this mirrors):
+ *
+ *   hmul/hadd/hfma below = float32 expression + one half_round, `precise` stops an
+ *   FMA contraction from skipping the intermediate rounding.
+ *
+ * kind (flags & 0xFF): 0 = Q (normalize, per-head scale, e4m3)
+ *                      1 = K (normalize, e4m3)
+ *                      2 = V (plain e4m3, no normalize/scale — SS A.6 step 2)
+ *
+ * Layout: proj fp32 [tokens, 3*1024] = [Q|K|V]; out f16 [tokens, 1024], channel
+ * c = head*32 + d (head-major = the merge_heads order the ctx GEMM store uses).
+ * pc.d = fp32 per-head scale buffer (Q only: attn_scale*sqrt(32), computed fp32
+ * first per design SS A.6.2 / nr_model.global_block).
+ */
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_basic : require
+
+#include "publish.glsl"
+
+layout(local_size_x = 32) in;
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf { float v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer HalfBuf  { float16_t v[]; };
+
+layout(push_constant, scalar) uniform Push {
+    FloatBuf a;      // proj fp32 [tokens, 3072]
+    HalfBuf  c;      // out f16 [tokens, 1024]
+    FloatBuf d;      // per-head fp32 scale (Q only)
+    uint m;          // vector count = tokens * heads
+    uint flags;      // kind in bits 0-1
+} pc;
+
+const float COSINE_NORM_FLOOR = 0.00006198883056640625;
+
+float hmul(float l, float r) { precise float t = l * r; return half_round(t); }
+float hadd(float l, float r) { precise float t = l + r; return half_round(t); }
+float hfma(float l, float r, float acc) { precise float t = l * r + acc; return half_round(t); }
+
+void main() {
+    uint v = gl_GlobalInvocationID.x;
+    if (v >= pc.m) return;
+    uint kind = pc.flags & 0xFFu;
+    uint t = v / 32u, head = v % 32u;
+    uint rd = t * 3072u + kind * 1024u + head * 32u;   // kind 2 = V block (2048)
+    uint wr = t * 1024u + head * 32u;
+
+    if (kind == 2u) {
+        for (uint i = 0u; i < 32u; i++)
+            pc.c.v[wr + i] = float16_t(e4m3(pc.a.v[rd + i]));
+        return;
+    }
+
+    float h[32];
+    for (uint i = 0u; i < 32u; i++) h[i] = half_round(pc.a.v[rd + i]);
+
+    float partial[4][2];
+    for (uint lane = 0u; lane < 4u; lane++)
+        for (uint parity = 0u; parity < 2u; parity++) {
+            uint ch = lane * 2u + parity;
+            float first  = hfma(h[ch + 8u],  h[ch + 8u],  hmul(h[ch],       h[ch]));
+            float second = hfma(h[ch + 24u], h[ch + 24u], hmul(h[ch + 16u], h[ch + 16u]));
+            partial[lane][parity] = hadd(first, second);
+        }
+    float two[4][2], one[4][2];
+    for (uint lane = 0u; lane < 4u; lane++)
+        for (uint p = 0u; p < 2u; p++) two[lane][p] = hadd(partial[lane][p], partial[lane ^ 2u][p]);
+    for (uint lane = 0u; lane < 4u; lane++)
+        for (uint p = 0u; p < 2u; p++) one[lane][p] = hadd(two[lane][p], two[lane ^ 1u][p]);
+
+    float norm = max(hadd(one[0][0], one[0][1]), half_round(COSINE_NORM_FLOOR));
+    float reciprocal = half_round(inversesqrt(norm));
+    float scale = 1.0;
+    if (kind == 0u) scale = half_round(pc.d.v[head]);
+    for (uint i = 0u; i < 32u; i++) {
+        float value = hmul(h[i], reciprocal);
+        if (kind == 0u) value = hmul(value, scale);
+        pc.c.v[wr + i] = float16_t(e4m3(value));
+    }
+}
