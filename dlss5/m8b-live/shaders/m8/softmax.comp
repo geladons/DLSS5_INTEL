@@ -40,9 +40,11 @@ layout(push_constant, scalar) uniform Push {
     float p0;        // symmetric logit cap; 0 = none
     uint64_t bias;   // M8a: optional f16 attn_bias base (window blocks); 0 = none
     uint hcount;     // M8a: heads per window for bias indexing; 0 = none
+    uint nReal;      // M9: global blocks — real (unpadded) tokens per row; 0 = n
 } pc;
 
 void weights_at(uint base, uint i, out float w0, out float w1) {
+    if (pc.nReal != 0u && i >= pc.nReal) { w0 = 0.0; w1 = 0.0; return; }
     vec2 affine;
     for (uint j = 0u; j < 2u; j++) {
         float logit = pc.a.v[base + i + j];

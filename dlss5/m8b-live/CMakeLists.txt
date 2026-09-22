@@ -45,7 +45,8 @@ endforeach()
 # m8 chain kernels + m8b bridge shaders. gemm is compiled twice: the default
 # 16x32 tile and a GEMM_RN=1 16x16 variant for the head GEMM (N=16), same as m7/m8.
 set(M8_SHADERS gemm gemm_rn1 cosine cosine_win softmax elementwise
-               partition transpose_we gather_residual merge featpack headpack)
+               partition transpose_we gather_residual merge featpack headpack
+               pool2 upmerge)
 foreach(S ${M8_SHADERS})
     set(SPV ${CMAKE_CURRENT_BINARY_DIR}/${S}.spv)
     if(S STREQUAL "gemm_rn1")

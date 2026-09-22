@@ -1552,6 +1552,8 @@ int main(int argc, char **argv) {
         {"b69", oB69, (uint64_t)st[1].TOK * 32 * 2, true},
         {"mrg70", oMRG70, (uint64_t)st[0].TOK * 32 * 4, false},
         {"head", oHEAD, (uint64_t)st[0].TOK * 16 * 4, false},
+        {"x16", oX16, (uint64_t)st[0].TOK * 16 * 2, true},
+        {"xfeats", oX, (uint64_t)st[0].TOK * 16 * 4, false},
     };
     for (auto &d : dbgList) dumps.push_back({d.name, d.off, d.bytes, d.f16});
     VkDeviceSize tot = 0;

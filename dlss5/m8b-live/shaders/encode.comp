@@ -5,7 +5,13 @@
 //   value = value==value ? unit(value) : 0      (NaN -> 0, unit = clamp01)
 //   out[p*4 + (2-c)] = (uint8)(value*255 + 0.5) (B first: c=0 R -> byte 2 ...)
 //   out[p*4 + 3] = raw alpha
-// For an rgba8 view of B8G8R8A8 the byte order is (.x=B,.y=G,.z=R,.w=A).
+//
+// DRIVER-MEASURED SWIZZLE (2026-09-22, Arc 101.8805): layout(rgba8) on a
+// VK_FORMAT_B8G8R8A8_UNORM view REVERSES the texel on stores too — value.x
+// lands in byte 2, value.z in byte 0 (the old ".x=B" comment assumed the
+// format-name order and was wrong; decode.comp has the matching read-side
+// note + the features-vs-torch diff that proved it). So an IDENTITY
+// vec4(R,G,B,A) store produces the required B,G,R,A byte order here.
 //
 // Two uses (push b.z): 0 = FULL-frame final image (region pixels from Final,
 //   letterbox bars / outside-region from the native decode -> bars untouched,
@@ -61,8 +67,9 @@ void main() {
         int r = clamp(int((lp >> 16) & 0xFFu) + int(round(d.x * 255.0)), 0, 255);
         int g = clamp(int((lp >> 8) & 0xFFu)  + int(round(d.y * 255.0)), 0, 255);
         int b = clamp(int(lp & 0xFFu)         + int(round(d.z * 255.0)), 0, 255);
-        imageStore(imgOut, xy, vec4(float(b) * (1.0 / 255.0), float(g) * (1.0 / 255.0),
-                                    float(r) * (1.0 / 255.0), a));
+        // driver-reversed store: .x -> byte2 (=R), .z -> byte0 (=B)
+        imageStore(imgOut, xy, vec4(float(r) * (1.0 / 255.0), float(g) * (1.0 / 255.0),
+                                    float(b) * (1.0 / 255.0), a));
         return;
     }
 
@@ -81,5 +88,6 @@ void main() {
         uint rp = uint(xy.y) * uint(pc.b.x) + uint(xy.x);
         rgb = vec3(nro[rp * 3u], nro[rp * 3u + 1u], nro[rp * 3u + 2u]);
     }
-    imageStore(imgOut, xy, vec4(enc(rgb.b), enc(rgb.g), enc(rgb.r), a));
+    // driver-reversed store: identity RGBA lands as B,G,R,A bytes (see header)
+    imageStore(imgOut, xy, vec4(enc(rgb.r), enc(rgb.g), enc(rgb.b), a));
 }

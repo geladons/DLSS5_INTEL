@@ -52,7 +52,7 @@ void main() {
     ivec2 xy = ivec2(gl_GlobalInvocationID.xy);
     if (xy.x >= pc.a.x || xy.y >= pc.a.y) return;
     uint p = uint(xy.y) * uint(pc.a.x) + uint(xy.x);
-    vec4 c = imageLoad(imgIn, xy);            // BGRA view: .x=B .y=G .z=R .w=A
+    vec4 c = imageLoad(imgIn, xy);            // driver-measured rgba8-on-BGRA reversal: .x=R .y=G .z=B .w=A
     uint lp = lastp[p];
     int m = pc.b.x;                           // generous safety clamp (maxDelta*4)
     int dR, dG, dB;
@@ -66,15 +66,16 @@ void main() {
         // structured lock-in was the M8B "dark/color-shifted overlay" bug
         // (DDA + GDI agreed the screen was dark; video-mode readback dark;
         // fbmean healthy ~12 - all consistent with a stable dark fixed point).
-        dR = int(c.z * 255.0 + 0.5);
+        dR = int(c.x * 255.0 + 0.5);
         dG = int(c.y * 255.0 + 0.5);
-        dB = int(c.x * 255.0 + 0.5);
+        dB = int(c.z * 255.0 + 0.5);
     } else {
         // BGRA byte order: byte0=B (bits 0-7), byte1=G (bits 8-15), byte2=R (16-23).
         // RgbFull channel order (same as decode.comp): 0=R, 1=G, 2=B.
-        dR = clamp(int(c.z * 255.0 + 0.5) - int((lp >> 16) & 0xFFu), -m, m);
+        // imageLoad rgba8-on-BGRA reversal (driver-measured): .x=R .y=G .z=B.
+        dR = clamp(int(c.x * 255.0 + 0.5) - int((lp >> 16) & 0xFFu), -m, m);
         dG = clamp(int(c.y * 255.0 + 0.5) - int((lp >> 8) & 0xFFu), -m, m);
-        dB = clamp(int(c.x * 255.0 + 0.5) - int(lp & 0xFFu), -m, m);
+        dB = clamp(int(c.z * 255.0 + 0.5) - int(lp & 0xFFu), -m, m);
     }
     v[p * 3u + 0u] = float(dR) * (1.0 / 255.0);
     v[p * 3u + 1u] = float(dG) * (1.0 / 255.0);

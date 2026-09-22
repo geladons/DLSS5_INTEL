@@ -1,6 +1,50 @@
-# DEV_STATE.md - where we are (updated 2026-09-22 ~11:10 by Kimi)
+# DEV_STATE.md - where we are (updated 2026-09-22 ~16:40 by Kimi)
 
 ## One-line status
+M9B SHIPPED: the live app now runs the REAL 71-block DLSSNR U-Net per-pixel at
+the vendor-aligned extent of the target window (e.g. 1309x1070 region ->
+1344x1088 network), replacing the old 288-token miniature chain. Validated
+against the torch reference on the live capture: features BIT-EXACT, composed
+output 50.1 dB PSNR vs reference (frame-1 head) / 46.9 dB vs the actual
+on-screen verify frame - at/above the m9-unet offline baseline (43.5 dB).
+Root-cause kill this session: driver-measured rgba8-on-BGRA texel reversal -
+decode/fbcancel read R as B (the network was fed R/B-swapped colour; encode
+double-swapped it back, so screens looked "fine" while the model saw garbage).
+Also: arena now chunked (Arc driver caps ONE VkDeviceMemory at ~4 GiB;
+window-extent arena is ~4.7 GB -> 2 chunks, BDA resolved per offset).
+
+OWNER: re-test with tools\RUN-DEMO.cmd (or runm8b.cmd --window anime --frames 45
+--wiggle-idle 1). Expected: correct colours AND visible neural detail (check
+flower/hair texture vs native), no stripes over time, PASS in docs\m8b-live.log.
+Speed: ~800 ms/frame at 1344x1088 (chain-bound; optimization = M10, not done).
+
+## M9b session log (2026-09-22 ~14:00-16:40)
+1. Ported the validated m9-unet chain into m8b-live (shaders m8/pool2,upmerge,
+   softmax+nReal; features.comp rewritten to vendor make_features with mirror
+   extension at the vendor-aligned extent; compose.comp rewritten to vendor
+   compose_head: residual = halfr(head)*0.25*gain, out = clamp(src+res)).
+2. Chunked device arena (CHUNK_CAP 3.5 GB, chunkOf/localOff/A per logical
+   offset; barriers/descriptors/fill/debug-copies chunk-aware). Fixes
+   vkAllocateMemory -2 at >4 GiB (vulkaninfo: maxMemoryAllocationSize =
+   0xffff0000).
+3. R/B SWAP FIX (the "fundamental error"): layout(rgba8) storage ops on a
+   VK_FORMAT_B8G8R8A8_UNORM view are REVERSED by this Arc driver (measured:
+   live featV ch4 == reference ch6 exactly, 5000-px probe; corr 1.0000).
+   decode.comp/fbcancel.comp now read .x=R .z=B; encode.comp stores identity
+   RGBA. After the fix: live features bit-exact vs torch (maxdiff 1 half-ulp,
+   noise channels only), head RGB mean|d| 0.008 @ std 0.13.
+4. Validation rig: work/_ref_test/dump_torch.py (+_f1 frame_index=1 variant)
+   dumps torch goldens per block; cmp_live.py compares live frame-1 dumps
+   (out\live_*.bin, written every run at frame 1). m9-unet gained x16/xfeats
+   dumps. Gotcha that cost an hour: m8b_native.bmp is written ONLY at verify
+   frames {10,30,60} - at --frames 10 it is STALE from the previous run;
+   always crop goldens from m8b_native0.bmp (frame 0, every run) instead.
+5. Numbers (region 1309x1070 -> extent 1344x1088): verify ALL PASS,
+   mean|final-native| ~6-7/255 per channel, changed 99.9%, no drift.
+   m9-unet at 576x512 cross-check: torch-vs-m9 43.45 dB, torch-vs-live
+   44.44 dB, m9-vs-live 46.16 dB.
+
+## Previous status (2026-09-22 ~11:10)
 ECHO-FREE PIPELINE SHIPPED (this commit): the overlay is now excluded from
 capture via WDA_EXCLUDEFROMCAPTURE -> DDA sees the TRUE desktop through the
 overlay. Root-causes killed at once: wrong colors (feedback equilibrium is

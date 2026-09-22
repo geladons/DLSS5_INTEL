@@ -732,8 +732,43 @@ static BOOL WINAPI CtrlHandler(DWORD) {
 // M8a chain constants + safetensors parser (verbatim from m8-full-chain;
 // the chain runs at a FIXED 24x12 = 288-token grid — see docs/m8-full-chain.md)
 // ===========================================================================
-static const uint32_t TOK = 288;      // tokens = 24 rows x 12 cols
-static const uint32_t IMG_H = 24, IMG_W = 12;
+// M9b: the network extent is the VENDOR-ALIGNED processing-region size
+// (multiple of 64, min 320) — the chain is the real 7-scale U-Net ported from
+// m9-unet (validated PSNR 41.5 dB vs the torch reference on photo extents).
+// The old pinned 12x24 = 288-token miniature is gone.
+static uint32_t pad8u(uint32_t v) { return (v + 7u) & ~7u; }
+struct Stage { uint32_t H, W, TOK; };
+
+// Fragment swizzle (nr_model._fragment_swizzle_indices): the single-head
+// window blocks (0-4, 66-70) and the 16-head split blocks (23-30, 40-47) store
+// attn_bias in fused-kernel mma fragment order; logical[j] = stored[SWZ[j]].
+// The 2/4/8-head blocks (5-22, 48-65) store the logical layout already.
+static uint32_t SWZ[4096];
+static void initSwizzle() {
+    for (int entry = 0; entry < 4096; ++entry) {
+        int q = entry / 64, k = entry % 64;
+        int qy = q / 8, qx = q % 8, ky = k / 8, kx = k % 8;
+        auto bit = [](int v, int p) { return (v >> p) & 1; };
+        SWZ[entry] = (uint32_t)((bit(qy, 2) << 11) | (bit(qx, 2) << 10) | (bit(ky, 2) << 9) |
+                                (bit(kx, 2) << 8) | (bit(qy, 0) << 7) | (bit(qx, 1) << 6) |
+                                (bit(qx, 0) << 5) | (bit(ky, 0) << 4) | (bit(kx, 1) << 3) |
+                                (bit(ky, 1) << 2) | (bit(qy, 1) << 1) | bit(kx, 0));
+    }
+}
+static int blockIndexOf(const std::string &name) {
+    auto dot = name.find('.');
+    return std::atoi(name.substr(5, dot - 5).c_str());
+}
+static bool biasNeedsSwizzle(const std::string &n) {
+    auto ends = [&](const char *suf) {
+        size_t l = std::strlen(suf);
+        return n.size() >= l && n.compare(n.size() - l, l, suf) == 0;
+    };
+    int blk = blockIndexOf(n);
+    if (ends(".layer0.attn_bias")) return blk <= 4 || blk >= 66;
+    if (ends(".layer2.attn_bias")) return (blk >= 23 && blk <= 30) || (blk >= 40 && blk <= 47);
+    return false;
+}
 
 struct Tensor {
     std::string dtype;
@@ -941,7 +976,7 @@ struct CosWinPush { uint64_t a, c, d; uint32_t m, flags, C, hcount; };
 #pragma pack(pop)  // SMaxPush: scalar layout aligns uint64 `bias` to 8 (offset 32);
                    // pack(1) would place it at 28 -> shader reads garbage nonzero
                    // bias -> wild BDA deref -> async device lost (M8a run-5 root cause)
-struct SMaxPush { uint64_t a, c; uint32_t m, n; float p0; uint64_t bias; uint32_t hcount; };
+struct SMaxPush { uint64_t a, c; uint32_t m, n; float p0; uint64_t bias; uint32_t hcount; uint32_t nReal; };
 #pragma pack(push, 1)
 
 struct EWPush { uint64_t a, b, c, d, h; uint32_t n, kind, ch; };
@@ -973,6 +1008,7 @@ int main(int argc, char** argv) {
     int cpuInfo[4];
     __cpuid(cpuInfo, 1);
     g_hasF16C = (cpuInfo[2] & (1 << 29)) != 0;
+    initSwizzle();   // M9b: attn_bias fragment-order recovery tables
 
     // ---------------- CLI
     long framesTarget = 300;
@@ -1005,9 +1041,9 @@ int main(int argc, char** argv) {
                                  // moving windows and its residual reintroduces row lines;
                                  // needs realtime cadence to be valid (owner screenshots
                                  // 2026-09-22 ~10:55).
-    float headGain = 0.2f;       // --gain F: headpack residual gain (default 0.2 = the
-                                 // calibrated invisible-safe value; 1.0 = full vendor-scale
-                                 // residual after per-row DC removal -> VISIBLE effect).
+    float headGain = 1.0f;       // --gain F: vendor head residual scale (default 1.0 =
+                                 // the real compose_head recipe; the old 0.2
+                                 // calibration belonged to the 288-token miniature).
     std::string winTitle;        // --window TITLE: per-window mode - capture/crop the target
                                  // window's client area, overlay covers only that rect.
     std::string outPref;         // --output NAME: capture-output preference (substring,
@@ -1041,23 +1077,28 @@ int main(int argc, char** argv) {
     if (refreshMs < 50) refreshMs = 50;
     if (paceMs < 0) paceMs = 0;
     temporal = temporal ? 1 : 0;
+    if (temporal) {   // M9b: the temporal history path was calibrated for the
+                      // old 288-token chain; not ported to the U-Net extent yet.
+        std::printf("[info] --temporal is not supported on the M9b U-Net chain; forcing 0\n");
+        temporal = 0;
+    }
     if (strength < 0.0f) strength = 0.0f;
     if (strength > 2.0f) strength = 2.0f;
     colorpass = colorpass ? 1 : 0;
     if (resGate < 0) resGate = 0;
     if (resGate > 255) resGate = 255;
     SetConsoleCtrlHandler(CtrlHandler, TRUE);
-    std::printf("=== M8B-LIVE: REAL DLSS 5 graph (71 blocks) live on the desktop, Intel Arc Pro B50 ===\n");
-    std::printf("transport: m4-present-simple (CPU bridge) | core: m8-full-chain @03900ab (288 tokens, ~47 ms)\n");
+    std::printf("=== M8B-LIVE (M9b U-Net): REAL DLSS 5 graph (71 blocks, 7 scales) live on the desktop, Intel Arc Pro B50 ===\n");
+    std::printf("transport: m4-present-simple (CPU bridge) | core: M9 U-Net chain at vendor-aligned extent\n");
     std::printf("frame target: %ux%u B8G8R8A8, frames=%ld (processed), wiggle-idle=%lds, video=%d\n",
                 W, H, framesTarget, wiggleIdleSec, !novideo);
     if (!novideo)
         std::printf("feedback-cancellation: ON (echo subtract + accumulate, max-delta=%d/255, settle-thresh=%.3f)\n",
                     maxDelta, settleThresh);
-    std::printf("composite: strength=%.2f, high-pass(color component)=%s, residual-gate=%ld/255\n",
-                strength, colorpass ? "OFF (--colorpass 1, legacy)" : "ON (default)", resGate);
+    std::printf("composite: vendor compose_head, gain=%.2f (legacy strength/colorpass/resgate ignored on the M9b path)\n",
+                (double)headGain);
     if (renderScale != 0.55f)
-        std::printf("[info] --scale ignored: network grid pinned to 12x24 = the chain's 288 tokens\n");
+        std::printf("[info] --scale ignored: network extent = vendor-aligned region size (mult 64, min 320)\n");
     std::printf("\n");
     CreateDirectoryA("out", nullptr);
 
@@ -1657,13 +1698,33 @@ int main(int argc, char** argv) {
     };
 
     // ===================================================================
-    // 7. Geometry: network extent PINNED to the chain's 288-token grid
-    //    (12 wide x 24 tall = m8 IMG_W x IMG_H; --scale ignored).
+    // 7. Geometry (M9b): the network extent is the VENDOR-ALIGNED processing
+    //    region (features.py NetworkGeometry.vendor_aligned: multiple of 64,
+    //    min 320, aligned UP). Window mode: the target client rect (known
+    //    since startup); fullscreen: the whole output. The frame-0 letterbox
+    //    content scan no longer sizes the network — the U-Net runs per-pixel.
     // ===================================================================
-    const int netW = (int)IMG_W;    // 12
-    const int netH = (int)IMG_H;    // 24
-    std::printf("[geometry] network extent PINNED at %dx%d = %u tokens (m8 chain grid)\n",
-                netW, netH, TOK);
+    Region region = winMode ? winRegion : Region{0, (int)H, 0, (int)W};
+    const int regionW = region.right - region.left;
+    const int regionH = region.bottom - region.top;
+    auto align64up = [](int v) { return (std::max(320, v) + 63) & ~63; };
+    const int netW = align64up(regionW);
+    const int netH = align64up(regionH);
+    Stage st[7];
+    st[0] = {(uint32_t)netH, (uint32_t)netW, 0};
+    st[1] = {(uint32_t)netH / 2, (uint32_t)netW / 2, 0};
+    st[2] = {(uint32_t)netH / 4, (uint32_t)netW / 4, 0};
+    st[3] = {(uint32_t)netH / 8, (uint32_t)netW / 8, 0};
+    st[4] = {(uint32_t)netH / 16, (uint32_t)netW / 16, 0};
+    st[5] = {pad8u(st[4].H) / 2, pad8u(st[4].W) / 2, 0};
+    st[6] = {pad8u(st[5].H) / 2, pad8u(st[5].W) / 2, 0};
+    for (auto &s : st) s.TOK = s.H * s.W;
+    const uint64_t T6 = st[6].TOK;
+    const uint32_t T6P = (st[6].TOK + 31) & ~31u;
+    std::printf("[geometry] region %dx%d -> vendor-aligned network extent %dx%d (U-Net 7 scales)\n",
+                regionW, regionH, netW, netH);
+    for (int i = 0; i < 7; ++i)
+        std::printf("  L%d: %4ux%-4u  TOK=%u\n", i, st[i].H, st[i].W, st[i].TOK);
 
     // ===================================================================
     // 8. DLSSNR weight residency (m8a §1-3): one device buffer, pack +
@@ -1707,13 +1768,15 @@ int main(int argc, char** argv) {
         char b[160]; std::snprintf(b, sizeof b, fmt, i); return b;
     };
 
-    // ---- arena layout (verbatim m8a + 2 m8b bridge slots) ----------------
+    // ---- arena layout (M9 U-Net: per-scale extents; ported from m9-unet) ---
     struct Ar {
         VkDeviceSize base = 0;
         VkDeviceSize off = 0;
+        std::vector<std::pair<VkDeviceSize, VkDeviceSize>> segs;   // (abs off, bytes) for chunking
         VkDeviceSize alloc(VkDeviceSize bytes) {
             VkDeviceSize a = (off + 255) & ~(VkDeviceSize)255;
             off = a + bytes;
+            segs.push_back({base + a, bytes});
             return base + a;
         }
     } ar;
@@ -1726,38 +1789,63 @@ int main(int argc, char** argv) {
     VkDeviceSize oHeadW = ar.alloc(1024);   // folded [32,16] f16 head weight
 
     auto slot = [&](VkDeviceSize bytes) { return ar.alloc(bytes); };
-    VkDeviceSize oX = slot(TOK * 16 * 4);
-    VkDeviceSize oX16 = slot(TOK * 16 * 2);
-    VkDeviceSize oADA = slot(TOK * 32 * 4);
-    VkDeviceSize oG1 = slot(TOK * 1024 * 4);
-    VkDeviceSize oG2 = slot(TOK * 1024 * 4);
-    VkDeviceSize oG3 = slot(TOK * 1024 * 4);
-    VkDeviceSize oG4 = slot(TOK * 1024 * 4);
-    VkDeviceSize oRAW = slot(TOK * 1024 * 4);
-    VkDeviceSize oWIN = slot(512 * 512 * 2);
-    VkDeviceSize oPROJW = slot(512 * 1536 * 4);
-    VkDeviceSize oQW = slot(128 * 64 * 32 * 2), oKW = slot(128 * 64 * 32 * 2), oVW = slot(128 * 64 * 32 * 2);
-    VkDeviceSize oSCW = slot(128 * 64 * 64 * 4), oPRW = slot(128 * 64 * 64 * 2);
-    VkDeviceSize oMGW = slot(128 * 64 * 32 * 4), oATW = slot(512 * 512 * 2), oABW = slot(512 * 512 * 4);
-    VkDeviceSize oHG = slot(TOK * 4096 * 2);
-    VkDeviceSize oPROJG = slot(TOK * 3072 * 4);
-    VkDeviceSize oQG = slot(TOK * 1024 * 2), oKG = slot(TOK * 1024 * 2), oVG = slot(TOK * 1024 * 2);
-    VkDeviceSize oSCG = slot((VkDeviceSize)32 * TOK * TOK * 4), oPRG = slot((VkDeviceSize)32 * TOK * TOK * 2);
-    VkDeviceSize oMGG = slot(TOK * 1024 * 4), oATG = slot(TOK * 1024 * 2);
-    VkDeviceSize oABG = slot(TOK * 1024 * 4), oBRG = slot(TOK * 1024 * 4);
-    VkDeviceSize oBOG = slot(TOK * 1024 * 4), oB16G = slot(TOK * 1024 * 2);
-    VkDeviceSize oB0RAW = slot(TOK * 32 * 4), oFRS = slot(TOK * 32 * 2);
-    VkDeviceSize oSKIP0 = slot(TOK * 32 * 2), oSKIP1 = slot(TOK * 64 * 2);
-    VkDeviceSize oSKIP2 = slot(TOK * 128 * 2), oSKIP3 = slot(TOK * 256 * 2);
-    VkDeviceSize oSS = slot(TOK * 512 * 2);
-    VkDeviceSize oB4DS = slot(TOK * 64 * 2), oB22DS = slot(TOK * 512 * 2);
-    VkDeviceSize oB38 = slot(TOK * 1024 * 2), oB39 = slot(TOK * 512 * 2), oB48 = slot(TOK * 256 * 2);
-    VkDeviceSize oB69 = slot(TOK * 32 * 2);
-    VkDeviceSize oMRG70 = slot(TOK * 32 * 4), oHEAD = slot(TOK * 16 * 4);
-    // m8b bridge slots: features output (fp32 [288,16]) + packed head ([288,4])
-    VkDeviceSize oFeatV = slot(TOK * 16 * 4);
-    VkDeviceSize oHead4 = slot(TOK * 4 * 4);
-    VkDeviceSize oHeadDC = slot(1024);  // headpack per-ROW DC accumulator (24 rows x 4 ch; B1 fix)
+
+    // per-scale maxima (window scales s0..s5: C = 32,32,64,128,256,512; heads = C/32)
+    uint64_t maxTokC = 0, maxTok4C = 0;
+    const uint32_t stageC[6] = {32, 32, 64, 128, 256, 512};
+    for (int s = 0; s < 6; ++s) {
+        maxTokC = std::max(maxTokC, (uint64_t)st[s].TOK * stageC[s]);
+        maxTok4C = std::max(maxTok4C, (uint64_t)st[s].TOK * 4 * stageC[s]);
+    }
+    maxTokC = std::max(maxTokC, T6 * 1024);
+    uint64_t wWin = 0, wProj = 0, wQkv = 0, wSc = 0;
+    for (int s = 0; s < 6; ++s) {
+        uint32_t hp8 = (st[s].H + 4 + 7) / 8, wp8 = (st[s].W + 4 + 7) / 8;
+        uint64_t Ww = (uint64_t)hp8 * wp8, Hd = stageC[s] / 32;
+        wWin = std::max(wWin, Ww * 64 * stageC[s]);
+        wProj = std::max(wProj, Ww * 64 * 3 * stageC[s]);
+        wQkv = std::max(wQkv, Ww * Hd * 64 * 32);
+        wSc = std::max(wSc, Ww * Hd * 64 * 64);
+    }
+
+    VkDeviceSize oX16 = slot((uint64_t)st[0].TOK * 16 * 2);
+    VkDeviceSize oADA = slot((uint64_t)st[0].TOK * 32 * 4);
+    VkDeviceSize oG1 = slot(maxTokC * 4);
+    VkDeviceSize oG2 = slot(maxTokC * 4);
+    VkDeviceSize oG3 = slot(maxTok4C * 4);
+    VkDeviceSize oG4 = slot(maxTokC * 4);
+    VkDeviceSize oRAW = slot(maxTokC * 4);
+    VkDeviceSize oPOOL = slot(maxTokC * 2);
+    // window attention set
+    VkDeviceSize oWIN = slot(wWin * 2);
+    VkDeviceSize oPROJW = slot(wProj * 4);
+    VkDeviceSize oQW = slot(wQkv * 2), oKW = slot(wQkv * 2), oVW = slot(wQkv * 2);
+    VkDeviceSize oSCW = slot(wSc * 4), oPRW = slot(wSc * 2);
+    VkDeviceSize oMGW = slot(wQkv * 4), oATW = slot(wWin * 2), oABW = slot(wWin * 4);
+    // global set (L6); token count padded to T6P (align 32) for the coopmat
+    // score GEMM — softmax masks cols >= T6 (nReal), padded rows carry zeros.
+    VkDeviceSize oHG = slot((uint64_t)T6P * 4096 * 2);
+    VkDeviceSize oPROJG = slot((uint64_t)T6P * 3072 * 4);
+    VkDeviceSize oQG = slot((uint64_t)T6P * 1024 * 2), oKG = slot((uint64_t)T6P * 1024 * 2), oVG = slot((uint64_t)T6P * 1024 * 2);
+    VkDeviceSize oSCG = slot(32ull * T6P * T6P * 4), oPRG = slot(32ull * T6P * T6P * 2);
+    VkDeviceSize oMGG = slot((uint64_t)T6P * 1024 * 4), oATG = slot((uint64_t)T6P * 1024 * 2);
+    VkDeviceSize oABG = slot((uint64_t)T6P * 1024 * 4), oBRG = slot((uint64_t)T6P * 1024 * 4);
+    // boundary / skip slots
+    VkDeviceSize oB0RAW = slot((uint64_t)st[0].TOK * 32 * 4), oFRS = slot((uint64_t)st[0].TOK * 32 * 2);
+    VkDeviceSize oSKIP0 = slot((uint64_t)st[1].TOK * 32 * 2), oSKIP1 = slot((uint64_t)st[2].TOK * 64 * 2);
+    VkDeviceSize oSKIP2 = slot((uint64_t)st[3].TOK * 128 * 2), oSKIP3 = slot((uint64_t)st[4].TOK * 256 * 2);
+    VkDeviceSize oSS = slot((uint64_t)st[5].TOK * 512 * 2);
+    VkDeviceSize oB4DS = slot((uint64_t)st[2].TOK * 64 * 2), oB22DS = slot((uint64_t)st[5].TOK * 512 * 2);
+    VkDeviceSize oBRIDGE = slot((uint64_t)T6P * 1024 * 2);
+    VkDeviceSize oB38 = slot((uint64_t)T6P * 1024 * 2), oB39 = slot((uint64_t)st[5].TOK * 512 * 2);
+    VkDeviceSize oB48 = slot((uint64_t)st[4].TOK * 256 * 2);
+    VkDeviceSize oB69 = slot((uint64_t)st[1].TOK * 32 * 2);
+    VkDeviceSize oMRG39 = slot((uint64_t)st[5].TOK * 512 * 4);
+    VkDeviceSize oMRG70 = slot((uint64_t)st[0].TOK * 32 * 4), oHEAD = slot((uint64_t)st[0].TOK * 16 * 4);
+    // m8b bridge slots: features output (fp32 [TOK0,16]) + head row-DC scratch
+    // (kept allocated: descriptor bindings 3/15 reference these ranges)
+    VkDeviceSize oFeatV = slot((uint64_t)st[0].TOK * 16 * 4);
+    VkDeviceSize oHeadDC = slot(1024);
 
     auto preVec = [&](const std::string &n) { if (poff.count(n)) needVec(n); };
     for (int i = 0; i <= 70; ++i) {
@@ -1784,16 +1872,39 @@ int main(int argc, char** argv) {
     }
 
     VkDeviceSize totalBytes = packTotal + ar.off;
-    std::printf("arena: %.2f MB scratch after weights; one device buffer, total %.1f MB\n",
+    std::printf("arena: %.2f MB scratch after weights; total %.1f MB\n",
                 ar.off / 1048576.0, totalBytes / 1048576.0);
 
-    ChainBuf dev;
-    chainAllocDev(c, totalBytes, dev);
+    // M9b: the driver caps ONE VkDeviceMemory at maxMemoryAllocationSize
+    // (0xffff0000 ~ 4 GiB) — the full-extent arena exceeds that, so it is
+    // split into chunks at slot boundaries (weights pack rides chunk 0).
+    // BDA addressing resolves a logical arena offset via chunkOf/localOff.
+    const VkDeviceSize CHUNK_CAP = 3500ull * 1024 * 1024;
+    struct Chunk { VkDeviceSize start, end; ChainBuf b; uint64_t baseA = 0; };
+    std::vector<Chunk> chunks;
+    {
+        VkDeviceSize curStart = 0, curEnd = packTotal;
+        for (auto &sg : ar.segs) {
+            if (sg.first + sg.second - curStart > CHUNK_CAP && sg.first > curStart) {
+                chunks.push_back({curStart, curEnd, {}, 0});
+                curStart = sg.first;
+            }
+            curEnd = sg.first + sg.second;
+        }
+        chunks.push_back({curStart, curEnd, {}, 0});
+    }
+    for (auto &ch : chunks) chainAllocDev(c, ch.end - ch.start, ch.b);
+    std::printf("[mem] arena chunked: %zu device buffers (cap %.2f GiB):", chunks.size(),
+                CHUNK_CAP / 1073741824.0);
+    for (auto &ch : chunks) std::printf("  %.2f MB", (ch.end - ch.start) / 1048576.0);
+    std::printf("\n");
 
     // ---- staging + preprocessing ----------------------------------------
-    ChainBuf cbuf;
-    chainAllocHost(c, packTotal + ar.off, cbuf);
-    char *sp = (char *)cbuf.mapped;
+    // M9b: host image in plain malloc'd memory (the Vulkan host staging
+    // buffer would hit the same ~4 GiB single-allocation cap); uploaded to
+    // the device per chunk below.
+    std::vector<char> hostImg((size_t)(packTotal + ar.off));
+    char *sp = hostImg.data();
 
     auto isBranchedExpand = [&](const std::string &n) {
         return n.size() >= 18 && n.substr(n.size() - 18) == ".ffn_expand_weight";
@@ -1814,6 +1925,16 @@ int main(int argc, char** argv) {
                             for (uint64_t c2 = 0; c2 < 32; ++c2)
                                 d[((oh * G + ih) * 32 + r) * 128 + br * 32 + c2] =
                                     s[((oh * 4 + br) * G + ih) * 1024 + r * 32 + c2];
+        } else if (biasNeedsSwizzle(e.name)) {
+            // M9: attn_bias of the 1-head and 16-head window blocks is stored
+            // in fused-kernel mma fragment order — recover the logical layout
+            // (nr_model._fragment_swizzle_indices). 30x accuracy fix.
+            const uint16_t *s = (const uint16_t *)src;
+            uint16_t *d = (uint16_t *)dst;
+            uint64_t heads = t.numel() / 4096;
+            for (uint64_t h = 0; h < heads; ++h)
+                for (uint32_t j = 0; j < 4096; ++j)
+                    d[h * 4096 + j] = s[h * 4096 + SWZ[j]];
         } else {
             std::memcpy(dst, src, e.bytes);
         }
@@ -1869,10 +1990,20 @@ int main(int argc, char** argv) {
             }
     }
     {
-        VkCommandBuffer up = beginOneShot();
-        VkBufferCopy cp1{0, 0, packTotal + ar.off};
-        vkCmdCopyBuffer(up, cbuf.buf, dev.buf, 1, &cp1);
-        double upMs = submitOneShot(up);
+        auto tUp = clk::now();
+        for (auto &ch : chunks) {   // per-chunk staging upload (alloc cap)
+            ChainBuf stg;
+            chainAllocHost(c, ch.end - ch.start, stg);
+            std::memcpy(stg.mapped, sp + ch.start, (size_t)(ch.end - ch.start));
+            VkCommandBuffer up = beginOneShot();
+            VkBufferCopy cp1{0, 0, ch.end - ch.start};
+            vkCmdCopyBuffer(up, stg.buf, ch.b.buf, 1, &cp1);
+            submitOneShot(up);
+            if (stg.mapped) vkUnmapMemory(c.dev, stg.mem);
+            vkDestroyBuffer(c.dev, stg.buf, nullptr);
+            vkFreeMemory(c.dev, stg.mem, nullptr);
+        }
+        double upMs = std::chrono::duration<double, std::milli>(clk::now() - tUp).count();
         std::printf("weight upload: %.1f MB in %.1f ms (%.2f GB/s incl. preprocessing)\n",
                     (packTotal + ar.off) / 1048576.0, upMs,
                     (packTotal + ar.off) / 1073741824.0 / (upMs / 1e3));
@@ -1888,7 +2019,7 @@ int main(int argc, char** argv) {
         exeDirStr = buf;
         exeDirStr.resize(exeDirStr.find_last_of('\\') + 1);
     }
-    ChainPipe pGemm, pGemm1, pCos, pCosW, pSmax, pEw, pPart, pTrans, pGather, pMerge, pFeatpack, pHeadpack;
+    ChainPipe pGemm, pGemm1, pCos, pCosW, pSmax, pEw, pPart, pTrans, pGather, pMerge, pFeatpack, pHeadpack, pPool, pUpM;
     chainMakePipe(c, exeDirStr + "gemm.spv", pGemm);
     chainMakePipe(c, exeDirStr + "gemm_rn1.spv", pGemm1);
     chainMakePipe(c, exeDirStr + "cosine.spv", pCos);
@@ -1901,11 +2032,25 @@ int main(int argc, char** argv) {
     chainMakePipe(c, exeDirStr + "merge.spv", pMerge);
     chainMakePipe(c, exeDirStr + "featpack.spv", pFeatpack);
     chainMakePipe(c, exeDirStr + "headpack.spv", pHeadpack);
-    VkBufferDeviceAddressInfo bdai{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, nullptr, dev.buf};
-    uint64_t A0 = vkGetBufferDeviceAddress(c.dev, &bdai);
-    auto A = [&](VkDeviceSize o) { return A0 + (uint64_t)o; };
-    std::printf("[chain] 12 pipelines up (10 kernels + featpack/headpack), BDA base 0x%llx\n",
-                (unsigned long long)A0);
+    chainMakePipe(c, exeDirStr + "pool2.spv", pPool);
+    chainMakePipe(c, exeDirStr + "upmerge.spv", pUpM);
+    for (auto &ch : chunks) {
+        VkBufferDeviceAddressInfo bdai{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, nullptr, ch.b.buf};
+        ch.baseA = vkGetBufferDeviceAddress(c.dev, &bdai);
+    }
+    auto chunkOf = [&](VkDeviceSize o) -> int {
+        for (int i = 0; i < (int)chunks.size(); i++)
+            if (o >= chunks[i].start && o < chunks[i].end) return i;
+        return (int)chunks.size() - 1;
+    };
+    auto A = [&](VkDeviceSize o) {
+        int i = chunkOf(o);
+        return chunks[i].baseA + (uint64_t)(o - chunks[i].start);
+    };
+    auto bufOf = [&](VkDeviceSize o) -> VkBuffer { return chunks[chunkOf(o)].b.buf; };
+    auto localOff = [&](VkDeviceSize o) -> VkDeviceSize { return o - chunks[chunkOf(o)].start; };
+    std::printf("[chain] 14 pipelines up (10 kernels + featpack/headpack + pool2/upmerge), %zu BDA chunk bases, chunk0 0x%llx\n",
+                chunks.size(), (unsigned long long)chunks[0].baseA);
 
     // ===================================================================
     // 9. Wave-1 buffers + frame-0 decode + letterbox region scan (verbatim M3/M4).
@@ -1998,8 +2143,8 @@ int main(int argc, char** argv) {
     writeBuf(setFinal, 1, bufRgb, (uint64_t)W * H * 3 * 4);
     writeBuf(setFinal, 8, bufMax, 4096 * 4);
 
-    // ---- record-once upload + decode + letterbox for the initial frame
-    Region region{};
+    // ---- record-once upload + decode for the initial frame (the letterbox
+    //      content scan is gone: the M9b region is fixed since section 7)
     {
         begin();
         {
@@ -2037,55 +2182,33 @@ int main(int argc, char** argv) {
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLayout, 0, 1, &setFinal, 0, nullptr);
         vkCmdDispatch(cmd, W / 16, H / 16, 1);
         barrierAll();
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLetter);
-        Push p{};
-        p.a[0] = (int32_t)W; p.a[1] = (int32_t)H;
-        p.b[0] = 0; push(p);
-        vkCmdDispatch(cmd, (H + 255) / 256, 1, 1);
-        barrierAll();
-        p.b[0] = 1; push(p);
-        vkCmdDispatch(cmd, (W + 255) / 256, 1, 1);
         VK_CHECK(vkEndCommandBuffer(cmd));
         double ms = submitAndWait();
-        std::printf("[stage] frame0 upload+decode+letterbox: %.3f ms\n", ms);
-        const float* m = (const float*)maxPtr;
-        region = ActiveRegion(m, m + 2048, (int)H, (int)W);
-        if (winMode) {
-            region = winRegion;   // --window: the region IS the target client rect
-            std::printf("[letterbox] --window override: region rows [%d,%d) cols [%d,%d)\n",
-                        region.top, region.bottom, region.left, region.right);
-        }
-        std::printf("[letterbox] region rows [%d,%d) cols [%d,%d) of %ux%u (host decision FIXED for the loop)\n",
-                    region.top, region.bottom, region.left, region.right, W, H);
+        std::printf("[stage] frame0 upload+decode: %.3f ms\n", ms);
+        std::printf("[geometry] region FIXED rows [%d,%d) cols [%d,%d) of %ux%u -> extent %dx%d\n",
+                    region.top, region.bottom, region.left, region.right, W, H, netW, netH);
     }
 
-    const int regionW = region.right - region.left;
-    const int regionH = region.bottom - region.top;
-    std::printf("[geometry] region %dx%d -> network extent %dx%d (chain 288-token grid)\n",
-                regionW, regionH, netW, netH);
-
     // ===================================================================
-    // 10. Wave-2 buffers + output image + full descriptor writes (M4;
-    //     bufFeat/bufHead are now RANGES of the chain device buffer:
-    //     binding 3 = oFeatV [288,16] fp32, binding 4 = oHead4 [288,4] fp32).
+    // 10. Wave-2 buffers + output image + full descriptor writes (M9b:
+    //     binding 3 = oFeatV [TOK0,16] fp32 features; binding 5 = oHEAD
+    //     [TOK0,16] fp32 raw head — compose reads it directly at full extent;
+    //     the rescale pair, bufHeadUp and headpack are gone).
     // ===================================================================
-    VkDeviceMemory memT = VK_NULL_HANDLE, memHeadUp = VK_NULL_HANDLE,
+    VkDeviceMemory memT = VK_NULL_HANDLE,
                    memFin = VK_NULL_HANDLE, memNr = VK_NULL_HANDLE,
                    memRbFinal = VK_NULL_HANDLE, memRbNr = VK_NULL_HANDLE,
                    memImgFinal = VK_NULL_HANDLE, memImgNr = VK_NULL_HANDLE;
-    const uint64_t Tfloats = std::max<uint64_t>((uint64_t)netH * regionW * 3,
-                                                (uint64_t)regionH * netW * 4);
+    const uint64_t Tfloats = 4096;   // legacy binding-2 scratch (rescale gone)
     VkBuffer bufT = CreateBuf(c, Tfloats * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memT);
-    VkBuffer bufHeadUp = CreateBuf(c, (uint64_t)regionW * regionH * 4 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memHeadUp);
     VkBuffer bufFin = CreateBuf(c, (uint64_t)regionW * regionH * 3 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memFin);
     VkBuffer bufNr = CreateBuf(c, (uint64_t)regionW * regionH * 3 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memNr);
-    // temporal history: scaled_color domain previous composed output, [TOK,3] fp32
+    // temporal history slot (temporal path OFF on M9b; descriptor stays defined)
     VkDeviceMemory memHist = VK_NULL_HANDLE;
-    VkBuffer bufHist = CreateBuf(c, (uint64_t)TOK * 3 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+    VkBuffer bufHist = CreateBuf(c, (uint64_t)st[0].TOK * 3 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memHist);
     VkBuffer bufRbFinal = CreateBuf(c, (uint64_t)W * H * 4,
                               VK_BUFFER_USAGE_TRANSFER_DST_BIT,
@@ -2096,27 +2219,23 @@ int main(int argc, char** argv) {
                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                               &memRbNr);
     // one-shot debug staging (frame-1 chain-output statistics)
-    const uint64_t dbgSzFeat = (TOK * 16 * 4 + 255) & ~255ull;
-    const uint64_t dbgSzHead = (TOK * 16 * 4 + 255) & ~255ull;
-    const uint64_t dbgSzH4 = (TOK * 4 * 4 + 255) & ~255ull;
-    const uint64_t dbgSzUp = ((uint64_t)regionW * regionH * 4 * 4 + 255) & ~255ull;
-    const uint64_t dbgSzX16 = (TOK * 16 * 2 + 255) & ~255ull;   // f16 chain input
-    const uint64_t dbgSzADA = (TOK * 32 * 4 + 255) & ~255ull;   // block0 output (fp32)
-    const uint64_t dbgSzMRG = (TOK * 32 * 4 + 255) & ~255ull;   // pre-block70 merge (fp32)
-    const uint64_t dbgSzG2 = (TOK * 32 * 4 + 255) & ~255ull;    // head-GEMM input (fp32 32ch)
-    const uint64_t dbgSzHW = (1024 + 255) & ~255ull;            // folded head weight (f16)
-    const uint64_t dbgSzB4 = (TOK * 64 * 2 + 255) & ~255ull;    // block4-downsample out (f16)
-    const uint64_t dbgSzB22 = (TOK * 512 * 2 + 255) & ~255ull;  // block22-downsample out (f16)
-    const uint64_t dbgSzB38 = (TOK * 1024 * 2 + 255) & ~255ull; // block38 out (f16)
-    const uint64_t dbgSzB48 = (TOK * 256 * 2 + 255) & ~255ull;  // block48 out (f16)
-    const uint64_t dbgSzB69 = (TOK * 32 * 2 + 255) & ~255ull;   // block69 out (f16)
-    const uint64_t dbgSzSin = (32 * 4 + 255) & ~255ull;         // inp_merge_sin (fp32)
-    const uint64_t dbgSzCos = (32 * 4 + 255) & ~255ull;         // inp_merge_cos (fp32)
-    const uint64_t dbgSzFRS = (TOK * 32 * 2 + 255) & ~255ull;   // full-res skip (f16)
+    const uint64_t dbgSzFeat = ((uint64_t)st[0].TOK * 16 * 4 + 255) & ~255ull;
+    const uint64_t dbgSzHead = ((uint64_t)st[0].TOK * 16 * 4 + 255) & ~255ull;
+    const uint64_t dbgSzX16 = ((uint64_t)st[0].TOK * 16 * 2 + 255) & ~255ull;   // f16 chain input
+    const uint64_t dbgSzADA = ((uint64_t)st[0].TOK * 32 * 4 + 255) & ~255ull;   // block0 output (fp32)
+    const uint64_t dbgSzMRG = ((uint64_t)st[0].TOK * 32 * 4 + 255) & ~255ull;   // pre-block70 merge (fp32)
+    const uint64_t dbgSzG2 = ((uint64_t)st[0].TOK * 32 * 4 + 255) & ~255ull;    // head-GEMM input (fp32 32ch)
+    const uint64_t dbgSzHW = (1024 + 255) & ~255ull;                            // folded head weight (f16)
+    const uint64_t dbgSzB4 = ((uint64_t)st[2].TOK * 64 * 2 + 255) & ~255ull;    // block4-downsample out (f16)
+    const uint64_t dbgSzB22 = ((uint64_t)st[5].TOK * 512 * 2 + 255) & ~255ull;  // block22-downsample out (f16)
+    const uint64_t dbgSzB38 = ((uint64_t)T6P * 1024 * 2 + 255) & ~255ull;       // block38 out (f16)
+    const uint64_t dbgSzB48 = ((uint64_t)st[4].TOK * 256 * 2 + 255) & ~255ull;  // block48 out (f16)
+    const uint64_t dbgSzB69 = ((uint64_t)st[1].TOK * 32 * 2 + 255) & ~255ull;   // block69 out (f16)
+    const uint64_t dbgSzSin = (32 * 4 + 255) & ~255ull;                         // inp_merge_sin (fp32)
+    const uint64_t dbgSzCos = (32 * 4 + 255) & ~255ull;                         // inp_merge_cos (fp32)
+    const uint64_t dbgSzFRS = ((uint64_t)st[0].TOK * 32 * 2 + 255) & ~255ull;   // full-res skip (f16)
     const uint64_t dbgOffFeat = 0, dbgOffHead = dbgSzFeat,
-                   dbgOffH4 = dbgSzFeat + dbgSzHead,
-                   dbgOffUp = dbgSzFeat + dbgSzHead + dbgSzH4,
-                   dbgOffX16 = dbgOffUp + dbgSzUp,
+                   dbgOffX16 = dbgSzFeat + dbgSzHead,
                    dbgOffADA = dbgOffX16 + dbgSzX16,
                    dbgOffMRG = dbgOffADA + dbgSzADA,
                    dbgOffG2 = dbgOffMRG + dbgSzMRG,
@@ -2143,17 +2262,17 @@ int main(int argc, char** argv) {
     VkImageView viewNr = CreateView(c, imgNr, VK_FORMAT_B8G8R8A8_UNORM);
     {
         writeBuf(setFinal, 2, bufT, Tfloats * 4);
-        writeBufRange(setFinal, 3, dev.buf, oFeatV, (uint64_t)TOK * 16 * 4);
-        writeBufRange(setFinal, 4, dev.buf, oHead4, (uint64_t)TOK * 4 * 4);
-        writeBuf(setFinal, 5, bufHeadUp, (uint64_t)regionW * regionH * 4 * 4);
+        writeBufRange(setFinal, 3, bufOf(oFeatV), localOff(oFeatV), (uint64_t)st[0].TOK * 16 * 4);
+        writeBufRange(setFinal, 4, bufOf(oHEAD), localOff(oHEAD), (uint64_t)st[0].TOK * 16 * 4);   // legacy slot (was headpack out)
+        writeBufRange(setFinal, 5, bufOf(oHEAD), localOff(oHEAD), (uint64_t)st[0].TOK * 16 * 4);   // compose reads the raw head here
         writeBuf(setFinal, 6, bufFin, (uint64_t)regionW * regionH * 3 * 4);
         writeBuf(setFinal, 7, bufNr, (uint64_t)regionW * regionH * 3 * 4);
         writeBuf(setFinal, 10, bufLastPresented, (uint64_t)W * H * 4);  // feedback cancellation
         writeBuf(setFinal, 11, bufFbStats, 8);                          // settle stats
         writeBuf(setFinal, 12, bufHp, 65536);                           // hpfilter low-res scratch
-        writeBuf(setFinal, 13, bufHist, (uint64_t)TOK * 3 * 4);         // temporal history
-        writeBufRange(setFinal, 14, dev.buf, oHEAD, (uint64_t)TOK * 16 * 4);  // raw head (temporal)
-        writeBufRange(setFinal, 15, dev.buf, oHeadDC, 1024);            // head row-DC (temporal)
+        writeBuf(setFinal, 13, bufHist, (uint64_t)st[0].TOK * 3 * 4);   // temporal history (OFF on M9b)
+        writeBufRange(setFinal, 14, bufOf(oHEAD), localOff(oHEAD), (uint64_t)st[0].TOK * 16 * 4);  // raw head (temporal, OFF)
+        writeBufRange(setFinal, 15, bufOf(oHeadDC), localOff(oHeadDC), 1024);            // head row-DC (temporal, OFF)
     }
     writeImg(setFinal, 9, viewFinal);
     for (size_t i = 0; i < setBlit.size(); ++i) {
@@ -2166,9 +2285,26 @@ int main(int argc, char** argv) {
     std::printf("[mem] intermediates device-local; readback host-coherent; blit sets %zu\n", setBlit.size());
 
     // ===================================================================
-    // 11. Chain dispatch machinery (verbatim m8a — the validated full chain).
+    // 11. Chain dispatch machinery (M9 U-Net port — per-scale Stage geometry,
+    //     pool2/upmerge transitions, padded global blocks).
     // ===================================================================
-    auto bar = [&](VkCommandBuffer cb) { chainFullBarrier(cb, dev.buf); };
+    auto bar = [&](VkCommandBuffer cb) {
+        // M9b: full compute barrier across every arena chunk.
+        VkBufferMemoryBarrier bs[8];
+        uint32_t n = 0;
+        for (auto &ch : chunks) {
+            if (n >= 8) break;
+            bs[n] = {VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER, nullptr,
+                     VK_ACCESS_SHADER_WRITE_BIT,
+                     VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                     VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
+                     ch.b.buf, 0, VK_WHOLE_SIZE};
+            n++;
+        }
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr,
+                             n, bs, 0, nullptr);
+    };
     auto gflags = [&](uint32_t epi, bool narrow) { return (epi << 8) | (narrow ? F_NARROW : 0u); };
     auto dGemm = [&](VkCommandBuffer cb, int fam, uint64_t a, uint64_t b, uint64_t c2,
                      uint32_t m, uint32_t n, uint32_t k, uint32_t batch,
@@ -2187,22 +2323,22 @@ int main(int argc, char** argv) {
         vkCmdPushConstants(cb, pEw.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
         vkCmdDispatch(cb, (n + 255) / 256, 1, 1);
     };
-    auto dPart = [&](VkCommandBuffer cb, uint64_t a, uint64_t c2, uint32_t C,
+    auto dPart = [&](VkCommandBuffer cb, uint64_t a, uint64_t c2, const Stage &s, uint32_t C,
                      uint32_t padTop, uint32_t padLeft, uint32_t wp8, bool in16) {
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pPart.pipe);
-        uint32_t hp8 = (IMG_H + padTop + 7) / 8;
-        PartPush p{a, c2, IMG_H, IMG_W, C, padTop, padLeft, wp8, in16 ? 1u : 0u};
+        uint32_t hp8 = (s.H + padTop + 7) / 8;
+        PartPush p{a, c2, s.H, s.W, C, padTop, padLeft, wp8, in16 ? 1u : 0u};
         vkCmdPushConstants(cb, pPart.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
         vkCmdDispatch(cb, hp8 * wp8 * 64, 1, 1);
     };
     auto dGather = [&](VkCommandBuffer cb, uint64_t a, uint64_t b, uint64_t d, uint64_t c2,
-                       uint64_t h, uint32_t C, uint32_t padTop, uint32_t padLeft, uint32_t wp8,
-                       bool pub, bool b16) {
+                       uint64_t h, const Stage &s, uint32_t C, uint32_t padTop, uint32_t padLeft,
+                       uint32_t wp8, bool pub, bool b16) {
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pGather.pipe);
-        GatherPush p{a, b, d, c2, h, IMG_H, IMG_W, C, padTop, padLeft, wp8,
+        GatherPush p{a, b, d, c2, h, s.H, s.W, C, padTop, padLeft, wp8,
                      (pub ? 1u : 0u) | (b16 ? 2u : 0u)};
         vkCmdPushConstants(cb, pGather.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
-        vkCmdDispatch(cb, TOK, 1, 1);
+        vkCmdDispatch(cb, s.TOK, 1, 1);
     };
     auto dTrans = [&](VkCommandBuffer cb, uint64_t a, uint64_t c2, uint32_t Ww, uint32_t H) {
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pTrans.pipe);
@@ -2219,22 +2355,22 @@ int main(int argc, char** argv) {
     };
     auto dCosG = [&](VkCommandBuffer cb, uint64_t a, uint64_t c2, uint64_t sc, uint32_t kind) {
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pCos.pipe);
-        CosPush p{a, c2, sc, TOK * 32, kind};
+        CosPush p{a, c2, sc, T6P * 32, kind};
         vkCmdPushConstants(cb, pCos.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
-        vkCmdDispatch(cb, (TOK * 32 + 31) / 32, 1, 1);
+        vkCmdDispatch(cb, (T6P * 32 + 31) / 32, 1, 1);
     };
     auto dSmaxW = [&](VkCommandBuffer cb, uint64_t a, uint64_t c2, uint32_t Ww, uint32_t H,
                       uint64_t bias) {
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pSmax.pipe);
-        SMaxPush p{a, c2, Ww * H * 64, 64, 0.0f, bias, H};
+        SMaxPush p{a, c2, Ww * H * 64, 64, 0.0f, bias, H, 0};
         vkCmdPushConstants(cb, pSmax.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
         vkCmdDispatch(cb, (Ww * H * 64 + 31) / 32, 1, 1);
     };
     auto dSmaxG = [&](VkCommandBuffer cb, uint64_t a, uint64_t c2) {
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pSmax.pipe);
-        SMaxPush p{a, c2, 32 * TOK, TOK, 3.0f, 0, 0};
+        SMaxPush p{a, c2, 32 * T6P, T6P, 3.0f, 0, 0, st[6].TOK};
         vkCmdPushConstants(cb, pSmax.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
-        vkCmdDispatch(cb, 32 * TOK, 1, 1);
+        vkCmdDispatch(cb, 32 * T6P, 1, 1);
     };
     auto dMerge = [&](VkCommandBuffer cb, uint64_t a, uint64_t b, uint64_t c2, uint64_t d,
                       uint64_t e, uint64_t h, uint32_t n, uint32_t ch, uint32_t kind) {
@@ -2243,23 +2379,46 @@ int main(int argc, char** argv) {
         vkCmdPushConstants(cb, pMerge.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
         vkCmdDispatch(cb, (n + 255) / 256, 1, 1);
     };
+    struct PoolPush { uint64_t a, c; uint32_t Hin, Win, Wpad, C, n, flags; };
+    auto dPool = [&](VkCommandBuffer cb, uint64_t a, uint64_t c2, uint32_t Hin, uint32_t Win,
+                     uint32_t Wpad, uint32_t Hpad, uint32_t C, uint32_t flags) {
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pPool.pipe);
+        uint32_t n = (Hpad / 2) * (Wpad / 2);
+        PoolPush p{a, c2, Hin, Win, Wpad, C, n, flags};
+        vkCmdPushConstants(cb, pPool.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
+        vkCmdDispatch(cb, (n + 255) / 256, 1, 1);
+    };
+    struct UpMergePush {
+        uint64_t a, b, c, d, e, h;
+        uint32_t Wt, Ht, Wl, C, kind;
+    };
+    auto dUpMerge = [&](VkCommandBuffer cb, uint64_t a, uint64_t b, uint64_t c2, uint64_t sin,
+                        uint64_t cos, uint64_t h, const Stage &tgt, const Stage &low,
+                        uint32_t C, uint32_t kind) {
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pUpM.pipe);
+        UpMergePush p{a, b, c2, sin, cos, h, tgt.W, tgt.H, low.W, C, kind};
+        vkCmdPushConstants(cb, pUpM.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
+        vkCmdDispatch(cb, (tgt.TOK + 255) / 256, 1, 1);
+    };
 
-    auto winGeo = [](int oy, int ox, uint32_t &padTop, uint32_t &padLeft, uint32_t &Ww) {
+    auto winGeo = [](const Stage &s, int oy, int ox,
+                     uint32_t &padTop, uint32_t &padLeft, uint32_t &Ww, uint32_t &wp8) {
         padTop = (uint32_t)(-oy);
         padLeft = (uint32_t)(-ox);
-        uint32_t hp8 = (IMG_H + padTop + 7) / 8;
-        uint32_t wp8 = (IMG_W + padLeft + 7) / 8;
+        uint32_t hp8 = (s.H + padTop + 7) / 8;
+        wp8 = (s.W + padLeft + 7) / 8;
         Ww = hp8 * wp8;
     };
 
     struct Cur { VkDeviceSize off; bool is16; uint32_t C; };
 
-    auto recordWindowAttn = [&](VkCommandBuffer &cb, int famIdx, int idx, int C, int H, int fam,
-                                int oy, int ox, VkDeviceSize ffnOff, bool ffn16,
+    // ---- window attention shared tail (per-stage geometry) -----------------
+    auto recordWindowAttn = [&](VkCommandBuffer &cb, int famIdx, int idx, const Stage &s,
+                                int C, int H, int fam, int oy, int ox,
+                                VkDeviceSize ffnOff, bool ffn16,
                                 VkDeviceSize rawOff, VkDeviceSize pubOff, bool publish) {
-        uint32_t padTop, padLeft, Ww;
-        winGeo(oy, ox, padTop, padLeft, Ww);
-        uint32_t wp8 = (IMG_W + padLeft + 7) / 8;
+        uint32_t padTop, padLeft, Ww, wp8;
+        winGeo(s, oy, ox, padTop, padLeft, Ww, wp8);
         auto lay = [&](const char *fmt) { return tname(fmt, idx); };
         std::string qkvN = lay(fam == 2 ? "block%d.layer2.qkv_weight" : "block%d.layer0.qkv_weight");
         std::string scN = lay(fam == 2 ? "block%d.layer2.attn_scale" : "block%d.layer0.attn_scale");
@@ -2267,7 +2426,7 @@ int main(int argc, char** argv) {
         std::string projN = lay(fam == 2 ? "block%d.layer3.projection_weight" : "block%d.layer0.projection_weight");
         std::string acosN = lay(fam == 2 ? "block%d.layer3.attn_cos_skip" : "block%d.layer0.attn_cos_skip");
 
-        dPart(cb, A(ffnOff), A(oWIN), (uint32_t)C, padTop, padLeft, wp8, ffn16);
+        dPart(cb, A(ffnOff), A(oWIN), s, (uint32_t)C, padTop, padLeft, wp8, ffn16);
         bar(cb);
         dGemm(cb, famIdx, A(oWIN), A(poff[qkvN]), A(oPROJW), 64, 3 * C, C, Ww,
               64 * C, 0, 64 * 3 * C, gflags(EPI_NONE, false), C, 3 * C, 3 * C);
@@ -2292,107 +2451,120 @@ int main(int argc, char** argv) {
               64 * C, 0, 64 * C, gflags(EPI_NONE, false), C, C, C);
         bar(cb);
         dGather(cb, A(oABW), A(ffnOff), A(vecOff[acosN]), A(rawOff), A(publish ? pubOff : rawOff),
-                (uint32_t)C, padTop, padLeft, wp8, publish, ffn16);
+                s, (uint32_t)C, padTop, padLeft, wp8, publish, ffn16);
         bar(cb);
     };
 
-    auto recordWindowBlock = [&](VkCommandBuffer &cb, int famIdx, int idx, int C, int H, int fam,
-                                 int oy, int ox, bool publish, Cur &cur,
+    // FFN + attention for one window block; writes raw (always) + pub (if publish).
+    auto recordWindowBlock = [&](VkCommandBuffer &cb, int famIdx, int idx, const Stage &s,
+                                 int C, int H, int fam, int oy, int ox, bool publish, Cur &cur,
                                  VkDeviceSize rawOff, VkDeviceSize pubOff) {
+        uint32_t TOKS = s.TOK;
         uint32_t G = C / 32;
         VkDeviceSize x16 = cur.is16 ? cur.off : oG2;
-        if (!cur.is16) { dEw(cb, A(cur.off), 0, 0, 0, A(oG2), TOK * C, 2, 0); bar(cb); }
+        if (!cur.is16) { dEw(cb, A(cur.off), 0, 0, 0, A(oG2), TOKS * C, 2, 0); bar(cb); }
         if (fam == 0) {
             dGemm(cb, famIdx, A(x16), A(poff[tname("block%d.layer0.weight1", idx)]), A(oG3),
-                  TOK, 4 * C, C, 1, 0, 0, 0, gflags(EPI_GATE_E4M3, true), C, 4 * C, 4 * C);
+                  TOKS, 4 * C, C, 1, 0, 0, 0, gflags(EPI_GATE_E4M3, true), C, 4 * C, 4 * C);
             bar(cb);
             dGemm(cb, famIdx, A(oG3), A(poff[tname("block%d.layer0.weight2", idx)]), A(oG4),
-                  TOK, C, 4 * C, 1, 0, 0, 0, gflags(EPI_NONE, false), 4 * C, C, C);
+                  TOKS, C, 4 * C, 1, 0, 0, 0, gflags(EPI_NONE, false), 4 * C, C, C);
             bar(cb);
             if (cur.is16)
                 dEw(cb, A(oG4), A(cur.off), A(oG4), A(vecOff[tname("block%d.layer0.ffn_cos_skip", idx)]), 0,
-                    TOK * C, 4, C);
+                    TOKS * C, 4, C);
             else
                 dEw(cb, A(oG4), A(cur.off), A(oG4), A(vecOff[tname("block%d.layer0.ffn_cos_skip", idx)]), 0,
-                    TOK * C, 1, C);
+                    TOKS * C, 1, C);
             bar(cb);
-            recordWindowAttn(cb, famIdx, idx, C, H, fam, oy, ox, oG4, false, rawOff, pubOff, publish);
+            recordWindowAttn(cb, famIdx, idx, s, C, H, fam, oy, ox, oG4, false, rawOff, pubOff, publish);
         } else if (fam == 1) {
             uint64_t expBase = A(poff[tname("block%d.layer0.ffn_expand_weight", idx)]);
             uint64_t prjBase = A(poff[tname("block%d.layer0.ffn_branch_projection_weight", idx)]);
             for (uint32_t oh = 0; oh < G; ++oh) {
                 dGemm(cb, famIdx, A(x16), expBase + (uint64_t)oh * C * 128 * 2, A(oG3),
-                      TOK, 128, C, 1, 0, 0, 0, gflags(EPI_GATE_E4M3, true), C, 128, 128);
+                      TOKS, 128, C, 1, 0, 0, 0, gflags(EPI_GATE_E4M3, true), C, 128, 128);
                 bar(cb);
                 dGemm(cb, famIdx, A(oG3), prjBase + (uint64_t)oh * 128 * 32 * 2, A(oG4 + oh * 32 * 2),
-                      TOK, 32, 128, 1, 0, 0, 0, gflags(EPI_E4M3, true), 128, 32, C);
+                      TOKS, 32, 128, 1, 0, 0, 0, gflags(EPI_E4M3, true), 128, 32, C);
                 bar(cb);
             }
             dGemm(cb, famIdx, A(oG4), A(poff[tname("block%d.layer0.ffn_output_projection_weight", idx)]),
-                  A(oG3), TOK, C, C, 1, 0, 0, 0, gflags(EPI_NONE, false), C, C, C);
+                  A(oG3), TOKS, C, C, 1, 0, 0, 0, gflags(EPI_NONE, false), C, C, C);
             bar(cb);
             dEw(cb, A(oG3), A(cur.off), A(oG3), A(vecOff[tname("block%d.layer0.ffn_cos_skip", idx)]),
-                A(oG2), TOK * C, 5, C);
+                A(oG2), TOKS * C, 5, C);
             bar(cb);
-            recordWindowAttn(cb, famIdx, idx, C, H, fam, oy, ox, oG2, true, rawOff, pubOff, publish);
+            recordWindowAttn(cb, famIdx, idx, s, C, H, fam, oy, ox, oG2, true, rawOff, pubOff, publish);
         } else {
             dGemm(cb, famIdx, A(x16), A(poff[tname("block%d.layer0.first_projection_weight", idx)]),
-                  A(oG2), TOK, C, C, 1, 0, 0, 0, gflags(EPI_E4M3, true), C, C, C);
+                  A(oG2), TOKS, C, C, 1, 0, 0, 0, gflags(EPI_E4M3, true), C, C, C);
             bar(cb);
             dGemm(cb, famIdx, A(oG2), A(poff[tname("block%d.layer0.group_expand_weight", idx)]),
-                  A(oG3), TOK, 256, 64, 8, 64, 64 * 256, 288 * 256,
+                  A(oG3), TOKS, 256, 64, 8, 64, 64 * 256, TOKS * 256,
                   gflags(EPI_GATE, true), C, 256, 256);
             bar(cb);
             dGemm(cb, famIdx, A(oG3), A(poff[tname("block%d.layer0.group_project_weight", idx)]),
-                  A(oG4), TOK, 64, 256, 8, 288 * 256, 256 * 64, 64,
+                  A(oG4), TOKS, 64, 256, 8, TOKS * 256, 256 * 64, 64,
                   gflags(EPI_NONE, false), 256, 64, C);
             bar(cb);
-            dEw(cb, A(oG4), 0, 0, 0, A(oG2), TOK * C, 3, 0);
+            dEw(cb, A(oG4), 0, 0, 0, A(oG2), TOKS * C, 3, 0);
             bar(cb);
             dGemm(cb, famIdx, A(oG2), A(poff[tname("block%d.layer1.weight3", idx)]), A(oG3),
-                  TOK, C, C, 1, 0, 0, 0, gflags(EPI_NONE, false), C, C, C);
+                  TOKS, C, C, 1, 0, 0, 0, gflags(EPI_NONE, false), C, C, C);
             bar(cb);
             dEw(cb, A(oG3), A(cur.off), A(oG3), A(vecOff[tname("block%d.layer1.ffn_cos_skip", idx)]),
-                0, TOK * C, 4, C);
+                0, TOKS * C, 4, C);
             bar(cb);
-            recordWindowAttn(cb, famIdx, idx, C, H, fam, oy, ox, oG3, false, rawOff, pubOff, publish);
+            recordWindowAttn(cb, famIdx, idx, s, C, H, fam, oy, ox, oG3, false, rawOff, pubOff, publish);
         }
     };
 
+    // downsample transition: avgpool2 (pad-to-8 optional) -> e4m3 -> gemm w0 -> e4m3
     auto recordDs = [&](VkCommandBuffer cb, int famIdx, int idx, int C, int Cn,
-                        VkDeviceSize rawOff, VkDeviceSize outOff) {
-        dEw(cb, A(rawOff), 0, 0, 0, A(oG2), TOK * C, 3, 0);
+                        VkDeviceSize rawOff, VkDeviceSize outOff,
+                        const Stage &inS, const Stage &outS, bool pad8) {
+        uint32_t Hp = pad8 ? pad8u(inS.H) : inS.H;
+        uint32_t Wp = pad8 ? pad8u(inS.W) : inS.W;
+        dPool(cb, A(rawOff), A(oPOOL), inS.H, inS.W, Wp, Hp, (uint32_t)C, 2u);
         bar(cb);
-        dGemm(cb, famIdx, A(oG2), A(poff[tname("block%d.layer0.weight0", idx)]), A(outOff),
-              TOK, Cn, C, 1, 0, 0, 0, gflags(EPI_E4M3, true), C, Cn, Cn);
+        dGemm(cb, famIdx, A(oPOOL), A(poff[tname("block%d.layer0.weight0", idx)]), A(outOff),
+              outS.TOK, (uint32_t)Cn, (uint32_t)C, 1, 0, 0, 0, gflags(EPI_E4M3, true),
+              (uint32_t)C, (uint32_t)Cn, (uint32_t)Cn);
         bar(cb);
     };
 
+    // upsample transition: gemm w0 -> nearest-x2 crop merge with skip*sin -> e4m3
     auto recordUp = [&](VkCommandBuffer cb, int famIdx, int idx, int Ci, int Co,
-                        Cur &cur, VkDeviceSize skipOff, VkDeviceSize out16Off) {
+                        Cur &cur, VkDeviceSize skipOff, VkDeviceSize out16Off,
+                        const Stage &lowS, const Stage &tgtS) {
         dGemm(cb, famIdx, A(cur.off), A(poff[tname("block%d.layer0.weight0", idx)]), A(oG3),
-              TOK, Co, Ci, 1, 0, 0, 0, gflags(EPI_NONE, false), Ci, Co, Co);
+              lowS.TOK, (uint32_t)Co, (uint32_t)Ci, 1, 0, 0, 0, gflags(EPI_NONE, false),
+              (uint32_t)Ci, (uint32_t)Co, (uint32_t)Co);
         bar(cb);
-        dMerge(cb, A(oG3), A(skipOff), A(oG4), A(vecOff[tname("block%d.layer0.sin", idx)]), 0,
-               A(out16Off), TOK * Co, Co, 0);
+        dUpMerge(cb, A(oG3), A(skipOff), A(oG4), A(vecOff[tname("block%d.layer0.sin", idx)]), 0,
+                 A(out16Off), tgtS, lowS, (uint32_t)Co, 0);
         bar(cb);
+        cur = {out16Off, true, (uint32_t)Co};
     };
 
+    // global block (L6 grid, input f16, padded to T6P rows)
     auto recordGlobal = [&](VkCommandBuffer cb, int famIdx, int idx, Cur &cur,
                             VkDeviceSize rawOff, VkDeviceSize pubOff) {
+        uint32_t TOKG = T6P;
         dGemm(cb, famIdx, A(cur.off), A(poff[tname("block%d.layer0.weight", idx)]), A(oHG),
-              TOK, 4096, 1024, 1, 0, 0, 0, gflags(EPI_GATE_E4M3, true), 1024, 4096, 4096);
+              TOKG, 4096, 1024, 1, 0, 0, 0, gflags(EPI_GATE_E4M3, true), 1024, 4096, 4096);
         bar(cb);
         dGemm(cb, famIdx, A(oHG), A(poff[tname("block%d.layer1.weight", idx)]), A(oG3),
-              TOK, 1024, 4096, 1, 0, 0, 0, gflags(EPI_NONE, false), 4096, 1024, 1024);
+              TOKG, 1024, 4096, 1, 0, 0, 0, gflags(EPI_NONE, false), 4096, 1024, 1024);
         bar(cb);
         dEw(cb, A(oG3), A(cur.off), A(oG3), A(vecOff[tname("block%d.layer1.ffn_cos_skip", idx)]),
-            0, TOK * 1024, 4, 1024);
+            0, TOKG * 1024, 4, 1024);
         bar(cb);
-        dEw(cb, A(oG3), 0, 0, 0, A(oG2), TOK * 1024, 2, 0);
+        dEw(cb, A(oG3), 0, 0, 0, A(oG2), TOKG * 1024, 2, 0);
         bar(cb);
         dGemm(cb, famIdx, A(oG2), A(poff[tname("block%d.layer2.qkv_weight", idx)]), A(oPROJG),
-              TOK, 3072, 1024, 1, 0, 0, 0, gflags(EPI_NONE, false), 1024, 3072, 3072);
+              TOKG, 3072, 1024, 1, 0, 0, 0, gflags(EPI_NONE, false), 1024, 3072, 3072);
         bar(cb);
         dCosG(cb, A(oPROJG), A(oQG), A(vecOff[tname("block%d.layer2.attn_scale.q32", idx)]), 0);
         bar(cb);
@@ -2400,21 +2572,21 @@ int main(int argc, char** argv) {
         bar(cb);
         dCosG(cb, A(oPROJG), A(oVG), A(vecOff[tname("block%d.layer2.attn_scale.q32", idx)]), 2);
         bar(cb);
-        dGemm(cb, famIdx, A(oQG), A(oKG), A(oSCG), TOK, TOK, 32, 32,
-              32, 32, TOK * TOK, gflags(EPI_NONE, false) | F_TRANSPOSE, 1024, 1024, TOK);
+        dGemm(cb, famIdx, A(oQG), A(oKG), A(oSCG), TOKG, TOKG, 32, 32,
+              32, 32, TOKG * TOKG, gflags(EPI_NONE, false) | F_TRANSPOSE, 1024, 1024, TOKG);
         bar(cb);
         dSmaxG(cb, A(oSCG), A(oPRG));
         bar(cb);
-        dGemm(cb, famIdx, A(oPRG), A(oVG), A(oMGG), TOK, 32, TOK, 32,
-              TOK * TOK, 32, 32, gflags(EPI_NONE, false), TOK, 1024, 1024);
+        dGemm(cb, famIdx, A(oPRG), A(oVG), A(oMGG), TOKG, 32, TOKG, 32,
+              TOKG * TOKG, 32, 32, gflags(EPI_NONE, false), TOKG, 1024, 1024);
         bar(cb);
-        dEw(cb, A(oMGG), 0, 0, 0, A(oATG), TOK * 1024, 3, 0);
+        dEw(cb, A(oMGG), 0, 0, 0, A(oATG), TOKG * 1024, 3, 0);
         bar(cb);
         dGemm(cb, famIdx, A(oATG), A(poff[tname("block%d.layer4.projection_weight", idx)]), A(oABG),
-              TOK, 1024, 1024, 1, 0, 0, 0, gflags(EPI_NONE, false), 1024, 1024, 1024);
+              TOKG, 1024, 1024, 1, 0, 0, 0, gflags(EPI_NONE, false), 1024, 1024, 1024);
         bar(cb);
         dEw(cb, A(oABG), A(oG3), A(oBRG), A(vecOff[tname("block%d.layer4.attn_cos_skip", idx)]),
-            A(pubOff), TOK * 1024, 0, 1024);
+            A(pubOff), TOKG * 1024, 0, 1024);
         bar(cb);
     };
 
@@ -2436,62 +2608,111 @@ int main(int argc, char** argv) {
         return {dy[phase % 4], dx[phase % 4]};
     };
 
-    // ---- the 71-block chain (verbatim m8a walk, probes/timing stripped) ----
+    // ---- the 71-block chain (M9 U-Net walk: per-scale extents, pool/up
+    //      transitions, padded global stage; validated vs torch reference) ----
     auto recordChain = [&](VkCommandBuffer cb) {
         Cur cur{oADA, false, 32};
+
+        // adapter GEMM at L0: x16 @ input_adapter_weight -> fp32
         dGemm(cb, 0, A(oX16), A(poff["block0.layer0.input_adapter_weight"]), A(oADA),
-              TOK, 32, 16, 1, 0, 0, 0, gflags(EPI_NONE, false), 16, 32, 32);
+              st[0].TOK, 32, 16, 1, 0, 0, 0, gflags(EPI_NONE, false), 16, 32, 32);
         bar(cb);
+        // b0 (plain, publish=false) at L0; frs = e4m3(raw); pool -> L1 e4m3
         {
             Cur c0 = cur;
-            recordWindowBlock(cb, 0, 0, 32, 1, 0, 0, 0, false, c0, oB0RAW, 0);
+            recordWindowBlock(cb, 0, 0, st[0], 32, 1, 0, 0, 0, false, c0, oB0RAW, 0);
             cur = {oB0RAW, false, 32};
-            dEw(cb, A(oB0RAW), 0, 0, 0, A(oFRS), TOK * 32, 3, 0);
+            dEw(cb, A(oB0RAW), 0, 0, 0, A(oFRS), st[0].TOK * 32, 3, 0);
             bar(cb);
+            dPool(cb, A(oB0RAW), A(oPOOL), st[0].H, st[0].W, st[0].W, st[0].H, 32, 2u);
+            bar(cb);
+            cur = {oPOOL, true, 32};
         }
         for (int i = 1; i <= 3; ++i) {
             VkDeviceSize out = (i == 3) ? oSKIP0 : oG1;
-            recordWindowBlock(cb, 0, i, 32, 1, 0, originOf(i).first, originOf(i).second, true,
-                              cur, oRAW, out);
+            auto o = originOf(i);
+            recordWindowBlock(cb, 0, i, st[1], 32, 1, 0, o.first, o.second, true, cur, oRAW, out);
             cur = {out, true, 32};
         }
-        {
+        {   // b4 window at L1 (publish=false) + ds to L2 C=64
             Cur c4 = cur;
-            recordWindowBlock(cb, 0, 4, 32, 1, 0, -4, 0, false, c4, oRAW, 0);
-            recordDs(cb, 0, 4, 32, 64, oRAW, oB4DS);
+            recordWindowBlock(cb, 0, 4, st[1], 32, 1, 0, -4, 0, false, c4, oRAW, 0);
+            recordDs(cb, 0, 4, 32, 64, oRAW, oB4DS, st[1], st[2], false);
             cur = {oB4DS, true, 64};
         }
 
-        for (int i = 5; i <= 22; ++i) {
-            int C = (i <= 8) ? 64 : (i <= 14) ? 128 : 256;
-            int H = C / 32;
-            bool isDs = (i == 8 || i == 14 || i == 22);
+        // enc L2: b5-7, b8 ds -> L3 C=128
+        for (int i = 5; i <= 7; ++i) {
+            VkDeviceSize out = (i == 7) ? oSKIP1 : oG1;
             auto o = originOf(i);
-            if (!isDs) {
-                VkDeviceSize out = (i == 7) ? oSKIP1 : (i == 13) ? oSKIP2 : (i == 21) ? oSKIP3 : oG1;
-                recordWindowBlock(cb, 1, i, C, H, 1, o.first, o.second, true, cur, oRAW, out);
-                cur = {out, true, (uint32_t)C};
-            } else {
-                int Cn = C * 2;
-                VkDeviceSize out = (i == 22) ? oB22DS : oG1;
-                Cur ci = cur;
-                recordWindowBlock(cb, 1, i, C, H, 1, o.first, o.second, false, ci, oRAW, 0);
-                recordDs(cb, 1, i, C, Cn, oRAW, out);
-                cur = {out, true, (uint32_t)Cn};
-            }
-        }
-
-        for (int i = 23; i <= 30; ++i) {
-            auto o = originOf(i);
-            VkDeviceSize out = (i == 30) ? oSS : oG1;
-            recordWindowBlock(cb, 2, i, 512, 16, 2, o.first, o.second, true, cur, oRAW, out);
-            cur = {out, true, 512};
+            recordWindowBlock(cb, 1, i, st[2], 64, 2, 1, o.first, o.second, true, cur, oRAW, out);
+            cur = {out, true, 64};
         }
         {
-            dGemm(cb, 2, A(oSS), A(poff["block30.layer4.weight"]), A(oG1),
-                  TOK, 1024, 512, 1, 0, 0, 0, gflags(EPI_E4M3, true), 512, 1024, 1024);
+            Cur ci = cur;
+            auto o = originOf(8);
+            recordWindowBlock(cb, 1, 8, st[2], 64, 2, 1, o.first, o.second, false, ci, oRAW, 0);
+            recordDs(cb, 1, 8, 64, 128, oRAW, oG1, st[2], st[3], false);
+            cur = {oG1, true, 128};
+        }
+        // enc L3: b9-13, b14 ds -> L4 C=256
+        for (int i = 9; i <= 13; ++i) {
+            VkDeviceSize out = (i == 13) ? oSKIP2 : oG1;
+            auto o = originOf(i);
+            recordWindowBlock(cb, 1, i, st[3], 128, 4, 1, o.first, o.second, true, cur, oRAW, out);
+            cur = {out, true, 128};
+        }
+        {
+            Cur ci = cur;
+            auto o = originOf(14);
+            recordWindowBlock(cb, 1, 14, st[3], 128, 4, 1, o.first, o.second, false, ci, oRAW, 0);
+            recordDs(cb, 1, 14, 128, 256, oRAW, oG1, st[3], st[4], false);
+            cur = {oG1, true, 256};
+        }
+        // enc L4: b15-21, b22 ds (pad8) -> L5 C=512
+        for (int i = 15; i <= 21; ++i) {
+            VkDeviceSize out = (i == 21) ? oSKIP3 : oG1;
+            auto o = originOf(i);
+            recordWindowBlock(cb, 1, i, st[4], 256, 8, 1, o.first, o.second, true, cur, oRAW, out);
+            cur = {out, true, 256};
+        }
+        {
+            Cur ci = cur;
+            auto o = originOf(22);
+            recordWindowBlock(cb, 1, 22, st[4], 256, 8, 1, o.first, o.second, false, ci, oRAW, 0);
+            recordDs(cb, 1, 22, 256, 512, oRAW, oB22DS, st[4], st[5], true);
+            cur = {oB22DS, true, 512};
+        }
+
+        // bottleneck L5: b23-30 split window
+        for (int i = 23; i <= 30; ++i) {
+            VkDeviceSize out = (i == 30) ? oSS : oG1;
+            auto o = originOf(i);
+            recordWindowBlock(cb, 2, i, st[5], 512, 16, 2, o.first, o.second, true, cur, oRAW, out);
+            cur = {out, true, 512};
+        }
+        {   // b30 bridge: pad8 + pool(f16) -> half -> gemm layer4.weight -> e4m3 at L6
+            uint32_t Hp = pad8u(st[5].H), Wp = pad8u(st[5].W);
+            dPool(cb, A(oSS), A(oPOOL), st[5].H, st[5].W, Wp, Hp, 512, 1u);
             bar(cb);
-            cur = {oG1, true, 1024};
+            dGemm(cb, 2, A(oPOOL), A(poff["block30.layer4.weight"]), A(oBRIDGE),
+                  st[6].TOK, 1024, 512, 1, 0, 0, 0, gflags(EPI_E4M3, true), 512, 1024, 1024);
+            bar(cb);
+            if (T6P > st[6].TOK) {   // zero the padded global rows (fill + transfer barrier)
+                vkCmdFillBuffer(cb, bufOf(oBRIDGE), localOff(oBRIDGE) + (uint64_t)st[6].TOK * 1024 * 2,
+                                (uint64_t)(T6P - st[6].TOK) * 1024 * 2, 0);
+                VkBufferMemoryBarrier fb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+                fb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                fb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+                fb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                fb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                fb.buffer = bufOf(oBRIDGE);
+                fb.offset = 0;
+                fb.size = VK_WHOLE_SIZE;
+                vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 1, &fb, 0, nullptr);
+            }
+            cur = {oBRIDGE, true, 1024};
         }
 
         for (int i = 31; i <= 38; ++i) {
@@ -2500,79 +2721,75 @@ int main(int argc, char** argv) {
             cur = {out, true, 1024};
         }
 
-        {
+        {   // b39: gemm conv_weight -> nearest-x2 crop merge with split_skip*sin -> e4m3
             dGemm(cb, 4, A(cur.off), A(poff["block39.layer0.conv_weight"]), A(oG3),
-                  TOK, 512, 1024, 1, 0, 0, 0, gflags(EPI_NONE, false), 1024, 512, 512);
+                  st[6].TOK, 512, 1024, 1, 0, 0, 0, gflags(EPI_NONE, false), 1024, 512, 512);
             bar(cb);
-            dMerge(cb, A(oG3), A(oSS), A(oG4), A(vecOff["block39.layer0.inp_upsample_sin"]), 0,
-                   A(oB39), TOK * 512, 512, 0);
+            dUpMerge(cb, A(oG3), A(oSS), A(oMRG39), A(vecOff["block39.layer0.inp_upsample_sin"]), 0,
+                     A(oB39), st[5], st[6], 512, 0);
             bar(cb);
             cur = {oB39, true, 512};
         }
         for (int i = 40; i <= 47; ++i) {
             auto o = originOf(i);
-            recordWindowBlock(cb, 4, i, 512, 16, 2, o.first, o.second, true, cur, oRAW, oG1);
+            recordWindowBlock(cb, 4, i, st[5], 512, 16, 2, o.first, o.second, true, cur, oRAW, oG1);
             cur = {oG1, true, 512};
         }
-        {
-            recordUp(cb, 4, 48, 512, 256, cur, oSKIP3, oG2);
-            cur = {oG2, true, 256};
-            recordWindowBlock(cb, 4, 48, 256, 8, 1, 0, 0, true, cur, oRAW, oB48);
+        {   // b48 up-transition L5->L4 + window branched C=256 H=8
+            recordUp(cb, 4, 48, 512, 256, cur, oSKIP3, oG2, st[5], st[4]);
+            recordWindowBlock(cb, 4, 48, st[4], 256, 8, 1, 0, 0, true, cur, oRAW, oB48);
             cur = {oB48, true, 256};
         }
         for (int i = 49; i <= 55; ++i) {
             auto o = originOf(i);
-            recordWindowBlock(cb, 4, i, 256, 8, 1, o.first, o.second, true, cur, oRAW, oG1);
+            recordWindowBlock(cb, 4, i, st[4], 256, 8, 1, o.first, o.second, true, cur, oRAW, oG1);
             cur = {oG1, true, 256};
         }
-        {
-            recordUp(cb, 4, 56, 256, 128, cur, oSKIP2, oG2);
-            cur = {oG2, true, 128};
-            recordWindowBlock(cb, 4, 57 - 1, 128, 4, 1, 0, -4, true, cur, oRAW, oG1); // originOf(56)=(0,-4)
+        {   // b56 up L4->L3 + window C=128 H=4
+            recordUp(cb, 4, 56, 256, 128, cur, oSKIP2, oG2, st[4], st[3]);
+            recordWindowBlock(cb, 4, 56, st[3], 128, 4, 1, 0, -4, true, cur, oRAW, oG1); // originOf(56)=(0,-4)
             cur = {oG1, true, 128};
         }
         for (int i = 57; i <= 61; ++i) {
             auto o = originOf(i);
-            recordWindowBlock(cb, 4, i, 128, 4, 1, o.first, o.second, true, cur, oRAW, oG1);
+            recordWindowBlock(cb, 4, i, st[3], 128, 4, 1, o.first, o.second, true, cur, oRAW, oG1);
             cur = {oG1, true, 128};
         }
-        {
-            recordUp(cb, 4, 62, 128, 64, cur, oSKIP1, oG2);
-            cur = {oG2, true, 64};
-            recordWindowBlock(cb, 4, 62, 64, 2, 1, 0, 0, true, cur, oRAW, oG1);
+        {   // b62 up L3->L2 + window C=64 H=2
+            recordUp(cb, 4, 62, 128, 64, cur, oSKIP1, oG2, st[3], st[2]);
+            recordWindowBlock(cb, 4, 62, st[2], 64, 2, 1, 0, 0, true, cur, oRAW, oG1);
             cur = {oG1, true, 64};
         }
         for (int i = 63; i <= 65; ++i) {
             auto o = originOf(i);
-            recordWindowBlock(cb, 4, i, 64, 2, 1, o.first, o.second, true, cur, oRAW, oG1);
+            recordWindowBlock(cb, 4, i, st[2], 64, 2, 1, o.first, o.second, true, cur, oRAW, oG1);
             cur = {oG1, true, 64};
         }
-        {
-            recordUp(cb, 4, 66, 64, 32, cur, oSKIP0, oG2);
-            cur = {oG2, true, 32};
-            recordWindowBlock(cb, 4, 66, 32, 1, 0, 0, 0, true, cur, oRAW, oG1);
+        {   // b66 up L2->L1 + window plain C=32 H=1
+            recordUp(cb, 4, 66, 64, 32, cur, oSKIP0, oG2, st[2], st[1]);
+            recordWindowBlock(cb, 4, 66, st[1], 32, 1, 0, 0, 0, true, cur, oRAW, oG1);
             cur = {oG1, true, 32};
         }
         for (int i = 67; i <= 69; ++i) {
             auto o = originOf(i);
             VkDeviceSize out = (i == 69) ? oB69 : oG1;
-            recordWindowBlock(cb, 4, i, 32, 1, 0, o.first, o.second, true, cur, oRAW, out);
+            recordWindowBlock(cb, 4, i, st[1], 32, 1, 0, o.first, o.second, true, cur, oRAW, out);
             cur = {out, true, 32};
         }
 
-        {
-            dMerge(cb, A(cur.off), A(oFRS), A(oMRG70), A(vecOff["block70.layer0.inp_merge_sin"]),
-                   A(vecOff["block70.layer0.inp_merge_cos"]), 0, TOK * 32, 32, 1);
+        {   // b70: upsample L1->L0, merge up*sin + frs*cos (fp32) -> window plain -> head
+            dUpMerge(cb, A(cur.off), A(oFRS), A(oMRG70), A(vecOff["block70.layer0.inp_merge_sin"]),
+                     A(vecOff["block70.layer0.inp_merge_cos"]), 0, st[0], st[1], 32, 1);
             bar(cb);
             Cur c70{oMRG70, false, 32};
-            recordWindowBlock(cb, 5, 70, 32, 1, 0, -4, -4, false, c70, oRAW, 0);
-            dEw(cb, A(oRAW), 0, 0, 0, A(oG2), TOK * 32, 2, 0);
+            recordWindowBlock(cb, 5, 70, st[0], 32, 1, 0, -4, -4, false, c70, oRAW, 0);
+            dEw(cb, A(oRAW), 0, 0, 0, A(oG2), st[0].TOK * 32, 2, 0);
             bar(cb);
             vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pGemm1.pipe);
-            GemmPush p{A(oG2), A(oHeadW), A(oHEAD), TOK, 16, 32, 1, 0, 0, 0,
+            GemmPush p{A(oG2), A(oHeadW), A(oHEAD), st[0].TOK, 16, 32, 1, 0, 0, 0,
                        gflags(EPI_NONE, false), 32, 16, 16};
             vkCmdPushConstants(cb, pGemm1.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
-            vkCmdDispatch(cb, 1, TOK / 16, 1);
+            vkCmdDispatch(cb, 1, st[0].TOK / 16, 1);
             bar(cb);
         }
     };
@@ -3153,7 +3370,8 @@ int main(int argc, char** argv) {
             vkCmdDispatch(cmd, W / 16, H / 16, 1);
             barrierAll();
         }
-        {   // M4 front-end (verbatim dispatch params; region fixed)
+        {   // M9b front-end: decode -> features at FULL vendor extent (no
+            // letterbox/rescale pair — the U-Net runs per-pixel on the region)
             Push p{};
             if (novideo || echoFree) {   // decode: BGRA -> float RGB. Legacy video
                                          // mode: fbcancel already wrote the
@@ -3165,128 +3383,40 @@ int main(int argc, char** argv) {
                 barrierAll();
             }
             vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool, 0);
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLetter);
-            p.a[0] = (int32_t)W; p.a[1] = (int32_t)H; p.b[0] = 0; push(p);
-            vkCmdDispatch(cmd, (H + 255) / 256, 1, 1);
-            barrierAll();
-            p.b[0] = 1; push(p);
-            vkCmdDispatch(cmd, (W + 255) / 256, 1, 1);
-            barrierAll();
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeRescale);
-            p.a[0] = (int32_t)W; p.a[1] = regionOff; p.a[2] = regionH; p.a[3] = regionW;
-            p.b[0] = netH; p.b[1] = regionW; p.b[2] = 0; p.b[3] = 3; p.d[0] = 1; p.d[1] = 2; push(p);
-            vkCmdDispatch(cmd, (regionW + 15) / 16, (netH + 15) / 16, 1);
-            barrierAll();
-            p.a[0] = regionW; p.a[1] = 0; p.a[2] = regionW; p.a[3] = netH;
-            p.b[0] = netW; p.b[1] = netW; p.b[2] = 1; p.b[3] = 3; p.d[0] = 2; p.d[1] = 4; push(p);
-            vkCmdDispatch(cmd, (netW + 15) / 16, (netH + 15) / 16, 1);
-            barrierAll();
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeFeatures);
-            p.a[0] = netW; p.a[1] = netH; p.b[0] = (int32_t)(frame & 0x7fffffff);
+            p.a[0] = netW; p.a[1] = netH; p.a[2] = regionW; p.a[3] = regionH;
+            p.b[0] = (int32_t)(frame & 0x7fffffff);
+            p.b[1] = region.left; p.b[2] = region.top; p.b[3] = (int32_t)W;
             p.c[0] = 0.0f; p.c[1] = 1.0f; p.c[2] = 1.0f;
-            // temporal: channels 7-9 come from bufHist (last frame's composed
-            // output, scaled domain); on frame 0 / reseed / --temporal 0 the
-            // shader falls back to the vendor first-frame layout (scaled color).
-            p.d[0] = (temporal && !reseedThisFrame) ? 1.0f : 0.0f;
-            p.d[1] = 0.0f; p.d[2] = 0.0f; p.d[3] = 0.0f;
+            // temporal history is OFF on M9b: channels 7-9 take the vendor
+            // first-frame layout (scaled color) every frame.
+            p.d[0] = 0.0f; p.d[1] = 0.0f; p.d[2] = 0.0f; p.d[3] = 0.0f;
             push(p);
             vkCmdDispatch(cmd, ((uint64_t)netW * netH + 255) / 256, 1, 1);
             barrierAll();
             vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool, 1);
         }
-        {   // ==== REAL DLSS 5 CHAIN (replaces the m4 stand-in block) ====
-            // featpack: features fp32 [288,16] -> chain input f16 (oX16)
+        {   // ==== REAL DLSS 5 CHAIN (M9 U-Net, 7 scales, full extent) ====
+            // featpack: features fp32 [TOK0,16] -> chain input f16 (oX16)
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pFeatpack.pipe);
-            PackPush fp{A(oFeatV), A(oX16), TOK * 16};
+            PackPush fp{A(oFeatV), A(oX16), st[0].TOK * 16};
             vkCmdPushConstants(cmd, pFeatpack.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(fp), &fp);
-            vkCmdDispatch(cmd, (TOK * 16 + 255) / 256, 1, 1);
+            vkCmdDispatch(cmd, (st[0].TOK * 16 + 255) / 256, 1, 1);
             barrierAll();
             vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool, 2);
-            // full 71-block DLSSNR chain (~1402 dispatches)
+            // full 71-block DLSSNR U-Net chain (~1400 dispatches)
             recordChain(cmd);
             vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool, 3);
-            if (temporal) {
-                // TEMPORAL PATH (vendor compose_temporal at token res + the
-                // calibrated per-row head DC compensation): mode 0 accumulates
-                // per-row head DC (binding 15, oHeadDC range), mode 1 reads the
-                // raw head (binding 14 = oHEAD) + this frame's features
-                // (binding 3: ch4-6 color, ch7-9 history), writes the residual
-                // (out-color)*4 into binding 4 (oHead4) and the next-frame
-                // history (scaled domain) into binding 13. See temporal.comp.
-                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeTemporal);
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLayout, 0, 1,
-                                        &setFinal, 0, nullptr);
-                vkCmdFillBuffer(cmd, dev.buf, oHeadDC, 1024, 0);
-                barrierAll();
-                Push tp{};
-                tp.a[0] = (int32_t)TOK; tp.a[1] = 12; tp.a[2] = 0;   // ntok, cols, mode 0
-                push(tp);
-                vkCmdDispatch(cmd, (TOK + 255) / 256, 1, 1);
-                barrierAll();
-                tp.a[2] = 1;                                          // mode 1
-                push(tp);
-                vkCmdDispatch(cmd, (TOK + 255) / 256, 1, 1);
-                barrierAll();
-            } else {
-            // headpack (two passes): per-token-ROW DC of the raw head (bug B1:
-            // global DC left +/-1.4/255 row biases = colored bands on screen),
-            // then the calibrated matched residual into the m4 head layout
-            // [288,4] (binding 4 slot). See shaders/m8/headpack.comp.
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pHeadpack.pipe);
-            vkCmdFillBuffer(cmd, dev.buf, oHeadDC, 1024, 0);
-            barrierAll();
-            HeadPush hd{A(oHEAD), A(oHead4), A(oHeadDC), TOK, 0.0f, 0, 12};
-            vkCmdPushConstants(cmd, pHeadpack.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(hd), &hd);
-            vkCmdDispatch(cmd, (TOK + 255) / 256, 1, 1);
-            barrierAll();
-            HeadPush hp{A(oHEAD), A(oHead4), A(oHeadDC), TOK, headGain, 1, 12};
-            vkCmdPushConstants(cmd, pHeadpack.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(hp), &hp);
-            vkCmdDispatch(cmd, (TOK + 255) / 256, 1, 1);
-            barrierAll();
-            }
             vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool, 4);
         }
-        {   // rescale up (4ch head -> region) + compose + encode (verbatim M4)
+        {   // compose (vendor compose_head on the raw head at full extent) + encode
             Push p{};
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeRescale);
-            p.a[0] = netW; p.a[1] = 0; p.a[2] = netH; p.a[3] = netW;
-            p.b[0] = regionH; p.b[1] = netW; p.b[2] = 0; p.b[3] = 4; p.d[0] = 4; p.d[1] = 2; push(p);
-            vkCmdDispatch(cmd, (netW + 15) / 16, (regionH + 15) / 16, 1);
-            barrierAll();
-            p.a[0] = netW; p.a[1] = 0; p.a[2] = netW; p.a[3] = regionH;
-            p.b[0] = regionW; p.b[1] = regionW; p.b[2] = 1; p.b[3] = 4; p.d[0] = 2; p.d[1] = 5; push(p);
-            vkCmdDispatch(cmd, (regionW + 15) / 16, (regionH + 15) / 16, 1);
-            barrierAll();
-            if (!colorpass && strength > 0.0f) {
-                // ---- high-pass the composite residual (kill color drift):
-                // delta_hp = delta - boxblur(delta, hpS) via a downscale+
-                // upscale pair on the head buffer (binding 5) BEFORE compose.
-                // With the desktop static the capture IS our own last frame
-                // (corrected ~0), so any DC/low-freq residual component would
-                // integrate +strength*residual EVERY processed frame — the
-                // accumulating blue tint. Removing the low-frequency image
-                // leaves only spatial detail; per-channel MEAN of the applied
-                // delta stays ~0 (verified: |mean| <= 0.5 on the live run).
-                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeHpfilter);
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLayout, 0, 1,
-                                        &setFinal, 0, nullptr);
-                Push hp{};
-                hp.a[0] = regionW; hp.a[1] = regionH; hp.a[2] = (int32_t)hpS; hp.a[3] = 0;
-                push(hp);
-                vkCmdDispatch(cmd, (regionW / hpS + 2), (regionH / hpS + 2), 1);
-                barrierAll();
-                hp.a[3] = 1;
-                push(hp);
-                vkCmdDispatch(cmd, (regionW + 15) / 16, (regionH + 15) / 16, 1);
-                barrierAll();
-            }
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeCompose);
-            p.a[0] = (int32_t)W; p.a[1] = region.top; p.a[2] = region.left;
+            p.a[0] = (int32_t)W; p.a[1] = region.top; p.a[2] = region.left; p.a[3] = netW;
             p.b[0] = regionW; p.b[1] = regionH;
-            p.c[0] = (float)maxDelta / 255.0f;             // composite delta clamp
+            p.c[0] = (float)maxDelta / 255.0f;             // accumulate-mode clamp (legacy)
             p.c[1] = (novideo || echoFree) ? 0.0f : 1.0f;  // accumulate mode (legacy video)
-            p.c[2] = strength;                             // --strength (0..2)
-            p.d[0] = (float)resGate;                       // residual gate threshold (1/255; 0=off)
+            p.c[2] = headGain;                             // --gain (vendor residual scale, default 1)
             push(p);
             vkCmdDispatch(cmd, ((uint64_t)regionW * regionH + 255) / 256, 1, 1);
             barrierAll();
@@ -3326,26 +3456,30 @@ int main(int argc, char** argv) {
             vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool, 5);
         }
         if (frame == 1) {   // one-shot debug: copy chain-path buffers for stats
-            VkBufferCopy cp[16]{};
-            cp[0] = {oFeatV, dbgOffFeat, TOK * 16 * 4};
-            cp[1] = {oHEAD, dbgOffHead, TOK * 16 * 4};
-            cp[2] = {oHead4, dbgOffH4, TOK * 4 * 4};
-            cp[3] = {oX16, dbgOffX16, TOK * 16 * 2};
-            cp[4] = {oADA, dbgOffADA, TOK * 32 * 4};
-            cp[5] = {oMRG70, dbgOffMRG, TOK * 32 * 4};
-            cp[6] = {oG2, dbgOffG2, TOK * 32 * 4};
-            cp[7] = {oHeadW, dbgOffHW, 1024};
-            cp[8] = {oB4DS, dbgOffB4, TOK * 64 * 2};
-            cp[9] = {oB22DS, dbgOffB22, TOK * 512 * 2};
-            cp[10] = {oB38, dbgOffB38, TOK * 1024 * 2};
-            cp[11] = {oB48, dbgOffB48, TOK * 256 * 2};
-            cp[12] = {oB69, dbgOffB69, TOK * 32 * 2};
-            cp[13] = {vecOff["block70.layer0.inp_merge_sin"], dbgOffSin, 32 * 4};
-            cp[14] = {vecOff["block70.layer0.inp_merge_cos"], dbgOffCos, 32 * 4};
-            cp[15] = {oFRS, dbgOffFRS, TOK * 32 * 2};
-            vkCmdCopyBuffer(cmd, dev.buf, bufDbg, 16, cp);
-            VkBufferCopy cp2{0, dbgOffUp, (uint64_t)regionW * regionH * 4 * 4};
-            vkCmdCopyBuffer(cmd, bufHeadUp, bufDbg, 1, &cp2);
+            // M9b: sources live in different arena chunks -> one copy per entry
+            // (every slot sits whole inside its chunk by construction).
+            struct DbgCp { VkDeviceSize srcOff, dstOff, size; };
+            DbgCp dcps[15] = {
+                {oFeatV, dbgOffFeat, (uint64_t)st[0].TOK * 16 * 4},
+                {oHEAD, dbgOffHead, (uint64_t)st[0].TOK * 16 * 4},
+                {oX16, dbgOffX16, (uint64_t)st[0].TOK * 16 * 2},
+                {oADA, dbgOffADA, (uint64_t)st[0].TOK * 32 * 4},
+                {oMRG70, dbgOffMRG, (uint64_t)st[0].TOK * 32 * 4},
+                {oG2, dbgOffG2, (uint64_t)st[0].TOK * 32 * 4},
+                {oHeadW, dbgOffHW, 1024},
+                {oB4DS, dbgOffB4, (uint64_t)st[2].TOK * 64 * 2},
+                {oB22DS, dbgOffB22, (uint64_t)st[5].TOK * 512 * 2},
+                {oB38, dbgOffB38, (uint64_t)T6P * 1024 * 2},
+                {oB48, dbgOffB48, (uint64_t)st[4].TOK * 256 * 2},
+                {oB69, dbgOffB69, (uint64_t)st[1].TOK * 32 * 2},
+                {vecOff["block70.layer0.inp_merge_sin"], dbgOffSin, 32 * 4},
+                {vecOff["block70.layer0.inp_merge_cos"], dbgOffCos, 32 * 4},
+                {oFRS, dbgOffFRS, (uint64_t)st[0].TOK * 32 * 2},
+            };
+            for (auto &e : dcps) {
+                VkBufferCopy c1{localOff(e.srcOff), e.dstOff, e.size};
+                vkCmdCopyBuffer(cmd, bufOf(e.srcOff), bufDbg, 1, &c1);
+            }
             VkMemoryBarrier db{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
             db.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; db.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
             vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -3518,36 +3652,19 @@ int main(int argc, char** argv) {
             void* pd = nullptr;
             VK_CHECK(vkMapMemory(c.dev, memDbg, 0, VK_WHOLE_SIZE, 0, &pd));
             const char* db = (const char*)pd;
-            dumpF("featV", (const float*)(db + dbgOffFeat), TOK * 16);
-            dumpF("HEAD", (const float*)(db + dbgOffHead), TOK * 16);
-            dumpF("head4", (const float*)(db + dbgOffH4), TOK * 4);
-            {   // per-channel DC vs spatial detail of the head residual
-                const float* h4 = (const float*)(db + dbgOffH4);
-                for (uint32_t c = 0; c < 4; ++c) {
+            const uint64_t T0 = st[0].TOK;
+            dumpF("featV", (const float*)(db + dbgOffFeat), T0 * 16);
+            dumpF("HEAD", (const float*)(db + dbgOffHead), T0 * 16);
+            {   // per-channel DC vs spatial detail of the raw head residual
+                const float* hd = (const float*)(db + dbgOffHead);
+                for (uint32_t c = 0; c < 3; ++c) {
                     double mean = 0, var = 0;
-                    for (uint32_t t = 0; t < TOK; ++t) mean += h4[t * 4 + c];
-                    mean /= TOK;
-                    for (uint32_t t = 0; t < TOK; ++t) { double d = h4[t * 4 + c] - mean; var += d * d; }
-                    var /= TOK;
-                    std::printf("[dbg] head4 ch%u: mean=%.4f std=%.4f (DC-removed delta 0.25xstd=%.4f)\n",
-                                c, mean, std::sqrt(var), 0.25 * std::sqrt(var));
-                }
-                // BUG-B1 probe (2026-09-22): per-token-ROW DC of the residual.
-                // Colored lines at fixed y on screen => row-scale DC that the
-                // global DC pass cannot see. Grid is 12x24; print per-row means
-                // for both 12-col and 24-col layouts, ch0..2, in 1/255 units.
-                for (uint32_t cols = 12; cols <= 24; cols += 12) {
-                    uint32_t rows = TOK / cols;
-                    std::printf("[dbg] head4 rowDC (%u cols x %u rows), 1/255 units:\n", cols, rows);
-                    for (uint32_t r = 0; r < rows; ++r) {
-                        double m[3] = {0, 0, 0};
-                        for (uint32_t k = 0; k < cols; ++k)
-                            for (uint32_t c = 0; c < 3; ++c) m[c] += h4[(r * cols + k) * 4 + c];
-                        for (uint32_t c = 0; c < 3; ++c) m[c] /= cols;
-                        std::printf("[dbg]   row %2u: B %+.3f  G %+.3f  R %+.3f\n",
-                                    r, m[0] * 0.25 * 0.2 * 255.0, m[1] * 0.25 * 0.2 * 255.0,
-                                    m[2] * 0.25 * 0.2 * 255.0);
-                    }
+                    for (uint64_t t = 0; t < T0; ++t) mean += hd[t * 16 + c];
+                    mean /= (double)T0;
+                    for (uint64_t t = 0; t < T0; ++t) { double d = hd[t * 16 + c] - mean; var += d * d; }
+                    var /= (double)T0;
+                    std::printf("[dbg] head ch%u: mean=%.4f std=%.4f (residual scale 0.25x, /255 units: DC=%+.2f std=%.2f)\n",
+                                c, mean, std::sqrt(var), mean * 0.25 * 255.0, std::sqrt(var) * 0.25 * 255.0);
                 }
             }
             auto dumpU16 = [](const char* nm, const uint16_t* p, size_t n) {
@@ -3560,10 +3677,10 @@ int main(int argc, char** argv) {
                 std::printf("[dbg] %-7s n=%zu min=0x%04x max=0x%04x nonzero=%.1f%%\n",
                             nm, n, mn, mx, 100.0 * (double)nz / (double)(n ? n : 1));
             };
-            dumpU16("x16", (const uint16_t*)(db + dbgOffX16), TOK * 16);
-            dumpF("ADA", (const float*)(db + dbgOffADA), TOK * 32);
-            dumpF("MRG70", (const float*)(db + dbgOffMRG), TOK * 32);
-            dumpF("G2", (const float*)(db + dbgOffG2), TOK * 32);
+            dumpU16("x16", (const uint16_t*)(db + dbgOffX16), T0 * 16);
+            dumpF("ADA", (const float*)(db + dbgOffADA), T0 * 32);
+            dumpF("MRG70", (const float*)(db + dbgOffMRG), T0 * 32);
+            dumpF("G2", (const float*)(db + dbgOffG2), T0 * 32);
             dumpU16("headW", (const uint16_t*)(db + dbgOffHW), 512);
             auto h2f = [](uint16_t h) -> float {
                 uint32_t s = (uint32_t)(h & 0x8000) << 16;
@@ -3595,15 +3712,32 @@ int main(int argc, char** argv) {
                 for (size_t i = 0; i < 8 && i < n; ++i) std::printf(" %.4g", h2f(p[i]));
                 std::printf("\n");
             };
-            dumpH("B4DS", (const uint16_t*)(db + dbgOffB4), TOK * 64);
-            dumpH("B22DS", (const uint16_t*)(db + dbgOffB22), TOK * 512);
-            dumpH("B38", (const uint16_t*)(db + dbgOffB38), TOK * 1024);
-            dumpH("B48", (const uint16_t*)(db + dbgOffB48), TOK * 256);
-            dumpH("B69", (const uint16_t*)(db + dbgOffB69), TOK * 32);
+            dumpH("B4DS", (const uint16_t*)(db + dbgOffB4), (size_t)st[2].TOK * 64);
+            dumpH("B22DS", (const uint16_t*)(db + dbgOffB22), (size_t)st[5].TOK * 512);
+            dumpH("B38", (const uint16_t*)(db + dbgOffB38), (size_t)T6P * 1024);
+            dumpH("B48", (const uint16_t*)(db + dbgOffB48), (size_t)st[4].TOK * 256);
+            dumpH("B69", (const uint16_t*)(db + dbgOffB69), (size_t)st[1].TOK * 32);
             dumpF("sinT", (const float*)(db + dbgOffSin), 32);
             dumpF("cosT", (const float*)(db + dbgOffCos), 32);
-            dumpH("FRS", (const uint16_t*)(db + dbgOffFRS), TOK * 32);
-            dumpF("headUp", (const float*)(db + dbgOffUp), (size_t)regionW * regionH * 4);
+            dumpH("FRS", (const uint16_t*)(db + dbgOffFRS), T0 * 32);
+            {   // M9b: raw dumps for offline diff vs torch goldens
+                auto wr = [&](const char* path, const void* p, uint64_t bytes) {
+                    FILE* f = fopen(path, "wb");
+                    if (f) { fwrite(p, 1, (size_t)bytes, f); fclose(f); }
+                };
+                wr("out\\live_featV.bin", db + dbgOffFeat, (uint64_t)T0 * 16 * 4);
+                wr("out\\live_head.bin", db + dbgOffHead, (uint64_t)T0 * 16 * 4);
+                wr("out\\live_x16.bin", db + dbgOffX16, (uint64_t)T0 * 16 * 2);
+                wr("out\\live_ada.bin", db + dbgOffADA, (uint64_t)T0 * 32 * 4);
+                wr("out\\live_mrg70.bin", db + dbgOffMRG, (uint64_t)T0 * 32 * 4);
+                wr("out\\live_g2.bin", db + dbgOffG2, (uint64_t)T0 * 32 * 4);
+                wr("out\\live_b4ds.f16", db + dbgOffB4, (uint64_t)st[2].TOK * 64 * 2);
+                wr("out\\live_b22ds.f16", db + dbgOffB22, (uint64_t)st[5].TOK * 512 * 2);
+                wr("out\\live_b38.f16", db + dbgOffB38, (uint64_t)T6P * 1024 * 2);
+                wr("out\\live_b48.f16", db + dbgOffB48, (uint64_t)st[4].TOK * 256 * 2);
+                wr("out\\live_b69.f16", db + dbgOffB69, (uint64_t)st[1].TOK * 32 * 2);
+                wr("out\\live_frs.f16", db + dbgOffFRS, (uint64_t)T0 * 32 * 2);
+            }
             vkUnmapMemory(c.dev, memDbg);
         }
 
@@ -3699,7 +3833,8 @@ int main(int argc, char** argv) {
     std::printf("present: %s, format %d, path %s\n",
                 presentMode == VK_PRESENT_MODE_MAILBOX_KHR ? "MAILBOX" : "FIFO", (int)swapFormat,
                 novideo ? "none (--novideo)" : (swapStorage ? "blit.comp STORAGE" : "vkCmdCopyImage"));
-    std::printf("chain: full 71-block DLSSNR graph @ 288 tokens (real weights, resident)\n");
+    std::printf("chain: full 71-block DLSSNR U-Net @ %dx%d vendor extent (real weights, resident)\n",
+                netW, netH);
     std::printf("verify frames {10,30,60}: %s\n", anyVerify ? (passMetrics ? "ALL PASS" : "FAIL") : "none run");
     bool pass = anyVerify && passMetrics && frame >= framesTarget;
     std::printf("=== M8B-LIVE result: %s ===\n", pass ? "PASS" : "FAIL");
@@ -3718,25 +3853,24 @@ int main(int argc, char** argv) {
         vkDestroyPipeline(c.dev, p, nullptr);
     vkDestroyPipelineLayout(c.dev, pipeLayout, nullptr);
     for (ChainPipe* cp : {&pGemm, &pGemm1, &pCos, &pCosW, &pSmax, &pEw, &pPart, &pTrans,
-                          &pGather, &pMerge, &pFeatpack, &pHeadpack}) {
+                          &pGather, &pMerge, &pFeatpack, &pHeadpack, &pPool, &pUpM}) {
         vkDestroyPipeline(c.dev, cp->pipe, nullptr);
         vkDestroyPipelineLayout(c.dev, cp->layout, nullptr);
         vkDestroyDescriptorSetLayout(c.dev, cp->dsl, nullptr);
     }
     vkDestroyDescriptorPool(c.dev, dpool, nullptr);
     vkDestroyDescriptorSetLayout(c.dev, dsLayout, nullptr);
-    for (VkBuffer b : {bufRgb, bufMax, bufT, bufHeadUp, bufFin, bufNr, bufRbFinal,
+    for (VkBuffer b : {bufRgb, bufMax, bufT, bufFin, bufNr, bufRbFinal,
                        bufRbNr, bufUpload, bufDbg, bufLastPresented, bufFbStats, bufHp})
         vkDestroyBuffer(c.dev, b, nullptr);
-    for (VkDeviceMemory m : {memRgb, memMax, memT, memHeadUp, memFin, memNr,
+    for (VkDeviceMemory m : {memRgb, memMax, memT, memFin, memNr,
                              memRbFinal, memRbNr, memDbg, memImgFinal, memImgNr, memImgIn, memUpload,
                              memLastP, memFbStats, memHp})
         vkFreeMemory(c.dev, m, nullptr);
-    if (cbuf.mapped) vkUnmapMemory(c.dev, cbuf.mem);
-    if (cbuf.buf) vkDestroyBuffer(c.dev, cbuf.buf, nullptr);
-    if (cbuf.mem) vkFreeMemory(c.dev, cbuf.mem, nullptr);
-    if (dev.buf) vkDestroyBuffer(c.dev, dev.buf, nullptr);
-    if (dev.mem) vkFreeMemory(c.dev, dev.mem, nullptr);
+    for (auto &ch : chunks) {
+        if (ch.b.buf) vkDestroyBuffer(c.dev, ch.b.buf, nullptr);
+        if (ch.b.mem) vkFreeMemory(c.dev, ch.b.mem, nullptr);
+    }
     vkDestroyImageView(c.dev, imgInView, nullptr);
     vkDestroyImageView(c.dev, viewFinal, nullptr);
     vkDestroyImageView(c.dev, viewNr, nullptr);
