@@ -1,11 +1,17 @@
-# DEV_STATE.md - where we are (updated 2026-09-21 ~23:20 PDT by Kimi)
+# DEV_STATE.md - where we are (updated 2026-09-22 ~10:15 by Kimi)
 
 ## One-line status
-PREVIOUS "FIXED + VERIFIED" CLAIMS FOR BUGS #1-#3 WERE WRONG - they held only in
-bounded synthetic tests, NOT in the owner's real usage. Owner 22:25: colors
-still broken, trails, stalls, COLORED LINES and other artifacts. Real-scenario
-repro (23:05, evidence: dlss5\m1-frame-capture\build\Release\out_live3\
-snapshot_5.bmp) confirmed at least two REAL defects:
+OWNER VERDICT 2026-09-22 09:59: the product is NOT usable - clicks FREEZE the
+desktop (kill via Task Manager), dynamic content shows DIGITAL GARBAGE. All
+prior "FIXED+VERIFIED" claims applied to synthetic tests only.
+>>> NEXT AGENT: START AT docs\HANDOFF_NEXT_AGENT.md <<<
+Short version: (L1) the fullscreen opaque topmost overlay cannot coexist with
+an interactive desktop - needs re-architecture to per-window/WGC mode;
+(L2) the network input is WRONG (stand-in noise ch0-2 - the real
+deterministic_noise() EXISTS at work/mlx-dlss/python/mlxdlss/features.py:87;
+no temporal history) and was never visually validated on real content;
+(L3) output pipeline defects B1/B2 are fixed (27d1667), bug #4 (invisible
+enhancement) quantified in Next steps item 0.
   (A) THE OVERLAY HIDES ALL NORMAL WINDOWS: it is an OPAQUE TOPMOST FULLSCREEN
       window - Notepad opened during the test is INVISIBLE (it opens UNDER the
       overlay; only windows with their own topmost flag, e.g. Task Manager
