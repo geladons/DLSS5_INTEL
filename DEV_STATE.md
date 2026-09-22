@@ -1,10 +1,10 @@
-# DEV_STATE.md - where we are (updated 2026-09-21 13:35 PDT by Kimi)
+# DEV_STATE.md - where we are (updated 2026-09-21 ~20:45 PDT by Kimi)
 
 ## One-line status
-The full DLSS 5 graph runs live on the Arc B50 and all ENGINEERING milestones
-pass. Owner bug #1 (stale screen) now has a BUILT + VERIFIED fix (--refresh-ms,
-commit see git log). Remaining owner bugs: blue tint (#2, next), mouse trails
-(#3), no visible enhancement (#4).
+ALL FOUR owner UX bugs addressed: #1 stale screen FIXED+VERIFIED (5b80cda),
+#2 blue tint FIXED+VERIFIED (ec08838 + headpack DC + hpfilter), #3 mouse
+trails FIXED+VERIFIED (005086b), #4 enhancement visibility = honest report
+below (not a bug - a tuning/expectations item). RUN-DEMO is the owner build.
 
 ## Milestones (all PASS unless noted)
 - M0 coopmat probe, M1 DDA capture, M2 D3D11<->Vulkan interop (bit-exact),
@@ -59,40 +59,48 @@ Verification runs (all on Sunshine host, overlay video mode):
       the long AcquireNextFrame waits count as "dropped (DDA timeout)" in the
       summary; that counter is acquire-timeout accounting, not real drops.
 
-## OWNER UX BUGS (from screenshot attachment-20260921-105537, priority order)
-Owner test: photo (anime, colorful) in Photos app + RUN-DEMO (all defaults).
-1. STALE SCREEN (worst): clicks pass through, but opening a window shows
-   nothing. Root cause: settle gate (est mean|d| < 0.5 skips chain+present) uses
-   512 sparse samples (every 24th row, 1997-byte stride). A new window in an
-   unsampled band reads est=0 -> overlay keeps the old frame forever. The log
-   shows "settled (est mean|d|=0.000)" for 100s of skips while this happens.
-   PARTIAL FIX in working tree (forceRefresh, see above). Also consider larger
-   settleThresh or dirty-rect-driven decisions later.
-2. BLUE TINT: whole screen gains a blue cast over time/frames. Mechanism
-   documented in shaders\hpfilter.comp: presented(n)=presented(n-1)+residual(n),
-   any correlated (DC/low-freq) residual integrates. hpfilter (S=32 box
-   high-pass) is ON by default and was believed to fix it; owner still sees blue.
-   NOT YET RE-DIAGNOSED on the current build. Next: run with frames flowing,
-   diff out\m8b_native0.bmp vs m8b_processed.bmp (both written on processed
-   frames) - per-channel signed delta tells the bias; also DDA-snapshot the real
-   screen (m1dda) to see the accumulated tint. Suspects: (a) S=32 box too small
-   to kill screen-scale gradients; (b) headpack per-channel DC pass (see
-   "headpack two-pass" ~line 927) interacting with hpfilter (double subtraction
-   -> overshoot); (c) tint in features/compose path, not residual.
-3. MOUSE TRAILS/artifacts: cursor ghosting while moving. Likely from the
-   fbcancel delta clamp (4*maxDelta=48/255) + compose clamp (12/255) + the
-   settle gate skipping frames mid-motion: cursor deltas accumulate partially.
-   Expected to improve with the refresh fix (ghosts cleared every 800 ms). If
-   not: raise maxDelta (--max-delta) for the cursor path or paint cursor after
-   accumulation instead of before.
-4. NO VISIBLE ENHANCEMENT: on a static photo the DLSSNR residual is subtle and
-   reads as "a color filter", not neural reconstruction. Partly expectations:
-   the model was validated bit-exact as a CHAIN, never VISUALLY benchmarked on
-   real content. After bugs 1-3: A/B crops (native vs processed from the verify
-   BMPs) on game content and on the owner's photo; consider --strength up to 2.0;
-   then a proper quality/temporal pass (was planned anyway, see PROGRESS.md).
+## OWNER UX BUGS - FINAL STATUS (2026-09-21 ~20:45 PDT, all verified on host)
+1. STALE SCREEN - FIXED (5b80cda): --refresh-ms forces a full process+present
+   at least every 800 ms even when the sparse settle estimate reads "settled".
+   A/B verified with the gate forced closed (--settle-thresh 255): refresh 800
+   -> ~1 Hz forced cadence; refresh 600000 -> stall reproduced. The only
+   difference is the new flag. NOTE the forced cadence is ~1 Hz (not 1.25)
+   because the loop blocks in AcquireNextFrame(1000 ms) between iterations.
+2. BLUE TINT - FIXED (ec08838, the --resgate patch, PLUS the headpack
+   per-channel DC pass and the hpfilter high-pass that were already in).
+   Three-layer defense: headpack subtracts the head's per-channel DC (measured
+   -0.700 vs design |mean|<0.02!), hpfilter kills low-freq residual, resgate
+   zeroes the residual on every pixel whose real change is below 4/255, so a
+   static background CANNOT integrate anything by construction.
+   VERIFIED 2026-09-21 20:20-20:32: 100-frame run (frame-60 metric = 50 frames
+   of potential accumulation) -> signed delta <= 0.08/255, no channel bias;
+   DDA ground-truth snapshots of the real screen 45 s apart -> wallpaper clean,
+   only +/-1 LSB wobble on high-contrast edges (R/B only, mean -0.02/255, a
+   quantization wobble, invisible); no blue cast anywhere. The apparent -0.5
+   "drift" seen in BMP diffs earlier was contamination (Task Manager + the
+   Kimi window sit ABOVE the overlay and update live; the verify "native" is
+   the echo capture, not the true desktop).
+3. MOUSE TRAILS - FIXED (005086b). REPRODUCED first: the painted cursor never
+   erases (echo-fbcancel algebra = 0 at old cursor pixels) - one wiggle pass
+   left a permanent 5x5 grid of 25 ghost cursors (DDA snapshot, _trail_crop).
+   FIX: cursor compositing OFF by default; the hardware cursor is drawn by DWM
+   above the topmost overlay so the user sees it regardless. Legacy path kept
+   behind --cursor-draw. RETESTED: DDA snapshot of the wiggle area is clean;
+   --frames 300 verify {10,30,60} ALL PASS; in-app metrics are cleaner too
+   (changed 0.4-1.6% vs 6-27% with the painted cursor contaminating).
+4. NO VISIBLE ENHANCEMENT - honest report, NOT a bug: the anti-drift defenses
+   intentionally make the residual tiny on static content (per-frame mean|d|
+   0.03-0.1/255, changed <2% on the owner's static photo). On dynamic content
+   the residual is clearly visible (old --frames 200 run: mean|d| 8-17/255,
+   changed 27-40%). Tuning path for the owner: --strength 1.5-2.0 for a
+   stronger effect on the photo scenario; a proper visual A/B needs game/video
+   content in motion (suggest the owner runs a game via Moonlight and compares
+   CTRL+ALT+X toggle). A quality/temporal pass was planned anyway.
 
 ## OPEN QUESTIONS / WATCH ITEMS
+- ADAPTER LUID CHANGED: 95a2 -> 9a8b across a host re-enumeration (seen in the
+  20:37 run log). Not a bug - M8c picks by dynamic LUID match - but AGENTS.md's
+  hardcoded "LUID ...95a2" is stale. LUIDs are per-boot; never hardcode.
 - ENV REGRESSION (2026-09-21 ~13:18): VS BuildTools instance at
   C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools EXISTS on
   disk (VC Tools 14.29.30133, MSBuild 16.11.6 both present and functional)
@@ -111,10 +119,10 @@ Owner test: photo (anime, colorful) in Photos app + RUN-DEMO (all defaults).
   cursor-forced frames appeared (settled skips continued). Either the re-arm
   branch is not reached or the wiggle thread dies. The startup-wiggle path WAS
   verified historically (M1). Investigate lines ~2620-2676.
-- Frame pacing: processed frames need CURSOR MOVES or real desktop changes on an
-  idle desktop; runs "stall" at 5 processed frames otherwise. For testing, move
-  the cursor externally (workspace\skills\win-desktop-control\scripts\ui.ps1
-  move X Y) or use --wiggle-idle 1 (after the open question is fixed).
+- Frame pacing: ADDRESSED by --refresh-ms (forces ~1 Hz processed cadence on an
+  idle desktop; no cursor moves needed). External wiggle helper for tests:
+  dlss5\m8b-live\_wiggle_loop.ps1 (SendInput SetCursorPos loop, start via
+  _wiggle_start.cmd; ui.ps1 move X Y also works).
 - RUN-DEMO wall text still says "~12-20 fps"; actual is ~12 fps active, idle 0.
 
 ## Numbers (current build, video mode)
@@ -135,11 +143,11 @@ Owner test: photo (anime, colorful) in Photos app + RUN-DEMO (all defaults).
 - Agent session memory: C:\Users\AI\.kimi_openclaw\workspace\memory\2026-09-21.md.
 
 ## Next steps (suggested order)
-1. ~~Build + test the settle-gate refresh patch~~ DONE + VERIFIED (see "BUG #1
-   FIX" above). Also repair the VS BuildTools registration so build.cmd works.
-2. Reproduce + measure blue tint (bug #2) with BMP diffs and m1dda snapshots;
-   fix hpfilter/headpack accordingly.
-3. Re-test mouse trails (bug #3) with the refresh fix in; tune clamps if needed.
-4. Visual A/B on real content (bug #4), strength study, honest quality report
-   to owner; then quality/temporal pass planning.
-5. Later: perf fusion pass; M5 zero-copy debug; game-mode window targeting.
+1. OWNER RE-TEST: RUN-DEMO.cmd on the real scenarios (photo in Photos, a game
+   via Moonlight). All four bugs have verified fixes in 5b80cda..005086b.
+2. Bug #4 tuning: owner A/B with --strength 1.5 / 2.0 on the photo scenario;
+   visual A/B on dynamic content (game video); then decide default strength.
+3. Repair VS BuildTools registration (re-run bootstrapper) so build.cmd works;
+   until then use _build_msb.cmd (MSBuild on the cached vcxproj).
+4. Perf fusion pass (30 fps path: cosine_v fusion et al.); M5 zero-copy debug;
+   game-mode window targeting; quality/temporal pass.

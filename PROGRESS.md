@@ -492,3 +492,19 @@ golden.py compare; isolation: isolate.py, quant.py, quant2.py forensics).
   forced cadence ~1 Hz despite permanent settle; refresh 600000 -> stall
   reproduced (frame 0 only, settled skips accumulate). Bug #1 root-cause
   fix VERIFIED. Cosmetic: forced-refresh acquire waits count as "dropped".
+
+### M8b owner UX bugs #1-#3 FIXED + VERIFIED (2026-09-21 evening)
+- Bug #1 stale screen: --refresh-ms forced cadence (5b80cda). Verified A/B with
+  the settle gate forced closed.
+- Bug #2 blue tint: resgate + headpack DC + hpfilter (ec08838). Verified: 100-frame
+  accumulation test signed drift <= 0.08/255; DDA ground-truth snapshots 45 s apart
+  show a clean screen (only +/-1 LSB edge wobble, R/B, mean -0.02/255). Apparent
+  -0.5 BMP diffs were Task Manager + Kimi window ABOVE the overlay + the verify
+  native being the echo capture, not the true desktop.
+- Bug #3 mouse trails: painted cursor never erased (echo algebra = 0) -> permanent
+  ghost grid (reproduced: 25 ghosts). Fixed by not compositing the cursor (005086b);
+  hw cursor stays visible above the overlay. DDA retest clean, verify PASS.
+- Bug #4 (no visible enhancement): honest report in DEV_STATE - residual is
+  intentionally tiny on static content; --strength 1.5-2.0 is the tuning path.
+- Env: VS BuildTools lost installer registration (use _build_msb.cmd until the
+  bootstrapper repair); adapter LUID changed 95a2 -> 9a8b (dynamic pick OK).
