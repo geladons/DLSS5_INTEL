@@ -1,0 +1,65 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+/*
+ * upmerge — M9 U-Net decoder merges with fused nearest-neighbour x2 upsample
+ * (nr_model.nearest_upsample2_crop + decoder_input_merge / b70 pre-merge).
+ * One invocation per TARGET token; loops channels.
+ *
+ * kind 0: decoder/upsample transition (b39, b48, b56, b62, b66):
+ *             c[y,x,ch] = a[y/2, x/2, ch] + widen(b[y,x,ch]) * sin[ch]   (fp32 raw)
+ *             h[y,x,ch] = e4m3(c)                                       (publish)
+ *          a = projection GEMM output fp32 at the LOW scale [Hl*Wl*C]
+ *          b = skip f16 (e4m3) at the TARGET scale [Ht*Wt*C]
+ *          target dims (Ht, Wt) <= (2*Hl, 2*Wl) — the crop.
+ * kind 1: b70 pre-merge (fp32 out, no publish):
+ *             c[y,x,ch] = widen(a[y/2,x/2,ch]) * sin[ch] + widen(b[y,x,ch]) * cos[ch]
+ *          a = f16 low-scale value (b69 out), b = full-resolution skip f16.
+ * sin/cos tables are fp32 side tables (placeVecF16 widened on the host).
+ */
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+
+#include "publish.glsl"
+
+layout(local_size_x = 256) in;
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf { float v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer HalfBuf  { float16_t v[]; };
+
+layout(push_constant, scalar) uniform Push {
+    uint64_t a;      // low-scale input (fp32 kind0 / f16 kind1)
+    uint64_t b;      // skip f16 at target scale
+    uint64_t c;      // out fp32 [Ht*Wt*C]
+    uint64_t d;      // sin vector fp32 [C]
+    uint64_t e;      // cos vector fp32 [C] (kind1 only)
+    uint64_t h;      // out f16 publish (kind0 only)
+    uint Wt, Ht;     // target dims
+    uint Wl;         // low-scale width (H_l = Ht/2 covered by crop; only Wl needed)
+    uint C;
+    uint kind;
+} pc;
+
+void main() {
+    uint t = gl_GlobalInvocationID.x;
+    if (t >= pc.Ht * pc.Wt) return;
+    uint y = t / pc.Wt, x = t % pc.Wt;
+    uint lowRow = (y / 2u) * pc.Wl + (x / 2u);
+    for (uint ch = 0u; ch < pc.C; ++ch) {
+        float bv = f16_widen(uint(float16BitsToUint16(HalfBuf(pc.b).v[t * pc.C + ch])));
+        float sv = FloatBuf(pc.d).v[ch];
+        if (pc.kind == 0u) {
+            precise float r = FloatBuf(pc.a).v[lowRow * pc.C + ch] + bv * sv;
+            FloatBuf(pc.c).v[t * pc.C + ch] = r;
+            HalfBuf(pc.h).v[t * pc.C + ch] = float16_t(e4m3(r));
+        } else {
+            float av = f16_widen(uint(float16BitsToUint16(HalfBuf(pc.a).v[lowRow * pc.C + ch])));
+            float cv = FloatBuf(pc.e).v[ch];
+            precise float r = av * sv + bv * cv;
+            FloatBuf(pc.c).v[t * pc.C + ch] = r;
+        }
+    }
+}

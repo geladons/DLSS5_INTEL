@@ -1,0 +1,33 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+/*
+ * round_test — M7a rounding unit kernel.
+ *
+ * For each input x (fp32) writes four outputs, bit-comparable against the C++ CPU
+ * implementation of the same design-doc SS A.1 formulas:
+ *   out_h[i]  = half_round(x)
+ *   out_e[i]  = e4m3(x)
+ *   out_g[i]  = gate_activation(x)
+ *   out_ge[i] = e4m3(gate_activation(x))     (the GEMM fused epilogue GATE_E4M3)
+ */
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+#include "publish.glsl"
+
+layout(local_size_x = 256) in;
+
+layout(binding = 0) readonly  buffer InBuf  { float xin[]; };
+layout(binding = 1) writeonly buffer OutBuf { float xout[]; };
+
+layout(push_constant) uniform Push { uint n; } pc;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.n) return;
+    float x = xin[i];
+    uint b = i * 4u;
+    xout[b + 0u] = half_round(x);
+    xout[b + 1u] = e4m3(x);
+    xout[b + 2u] = gate_activation(x);
+    xout[b + 3u] = e4m3(gate_activation(x));
+}
