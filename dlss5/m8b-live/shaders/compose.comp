@@ -33,6 +33,18 @@
 // residual AFTER the hpfilter high-pass (final = native + strength*hp(delta))
 // — the residual buffer already had its low-frequency/color component removed
 // by shaders/hpfilter.comp (unless --colorpass 1).
+// M8B UX-2 (2026-09-21): d.x = residual gate threshold (1/255 units; 0 = off).
+// The feedback loop adds the network residual onto the accumulation EVERY
+// processed frame, so on a near-static screen (corrected ~ 0 exactly, 8-bit
+// echo) a deterministic zero-input residual pattern integrates frame over
+// frame — the accumulating BLUE TINT (owner bug #2; cursor activity and the
+// --refresh-ms cadence both force processing while the background is static).
+// The gate weights the residual by the MAGNITUDE OF THE REAL CHANGE at the
+// pixel: w = clamp(max|corrected_rgb|*255 / d.x, 0..1), fin = corrected +
+// w*residual. Unchanged pixels (corrected == 0) add exactly nothing -> no
+// integration, by construction. Pixels that changed by >= d.x/255 get the
+// full residual; a linear ramp between. Enhancement of moving/video content
+// is unaffected (corrected is large there); static backgrounds are stable.
 // ============================================================================
 #extension GL_GOOGLE_include_directive : require
 #include "publish.glsl"
@@ -54,6 +66,15 @@ void main() {
     uint natP = (uint(pc.a.y) + y) * uint(pc.a.x) + (uint(pc.a.z) + x);
     float m = pc.c.x > 0.0 && pc.c.x < 1.0 ? pc.c.x : 1.0;   // composite (net residual) clamp
     float str = pc.c.z > 0.0 ? pc.c.z : 1.0;                 // --strength (default 1)
+    // residual gate (accumulate mode only): weight by real per-pixel change
+    float w = 1.0;
+    if (pc.c.y > 0.5 && pc.d.x > 0.0) {
+        float cr = abs(nat[natP * 3u + 0u]);
+        float cg = abs(nat[natP * 3u + 1u]);
+        float cb = abs(nat[natP * 3u + 2u]);
+        float mag = max(max(cr, cg), cb) * 255.0;
+        w = clamp(mag / pc.d.x, 0.0, 1.0);
+    }
     for (uint c = 0u; c < 3u; ++c) {
         float source = nat[natP * 3u + c];
         float halfv = half_round(hup[p * 4u + c]) * 0.25 * str;
@@ -64,9 +85,11 @@ void main() {
             // what the net ADDS, never on real content (else the screen could
             // never appear from black). encode adds fin onto lastPresented:
             //   presented(n) = capture(n) + deltaNet(n)   [echo cancels exactly]
+            // The gate w suppresses the residual wherever the pixel did not
+            // change (static background) so the residual cannot integrate.
             float delta = clamp(halfv, -m, m);
-            fin[p * 3u + c] = source + delta;
-            nro[p * 3u + c] = clamp(source + delta, 0.0, 1.0);
+            fin[p * 3u + c] = source + w * delta;
+            nro[p * 3u + c] = clamp(source + w * delta, 0.0, 1.0);
         } else {
             float predicted = clamp(source + halfv, 0.0, 1.0);
             float finalv = clamp(source + 1.0 * (predicted - source), 0.0, 1.0);
