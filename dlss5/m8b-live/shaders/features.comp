@@ -25,9 +25,17 @@
 // zero-mean. The old integer-hash stand-in fed the graph a wrong conditioning
 // signal every frame (owner: "digital garbage on dynamic content").
 //
-//   push a = (netW, netH, 0, 0);  b = (frameIndex, 0, 0, 0);
+//   push a = (netW, netH, regionW, regionH);  b = (frameIndex, regionLeft, regionTop, fullW)
 //        c = (style, tone, structure, 0)   (style/tone/structure host-half-rounded)
 //        d = (histValid, 0, 0, 0)          (1 = channels 7-9 from binding 13)
+//
+// M9B (2026-09-22): the network extent is now the VENDOR-ALIGNED full
+// resolution of the region (multiple of 64, >= 320), not the old 12x24
+// miniature. Colour is read straight from the full-res decoded desktop
+// (binding 1, bufRgb) at the region offset; network pixels outside the region
+// use the vendor mirror extension (index 2*extent-2-x, clamped at 0 —
+// features.py extended_indices). Noise stays keyed by NETWORK coordinates
+// (x, y), exactly like the vendor (regenerated in the extension).
 // ============================================================================
 #extension GL_GOOGLE_include_directive : require
 #include "publish.glsl"
@@ -92,7 +100,7 @@ float hr_widen(uint h) {
 float halfr(float x) { return hr_widen(hr_bits(floatBitsToUint(x))); }
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
-layout(std430, set = 0, binding = 4) readonly buffer NetRgb { float rgb[]; };
+layout(std430, set = 0, binding = 1) readonly buffer RgbFull { float nat[]; };
 layout(std430, set = 0, binding = 3) writeonly buffer Features { float f[]; };
 layout(std430, set = 0, binding = 13) readonly buffer Hist { float hist[]; };
 layout(push_constant) uniform Push { ivec4 a; ivec4 b; vec4 c; vec4 d; } pc;
@@ -131,14 +139,23 @@ vec3 deterministicNoise(uint x, uint y, uint frame) {
 
 void main() {
     uint p = gl_GlobalInvocationID.x;
-    uint n = uint(pc.a.x) * uint(pc.a.y);
+    uint netW = uint(pc.a.x), netH = uint(pc.a.y);
+    uint n = netW * netH;
     if (p >= n) return;
-    uint x = p % uint(pc.a.x);
-    uint y = p / uint(pc.a.x);
+    uint x = p % netW;
+    uint y = p / netW;
+
+    // vendor mirror extension (features.py:60-68): network pixels past the
+    // region read the mirrored source pixel, index 2*extent-2-i clamped at 0.
+    uint regW = uint(pc.a.z), regH = uint(pc.a.w);
+    uint sx = x < regW ? x : uint(max(0, 2 * int(regW) - 2 - int(x)));
+    uint sy = y < regH ? y : uint(max(0, 2 * int(regH) - 2 - int(y)));
+    uint fullW = uint(pc.b.w);
+    uint srcP = (uint(pc.b.z) + sy) * fullW + (uint(pc.b.y) + sx);
 
     float scaled[3];
     for (uint c = 0u; c < 3u; ++c) {
-        float v = rgb[p * 3u + c];
+        float v = nat[srcP * 3u + c];
         // scaled_color, nr_image.c:96 — three FP16 roundings (ARCHITECTURE.md:49)
         v = halfr(v);
         v = halfr(v - 0.5);
