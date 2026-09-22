@@ -955,6 +955,10 @@ int main(int argc, char** argv) {
     float strength = 1.0f;       // --strength F: composite residual scale 0..2 (default 1.0)
     int colorpass = 0;           // --colorpass 0|1: 1 = pass the residual's color/low-freq
                                  // component (legacy); 0 = high-pass it away (default, no drift)
+    long resGate = 4;            // --resgate T: residual gate threshold (1/255 units, default 4;
+                                 // 0 = off). The network residual is weighted by the real
+                                 // per-pixel change magnitude so it cannot integrate on a
+                                 // static background (owner bug #2, blue tint).
     std::string outPref;         // --output NAME: capture-output preference (substring,
                                  // case-insensitive, e.g. "DISPLAY5"; empty = auto)
     for (int i = 1; i < argc; ++i) {
@@ -971,7 +975,8 @@ int main(int argc, char** argv) {
         else if (a == "--scale" && i + 1 < argc) renderScale = (float)std::atof(argv[++i]);
         else if (a == "--strength" && i + 1 < argc) strength = (float)std::atof(argv[++i]);
         else if (a == "--colorpass" && i + 1 < argc) colorpass = std::atoi(argv[++i]);
-        else { std::fprintf(stderr, "usage: m8blive [--frames N] [--nowiggle] [--novideo] [--nocursor] [--output NAME] [--scale S(ignored)] [--wiggle-idle SECS] [--max-delta N] [--settle-thresh X] [--refresh-ms N] [--strength F] [--colorpass 0|1]\n"); return 1; }
+        else if (a == "--resgate" && i + 1 < argc) resGate = std::atol(argv[++i]);
+        else { std::fprintf(stderr, "usage: m8blive [--frames N] [--nowiggle] [--novideo] [--nocursor] [--output NAME] [--scale S(ignored)] [--wiggle-idle SECS] [--max-delta N] [--settle-thresh X] [--refresh-ms N] [--strength F] [--colorpass 0|1] [--resgate T]\n"); return 1; }
     }
     if (wiggleForbidden) wiggleIdleSec = 0;
     if (maxDelta < 1) maxDelta = 1;
@@ -980,6 +985,8 @@ int main(int argc, char** argv) {
     if (strength < 0.0f) strength = 0.0f;
     if (strength > 2.0f) strength = 2.0f;
     colorpass = colorpass ? 1 : 0;
+    if (resGate < 0) resGate = 0;
+    if (resGate > 255) resGate = 255;
     SetConsoleCtrlHandler(CtrlHandler, TRUE);
     std::printf("=== M8B-LIVE: REAL DLSS 5 graph (71 blocks) live on the desktop, Intel Arc Pro B50 ===\n");
     std::printf("transport: m4-present-simple (CPU bridge) | core: m8-full-chain @03900ab (288 tokens, ~47 ms)\n");
@@ -988,8 +995,8 @@ int main(int argc, char** argv) {
     if (!novideo)
         std::printf("feedback-cancellation: ON (echo subtract + accumulate, max-delta=%d/255, settle-thresh=%.3f)\n",
                     maxDelta, settleThresh);
-    std::printf("composite: strength=%.2f, high-pass(color component)=%s\n",
-                strength, colorpass ? "OFF (--colorpass 1, legacy)" : "ON (default)");
+    std::printf("composite: strength=%.2f, high-pass(color component)=%s, residual-gate=%ld/255\n",
+                strength, colorpass ? "OFF (--colorpass 1, legacy)" : "ON (default)", resGate);
     if (renderScale != 0.55f)
         std::printf("[info] --scale ignored: network grid pinned to 12x24 = the chain's 288 tokens\n");
     std::printf("\n");
@@ -3028,6 +3035,7 @@ int main(int argc, char** argv) {
             p.c[0] = (float)maxDelta / 255.0f;             // composite delta clamp
             p.c[1] = novideo ? 0.0f : 1.0f;                // accumulate mode (video)
             p.c[2] = strength;                             // --strength (0..2)
+            p.d[0] = (float)resGate;                       // residual gate threshold (1/255; 0=off)
             push(p);
             vkCmdDispatch(cmd, ((uint64_t)regionW * regionH + 255) / 256, 1, 1);
             barrierAll();
