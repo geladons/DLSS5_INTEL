@@ -6,9 +6,11 @@ DESKTOP-285INKS (Win 11), GPU passed through. Owner plays games via Sunshine
 (Moonlight) - Sunshine is PERMANENT, never stop/disable it (PID ~7784).
 
 ## Build / run / verify loop
-- Build: `cd dlss5\m8b-live && build.cmd` (cmake VS generator, Release). Check
-  `_build.log` for errors. Exe: `dlss5\m8b-live\build\Release\m8blive.exe`
-  (run from that dir - shaders live next to the exe).
+- Build: `cd dlss5\m8b-live && build.cmd` (cmake VS generator, Release; AUTO-
+  FALLBACK to NMake+vcvars64 if the VS instance is not discoverable - see the
+  VS REGRESSION note below). Check `_build.log` for errors. Exe:
+  `dlss5\m8b-live\build\Release\m8blive.exe` (run from that dir - shaders live
+  next to the exe).
 - Runner: `dlss5\m8b-live\runm8b.cmd <args>` (appends to docs\m8b-live.log).
 - Owner demo: `tools\RUN-DEMO.cmd` = `m8blive.exe --frames 1000000` (all defaults).
 - Sanity (no overlay): `--novideo --frames 10`. Full video run: `--frames 30`.
@@ -48,7 +50,16 @@ DESKTOP-285INKS (Win 11), GPU passed through. Owner plays games via Sunshine
   adapter present. Two DEFAULT_MONITOR (Unknown) = virtual displays (Sunshine +
   QEMU), inactive when no Moonlight client.
 - Toolchain: Vulkan SDK 1.4.357.0 (C:\VulkanSDK), CMake 4.4.3, VS Build Tools
-  2019, Python 3.12.10 (user), Git 2.55. No ninja - VS generator.
+  2019 (reinstalled 2026-09-22, instance 8350b0c9, toolset merged from
+  BuildTools.bak), Python 3.12.10 (user), Git 2.55. No ninja - VS generator.
+- VS REGRESSION (fixed with caveats 2026-09-22): the VS Setup.Configuration
+  COM discovery is BROKEN on this host (CLSID/ProgID registration absent from
+  every registry view; vswhere returns 0 instances even after a full
+  BuildTools reinstall). build.cmd now tries the VS generator (works with the
+  existing CMake cache) and falls back to NMake+vcvars64 for a cold configure.
+  Backups: BuildTools.bak (orig toolset), _vsbt_backup\ (registrations),
+  Downloads\vs_BuildTools.exe (bootstrapper). If builds break again, check
+  cmake's first configure line for "instance is not known".
 
 ## Architecture map (dlss5\)
 - m1-frame-capture: DDA probe/snapshots (diagnostic tool - use it!).
