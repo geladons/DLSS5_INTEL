@@ -55,6 +55,7 @@ struct VkCtx {
     VkQueue queue = VK_NULL_HANDLE;
     uint32_t qf = UINT32_MAX;
     VkPhysicalDeviceMemoryProperties memProps{};
+    bool sparseBinding = false;   // queue family supports VK_QUEUE_SPARSE_BINDING_BIT
 };
 
 inline uint32_t FindMemType(const VkCtx& c, uint32_t typeBits, VkMemoryPropertyFlags want) {

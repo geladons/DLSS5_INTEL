@@ -1,10 +1,119 @@
-# HANDOFF_M10.md - DLSSNR chain perf (M10), state as of 2026-09-23 ~12:10
+# HANDOFF_M10.md - DLSSNR chain perf (M10), state as of 2026-09-23 ~13:30
 
 ## One-line status
-M10 in progress: chain at 1920x1088 went 1415 ms -> 1059 ms/frame (0.70 ->
-0.92 fps) in one session. Big win: gather_residual warp-per-token (10.8x).
-Key discovery: window-attention support-kernel time is NOT in-kernel - it is
-the ~1260 full-arena bar() drains per frame. Next levers ranked below.
+M10 pass 4: the barrier-scoping lever is CLOSED with measurements (it cannot
+pay on this driver - see "barrier autopsy"). Pass-3 shaders turned out
+numerically broken (reverted; their validation was faked by a stale-spv trap
+now fixed structurally). Baseline unchanged: 1083 ms/frame at 1920x1088,
+0.91 fps. OPEN INCIDENT: GPU/driver degraded ~13:00 after a 3800 MB buffer
+alloc experiment - selftest nondeterministically wrong on ALL configs/code,
+needs driver reload or reboot (owner action) before any further GPU work.
+Next lever after recovery: GEMM K-loop pipelining (gemm = 382 ms of REAL
+in-kernel time; the support-kernel "times" were barrier tax, now attributed).
+
+## Barrier autopsy (pass 4, measured - do not re-litigate)
+Tax at 1080p = 1083 - 807 = ~276 ms/frame (~1260 bar() calls, ~3 buffers).
+Probe matrix (chain ms, throwaway bar() variants, bench 20):
+  3 dense buffers whole-size (production):            1083
+  2 dense buffers whole-size (CHUNK_CAP 3800):        1078  (+ BROKEN numerics - cap stays 3500)
+  1 dense buffer whole-size 2.9 GB (chunk0 only):      797  (correctness-broken probe)
+  1 dense buffer 256 B:                                813
+  0 barriers (dense):                                  807  (NO execution-drain component)
+  1 sparse buffer whole-size 6.6 GB (D5C_SPARSE=1):   1075
+  0 barriers (sparse):                                 995  (sparse access costs ~190 ms)
+Conclusions:
+- Cost is per-buffer-OBJECT sync (~140 us x extra buffers x bars), size-free,
+  but ONLY a single DENSE buffer is cheap; 2 dense buffers pay full tax.
+- One dense buffer for the whole arena is impossible (6.6 GB > 4.29 GiB
+  allocation cap). Sparse single buffer kills the tax but pays it back in
+  access throughput. NET-ZERO - kept behind D5C_SPARSE=1 as a retestable.
+- Dependency-precise scoping would gain NOTHING: removing barriers entirely
+  (807) ~= tiny-barrier (813) - there is no drain to remove, and with >=2
+  buffers any barrier costs the same regardless of range/count details.
+- What the tax was hiding: the REAL in-kernel per-frame split at 1080p
+  (tiny-barrier probe, prof v6): gemm 382, cosw 169, ew 44, part 43,
+  pool 39, upm 38, gather 37, trans 37, smaxw 17 (pass-3 smaxw kernel was
+  fine - barrier masked it), smaxg 1.4, front-end ~10. SUM ~808 = the floor.
+- Gotcha: per-dispatch CSV timestamps WITHOUT barriers are 50x garbage on
+  this driver (timestamps need the barrier ordering). Never profile no-bar.
+- The only remaining barrier-adjacent win would be <4.3 GB arena (single
+  dense buffer): needs ~2.3 GB scratch shrink (L0 attention batching etc) -
+  deferred, high effort, race-audit risk.
+
+## Correctness fixes (this pass, validated before the GPU incident)
+1. REVERTED pass 3 (083eda2) cosine_win/softmax shaders: numerically broken
+   (head meandiff 0.66, uncorrelated). Proven via torch arbitration: running
+   work/_ref_test/dump_torch_f1.py on work/_m9b_cmp/native_crop.bmp reproduces
+   golden_head.bin BIT-EXACT (torch==goldens; the live chain was the liar).
+   Shaders now at the 454209d state; validation PASSes with the exact
+   expected 0.008265/0.007924/0.008648, 5x selftest head dumps md5-identical.
+2. spv staging trap FIXED STRUCTURALLY: d5c_stage_shaders used POST_BUILD
+   copies (run only on exe RELINK). Shader-only commits never restage -> the
+   pass-3 selftest ran the PREVIOUS shaders and "validated" them. Now the
+   copies are OUTPUT-based custom commands in a <target>_spv staging target
+   the exe depends on (reconfigure happened; works).
+3. Helpers: dlss5/m11d/_run_detach.py (detached launcher + log poll; usage
+   python _run_detach.py LOG TIMEOUT "expected" -- EXE args...; the decisive
+   signal is the expected line in the log, exit codes lie after TDR) and
+   dlss5/m11d/_validate.py (numpy compare vs goldens, ASCII).
+
+## Measured 1080p split (extent 1920x1088, median of 20, prof v6) - SUPERSEDED by the real in-kernel split above
+gemm 410 ms | smaxw 205 | cosw 184 | ew 44 | part 43 | trans 40 | pool 40 |
+gather 38 | upm 37 | smaxg 13 | front-end ~9. Frame total 1059-1083 ms.
+NOTE: this table was BARRIER-DRAIN attribution, not kernel cost. The barrier
+tax lands on whichever family follows the biggest writes. Real kernel costs
+are in the autopsy section.
+
+## Next levers (ranked, after GPU recovery)
+1. GEMM K-loop pipelining (gemm.comp, 382 ms real): no-prefetch K loop,
+   1 subgroup/workgroup, 16x32 tile. (a) software-pipeline prefetch k+1
+   (accumulation order unchanged -> bit-exact), (b) 2-4 subgroups on distinct
+   M tiles, (c) per-shape tiles via GEMM_RN. Fat convs (2088960,128,32)
+   ~9.9 TF/s of ~30 peak. Expected 2-4x on 382 ms -> ~600-700 ms frame.
+2. cosw 169 ms real: pass-3-style vectorization DONE RIGHT this time (with
+   the staging fix the selftest actually tests changes now). Verify per-shape
+   in the prof CSV before/after; smaxw's 17 ms shows the shape to aim for.
+3. Middle class ~236 ms (ew/part/pool/upm/gather/trans, all ~35-45 us x ~1240
+   dispatches): latency-bound small kernels; fusion candidates (part+cosw?
+   ew into gemm epilogue?) - bigger design work.
+4. Honest framing for the owner: floor ~808 ms + perfect levers 1-3 plausibly
+   lands ~450-550 ms (~2 fps). 15-30 fps needs ~20-40x and will NOT come
+   from kernel work - precision experiments (fp16 accumulate, re-baselined
+   tolerances vs torch) or cinematic-demo mode remain the structural options.
+
+## GPU incident (OPEN - owner action)
+~13:00 PDT 2026-09-23: after builds allocating a 3800 MB device buffer
+(CHUNK_CAP experiment), chain numerics went nondeterministically wrong on
+every configuration - sparse/dense, 2/3 buffers, both enumerated devices,
+clean HEAD, AND an exact rebuild of a config that passed 5x bit-identical
+40 minutes earlier. featV stays golden-exact (small buffers OK), benches stay
+fast/stable, garbage varies run to run. Code exonerated by A/B; persistent
+cross-process state points at a driver page-table corruption from the
+near-cap allocation. ACTION: reload the Arc driver or reboot the VM when
+convenient (Sunshine/Moonlight drop for a minute). Then: _validate.py must
+PASS again, re-run one sparse-vs-dense bench pair, then GEMM pipelining.
+
+## Hard gotchas (do not rediscover) - additions this pass
+- STALE-SPV TRAP (fixed, but understand it): any shader-only change now
+  restages via the <target>_spv dependency, but OTHER consumers of
+  d5c_stage_shaders must reconfigure to get the fix. If selftest numbers are
+  bit-identical across a shader change, suspect staging, not magic.
+- CHUNK_CAP above 3500 MB: SILENT numeric corruption on this driver (3800
+  measured broken). Do not raise. (May be related to the incident above.)
+- CSV profiler timestamps are garbage without intervening barriers.
+- Validation arbitration procedure when live != golden: run the torch
+  reference (work/_ref_test/dump_torch_f1.py <bmp> <outdir>, needs
+  PYTHONPATH=work/mlx-dlss/python + .venv) - torch==golden means live is the
+  liar; torch!=golden means stale goldens.
+- Device enumeration order is NOT stable process-to-process here; two
+  same-name B50s enumerate; D5C_DEV_SKIP=N selects the N-th.
+
+## Commits (this pass)
+- (pending) revert pass-3 shaders + spv staging fix + helpers + docs
+- (pending) sparse arena opt-in (D5C_SPARSE), sparseBinding enable,
+  D5C_DEV_SKIP device select, chunked upload
+
+## Previous status (2026-09-23 ~12:10) - M10 pass 2/3 state
 
 ## Commits (this session)
 - 454209d M10 pass 2: ChainProf per-dispatch profiler + m11d --bench +

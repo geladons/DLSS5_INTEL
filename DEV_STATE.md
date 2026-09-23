@@ -1,4 +1,74 @@
-# DEV_STATE.md - where we are (updated 2026-09-23 ~10:10 by Kimi)
+# DEV_STATE.md - where we are (updated 2026-09-23 ~13:30 by Kimi)
+
+## One-line status
+M10 pass 4 (2026-09-23 ~12:15-13:30): the barrier question is MEASURED TO DEATH
+and the original "barrier scoping" plan is dead - see HANDOFF_M10.md "M10 pass 4".
+Two real fixes shipped: (1) pass-3 shaders (cosine_win/softmax) were NUMERICALLY
+BROKEN and their "validation" was an artifact of a stale-spv POST_BUILD trap
+(now fixed structurally in d5c_stage_shaders); reverted, exact golden meandiffs
+restored. (2) Barrier tax measured: ~276 ms/frame at 1080p, but it only
+disappears for exactly ONE dense VkBuffer (impossible: arena 6.6 GB > 4 GiB
+allocation cap) - sparse single buffer is net-zero (kills the tax but costs
+~same in access throughput), 2-buffer dense is no better than 3.
+INCIDENT: after a CHUNK_CAP 3800 MB experiment (~13:00) the GPU/driver entered
+a degraded state - selftest flips between PASS and varying garbage on code that
+passed 5x bit-identical 40 min earlier, on BOTH enumerated devices. Needs
+driver reload or reboot (OWNER ACTION - Sunshine will drop for a minute).
+Chain perf unchanged (1083 ms @1080p, 0.91 fps). Next real lever: GEMM
+K-loop pipelining (gemm 382 ms of real in-kernel time per frame).
+
+## M10 pass 4 (2026-09-23 ~12:15-13:30) - barrier autopsy + two fixes + GPU incident
+0. Reproduced baseline: --bench 20 1920x1088 -> chain median 1083 ms (handoff
+   said 1059-1063; run-to-run spread ~30 ms covers it). All benches detached
+   via dlss5/m11d/_run_detach.py (new helper, Popen DETACHED + log poll).
+1. Probes (throwaway bar() variants, perf-only):
+   - 256-byte single barrier:      chain 813 ms  (-270 ms)
+   - NO barrier at all:            chain 807 ms  (no execution-drain component!)
+   - 1 dense buffer whole (2.9 GB): chain 797 ms (single barrier free at ANY size)
+   - 1 sparse buffer whole (6.6 GB): chain 1075 ms (net-zero vs 1083 baseline)
+   - 0 barriers on sparse:         chain 995 ms (sparse access itself costs ~190 ms)
+   - 2 dense buffers (3800 cap):   chain 1078 ms (no gain) + SILENTLY BROKEN
+     numerics (see incident) - do not raise CHUNK_CAP above 3500 MB.
+   Conclusion: tax = per-buffer-object sync (~140 us x 2 extra buffers x ~1260
+   bars); no dependency-scoping win available (no drain); single dense buffer
+   impossible at 1080p; sparse is a wash -> lever 1 CLOSED with measured data.
+   The real in-kernel split (from the tiny-barrier probe, trustworthy): gemm
+   382 ms, cosw 169, ew 44, part 43, pool 39, upm 38, gather 37, trans 37,
+   smaxw 17 (pass-3 kernel rewrite DID work - it was the barrier masking it),
+   rest ~12. NOTE: CSV timestamps WITHOUT barriers are garbage on this driver
+   (50x inflated) - never profile a no-barrier build.
+2. CORRECTNESS FIX 1: commit 083eda2 (pass-3 cosine_win/softmax rewrite) is
+   numerically broken: selftest head meandiff 0.66 (uncorrelated vs torch;
+   verified by re-running the torch reference on work/_m9b_cmp/native_crop.bmp
+   with work/_ref_test/dump_torch_f1.py - torch reproduces golden_head.bin
+   BIT-EXACT, so goldens are fine and the live chain was wrong). Root cause of
+   the false pass-3 "validation": d5c_stage_shaders used POST_BUILD copies
+   which only run when the exe RELINKS; pass 3 touched shaders only -> stale
+   spv -> the selftest validated the OLD shaders. Identical metrics were the
+   tell (again). Fixed structurally: copies are now OUTPUT-based custom
+   commands feeding a <target>_spv staging target that the exe depends on.
+   Shaders reverted to the 454209d state; validation PASS with the exact
+   expected meandiffs 0.008265/0.007924/0.008648, 5x selftest bit-identical.
+3. PERF EXPERIMENT (kept, opt-in): single sparse VkBuffer for the whole arena
+   (arena.cpp chainAllocSparse, env D5C_SPARSE=1). Net-zero at 1080p on this
+   driver; retest if the Arc driver improves. Sparse also required
+   VkContext to enable sparseBinding and the queue family to carry
+   VK_QUEUE_SPARSE_BINDING_BIT (both wired, with fallback). D5C_DEV_SKIP=N env
+   picks the N-th enumerated device (two same-name B50s enumerate; order is
+   not stable across processes).
+4. INCIDENT (open, owner action needed): ~13:00, after builds that allocated a
+   3800 MB device buffer, chain numerics went nondeterministically wrong on
+   EVERY config (sparse, dense 2/3-buffer, both devices, clean HEAD) while
+   featV stayed golden-exact and benches stayed fast and stable. A binary
+   config that passed 5x bit-identical at 12:55 fails at 13:10 unchanged.
+   Code is exonerated (A/B rebuild of the exact PASS state still fails); the
+   3800-MB allocation is the prime suspect for a driver page-table corruption
+   that persists across processes. Fix: reload the Arc driver or reboot the VM
+   (Sunshine/Moonlight will drop for a minute - owner to choose the moment).
+   After recovery: re-run `python dlss5/m11d/_validate.py` target state PASS,
+   then re-bench sparse-vs-dense once, then GEMM pipelining.
+
+## Previous status (2026-09-23 ~10:10) - M12a live on GTA5
 
 ## One-line status
 M12a LIVE ON GTA5 ENHANCED: dlss5\m12-dxgi dxgi.dll proxy ships DX12 present

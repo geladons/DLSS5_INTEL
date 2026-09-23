@@ -61,7 +61,8 @@ public:
     VkDeviceSize scratchBytes = 0;   // ar.off — scratch after the pack
     VkDeviceSize totalBytes = 0;     // packTotal + scratch
 
-    struct Chunk { VkDeviceSize start = 0, end = 0; ChainBuf b; uint64_t baseA = 0; };
+    struct Chunk { VkDeviceSize start = 0, end = 0; ChainBuf b; uint64_t baseA = 0;
+                   std::vector<VkDeviceMemory> sparseMem; };   // M10: multi-alloc backing of one sparse buffer
     std::vector<Chunk> chunks;
 };
 
