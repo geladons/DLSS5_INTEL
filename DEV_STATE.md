@@ -1,22 +1,51 @@
-# DEV_STATE.md - where we are (updated 2026-09-22 ~16:40 by Kimi)
+# DEV_STATE.md - where we are (updated 2026-09-22 ~21:00 by Kimi)
 
 ## One-line status
-M9B SHIPPED: the live app now runs the REAL 71-block DLSSNR U-Net per-pixel at
-the vendor-aligned extent of the target window (e.g. 1309x1070 region ->
-1344x1088 network), replacing the old 288-token miniature chain. Validated
-against the torch reference on the live capture: features BIT-EXACT, composed
-output 50.1 dB PSNR vs reference (frame-1 head) / 46.9 dB vs the actual
-on-screen verify frame - at/above the m9-unet offline baseline (43.5 dB).
-Root-cause kill this session: driver-measured rgba8-on-BGRA texel reversal -
-decode/fbcancel read R as B (the network was fed R/B-swapped colour; encode
-double-swapped it back, so screens looked "fine" while the model saw garbage).
-Also: arena now chunked (Arc driver caps ONE VkDeviceMemory at ~4 GiB;
-window-extent arena is ~4.7 GB -> 2 chunks, BDA resolved per offset).
+M11 v0 DONE: the Windows Vulkan layer (dlss5\m11-layer, port of the reference
+nr_layer.c) intercepts vkcube's presents, roundtrips frames through a TCP
+daemon and writes them back - owner SEES a green rotating cube in the
+Moonlight stream. This is the post-overlay architecture: no desktop capture,
+no feedback decay, no click-through problems, stream-native visibility.
+Next: extract the 71-block chain from m8b-live main.cpp into a module and
+stand up the real daemon (m11d), then a real game via DXVK (owner has no GTA
+SA; the GTA IV window was a screenshot, not the game).
 
-OWNER: re-test with tools\RUN-DEMO.cmd (or runm8b.cmd --window anime --frames 45
---wiggle-idle 1). Expected: correct colours AND visible neural detail (check
-flower/hair texture vs native), no stripes over time, PASS in docs\m8b-live.log.
-Speed: ~800 ms/frame at 1344x1088 (chain-bound; M10 first pass done, see below).
+Why the pivot (owner call 2026-09-22 ~19:45): overlay mode with --echo-free 0
+shows a great first frame then the effect DECAYS each frame (fbcancel eats
+the residual through the capture loop) and clicks hit the overlay.
+Screen-level processing is the wrong level; the layer sits just above the
+driver instead.
+
+## M11 v0 session log (2026-09-22 ~19:50-21:00)
+1. Ported reference\dlss-nr-on-intel\src\layer\nr_layer.c (1064 lines) to
+   dlss5\m11-layer\nr_layer_win.c: pthread->CRITICAL_SECTION, Unix socket->
+   TCP 127.0.0.1:47990, access->_access, stderr->%TEMP%\nr_layer_win.log.
+   Semantics 1:1 incl. TRANSFER_SRC patch, idle/semaphore sync, live/photo
+   modes, UI mask. Built as C (MSVC C++: C2375 on the exported Vulkan names;
+   dllexport-after-declaration is a hard error in C too -> .def exports).
+   Gotchas: "interface" is an MSVC keyword (windows.h); logf collides with
+   the math intrinsic.
+2. Manifest VkLayer_dlssnr_win.json: THIS LOADER REQUIRES disable_environment
+   (skips the layer without it); enable_environment gating never fired, so
+   the layer is always-on unless DISABLE_NR_LAYER=1. Registered via HKCU
+   ImplicitLayers (no admin needed). Absolute library_path.
+3. vkcube validation: capture-to-file decoded perfectly (500x500 fmt44,
+   LunarG cube pixels). daemon_stub.py (green tint) roundtrip: daemon in/out
+   means correct, layer logged "processed 500x500" continuously, OWNER
+   CONFIRMED green rotating cube in the stream. Local GDI AND local DDA show
+   windowed Vulkan flip windows BLACK on this host (MPO) - verify Vulkan
+   windows only via the owner's stream or the layer's own readback.
+
+## M9b status (superseded by M11 but still the validation base)
+M9B SHIPPED: the live app runs the REAL 71-block DLSSNR U-Net per-pixel at
+the vendor-aligned extent of the target window (e.g. 1309x1070 region ->
+1344x1088 network). Validated against the torch reference: features
+BIT-EXACT, composed output 50.1 dB PSNR vs reference (frame-1 head) /
+46.9 dB vs the on-screen verify frame. Root-cause kill: driver-measured
+rgba8-on-BGRA texel reversal - decode/fbcancel read R as B; encode writes
+identity RGBA. Arena chunked (Arc caps one VkDeviceMemory at ~4 GiB).
+Speed: ~800 ms/frame at 1344x1088 (chain-bound; M10 pass 1 = no gain, the
+lever is GEMM kernel efficiency, 0.6-2.9 TF/s vs ~30 TF/s hw).
 
 ## Owner-visibility fix + expected-effect calibration (2026-09-22 ~19:10)
 - ROOT CAUSE of "nothing on screen": the owner watches via Moonlight
