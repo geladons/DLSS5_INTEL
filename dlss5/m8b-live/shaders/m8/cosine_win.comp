@@ -25,10 +25,8 @@
 
 layout(local_size_x = 32) in;
 
-layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf  { float v[]; };
-layout(buffer_reference, scalar, buffer_reference_align = 16) buffer Float4Buf { vec4 v4[]; };
-layout(buffer_reference, scalar, buffer_reference_align = 16) buffer HalfBuf   { float16_t v[]; };
-layout(buffer_reference, scalar, buffer_reference_align = 16) buffer Half4Buf  { f16vec4 v4[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf { float v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer HalfBuf  { float16_t v[]; };
 
 layout(push_constant, scalar) uniform Push {
     FloatBuf a;      // proj fp32 [W*64, 3C]
@@ -57,26 +55,13 @@ void main() {
     uint outBase = ((w * pc.hcount + head) * 64u + t) * 32u;
 
     if (kind == 2u) {
-        // V: plain e4m3 publish. rd/outBase are multiples of 4 (C mult of 32,
-        // out stride 32) -> vec4/f16vec4 accesses, values identical.
-        for (uint i = 0u; i < 32u; i += 4u) {
-            vec4 a4 = Float4Buf(pc.a).v4[(rd + i) >> 2];
-            Half4Buf(pc.c).v4[(outBase + i) >> 2] =
-                f16vec4(float16_t(e4m3(a4.x)), float16_t(e4m3(a4.y)),
-                        float16_t(e4m3(a4.z)), float16_t(e4m3(a4.w)));
-        }
+        for (uint i = 0u; i < 32u; i++)
+            pc.c.v[outBase + i] = float16_t(e4m3(pc.a.v[rd + i]));
         return;
     }
 
-    // Q/K: 32 half-rounded values via 8 vec4 loads (same values as scalar).
     float h[32];
-    for (uint i = 0u; i < 32u; i += 4u) {
-        vec4 a4 = Float4Buf(pc.a).v4[(rd + i) >> 2];
-        h[i]      = half_round(a4.x);
-        h[i + 1u] = half_round(a4.y);
-        h[i + 2u] = half_round(a4.z);
-        h[i + 3u] = half_round(a4.w);
-    }
+    for (uint i = 0u; i < 32u; i++) h[i] = half_round(pc.a.v[rd + i]);
 
     float partial[4][2];
     for (uint lane = 0u; lane < 4u; lane++)
@@ -96,19 +81,9 @@ void main() {
     float reciprocal = half_round(inversesqrt(norm));
     float scale = 1.0;
     if (kind == 0u) scale = half_round(pc.d.v[head]);
-    for (uint i = 0u; i < 32u; i += 4u) {
-        float v0 = hmul(h[i],      reciprocal);
-        float v1 = hmul(h[i + 1u], reciprocal);
-        float v2 = hmul(h[i + 2u], reciprocal);
-        float v3 = hmul(h[i + 3u], reciprocal);
-        if (kind == 0u) {
-            v0 = hmul(v0, scale);
-            v1 = hmul(v1, scale);
-            v2 = hmul(v2, scale);
-            v3 = hmul(v3, scale);
-        }
-        Half4Buf(pc.c).v4[(outBase + i) >> 2] =
-            f16vec4(float16_t(e4m3(v0)), float16_t(e4m3(v1)),
-                    float16_t(e4m3(v2)), float16_t(e4m3(v3)));
+    for (uint i = 0u; i < 32u; i++) {
+        float value = hmul(h[i], reciprocal);
+        if (kind == 0u) value = hmul(value, scale);
+        pc.c.v[outBase + i] = float16_t(e4m3(value));
     }
 }

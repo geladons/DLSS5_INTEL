@@ -64,7 +64,11 @@ void ChainRecorder::destroy(const VkCtx& c) {
 }
 
 void ChainRecorder::bar(VkCommandBuffer cb) {
-    // M9b: full compute barrier across every arena chunk.
+    // M9b: full compute barrier across every arena chunk. M10 finding: on
+    // this Arc driver each ADDITIONAL buffer barrier in the call costs
+    // ~143 us regardless of size, so the arena is allocated as ONE sparse
+    // buffer whenever possible (see arena.cpp) and this loop emits exactly
+    // one VkBufferMemoryBarrier in the hot path.
     VkBufferMemoryBarrier bs[8];
     uint32_t n = 0;
     for (auto& ch : ar_->chunks) {
