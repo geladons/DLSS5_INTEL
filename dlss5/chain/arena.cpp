@@ -4,6 +4,7 @@
 #include "arena.h"
 
 #include <algorithm>
+#include <cstdlib>
 
 namespace d5c {
 
@@ -165,6 +166,9 @@ void ChainArena::layout(const Stage st[7], uint64_t T6P, uint64_t packTotalIn,
                 ar.off / 1048576.0, totalBytes / 1048576.0);
 
     // Chunked split at slot boundaries (the weights pack rides chunk 0).
+    // M10 measured: 3500 MB works; 3800 MB SILENTLY breaks chain numerics
+    // (head meandiff 0.71/1.60/1.26 vs 0.008 expected) on this Arc driver
+    // while bench looks normal - keep the cap conservative, do not raise.
     const VkDeviceSize CHUNK_CAP = 3500ull * 1024 * 1024;
     chunks.clear();
     {
@@ -180,8 +184,108 @@ void ChainArena::layout(const Stage st[7], uint64_t T6P, uint64_t packTotalIn,
     }
 }
 
+// M10: try to back the whole arena with ONE sparse VkBuffer. Measured on
+// this Arc driver: each ADDITIONAL VkBufferMemoryBarrier in bar() costs
+// ~143 us regardless of size (3 buffers -> 1083 ms/frame, 1 -> 797 ms at
+// 1080p), while a single whole-buffer barrier is free. Sparse binding is
+// the only way to exceed maxMemoryAllocationSize (~4 GiB) with one buffer.
+// Returns false on any failure; caller falls back to per-chunk buffers.
+static bool chainAllocSparse(const VkCtx& c, VkDeviceSize total, ChainArena::Chunk& out) {
+    VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bci.size = (total + 65535) & ~(VkDeviceSize)65535;   // granularity-aligned
+    bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    bci.flags = VK_BUFFER_CREATE_SPARSE_BINDING_BIT;
+    if (vkCreateBuffer(c.dev, &bci, nullptr, &out.b.buf) != VK_SUCCESS) return false;
+
+    // No vkGetBufferSparseMemoryRequirements in modern headers (removed);
+    // buffer sparse granularity has been 64 KiB on every desktop GPU.
+    // vkGetBufferMemoryRequirements still reports memoryTypeBits/alignment.
+    VkMemoryRequirements req{};
+    vkGetBufferMemoryRequirements(c.dev, out.b.buf, &req);
+    const VkDeviceSize gran = 65536;
+    uint32_t mt = UINT32_MAX;
+    for (uint32_t i = 0; i < c.memProps.memoryTypeCount; ++i)
+        if ((req.memoryTypeBits & (1u << i)) &&
+            (c.memProps.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) { mt = i; break; }
+    if (mt == UINT32_MAX) { vkDestroyBuffer(c.dev, out.b.buf, nullptr); out.b.buf = VK_NULL_HANDLE; return false; }
+
+    const VkDeviceSize SPARSE_ALLOC_CAP = 3500ull * 1024 * 1024;   // same margin as CHUNK_CAP
+    const VkDeviceSize bufSize = bci.size;
+    std::vector<VkSparseMemoryBind> binds;
+    VkDeviceSize off = 0;
+    while (off < bufSize) {
+        VkDeviceSize sz = std::min(SPARSE_ALLOC_CAP, bufSize - off);
+        sz &= ~(gran - 1);
+        if (sz == 0) break;
+        VkMemoryAllocateFlagsInfo mafi{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO};
+        mafi.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+        VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        mai.pNext = &mafi;
+        mai.allocationSize = sz;
+        mai.memoryTypeIndex = mt;
+        VkDeviceMemory mem = VK_NULL_HANDLE;
+        if (vkAllocateMemory(c.dev, &mai, nullptr, &mem) != VK_SUCCESS) break;
+        VkSparseMemoryBind b{};
+        b.resourceOffset = off;
+        b.size = sz;
+        b.memory = mem;
+        binds.push_back(b);
+        out.sparseMem.push_back(mem);
+        off += sz;
+    }
+    if (off < bufSize) {   // roll back
+        for (auto m : out.sparseMem) vkFreeMemory(c.dev, m, nullptr);
+        out.sparseMem.clear();
+        vkDestroyBuffer(c.dev, out.b.buf, nullptr);
+        out.b.buf = VK_NULL_HANDLE;
+        return false;
+    }
+    VkSparseBufferMemoryBindInfo bbi{out.b.buf, (uint32_t)binds.size(), binds.data()};
+    VkBindSparseInfo si{VK_STRUCTURE_TYPE_BIND_SPARSE_INFO};
+    si.bufferBindCount = 1;
+    si.pBufferBinds = &bbi;
+    VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    VkFence fence = VK_NULL_HANDLE;
+    VkResult fr = vkCreateFence(c.dev, &fci, nullptr, &fence);
+    VkResult br = vkQueueBindSparse(c.queue, 1, &si, fence);
+    VkResult wr = VK_SUCCESS;
+    if (br == VK_SUCCESS && fr == VK_SUCCESS) wr = vkWaitForFences(c.dev, 1, &fence, VK_TRUE, UINT64_MAX);
+    if (fence) vkDestroyFence(c.dev, fence, nullptr);
+    if (br != VK_SUCCESS || wr != VK_SUCCESS) {
+        for (auto m : out.sparseMem) vkFreeMemory(c.dev, m, nullptr);
+        out.sparseMem.clear();
+        vkDestroyBuffer(c.dev, out.b.buf, nullptr);
+        out.b.buf = VK_NULL_HANDLE;
+        return false;
+    }
+    out.b.size = total;
+    return true;
+}
+
 void ChainArena::allocDevice(const VkCtx& c) {
-    for (auto& ch : chunks) chainAllocDev(c, ch.end - ch.start, ch.b);
+    // Sparse single-buffer path: NET-ZERO on this Arc driver (measured M10):
+    // it removes the per-extra-buffer barrier tax (~270 ms/frame at 1080p)
+    // but sparse pages cost ~190 ms/frame of access throughput (no-barrier
+    // chain: dense 807 ms vs sparse 995 ms; with barriers 1083 vs 1075).
+    // Kept behind D5C_SPARSE=1 as a retestable experiment (driver may
+    // improve); dense chunked buffers are the default.
+    bool wantSparse = false;   // dense chunked buffers are the default; D5C_SPARSE=1 opts in
+    if (const char* s = std::getenv("D5C_SPARSE")) wantSparse = std::atoi(s) != 0;
+    if (wantSparse && c.sparseBinding && chunks.size() > 1) {
+        Chunk one{chunks[0].start, chunks.back().end, {}, 0, {}};
+        if (chainAllocSparse(c, one.end - one.start, one)) {
+            std::printf("[mem] arena: single sparse buffer %.2f MB (%zu device allocs)\n",
+                        (one.end - one.start) / 1048576.0, one.sparseMem.size());
+            chunks.clear();
+            chunks.push_back(one);
+        } else {
+            std::printf("[mem] arena: sparse buffer FAILED, falling back to %zu device buffers\n",
+                        chunks.size());
+        }
+    }
+    for (auto& ch : chunks) if (!ch.b.buf) chainAllocDev(c, ch.end - ch.start, ch.b);
     std::printf("[mem] arena chunked: %zu device buffers (cap %.2f GiB):", chunks.size(),
                 3500ull * 1024 * 1024 / 1073741824.0);
     for (auto& ch : chunks) std::printf("  %.2f MB", (ch.end - ch.start) / 1048576.0);
@@ -194,6 +298,8 @@ void ChainArena::allocDevice(const VkCtx& c) {
 
 void ChainArena::freeDevice(const VkCtx& c) {
     for (auto& ch : chunks) {
+        for (auto m : ch.sparseMem) vkFreeMemory(c.dev, m, nullptr);
+        ch.sparseMem.clear();
         if (ch.b.buf) vkDestroyBuffer(c.dev, ch.b.buf, nullptr);
         if (ch.b.mem) vkFreeMemory(c.dev, ch.b.mem, nullptr);
         ch.b = ChainBuf{};
@@ -202,17 +308,23 @@ void ChainArena::freeDevice(const VkCtx& c) {
 }
 
 void ChainArena::upload(const VkCtx& c, VkCommandPool pool, VkFence fence, const char* hostImg) const {
-    for (auto& ch : chunks) {   // per-chunk staging upload (alloc cap)
-        ChainBuf stg;
-        chainAllocHost(c, ch.end - ch.start, stg);
-        std::memcpy(stg.mapped, hostImg + ch.start, (size_t)(ch.end - ch.start));
-        VkCommandBuffer up = BeginOneShot(c, pool);
-        VkBufferCopy cp1{0, 0, ch.end - ch.start};
-        vkCmdCopyBuffer(up, stg.buf, ch.b.buf, 1, &cp1);
-        SubmitOneShot(c, pool, fence, up);
-        if (stg.mapped) vkUnmapMemory(c.dev, stg.mem);
-        vkDestroyBuffer(c.dev, stg.buf, nullptr);
-        vkFreeMemory(c.dev, stg.mem, nullptr);
+    // Staged in sub-ranged pieces: a single sparse arena chunk can exceed
+    // what one host staging buffer should allocate at once (6.6 GB at 1080p).
+    const VkDeviceSize PIECE = 1024ull * 1024 * 1024;
+    for (auto& ch : chunks) {
+        for (VkDeviceSize off = ch.start; off < ch.end; off += PIECE) {
+            VkDeviceSize sz = std::min(PIECE, ch.end - off);
+            ChainBuf stg;
+            chainAllocHost(c, sz, stg);
+            std::memcpy(stg.mapped, hostImg + off, (size_t)sz);
+            VkCommandBuffer up = BeginOneShot(c, pool);
+            VkBufferCopy cp1{0, off - ch.start, sz};
+            vkCmdCopyBuffer(up, stg.buf, ch.b.buf, 1, &cp1);
+            SubmitOneShot(c, pool, fence, up);
+            if (stg.mapped) vkUnmapMemory(c.dev, stg.mem);
+            vkDestroyBuffer(c.dev, stg.buf, nullptr);
+            vkFreeMemory(c.dev, stg.mem, nullptr);
+        }
     }
 }
 

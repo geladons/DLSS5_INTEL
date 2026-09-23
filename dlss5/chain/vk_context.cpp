@@ -3,6 +3,8 @@
 // ============================================================================
 #include "vk_context.h"
 
+#include <cstdlib>
+
 namespace d5c {
 
 static std::string LuidStr(const LUID& l) {
@@ -34,9 +36,12 @@ bool VkContext::create(const VkContextConfig& cfg) {
     vk.qf = UINT32_MAX;
     for (uint32_t i = 0; i < nq; ++i)
         if ((qps[i].queueFlags & VK_QUEUE_COMPUTE_BIT) && (qps[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)) {
-            vk.qf = i; break;
+            vk.qf = i;
+            vk.sparseBinding = (qps[i].queueFlags & VK_QUEUE_SPARSE_BINDING_BIT) != 0;
+            break;
         }
     if (vk.qf == UINT32_MAX) { std::fprintf(stderr, "[FAIL] no compute+graphics queue\n"); return false; }
+    std::printf("[VK] queue family %u sparseBinding=%d\n", vk.qf, (int)vk.sparseBinding);
     vkGetPhysicalDeviceMemoryProperties(vk.pd, &vk.memProps);
     return createDevice(cfg);
 }
@@ -114,6 +119,7 @@ bool VkContext::createDevice(const VkContextConfig& cfg) {
     VkPhysicalDeviceFeatures fe{};
     fe.shaderInt64 = VK_TRUE;
     fe.shaderInt16 = VK_TRUE;
+    fe.sparseBinding = vk.sparseBinding ? VK_TRUE : VK_FALSE;
     VkPhysicalDeviceVulkan11Features f11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
     f11.storageBuffer16BitAccess = VK_TRUE;
     VkPhysicalDeviceVulkan12Features f12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
