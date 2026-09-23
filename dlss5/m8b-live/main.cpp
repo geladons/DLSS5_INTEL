@@ -134,7 +134,12 @@
 
 using Microsoft::WRL::ComPtr;
 
-static constexpr uint32_t W = 2560, H = 1440;
+// Frame size. Defaults match the dev desktop; CapBuildFromPick re-pins both
+// from the live DDA mode at startup. A runtime display-mode change (game
+// going fullscreen at another resolution) is NOT survivable in place -
+// every buffer/extent derives from these - so recoverAccessLost respawns
+// the process instead; the child re-pins to the new mode at init.
+static uint32_t W = 2560, H = 1440;
 
 // ----------------------------------------------------------- f16 <-> f32 ---
 // (from m8-full-chain main.cpp — host-side widening of the f16 side tables)
@@ -503,9 +508,10 @@ static bool CapBuildFromPick(Cap& c) {
     std::printf("[DDA] DuplicateOutput active: %ux%u format=%d rotation=%d origin=(%d,%d)\n",
                 (unsigned)dd.ModeDesc.Width, (unsigned)dd.ModeDesc.Height,
                 (int)dd.ModeDesc.Format, (int)dd.Rotation, c.outX, c.outY);
-    if (dd.ModeDesc.Width != W || dd.ModeDesc.Height != H ||
-        dd.ModeDesc.Format != DXGI_FORMAT_B8G8R8A8_UNORM) {
-        std::fprintf(stderr, "[FAIL] expected %ux%u B8G8R8A8\n", W, H);
+    W = dd.ModeDesc.Width; H = dd.ModeDesc.Height;   // pin to the LIVE mode
+    if (dd.ModeDesc.Format != DXGI_FORMAT_B8G8R8A8_UNORM) {
+        std::fprintf(stderr, "[FAIL] expected B8G8R8A8, got format=%d\n",
+                     (int)dd.ModeDesc.Format);
         return false;
     }
     D3D11_TEXTURE2D_DESC sd{};
@@ -1005,6 +1011,17 @@ int main(int argc, char** argv) {
     using clk = std::chrono::steady_clock;
     const auto tStart = clk::now();
     setvbuf(stdout, nullptr, _IONBF, 0);   // live diagnostics: crash/hang forensics
+    // Respawned child (display-mode change): the launcher log handle is not
+    // inheritable, so our stdout would write into a void. Re-anchor to our
+    // own log so the respawn chain stays observable.
+    if (std::getenv("D5C_RESPAWN")) {
+        CreateDirectoryA("out", nullptr);
+        std::freopen("out\\m8b_respawn.log", "a", stdout);
+        std::freopen("out\\m8b_respawn.log", "a", stderr);
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        std::printf("[respawn] child up, pid=%lu, logging to out\\m8b_respawn.log\n",
+                    (unsigned long)GetCurrentProcessId());
+    }
     int cpuInfo[4];
     __cpuid(cpuInfo, 1);
     g_hasF16C = (cpuInfo[2] & (1 << 29)) != 0;
@@ -2842,6 +2859,53 @@ int main(int argc, char** argv) {
         Cap np;
         if (!CapPickInto(np, outPref.empty() ? nullptr : outPref.c_str())) {
             std::fprintf(stderr, "[FAIL] %s-mode ACCESS_LOST: no attached output to re-pick\n", mode);
+            return false;
+        }
+        // Display-mode change (e.g. a game going fullscreen at another
+        // resolution): every size below (letterbox, extent, GPU buffers,
+        // overlay) was pinned at startup, and a DDA-only rebuild cannot
+        // remap them - the loop would hold the last presented frame forever
+        // ("frozen overlay"). Respawn ourselves with the same command line;
+        // the child re-pins W/H from the live mode at init.
+        DXGI_OUTPUT_DESC od{};
+        np.output->GetDesc(&od);
+        const uint32_t nW = (uint32_t)(od.DesktopCoordinates.right - od.DesktopCoordinates.left);
+        const uint32_t nH = (uint32_t)(od.DesktopCoordinates.bottom - od.DesktopCoordinates.top);
+        if (nW != W || nH != H) {
+            std::printf("[capture] display mode %ux%u -> %ux%u: pinned geometry stale, "
+                        "respawning self\n", W, H, nW, nH);
+            std::fflush(stdout);
+            // Rebuild the command line from the ABSOLUTE module path + our
+            // args: GetCommandLineW may carry a RELATIVE argv[0] (the exe
+            // dir is our CWD), which the child cannot resolve -> error 2.
+            wchar_t exe[MAX_PATH];
+            GetModuleFileNameW(nullptr, exe, MAX_PATH);
+            std::wstring cl = L"\"";
+            cl += exe;
+            cl += L"\"";
+            for (int ai = 1; ai < argc; ++ai) {
+                cl += L" ";
+                cl += std::wstring(argv[ai], argv[ai] + strlen(argv[ai]));
+            }
+            std::vector<wchar_t> clBuf(cl.begin(), cl.end());
+            clBuf.push_back(0);
+            // Mark the child (it re-anchors its own log; the launcher log
+            // handle is not inheritable) and let the mode settle before the
+            // child's init reads it - spawning mid-flip pins the stale mode
+            // and costs a second respawn.
+            SetEnvironmentVariableW(L"D5C_RESPAWN", L"1");
+            Sleep(2000);
+            STARTUPINFOW si{sizeof(si)};
+            PROCESS_INFORMATION pi{};
+            if (CreateProcessW(nullptr, clBuf.data(), nullptr, nullptr, TRUE, 0, nullptr,
+                               nullptr, &si, &pi)) {
+                CloseHandle(pi.hProcess);
+                CloseHandle(pi.hThread);
+                std::exit(0);
+            }
+            std::fprintf(stderr, "[FAIL] respawn failed (%lu) - stopping\n",
+                         (unsigned long)GetLastError());
+            g_stop.store(true);
             return false;
         }
         if (np.adapterLuid.LowPart == curAdapterLuid.LowPart &&
