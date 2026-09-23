@@ -22,5 +22,5 @@ if "%~1"=="" (
   exit /b 1
 )
 cd /d C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m8b-live\build\Release
-m8blive.exe --frames 1000000 --window "%~1" --gain 1.0 --colorpass 1
+m8blive.exe --frames 1000000 --window "%~1" --gain 1.0 --colorpass 1 --echo-free 0
 pause

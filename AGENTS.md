@@ -44,6 +44,12 @@ DESKTOP-285INKS (Win 11), GPU passed through. Owner plays games via Sunshine
 - Injected MODIFIERS are dropped on this host (ctrl+alt combos via PostMessage
   fail); SendInput-based input (ui.ps1 move/click, WiggleThread) WORKS.
 - Sunshine coexists with our DuplicateOutput (multiple duplications allowed).
+- **THE OWNER WATCHES THIS DESKTOP THROUGH THE MOONLIGHT STREAM** (Sunshine
+  DDA capture 2560x1440). A WDA_EXCLUDEFROMCAPTURE overlay is INVISIBLE in
+  that stream: after echo-free shipped (2026-09-22 ~11:10) the owner saw
+  "absolutely nothing" while all readback metrics were green. Owner-facing
+  runs MUST pass `--echo-free 0` (fbcancel accumulate path, bounded deltas).
+  Conversely, echo-free mode is still right for clean validation readbacks.
 - Machine: real GPU = Arc Pro B50 (PCI DEV_E212, LUID ...95a2, driver 101.8805,
   Vulkan 1.4.348, coopmat rev2). "Arc Pro B500" in WMI = virtual root display,
   IGNORE for compute. Primary display \\.\DISPLAY5 2560x1440 @ (0,0). QEMU basic
