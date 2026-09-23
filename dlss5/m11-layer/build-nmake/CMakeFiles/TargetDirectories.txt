@@ -1,3 +1,0 @@
-C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m11-layer/build-nmake/CMakeFiles/nr_layer_win.dir
-C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m11-layer/build-nmake/CMakeFiles/edit_cache.dir
-C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m11-layer/build-nmake/CMakeFiles/rebuild_cache.dir
