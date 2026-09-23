@@ -127,6 +127,26 @@ CTRL+ALT=X pause toggle, CTRL+ALT+Q full detach (in-place vtable restore).
    NEXT M10 targets (same scalar-disease class): smaxw 210 ms + cosw 182 ms
    (softmax.comp / cosine_win.comp: scalar loads, 2-pass softmax); then the
    gemm 408 ms (K-loop pipelining, multi-subgroup tiles).
+1b. DONE 2026-09-23 ~12:00 (M10 pass 3 - NEGATIVE RESULT, theory corrected):
+   cosine_win vec4 accesses + softmax lane-parallel-weights-in-shared (both
+   bit-exact validated, head meandiff identical 0.008265). ZERO perf change:
+   smaxw 205 ms / cosw 183 ms across THREE independent kernel rewrites that
+   cut in-kernel work 5-30x. CONCLUSION: the support-kernel time is NOT in
+   the kernels - it is the ~1260 full-arena bar() drains per frame (every
+   dispatch pair gets a memory barrier over ALL 8 arena chunks, VK_WHOLE_SIZE
+   each). Gather's 10.8x worked because its own cost was sector waste (16x),
+   overwhelming the fixed tax; latency/ALU-bound kernels cannot move until
+   the tax is removed. REAL NEXT LEVERS, in order:
+   (a) barrier scoping: bar() only the arena chunk(s) the next dispatch
+       actually touches (arena knows chunkOf(offset); scratch buffers oG2/oG3
+       are reused across blocks so consecutive dispatches often share chunks -
+       needs a dependency audit or it RACES; validate with repeated selftest +
+       stress bench). Expected: several hundred ms/frame.
+   (b) GEMM K-loop software pipelining + multi-subgroup tiles (gemm 410 ms
+       at ~10-60 TF/s effective; the fat conv shapes (2088960,128,32) run at
+       9.9 TF/s - ~2-4x plausible while keeping accumulation order ->
+       bit-exact).
+   (c) fuse the window-attn tail (gather already cheap at 38 ms; skip).
 2. M12c polish: async pipeline (capture thread) to unhook the present block,
    per-size engine warmup, HDR (R10G10B10A2) conversion if a game needs it
    (GTA5E ships B8G8R8A8, not hit).
