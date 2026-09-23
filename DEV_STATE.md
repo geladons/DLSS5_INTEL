@@ -1,15 +1,78 @@
-# DEV_STATE.md - where we are (updated 2026-09-23 ~00:10 by Kimi)
+# DEV_STATE.md - where we are (updated 2026-09-23 ~02:00 by Kimi)
 
 ## One-line status
-HANDED OFF to the next agent (cheaper model): docs\HANDOFF_M12.md carries
-the continuation prompt. State at handoff: the REAL 71-block DLSS 5 chain
-processes Vulkan presents live (m11-layer -> m11d -> chain module), 2178
-vkcube frames on the owner's stream, torch-validated. Demo stopped, GPU
-free. Next task M12: real game. Owner launched GTA5 in WINDOWED mode, but
-it is GTA5_Enhanced.exe (D:\Grand Theft Auto V Enhanced\) = DX12 + BattleEye
-- the Vulkan layer sees NOTHING there. Path A (recommended): GTA5 Legacy
-(DX11) + DXVK x64 dlls next to GTA5.exe. Path B (risky, BattleEye):
-Enhanced + vkd3d-proton, story mode only. Details in docs\HANDOFF_M12.md.
+M12a BUILT, VALIDATED AND DEPLOYED: dlss5\m12-dxgi dxgi.dll proxy now ships
+DX12 present frames to the m11d daemon (real 71-block DLSS 5 chain). Numeric
+selftest: single-pass processed dump mean|d| 7.1/255 vs solid-color golden
+(model-effect class), 400+ live roundtrips at 960x540, no crash. The proxy is
+deployed next to GTA5_Enhanced.exe (D:\Grand Theft Auto V Enhanced\dxgi.dll);
+m11d is RUNNING (start it with dlss5\m12-dxgi\_start_daemon.cmd). OWNER
+ACTION NEEDED: restart GTA5 Enhanced (windowed) and look at the stream.
+Expected: slideshow (~1 fps; chain ~700 ms at ~1K, ~930 ms at 1344x1088) and
+a SUBTLE model effect (calibrated mean|d| ~2-7/255). If BattleEye blocks the
+game from starting: dlss5\m12-dxgi\_undeploy.cmd, restart, tell Kimi (then we
+go M12b: GTA5 Legacy DX11 + DXVK x64 -> existing m11-layer).
+
+## M12a session log (2026-09-23 ~00:50-02:00)
+1. New module dlss5\m12-dxgi (OOP per AGENTS.md): m12_log (kernel32-only
+   file logger, %TEMP%\m12_dxgi.log, M12_LOG overrides), m12_client (TCP,
+   m11 wire protocol verbatim, port M12_PORT default 47990), m12_dx12
+   (M12Dx12Processor: readback/upload staging on the GAME's command queue
+   captured at CreateSwapChain (pDevice IS the ID3D12CommandQueue), fence
+   waits, resize handling, HDR formats logged + passed through), m12_hook
+   (per-object vtable COPY - never writes .rdata; factory entries
+   10/15/16/24, swapchain Present(8)/Present1(22 via IDXGISwapChain1 QI)),
+   m12_exports (CreateDXGIFactory* forwarded to system32 dxgi.dll by fully
+   qualified path; 19 internal DXGI helpers stubbed - never called by
+   games). Env: M12_LIVE (default 4), M12_DISABLE=1, M12_DUMP=path.bmp.
+2. GOTCHAS COSTING TIME (do not rediscover):
+   - CRT stdio (fopen/fprintf) inside this proxy CRASHES in DllMain context
+     as a game dependency dll. All logging is CreateFile/WriteFile. (The
+     exact CRT failure was never root-caused; suspect ucrt init order.)
+   - Git Bash tool LIES about child exit codes: plain `foo.exe` reported
+     127 while cmd-inner %errorlevel% was 0. Always verify via cmd.
+   - IDXGISwapChain::GetCurrentBackBufferIndex is on IDXGISwapChain3 - QI.
+   - Copy >=48 vtable entries: Win11 factory vtables reach entry 31.
+   - OCCLUDED flip window: DXGI's internal retry thread re-presents the
+     swapchain at ~60-240 Hz IN-PROCESS -> hooked Present runs without the
+     app calling it; captures then re-read our own blit (feedback drift).
+     Proxy throttles live captures to >=250 ms intervals; test harness
+     artifacts, real games present from their own thread.
+   - 47990 ownership: Sunshine listens on 0.0.0.0:47990 (its web port!) -
+     m11d binds 127.0.0.1:47990 alongside (Windows permits specific-IP
+     over wildcard bind; loopback routes to m11d). A connect to "the
+     daemon" when m11d is DOWN reaches SUNSHINE's HTTPS server: connect
+     succeeds, exchange then fails. Check `tasklist | findstr m11d`, never
+     assume from netstat alone.
+   - Game dir ACL: D:\Grand Theft Auto V Enhanced is RX for Users; AI is
+     Administrator but the shell is filtered -> copy needs elevation
+     (_deploy_elevated.cmd + owner UAC click).
+3. Validation rig: dlss5\m12-dxgi\test\m12_test.exe (own DX12 gradient app;
+   proxy staged as dxgi.dll in test\run; _selftest.cmd). The in-app final
+   readback can wedge (present-park interplay with the retry storm), so
+   the decisive check is M12_DUMP: proxy writes its last processed reply
+   as BMP; single-pass (M12_LIVE=1000000) dump vs known solid = mean|d|
+   7.1/255, center px shift +14/+2/+7, max 19 - correct pixel path both
+   directions incl. R/B swizzle.
+4. Chain perf at 960x540: ~700 ms/frame (GEMM-bound, matches M10 notes).
+
+## Next steps (order)
+0. OWNER: restart GTA5 Enhanced, watch the stream (slideshow + subtle
+   effect). If BattleEye kills it -> _undeploy.cmd, fall back to M12b
+   (GTA5 Legacy DX11 + DXVK x64 from GitHub -> existing m11-layer; no new
+   capture code needed).
+1. If the game's backbuffer is R10G10B10A2 (HDR), v0 passes through
+   unprocessed (logged in m12_dxgi.log) - then decide: tonemap-convert or
+   leave it.
+2. M12c polish after owner confirms: per-size engine warmup, cleaner gain
+   control, maybe async pipeline (capture thread) to unhook the 700 ms
+   present block.
+3. M13 one-click manager ONLY after owner confirms a working path.
+
+## Previous status (2026-09-23 ~00:10) - M11 handoff state
+The REAL 71-block DLSS 5 chain processes Vulkan presents live (m11-layer ->
+m11d -> chain module), 2178 vkcube frames on the owner's stream, torch-validated.
+Demo stopped, GPU free. Details in docs\HANDOFF_M12.md.
 
 ## Previous milestone (2026-09-22 ~23:35)
 M11 DAEMON LIVE: the REAL 71-block DLSS 5 chain now processes vkcube presents
