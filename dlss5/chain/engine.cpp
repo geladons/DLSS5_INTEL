@@ -124,6 +124,15 @@ bool ChainEngine::init(const EngineConfig& cfg) {
     arena_.allocDevice(c);
     std::vector<char> hostImg((size_t)arena_.totalBytes);
     ws_.preprocessInto(hostImg.data(), arena_.vecOff, arena_.off.oHeadW);
+    {   // host-image hash: detects CPU/RAM-side pack corruption (GPU
+        // flakiness vs host flakiness discriminator; FNV-1a, one pass)
+        uint64_t h = 1469598103934665603ull;
+        for (size_t i = 0; i < (size_t)arena_.totalBytes; ++i) {
+            h ^= (unsigned char)hostImg[i];
+            h *= 1099511628211ull;
+        }
+        std::printf("hostImg fnv1a: %016llx\n", (unsigned long long)h);
+    }
     {
         auto tUp = std::chrono::steady_clock::now();
         arena_.upload(c, cmdPool_, fence_, hostImg.data());
