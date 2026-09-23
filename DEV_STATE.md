@@ -1,6 +1,17 @@
-# DEV_STATE.md - where we are (updated 2026-09-22 ~23:35 by Kimi)
+# DEV_STATE.md - where we are (updated 2026-09-23 ~00:10 by Kimi)
 
 ## One-line status
+HANDED OFF to the next agent (cheaper model): docs\HANDOFF_M12.md carries
+the continuation prompt. State at handoff: the REAL 71-block DLSS 5 chain
+processes Vulkan presents live (m11-layer -> m11d -> chain module), 2178
+vkcube frames on the owner's stream, torch-validated. Demo stopped, GPU
+free. Next task M12: real game. Owner launched GTA5 in WINDOWED mode, but
+it is GTA5_Enhanced.exe (D:\Grand Theft Auto V Enhanced\) = DX12 + BattleEye
+- the Vulkan layer sees NOTHING there. Path A (recommended): GTA5 Legacy
+(DX11) + DXVK x64 dlls next to GTA5.exe. Path B (risky, BattleEye):
+Enhanced + vkd3d-proton, story mode only. Details in docs\HANDOFF_M12.md.
+
+## Previous milestone (2026-09-22 ~23:35)
 M11 DAEMON LIVE: the REAL 71-block DLSS 5 chain now processes vkcube presents
 through the Vulkan layer - dlss5\m11d (TCP daemon on 127.0.0.1:47990) runs
 ChainEngine (new dlss5\chain OOP module) at ~145 ms/frame on the 500x500
