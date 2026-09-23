@@ -120,10 +120,13 @@ CTRL+ALT=X pause toggle, CTRL+ALT+Q full detach (in-place vtable restore).
   (UAC). Env: M12_LIVE (default 4), M12_DISABLE=1, M12_DUMP=path.bmp,
   M12_LOG, M12_PORT (47990).
 - Owner A/B evidence 2026-09-23 (GTA5E story mode, Franklin house scene,
-  1080p): dlss5\m12-dxgi\evidence\m12a_before.png (paused/original) vs
-  m12a_after.png (processed): after = visibly cleaner foliage/fence edges,
-  less shimmer on distant downtown towers, fabric folds on the hoodie read
-  sharper. Owner-visible, matches mean|d| ~2-7/255 calibration.
+  1080p, owner-labeled): dlss5\m12-dxgi\evidence\m12a_before.png = original
+  game (paused); m12a_after.png = chain-processed. The two captures are
+  different moments (phone out in the processed one), so treat as indicative
+  A/B, not pixel-matched. Observable in the processed frame: slightly softer
+  distant background haze vs the punchier original - consistent with the
+  calibrated SUBTLE mean|d| ~2-7/255 effect; judge on matched scenes with
+  CTRL+ALT+X flipping, that is what the hotkey is for.
 
 ## Previous status (2026-09-23 ~00:10) - M11 handoff state
 The REAL 71-block DLSS 5 chain processes Vulkan presents live (m11-layer ->
