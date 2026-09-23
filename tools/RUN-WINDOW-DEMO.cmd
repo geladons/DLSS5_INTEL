@@ -10,6 +10,8 @@ REM  Example: RUN-WINDOW-DEMO.cmd anime      (the Photos window)
 REM
 REM  The effect is VISIBLE by design here (--gain 1.0
 REM  --colorpass 1: full residual, tone + detail).
+REM  Speed reality: ~0.8 s per frame at the Photos window
+REM  extent (1344x1088) - about 1.2 fps. Best demo mode.
 REM  Hotkeys: CTRL+ALT+X hide/show, CTRL+ALT+Q quit.
 REM  Moving the window is tracked; resizing asks for a restart.
 REM ============================================================

@@ -4,9 +4,9 @@ REM  DLSS5_INTEL - LIVE DEMO (M8b: real DLSS 5 graph, 71 blocks)
 REM  Your desktop, processed in real time by the full DLSSNR
 REM  graph on the Intel Arc Pro B50.
 REM
-REM  Event-driven + paced: up to ~15 fps while the screen
-REM  changes, ~1 Hz refresh when idle, GPU nearly idle on a
-REM  static desktop.
+REM  Speed reality (2026-09-22, M9b real 71-block U-Net):
+REM  ~1-2 s per frame at fullscreen extent - a SLIDESHOW, not
+REM  realtime yet. Kernel optimization = milestone M10 pass 2.
 REM
 REM  Hotkeys:  CTRL+ALT+X = hide/show the overlay (work mode)
 REM            CTRL+ALT+Q = quit
