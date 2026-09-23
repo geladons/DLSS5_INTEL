@@ -1,4 +1,4 @@
-# DEV_STATE.md - where we are (updated 2026-09-23 ~13:30 by Kimi)
+# DEV_STATE.md - where we are (updated 2026-09-23 ~15:45 by Kimi)
 
 ## One-line status
 M10 pass 4 (2026-09-23 ~12:15-13:30): the barrier question is MEASURED TO DEATH
@@ -10,10 +10,14 @@ restored. (2) Barrier tax measured: ~276 ms/frame at 1080p, but it only
 disappears for exactly ONE dense VkBuffer (impossible: arena 6.6 GB > 4 GiB
 allocation cap) - sparse single buffer is net-zero (kills the tax but costs
 ~same in access throughput), 2-buffer dense is no better than 3.
-INCIDENT: after a CHUNK_CAP 3800 MB experiment (~13:00) the GPU/driver entered
-a degraded state - selftest flips between PASS and varying garbage on code that
-passed 5x bit-identical 40 min earlier, on BOTH enumerated devices. Needs
-driver reload or reboot (OWNER ACTION - Sunshine will drop for a minute).
+INCIDENT RESOLVED (~15:30, it was never the GPU/host): 78a5d28 enabled the
+sparseBinding VkDevice FEATURE, and on this Arc driver (101.8805) merely
+enabling it silently corrupts large DENSE allocations - selftest head
+meandiff 0.65-1.93 vs 0.008, nondeterministic, featV golden-exact, bench
+normal. A/B proof: 3482274 (feature off) PASS x3 md5-identical; 78a5d28
+FAIL; 78a5d28 + feature gated behind D5C_SPARSE=1 (2ec9135) PASS x3, md5
+f1e17ec9 = the 3482274 golden. The "3800 MB CHUNK_CAP" suspicion was wrong
+(arena.cpp comment corrected). Host/vfio exonerated - owner's call was right.
 Chain perf unchanged (1083 ms @1080p, 0.91 fps). Next real lever: GEMM
 K-loop pipelining (gemm 382 ms of real in-kernel time per frame).
 
@@ -56,17 +60,19 @@ K-loop pipelining (gemm 382 ms of real in-kernel time per frame).
    VK_QUEUE_SPARSE_BINDING_BIT (both wired, with fallback). D5C_DEV_SKIP=N env
    picks the N-th enumerated device (two same-name B50s enumerate; order is
    not stable across processes).
-4. INCIDENT (open, owner action needed): ~13:00, after builds that allocated a
-   3800 MB device buffer, chain numerics went nondeterministically wrong on
-   EVERY config (sparse, dense 2/3-buffer, both devices, clean HEAD) while
-   featV stayed golden-exact and benches stayed fast and stable. A binary
-   config that passed 5x bit-identical at 12:55 fails at 13:10 unchanged.
-   Code is exonerated (A/B rebuild of the exact PASS state still fails); the
-   3800-MB allocation is the prime suspect for a driver page-table corruption
-   that persists across processes. Fix: reload the Arc driver or reboot the VM
-   (Sunshine/Moonlight will drop for a minute - owner to choose the moment).
-   After recovery: re-run `python dlss5/m11d/_validate.py` target state PASS,
-   then re-bench sparse-vs-dense once, then GEMM pipelining.
+4. INCIDENT (RESOLVED ~15:30): ~13:00 chain numerics went nondeterministically
+   wrong on EVERY config while featV stayed golden-exact and benches stayed
+   fast/stable. Suspects eliminated with evidence: staged spv (fresh glslang
+   compile md5-identical), device selection (both apps on LUID 9799), input
+   (hostImg FNV-1a stable across runs), host RAM (torch goldens bit-exact);
+   m8b-live verify ALL PASS throughout - GPU always healthy. TRUE CAUSE:
+   78a5d28's sparseBinding device-feature enable corrupts large dense
+   allocations on this driver. Fixed in 2ec9135 (feature gated behind
+   D5C_SPARSE=1); selftest PASS x3 md5 f1e17ec9 = 3482274 golden. Lesson:
+   the earlier "rolled-back trees also fail" was a false A/B - the rollback
+   never rebuilt the exe (stale-binary trap). Always verify exe mtime +
+   dump md5 before believing an A/B. Next: control bench 20 @1080p, then
+   GEMM pipelining.
 
 ## Previous status (2026-09-23 ~10:10) - M12a live on GTA5
 
