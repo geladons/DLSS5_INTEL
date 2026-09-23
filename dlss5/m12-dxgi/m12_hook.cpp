@@ -1,4 +1,18 @@
-// m12_hook.cpp - COM vtable hooking for the m12 dxgi proxy (see m12_hook.h).
+// m12_hook.cpp - COM vtable hooking for the m12 dxgi proxy.
+//
+// The proxy hooks the three CreateSwapChain* entry points and the swapchain
+// Present/Present1 entry points by patching the ORIGINAL vtables IN PLACE
+// (VirtualProtect, write, restore). The object's vtable pointer is left
+// untouched - this is the ReShade-style approach and it matters: some games
+// (GTA5 Enhanced, anti-tamper) kill the process if a COM object's vtable
+// pointer deviates from the module's known vtable, which is what the
+// per-object copy approach triggers.
+//
+// Lookup scheme:
+//   g_vtables: vtable ptr -> record of original entries (for call-through)
+//   g_objects: interface ptr -> SwapchainState (processor); unknown objects
+//              pass through to the original entry.
+#pragma once
 #include "m12_hook.h"
 
 #include "m12_dx12.h"
@@ -9,44 +23,55 @@
 
 #include <cstdlib>
 #include <map>
+#include <utility>
 #include <vector>
 
 namespace {
 
-// One private vtable copy per hooked object.
-struct VtableCopy {
-    void **obj;         // hooked interface pointer (first member is the vtable)
-    void **orig;        // original vtable
-    std::vector<void *> copy;  // patched copy, installed at *obj
-};
-
-// Swapchain state shared by every vtable view of the same swapchain object.
 struct SwapchainState {
-    std::vector<VtableCopy *> views;
     M12Dx12Processor *proc;
-    void *orig_present;
-    void *orig_present1;
-    bool is_d3d12;
 };
 
 CRITICAL_SECTION g_cs;
-std::map<void *, SwapchainState *> g_by_object;   // object ptr -> state
-std::map<void *, VtableCopy *> g_by_vtable_view;  // interface ptr -> copy
+std::map<void *, std::map<int, void *>> g_orig;    // vtable -> idx -> orig fn
+std::map<void *, SwapchainState *> g_objects;       // interface ptr -> state
 
-// Copies up to `count` vtable entries and installs the patched copy.
-// Returns NULL if the object was already hooked.
-VtableCopy *hook_object_vtable(void *obj, size_t count)
+void *orig_entry(void *obj, int idx)
 {
-    void **vtable = *(void ***)obj;
-    VtableCopy *vc = new VtableCopy();
-    vc->obj = (void **)obj;
-    vc->orig = vtable;
-    vc->copy.assign(vtable, vtable + count);
-    *(void ***)obj = vc->copy.data();
-    return vc;
+    std::map<void *, std::map<int, void *>>::iterator vt = g_orig.find(*(void ***)obj);
+    if (vt == g_orig.end()) return NULL;
+    std::map<int, void *>::iterator e = vt->second.find(idx);
+    return e == vt->second.end() ? NULL : e->second;
 }
 
-void patch_entry(VtableCopy *vc, size_t idx, void *fn) { vc->copy[idx] = fn; }
+// Patches the given entries of the object's CURRENT vtable in place.
+// Idempotent per vtable. Returns FALSE if the page could not be opened.
+bool patch_in_place(void *obj, int idx0, void *fn0, int idx1, void *fn1, int idx2,
+                    void *fn2, int idx3, void *fn3)
+{
+    void **vt = *(void ***)obj;
+    if (g_orig.find(vt) != g_orig.end()) return true;
+    DWORD old_protect = 0;
+    if (!VirtualProtect(vt, 64 * sizeof(void *), PAGE_READWRITE, &old_protect)) {
+        m12_logf("VirtualProtect failed on vtable %p (err %lu); cannot hook in place",
+                 vt, GetLastError());
+        return false;
+    }
+    std::map<int, void *> &rec = g_orig[vt];
+    struct {
+        int idx;
+        void *fn;
+    } patches[4] = {{idx0, fn0}, {idx1, fn1}, {idx2, fn2}, {idx3, fn3}};
+    for (int i = 0; i < 4; i++) {
+        if (!patches[i].fn) continue;
+        rec[patches[i].idx] = vt[patches[i].idx];
+        vt[patches[i].idx] = patches[i].fn;
+    }
+    DWORD ignored = 0;
+    VirtualProtect(vt, 64 * sizeof(void *), old_protect, &ignored);
+    m12_logf("vtable %p patched in place (%u entries)", vt, (unsigned)rec.size());
+    return true;
+}
 
 int live_every()
 {
@@ -69,18 +94,16 @@ bool disabled()
     return off == 1;
 }
 
-SwapchainState *find_state(void *obj)
-{
-    std::map<void *, SwapchainState *>::iterator it = g_by_object.find(obj);
-    return it == g_by_object.end() ? NULL : it->second;
-}
-
 HRESULT WINAPI hooked_Present(IDXGISwapChain *sc, UINT sync_interval, UINT flags)
 {
     EnterCriticalSection(&g_cs);
-    SwapchainState *st = find_state(sc);
-    void *orig = st ? st->orig_present : NULL;
-    if (st && st->proc && st->is_d3d12) st->proc->onPresent();
+    std::map<void *, SwapchainState *>::iterator st = g_objects.find(sc);
+    void *orig = orig_entry(sc, 8);
+    if (st != g_objects.end() && st->second->proc) {
+        st->second->proc->log_present_entry(0, flags);
+        st->second->proc->onPresent();
+        st->second->proc->log_present_exit(0);
+    }
     LeaveCriticalSection(&g_cs);
     if (!orig) return DXGI_ERROR_INVALID_CALL;
     return ((HRESULT(WINAPI *)(IDXGISwapChain *, UINT, UINT))orig)(sc, sync_interval,
@@ -91,9 +114,13 @@ HRESULT WINAPI hooked_Present1(IDXGISwapChain1 *sc, UINT sync_interval, UINT fla
                                const DXGI_PRESENT_PARAMETERS *params)
 {
     EnterCriticalSection(&g_cs);
-    SwapchainState *st = find_state(sc);
-    void *orig = st ? st->orig_present1 : NULL;
-    if (st && st->proc && st->is_d3d12) st->proc->onPresent();
+    std::map<void *, SwapchainState *>::iterator st = g_objects.find(sc);
+    void *orig = orig_entry(sc, 22);
+    if (st != g_objects.end() && st->second->proc) {
+        st->second->proc->log_present_entry(1, flags);
+        st->second->proc->onPresent();
+        st->second->proc->log_present_exit(1);
+    }
     LeaveCriticalSection(&g_cs);
     if (!orig) return DXGI_ERROR_INVALID_CALL;
     return ((HRESULT(WINAPI *)(IDXGISwapChain1 *, UINT, UINT,
@@ -101,55 +128,41 @@ HRESULT WINAPI hooked_Present1(IDXGISwapChain1 *sc, UINT sync_interval, UINT fla
         sc, sync_interval, flags, params);
 }
 
-// Hooks a swapchain object: Present always, Present1 on the IDXGISwapChain1
-// view when the object exposes one. `queue` is non-NULL for D3D12 devices.
 void attach_swapchain(IDXGISwapChain *sc, ID3D12CommandQueue *queue, UINT w, UINT h,
                       DXGI_FORMAT fmt)
 {
     EnterCriticalSection(&g_cs);
-    if (find_state(sc)) {
+    if (g_objects.find(sc) != g_objects.end()) {
         LeaveCriticalSection(&g_cs);
         return;
     }
     SwapchainState *st = new SwapchainState();
-    st->proc = NULL;
-    st->orig_present = NULL;
-    st->orig_present1 = NULL;
-    st->is_d3d12 = queue != NULL;
-    if (queue)
-        st->proc = new M12Dx12Processor(sc, queue, w, h, fmt, live_every());
+    st->proc = queue ? new M12Dx12Processor(sc, queue, w, h, fmt, live_every()) : NULL;
+    g_objects[sc] = st;
 
-    // Classic IDXGISwapChain view: entries IUnknown(3) + IDXGIObject(4) +
-    // IDXGIDeviceSubObject(1) -> Present sits at index 8.
-    VtableCopy *v1 = hook_object_vtable(sc, 40);
-    st->orig_present = v1->orig[8];
-    patch_entry(v1, 8, (void *)&hooked_Present);
-    st->views.push_back(v1);
-    g_by_vtable_view[sc] = v1;
-    g_by_object[sc] = st;
-
-    // IDXGISwapChain1 view (same object, different vtable): Present1 is 22.
+    // Present sits at entry 8 of every IDXGISwapChainN view; Present1 at 22
+    // of the IDXGISwapChain1 view. Patch each distinct vtable in place and
+    // register every view pointer so any of them reaches the processor.
+    patch_in_place(sc, 8, (void *)&hooked_Present, 0, NULL, 0, NULL, 0, NULL);
+    g_objects[sc] = st;
     IDXGISwapChain1 *sc1 = NULL;
-    if (SUCCEEDED(sc->QueryInterface(IID_PPV_ARGS(&sc1))) && sc1 &&
-        *(void ***)sc1 != v1->orig) {
-        VtableCopy *v2 = hook_object_vtable(sc1, 48);
-        st->orig_present1 = v2->orig[22];
-        patch_entry(v2, 8, (void *)&hooked_Present);
-        patch_entry(v2, 22, (void *)&hooked_Present1);
-        st->orig_present = v2->orig[8];
-        st->views.push_back(v2);
-        g_by_vtable_view[sc1] = v2;
-        g_by_object[sc1] = st;
-        m12_logf("swapchain %p exposes IDXGISwapChain1 (vtable %p): Present1 hooked",
-                 sc, *(void ***)sc1);
+    if (SUCCEEDED(sc->QueryInterface(IID_PPV_ARGS(&sc1))) && sc1) {
+        if (*(void ***)sc1 != *(void ***)sc)
+            patch_in_place(sc1, 8, (void *)&hooked_Present, 22,
+                           (void *)&hooked_Present1, 0, NULL, 0, NULL);
+        g_objects[sc1] = st;
+    }
+    IDXGISwapChain3 *sc3 = NULL;
+    if (SUCCEEDED(sc->QueryInterface(IID_PPV_ARGS(&sc3))) && sc3) {
+        if (*(void ***)sc3 != *(void ***)sc && *(void ***)sc3 != *(void ***)sc1)
+            patch_in_place(sc3, 8, (void *)&hooked_Present, 0, NULL, 0, NULL, 0, NULL);
+        g_objects[sc3] = st;
     }
     if (sc1) sc1->Release();
+    if (sc3) sc3->Release();
     LeaveCriticalSection(&g_cs);
 }
 
-// Common tail of the three CreateSwapChain* hooks: QI the pDevice for a
-// D3D12 command queue (that is what DXGI takes for D3D12 swapchains) and
-// attach to the returned swapchain.
 void after_create_swapchain(IUnknown *device, IDXGISwapChain *sc,
                             DXGI_SWAP_CHAIN_DESC *desc)
 {
@@ -174,20 +187,18 @@ HRESULT WINAPI hooked_CreateSwapChain(IDXGIFactory *factory, IUnknown *device,
                                       DXGI_SWAP_CHAIN_DESC *desc,
                                       IDXGISwapChain **pp_swapchain)
 {
-    m12_logf("CreateSwapChain called: factory %p device %p %ux%u fmt %d", factory,
-             device, desc ? desc->BufferDesc.Width : 0,
-             desc ? desc->BufferDesc.Height : 0, desc ? (int)desc->BufferDesc.Format : -1);
     EnterCriticalSection(&g_cs);  // reentrant: attach below re-acquires
-    VtableCopy *vc = g_by_vtable_view[(void *)factory];
-    void *orig = vc ? vc->orig[10] : NULL;
-    if (!orig) return DXGI_ERROR_INVALID_CALL;
+    void *orig = orig_entry(factory, 10);
+    if (!orig) {
+        LeaveCriticalSection(&g_cs);
+        return DXGI_ERROR_INVALID_CALL;
+    }
     HRESULT hr = ((HRESULT(WINAPI *)(IDXGIFactory *, IUnknown *, DXGI_SWAP_CHAIN_DESC *,
                                       IDXGISwapChain **))orig)(factory, device, desc,
                                                               pp_swapchain);
-    m12_logf("CreateSwapChain orig returned 0x%08lx, sc %p", hr,
-             pp_swapchain ? *pp_swapchain : NULL);
     if (SUCCEEDED(hr) && pp_swapchain && *pp_swapchain)
         after_create_swapchain(device, *pp_swapchain, desc);
+    LeaveCriticalSection(&g_cs);
     return hr;
 }
 
@@ -198,10 +209,12 @@ HRESULT WINAPI hooked_CreateSwapChainForHwnd(IDXGIFactory2 *factory, IUnknown *d
                                              IDXGIOutput *restrict_to,
                                              IDXGISwapChain1 **pp_swapchain)
 {
-    EnterCriticalSection(&g_cs);  // reentrant: attach below re-acquires
-    VtableCopy *vc = g_by_vtable_view[(void *)factory];
-    void *orig = vc ? vc->orig[15] : NULL;
-    if (!orig) return DXGI_ERROR_INVALID_CALL;
+    EnterCriticalSection(&g_cs);
+    void *orig = orig_entry(factory, 15);
+    if (!orig) {
+        LeaveCriticalSection(&g_cs);
+        return DXGI_ERROR_INVALID_CALL;
+    }
     HRESULT hr = ((HRESULT(WINAPI *)(IDXGIFactory2 *, IUnknown *, HWND,
                                       const DXGI_SWAP_CHAIN_DESC1 *,
                                       const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *,
@@ -214,6 +227,7 @@ HRESULT WINAPI hooked_CreateSwapChainForHwnd(IDXGIFactory2 *factory, IUnknown *d
         desc.BufferDesc.Format = desc1->Format;
         after_create_swapchain(device, *pp_swapchain, &desc);
     }
+    LeaveCriticalSection(&g_cs);
     return hr;
 }
 
@@ -224,10 +238,12 @@ HRESULT WINAPI hooked_CreateSwapChainForCoreWindow(IDXGIFactory2 *factory,
                                                    IDXGIOutput *restrict_to,
                                                    IDXGISwapChain1 **pp_swapchain)
 {
-    EnterCriticalSection(&g_cs);  // reentrant: attach below re-acquires
-    VtableCopy *vc = g_by_vtable_view[(void *)factory];
-    void *orig = vc ? vc->orig[16] : NULL;
-    if (!orig) return DXGI_ERROR_INVALID_CALL;
+    EnterCriticalSection(&g_cs);
+    void *orig = orig_entry(factory, 16);
+    if (!orig) {
+        LeaveCriticalSection(&g_cs);
+        return DXGI_ERROR_INVALID_CALL;
+    }
     HRESULT hr = ((HRESULT(WINAPI *)(IDXGIFactory2 *, IUnknown *, IUnknown *,
                                       IUnknown *, const DXGI_SWAP_CHAIN_DESC1 *,
                                       IDXGIOutput *, IDXGISwapChain1 **))orig)(
@@ -239,6 +255,7 @@ HRESULT WINAPI hooked_CreateSwapChainForCoreWindow(IDXGIFactory2 *factory,
         desc.BufferDesc.Format = desc1->Format;
         after_create_swapchain(device, *pp_swapchain, &desc);
     }
+    LeaveCriticalSection(&g_cs);
     return hr;
 }
 
@@ -248,10 +265,12 @@ HRESULT WINAPI hooked_CreateSwapChainForComposition(IDXGIFactory2 *factory,
                                                     IDXGIOutput *restrict_to,
                                                     IDXGISwapChain1 **pp_swapchain)
 {
-    EnterCriticalSection(&g_cs);  // reentrant: attach below re-acquires
-    VtableCopy *vc = g_by_vtable_view[(void *)factory];
-    void *orig = vc ? vc->orig[24] : NULL;
-    if (!orig) return DXGI_ERROR_INVALID_CALL;
+    EnterCriticalSection(&g_cs);
+    void *orig = orig_entry(factory, 24);
+    if (!orig) {
+        LeaveCriticalSection(&g_cs);
+        return DXGI_ERROR_INVALID_CALL;
+    }
     HRESULT hr = ((HRESULT(WINAPI *)(IDXGIFactory2 *, IUnknown *,
                                       const DXGI_SWAP_CHAIN_DESC1 *, IDXGIOutput *,
                                       IDXGISwapChain1 **))orig)(
@@ -263,6 +282,7 @@ HRESULT WINAPI hooked_CreateSwapChainForComposition(IDXGIFactory2 *factory,
         desc.BufferDesc.Format = desc1->Format;
         after_create_swapchain(device, *pp_swapchain, &desc);
     }
+    LeaveCriticalSection(&g_cs);
     return hr;
 }
 
@@ -282,38 +302,10 @@ void m12_hook_factory(void *factory)
 {
     if (!factory || disabled()) return;
     EnterCriticalSection(&g_cs);
-    if (g_by_vtable_view.find(factory) != g_by_vtable_view.end()) {
-        LeaveCriticalSection(&g_cs);
-        return;
-    }
-    // 48 entries cover IDXGIFactory7 (RegisterAdaptersChangedEvent at 31)
-    // with headroom for anything newer the runtime may dispatch through.
-    VtableCopy *vc = hook_object_vtable(factory, 48);
-    patch_entry(vc, 10, (void *)&hooked_CreateSwapChain);
-    patch_entry(vc, 15, (void *)&hooked_CreateSwapChainForHwnd);
-    patch_entry(vc, 16, (void *)&hooked_CreateSwapChainForCoreWindow);
-    patch_entry(vc, 24, (void *)&hooked_CreateSwapChainForComposition);
-    g_by_vtable_view[factory] = vc;
-
-    // The same object may expose an IID_IDXGIFactory2 view with its own
-    // vtable; hook that one too so QI'd callers are still intercepted.
-    m12_logf("factory %p: main view hooked, querying Factory2 view", factory);
-    IDXGIFactory2 *f2 = NULL;
-    HRESULT qhr = ((IUnknown *)factory)->QueryInterface(IID_PPV_ARGS(&f2));
-    m12_logf("factory %p: Factory2 QI hr=0x%08lx ptr=%p", factory, qhr, (void *)f2);
-    if (SUCCEEDED(qhr) && f2 && (void *)f2 != factory) {
-        if (g_by_vtable_view.find(f2) == g_by_vtable_view.end()) {
-            VtableCopy *vc2 = hook_object_vtable(f2, 48);
-            patch_entry(vc2, 10, (void *)&hooked_CreateSwapChain);
-            patch_entry(vc2, 15, (void *)&hooked_CreateSwapChainForHwnd);
-            patch_entry(vc2, 16, (void *)&hooked_CreateSwapChainForCoreWindow);
-            patch_entry(vc2, 24, (void *)&hooked_CreateSwapChainForComposition);
-            g_by_vtable_view[f2] = vc2;
-            m12_logf("factory %p: IDXGIFactory2 view %p hooked too", factory, f2);
-        }
-    }
-    if (f2) f2->Release();
+    // 10 CreateSwapChain, 15 ForHwnd, 16 ForCoreWindow, 24 ForComposition.
+    patch_in_place(factory, 10, (void *)&hooked_CreateSwapChain, 15,
+                   (void *)&hooked_CreateSwapChainForHwnd, 16,
+                   (void *)&hooked_CreateSwapChainForCoreWindow, 24,
+                   (void *)&hooked_CreateSwapChainForComposition);
     LeaveCriticalSection(&g_cs);
-    m12_logf("factory %p hooked (vtable %p)", factory,
-             g_by_vtable_view[factory]->orig);
 }

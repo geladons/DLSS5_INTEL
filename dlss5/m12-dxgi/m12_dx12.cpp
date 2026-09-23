@@ -49,7 +49,7 @@ M12Dx12Processor::M12Dx12Processor(IDXGISwapChain *sc, ID3D12CommandQueue *queue
     : sc_(sc), fence_event_(NULL), fence_value_(0), width_(w), height_(h),
       fmt_(fmt), fmt_supported_(false), needs_rbswap_(false), row_pitch_(0),
       live_every_(live_every > 0 ? live_every : 1), present_count_(0),
-      have_processed_(false)
+      present_trace_(0), have_processed_(false), paused_(false)
 {
     queue_ = queue;
     HRESULT hr = queue->GetDevice(IID_PPV_ARGS(&device_));
@@ -267,6 +267,20 @@ void M12Dx12Processor::dump_processed()
     dump_bgra_bmp(path, processed_, width_, height_);
 }
 
+void M12Dx12Processor::log_present_entry(int which, UINT flags)
+{
+    present_trace_++;
+    if (present_trace_ <= 5 || present_trace_ % 60 == 0)
+        m12_logf("present%s #%llu on sc %p flags 0x%x", which ? "1" : "",
+                 present_trace_, sc_, flags);
+}
+
+void M12Dx12Processor::log_present_exit(int which)
+{
+    if (present_trace_ <= 5)
+        m12_logf("present%s #%llu done", which ? "1" : "", present_trace_);
+}
+
 // processed_ -> upload buffer -> backbuffer (leaves bb in PRESENT state).
 bool M12Dx12Processor::blitToBackbuffer(ID3D12Resource *bb)
 {
@@ -317,8 +331,31 @@ bool M12Dx12Processor::blitToBackbuffer(ID3D12Resource *bb)
     return true;
 }
 
+// %TEMP%\m12_pause.flag: cheap runtime pause switch. While the flag exists
+// every frame passes through untouched (full fps, zero GPU/TCP work).
+bool M12Dx12Processor::pauseFlagSet()
+{
+    char path[MAX_PATH];
+    if (!GetTempPathA(MAX_PATH, path)) return false;
+    if (lstrlenA(path) + 16 > MAX_PATH) return false;
+    lstrcatA(path, "m12_pause.flag");
+    return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
+}
+
 void M12Dx12Processor::onPresent()
 {
+    if (pauseFlagSet()) {
+        if (!paused_) {
+            paused_ = true;
+            m12_logf("processing PAUSED (m12_pause.flag) - passthrough");
+        }
+        return;
+    }
+    if (paused_) {
+        paused_ = false;
+        have_processed_ = false;  // drop the stale frame, show live game again
+        m12_logf("processing RESUMED");
+    }
     if (!fmt_supported_ || !fence_) return;
     if (!refreshDesc() || width_ == 0 || height_ == 0) return;
     if (!ensureResources()) {
