@@ -90,6 +90,7 @@ void ChainRecorder::dGemm(VkCommandBuffer cb, int fam, uint64_t a, uint64_t b, u
     GemmPush p{a, b, c2, m, n, k, batch, sa, sb, sc, flags, lda, ldb, ldc};
     vkCmdPushConstants(cb, pGemm.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
     vkCmdDispatch(cb, n / 32, m / 16, batch);
+    pm(cb, "gemm", "blk", m, n, k, n / 32, m / 16, batch);
 }
 
 void ChainRecorder::dEw(VkCommandBuffer cb, uint64_t a, uint64_t b, uint64_t c2, uint64_t d,
@@ -98,6 +99,7 @@ void ChainRecorder::dEw(VkCommandBuffer cb, uint64_t a, uint64_t b, uint64_t c2,
     EWPush p{a, b, c2, d, h, n, kind, ch};
     vkCmdPushConstants(cb, pEw.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
     vkCmdDispatch(cb, (n + 255) / 256, 1, 1);
+    pm(cb, "ew", "", 0, 0, 0, (n + 255) / 256, 1, 1);
 }
 
 void ChainRecorder::dPart(VkCommandBuffer cb, uint64_t a, uint64_t c2, const Stage& s, uint32_t C,
@@ -107,6 +109,7 @@ void ChainRecorder::dPart(VkCommandBuffer cb, uint64_t a, uint64_t c2, const Sta
     PartPush p{a, c2, s.H, s.W, C, padTop, padLeft, wp8, in16 ? 1u : 0u};
     vkCmdPushConstants(cb, pPart.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
     vkCmdDispatch(cb, hp8 * wp8 * 64, 1, 1);
+    pm(cb, "part", "", 0, C, 0, hp8 * wp8 * 64, 1, 1);
 }
 
 void ChainRecorder::dGather(VkCommandBuffer cb, uint64_t a, uint64_t b, uint64_t d, uint64_t c2,
@@ -116,7 +119,13 @@ void ChainRecorder::dGather(VkCommandBuffer cb, uint64_t a, uint64_t b, uint64_t
     GatherPush p{a, b, d, c2, h, s.H, s.W, C, padTop, padLeft, wp8,
                  (pub ? 1u : 0u) | (b16 ? 2u : 0u)};
     vkCmdPushConstants(cb, pGather.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
-    vkCmdDispatch(cb, s.TOK, 1, 1);
+    // M10: warp-per-token mapping. C in {32,64,128,256,512}: S=C/4 vec4 slots
+    // per token; S>=32 -> one token per workgroup, else 128/C tokens per
+    // workgroup (lane -> (token, slot), fully coalesced across the warp).
+    uint32_t ttw = (C >= 128u) ? 1u : (128u / C);   // tokens per workgroup
+    uint32_t grid = (s.TOK + ttw - 1) / ttw;
+    vkCmdDispatch(cb, grid, 1, 1);
+    pm(cb, "gather", "", 0, C, 0, grid, 1, 1);
 }
 
 void ChainRecorder::dTrans(VkCommandBuffer cb, uint64_t a, uint64_t c2, uint32_t Ww, uint32_t H) {
@@ -124,6 +133,7 @@ void ChainRecorder::dTrans(VkCommandBuffer cb, uint64_t a, uint64_t c2, uint32_t
     TransWePush p{a, c2, Ww, H};
     vkCmdPushConstants(cb, pTrans.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
     vkCmdDispatch(cb, Ww * 64, 1, 1);
+    pm(cb, "trans", "", 0, Ww, 0, Ww * 64, 1, 1);
 }
 
 void ChainRecorder::dCosW(VkCommandBuffer cb, uint64_t a, uint64_t c2, uint64_t sc,
@@ -132,6 +142,7 @@ void ChainRecorder::dCosW(VkCommandBuffer cb, uint64_t a, uint64_t c2, uint64_t 
     CosWinPush p{a, c2, sc, Ww * 64 * H, kind, C, H};
     vkCmdPushConstants(cb, pCosW.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
     vkCmdDispatch(cb, (Ww * 64 * H + 31) / 32, 1, 1);
+    pm(cb, "cosw", "", 0, C, 0, (Ww * 64 * H + 31) / 32, 1, 1);
 }
 
 void ChainRecorder::dCosG(VkCommandBuffer cb, uint64_t a, uint64_t c2, uint64_t sc, uint32_t kind) {
@@ -139,6 +150,7 @@ void ChainRecorder::dCosG(VkCommandBuffer cb, uint64_t a, uint64_t c2, uint64_t 
     CosPush p{a, c2, sc, T6P_ * 32, kind};
     vkCmdPushConstants(cb, pCos.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
     vkCmdDispatch(cb, (T6P_ * 32 + 31) / 32, 1, 1);
+    pm(cb, "cosg", "", 0, 0, 0, (T6P_ * 32 + 31) / 32, 1, 1);
 }
 
 void ChainRecorder::dSmaxW(VkCommandBuffer cb, uint64_t a, uint64_t c2, uint32_t Ww, uint32_t H,
@@ -147,6 +159,7 @@ void ChainRecorder::dSmaxW(VkCommandBuffer cb, uint64_t a, uint64_t c2, uint32_t
     SMaxPush p{a, c2, Ww * H * 64, 64, 0.0f, bias, H, 0};
     vkCmdPushConstants(cb, pSmax.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
     vkCmdDispatch(cb, (Ww * H * 64 + 31) / 32, 1, 1);
+    pm(cb, "smaxw", "", 0, 64, 0, (Ww * H * 64 + 31) / 32, 1, 1);
 }
 
 void ChainRecorder::dSmaxG(VkCommandBuffer cb, uint64_t a, uint64_t c2) {
@@ -154,6 +167,7 @@ void ChainRecorder::dSmaxG(VkCommandBuffer cb, uint64_t a, uint64_t c2) {
     SMaxPush p{a, c2, 32 * T6P_, T6P_, 3.0f, 0, 0, st_[6].TOK};
     vkCmdPushConstants(cb, pSmax.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
     vkCmdDispatch(cb, 32 * T6P_, 1, 1);
+    pm(cb, "smaxg", "", 0, T6P_, 0, 32 * T6P_, 1, 1);
 }
 
 void ChainRecorder::dMerge(VkCommandBuffer cb, uint64_t a, uint64_t b, uint64_t c2, uint64_t d,
@@ -162,6 +176,7 @@ void ChainRecorder::dMerge(VkCommandBuffer cb, uint64_t a, uint64_t b, uint64_t 
     MergePush p{a, b, c2, d, e, h, n, ch, kind};
     vkCmdPushConstants(cb, pMerge.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
     vkCmdDispatch(cb, (n + 255) / 256, 1, 1);
+    pm(cb, "merge", "", 0, ch, 0, (n + 255) / 256, 1, 1);
 }
 
 namespace {
@@ -179,6 +194,7 @@ void ChainRecorder::dPool(VkCommandBuffer cb, uint64_t a, uint64_t c2, uint32_t 
     PoolPush p{a, c2, Hin, Win, Wpad, C, n, flags};
     vkCmdPushConstants(cb, pPool.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
     vkCmdDispatch(cb, (n + 255) / 256, 1, 1);
+    pm(cb, "pool", "", 0, C, 0, (n + 255) / 256, 1, 1);
 }
 
 void ChainRecorder::dUpMerge(VkCommandBuffer cb, uint64_t a, uint64_t b, uint64_t c2, uint64_t sin,
@@ -188,6 +204,7 @@ void ChainRecorder::dUpMerge(VkCommandBuffer cb, uint64_t a, uint64_t b, uint64_
     UpMergePush p{a, b, c2, sin, cos, h, tgt.W, tgt.H, low.W, C, kind};
     vkCmdPushConstants(cb, pUpM.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
     vkCmdDispatch(cb, (tgt.TOK + 255) / 256, 1, 1);
+    pm(cb, "upm", "", 0, C, 0, (tgt.TOK + 255) / 256, 1, 1);
 }
 
 } // namespace d5c

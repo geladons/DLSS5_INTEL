@@ -9,6 +9,7 @@
 #include "vk_util.h"
 #include "arena.h"
 #include "weights.h"
+#include "prof.h"
 
 namespace d5c {
 
@@ -67,6 +68,9 @@ public:
               const Stage st[7], const std::string& shaderDir);
     void destroy(const VkCtx& c);
 
+    // Optional per-dispatch profiler (M10). Not owned; nullptr = disabled.
+    void setProf(ChainProf* p) { prof_ = p; }
+
     // Records the full 71-block chain (~1400 dispatches) into cb.
     // Input: oX16 (f16 features via featpack); output: oHEAD (fp32 [TOK0,16]).
     void recordChain(VkCommandBuffer cb);
@@ -76,6 +80,11 @@ public:
 
 private:
     void bar(VkCommandBuffer cb);
+    // one-line profiler mark (no-op when profiling is disabled)
+    void pm(VkCommandBuffer cb, const char* fam, const char* note,
+            uint32_t m, uint32_t n, uint32_t k, uint32_t gx, uint32_t gy, uint32_t gz) {
+        if (prof_) prof_->mark(cb, fam, note, m, n, k, gx, gy, gz);
+    }
     static uint32_t gflags(uint32_t epi, bool narrow) { return (epi << 8) | (narrow ? F_NARROW : 0u); }
 
     // dispatchers (one per chain kernel)
@@ -127,6 +136,7 @@ private:
     const VkCtx* c_ = nullptr;
     const ChainArena* ar_ = nullptr;
     const WeightsStore* ws_ = nullptr;
+    ChainProf* prof_ = nullptr;
     Stage st_[7]{};
     uint64_t T6_ = 0;
     uint32_t T6P_ = 0;

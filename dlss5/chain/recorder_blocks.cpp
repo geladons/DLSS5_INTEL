@@ -398,6 +398,7 @@ void ChainRecorder::recordChain(VkCommandBuffer cb) {
                    gflags(EPI_NONE, false), 32, 16, 16};
         vkCmdPushConstants(cb, pGemm1.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
         vkCmdDispatch(cb, 1, st_[0].TOK / 16, 1);
+        pm(cb, "gemm1", "head", st_[0].TOK, 16, 32, 1, st_[0].TOK / 16, 1);
         bar(cb);
     }
 }
