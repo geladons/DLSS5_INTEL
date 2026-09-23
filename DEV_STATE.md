@@ -16,7 +16,26 @@ window-extent arena is ~4.7 GB -> 2 chunks, BDA resolved per offset).
 OWNER: re-test with tools\RUN-DEMO.cmd (or runm8b.cmd --window anime --frames 45
 --wiggle-idle 1). Expected: correct colours AND visible neural detail (check
 flower/hair texture vs native), no stripes over time, PASS in docs\m8b-live.log.
-Speed: ~800 ms/frame at 1344x1088 (chain-bound; optimization = M10, not done).
+Speed: ~800 ms/frame at 1344x1088 (chain-bound; M10 first pass done, see below).
+
+## M10 pass 1 (2026-09-22 ~17:20) - barrier dedup: NO measurable gain
+- Removed 2 of 3 barriers between the Q/K/V cosine dispatches in
+  recordWindowAttn (dCosW) and recordGlobal (dCosG): all three read the same
+  oPROJ buffer and write disjoint oQ/oK/oV slots, so the intermediate barriers
+  were pure overhead. ~140 barriers removed of 1403 dispatches.
+- Validation after the change: 45-frame run PASS, verify ALL PASS, features
+  99.98% bit-exact vs torch golden (3851/23.4M elems, 1 f16 ulp, screen noise),
+  head RGB mean|d| 0.0083 (unchanged). Numerics intact.
+- Speed: chain 796.8 (pre) -> 799.6 (post) ms median of frames 40-44; the
+  16:25 pre-run measured 767.7, i.e. run-to-run spread (~30 ms) exceeds the
+  effect. Conclusion: at 1344x1088 the chain is COMPUTE-bound, not
+  barrier-bound (dispatch/barrier overhead ~10% at full extent, measured
+  ~50-96 us marginal per dispatch+barrier at 576x512 where it dominates).
+- Real lever for M10 pass 2: GEMM/kernel efficiency. Per-family rates measured
+  at 576x512: stem 0.61 TF/s, head 0.65, decoder 1.24, enc 1.52, bottleneck
+  1.71, global 2.89 - vs ~30 TF/s f16 hardware. 2x better GEMM kernels ~= 2x
+  chain speedup. That is a kernel-fusion/tuning milestone, not barrier work.
+  Deferred; chain is correct and stable at ~1.1 fps for now.
 
 ## M9b session log (2026-09-22 ~14:00-16:40)
 1. Ported the validated m9-unet chain into m8b-live (shaders m8/pool2,upmerge,

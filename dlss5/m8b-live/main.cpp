@@ -2431,10 +2431,9 @@ int main(int argc, char** argv) {
         dGemm(cb, famIdx, A(oWIN), A(poff[qkvN]), A(oPROJW), 64, 3 * C, C, Ww,
               64 * C, 0, 64 * 3 * C, gflags(EPI_NONE, false), C, 3 * C, 3 * C);
         bar(cb);
+        // M10: Q/K/V read the same oPROJW and write disjoint slots -> one bar.
         dCosW(cb, A(oPROJW), A(oQW), A(poff[scN]), Ww, H, C, 0);
-        bar(cb);
         dCosW(cb, A(oPROJW), A(oKW), A(poff[scN]), Ww, H, C, 1);
-        bar(cb);
         dCosW(cb, A(oPROJW), A(oVW), A(poff[scN]), Ww, H, C, 2);
         bar(cb);
         dGemm(cb, famIdx, A(oQW), A(oKW), A(oSCW), 64, 64, 32, Ww * H,
@@ -2566,10 +2565,9 @@ int main(int argc, char** argv) {
         dGemm(cb, famIdx, A(oG2), A(poff[tname("block%d.layer2.qkv_weight", idx)]), A(oPROJG),
               TOKG, 3072, 1024, 1, 0, 0, 0, gflags(EPI_NONE, false), 1024, 3072, 3072);
         bar(cb);
+        // M10: Q/K/V read the same oPROJG and write disjoint slots -> one bar.
         dCosG(cb, A(oPROJG), A(oQG), A(vecOff[tname("block%d.layer2.attn_scale.q32", idx)]), 0);
-        bar(cb);
         dCosG(cb, A(oPROJG), A(oKG), A(vecOff[tname("block%d.layer2.attn_scale.q32", idx)]), 1);
-        bar(cb);
         dCosG(cb, A(oPROJG), A(oVG), A(vecOff[tname("block%d.layer2.attn_scale.q32", idx)]), 2);
         bar(cb);
         dGemm(cb, famIdx, A(oQG), A(oKG), A(oSCG), TOKG, TOKG, 32, 32,
