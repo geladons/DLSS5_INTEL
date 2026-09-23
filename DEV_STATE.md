@@ -18,6 +18,24 @@ OWNER: re-test with tools\RUN-DEMO.cmd (or runm8b.cmd --window anime --frames 45
 flower/hair texture vs native), no stripes over time, PASS in docs\m8b-live.log.
 Speed: ~800 ms/frame at 1344x1088 (chain-bound; M10 first pass done, see below).
 
+## Owner-visibility fix + expected-effect calibration (2026-09-22 ~19:10)
+- ROOT CAUSE of "nothing on screen": the owner watches via Moonlight
+  (Sunshine CLIENT CONNECTED, DDA 2560x1440). WDA_EXCLUDEFROMCAPTURE hides
+  the overlay from that capture -> invisible since 11:10. Fixed for demos:
+  tools\RUN-*.cmd now pass --echo-free 0 (overlay captured, fbcancel on).
+  Owner CONFIRMED the overlay is visible again in window mode.
+- EXPECTED EFFECT calibration (reference\dlss-nr-on-intel\README.md):
+  DLSS-NR is a one-step pixel-space diffusion pass with SUBTLE native-res
+  output - measured there: characters darker, fabric texture +22..50%,
+  backgrounds untouched, MK1 faces even LOSE detail; "better = taste".
+  Our torch-vs-native on the anime wallpaper: mean|d| 6.5/255 overall, 36%
+  of pixels >8/255, concentrated on characters (faces, fabric, flowers) -
+  the same magnitude class. Live matches torch at ~50 dB, so the pipeline
+  does EXACTLY what the reference file does. The NVIDIA marketing demo
+  (dramatic face repaint) is NOT what this file does at native res on
+  already-clean content. Strongest visible effect = 3D game frames with
+  fine shading/fabric, not flat anime JPEGs.
+
 ## M10 pass 1 (2026-09-22 ~17:20) - barrier dedup: NO measurable gain
 - Removed 2 of 3 barriers between the Q/K/V cosine dispatches in
   recordWindowAttn (dCosW) and recordGlobal (dCosG): all three read the same
