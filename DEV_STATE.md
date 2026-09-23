@@ -1,18 +1,49 @@
-# DEV_STATE.md - where we are (updated 2026-09-22 ~21:00 by Kimi)
+# DEV_STATE.md - where we are (updated 2026-09-22 ~23:35 by Kimi)
 
 ## One-line status
-M11 v0 DONE: the Windows Vulkan layer (dlss5\m11-layer, port of the reference
-nr_layer.c) intercepts vkcube's presents, roundtrips frames through a TCP
-daemon and writes them back - owner SEES a green rotating cube in the
-Moonlight stream. This is the post-overlay architecture: no desktop capture,
-no feedback decay, no click-through problems, stream-native visibility.
-Next: extract the 71-block chain from m8b-live main.cpp into a module and
-stand up the real daemon (m11d), then a real game via DXVK (owner has no GTA
-SA; the GTA IV window was a screenshot, not the game).
+M11 DAEMON LIVE: the REAL 71-block DLSS 5 chain now processes vkcube presents
+through the Vulkan layer - dlss5\m11d (TCP daemon on 127.0.0.1:47990) runs
+ChainEngine (new dlss5\chain OOP module) at ~145 ms/frame on the 500x500
+cube. Validated vs torch goldens BEFORE going live: 15/16 feature channels
+bit-exact (color ch0-2 within 1 f16 ulp on 0.26% of tokens), head meandiff
+0.0083 == the m8b-live validated level. Processed cube pixels verified
+artifact-free (residual concentrates on logos/edges, x8 diff inspected).
+Demo: dlss5\m11d\_demo.cmd (m11d console + vkcube; kill both after).
+Next: real game via DXVK (32-bit layer build for DX9 games), then GEMM
+perf (chain is ~135 ms at 512x512, ~930 ms at 1344x1088).
 
 Why the pivot (owner call 2026-09-22 ~19:45): overlay mode with --echo-free 0
 shows a great first frame then the effect DECAYS each frame (fbcancel eats
 the residual through the capture loop) and clicks hit the overlay.
+Screen-level processing is the wrong level; the layer sits just above the
+driver instead.
+
+## M11 daemon session log (2026-09-22 ~21:30-23:35)
+1. dlss5\chain module (per owner code rules): vk_util.h / fp16.h /
+   VkContext (vk_context.*) / WeightsStore (weights.*, safetensors + pack +
+   fuse-fold + de-swizzle + side tables) / ChainArena (arena.*, slot layout +
+   3.5 GiB chunking + BDA) / ChainRecorder (recorder.* + recorder_blocks.cpp,
+   14 pipelines + 71-block walk) / ChainEngine (engine.*, absolute echo-free
+   front-end: decode->features->featpack->chain->compose->encode->readback).
+   All chain code VERBATIM-ported from m8b-live main.cpp (lambdas -> methods).
+   Shaders compile from m8b-live\sources (single source of truth).
+2. dlss5\m11d: TCP daemon, protocol identical to nr_layer.c (16-byte header
+   {magic,w,h,fmt} + BGRA payload, masked variant reads +w*h mask). Lazy
+   engine init per frame size, alpha preserved (vendor nr_daemon.py:88
+   parity; encode forces opaque for the overlay use-case), held-still UI
+   mask pixels pass through. --selftest file.bmp = one-shot validation mode
+   (frame index 1, dumps out\live_*).
+3. Validation (m11d --selftest native_crop.bmp 1309x1070, extent 1344x1088):
+   features ch3-15 BIT-EXACT vs golden, ch0-2 maxdiff 1 f16 ulp (0.26% of
+   tokens, meandiff 4.6e-07); head ch0-2 meandiff 0.0083 == m8b's own
+   validated deviation. LIVE cube reply: mean|d| ~2/255 color, geometry and
+   colors intact, residual rides logos/edges (x8 diff PNG inspected).
+4. Gotchas hit: cmake function directory-scope vars are invisible at the
+   call site (d5c_stage_shaders silently staged nothing -> spv dir now
+   travels via a GLOBAL property); LNK1104 when rebuilding over a running
+   m11d.exe (kill first); two "Arc Pro B50" Vulkan devices enumerate today
+   (LUID 968b / 11646) - headless engine takes the first coopmat-capable,
+   works, but pinning by LUID may matter later.
 Screen-level processing is the wrong level; the layer sits just above the
 driver instead.
 
