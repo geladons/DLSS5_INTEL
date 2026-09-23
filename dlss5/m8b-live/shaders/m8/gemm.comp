@@ -75,34 +75,88 @@ void main() {
     for (uint i = 0u; i < RM; i++)
         for (uint j = 0u; j < RN; j++)
             acc[i][j] = coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(0.0);
-    coopmat<float16_t, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA> a[RM];
-    coopmat<float16_t, gl_ScopeSubgroup, TK, TN, gl_MatrixUseB> b[RN];
+    // K-loop software pipeline (M10): two tile slots, loads for t+1 issue
+    // before the MMAs of t consume slot t, so global-load latency overlaps
+    // XMX math. Math order is UNCHANGED (same TK tiles, same accumulate
+    // sequence) - bit-exact vs the serial loop. Slot indices are compile-
+    // time constants (dynamic coopmat array indexing would spill to scratch).
+    coopmat<float16_t, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA> a[2][RM];
+    coopmat<float16_t, gl_ScopeSubgroup, TK, TN, gl_MatrixUseB> b[2][RN];
+    const uint tiles = (pc.k + TK - 1u) / TK;
 
     if ((pc.flags & 1u) != 0u) {
         // B stored row-major as (N, K): element (n, k) at n*ldb + k. A ColumnMajor
         // coopmat load of that buffer yields the (K, N) tile = B^T.
-        for (uint k = 0u; k < pc.k; k += TK) {
-            for (uint i = 0u; i < RM; i++)
-                coopMatLoad(a[i], pc.a.v, ao + (row + i * TM) * lda + k, lda,
-                            gl_CooperativeMatrixLayoutRowMajor);
-            for (uint j = 0u; j < RN; j++)
-                coopMatLoad(b[j], pc.b.v, bo + (col + j * TN) * ldb + k, ldb,
-                            gl_CooperativeMatrixLayoutColumnMajor);
+        for (uint i = 0u; i < RM; i++)
+            coopMatLoad(a[0][i], pc.a.v, ao + (row + i * TM) * lda, lda,
+                        gl_CooperativeMatrixLayoutRowMajor);
+        for (uint j = 0u; j < RN; j++)
+            coopMatLoad(b[0][j], pc.b.v, bo + (col + j * TN) * ldb, ldb,
+                        gl_CooperativeMatrixLayoutColumnMajor);
+        uint t = 0u;
+        while (true) {
+            if (t + 1u < tiles)
+                for (uint i = 0u; i < RM; i++)
+                    coopMatLoad(a[1][i], pc.a.v, ao + (row + i * TM) * lda + (t + 1u) * TK, lda,
+                                gl_CooperativeMatrixLayoutRowMajor);
+            if (t + 1u < tiles)
+                for (uint j = 0u; j < RN; j++)
+                    coopMatLoad(b[1][j], pc.b.v, bo + (col + j * TN) * ldb + (t + 1u) * TK, ldb,
+                                gl_CooperativeMatrixLayoutColumnMajor);
             for (uint i = 0u; i < RM; i++)
                 for (uint j = 0u; j < RN; j++)
-                    acc[i][j] = coopMatMulAdd(a[i], b[j], acc[i][j]);
+                    acc[i][j] = coopMatMulAdd(a[0][i], b[0][j], acc[i][j]);
+            ++t;
+            if (t >= tiles) break;
+            if (t + 1u < tiles)
+                for (uint i = 0u; i < RM; i++)
+                    coopMatLoad(a[0][i], pc.a.v, ao + (row + i * TM) * lda + (t + 1u) * TK, lda,
+                                gl_CooperativeMatrixLayoutRowMajor);
+            if (t + 1u < tiles)
+                for (uint j = 0u; j < RN; j++)
+                    coopMatLoad(b[0][j], pc.b.v, bo + (col + j * TN) * ldb + (t + 1u) * TK, ldb,
+                                gl_CooperativeMatrixLayoutColumnMajor);
+            for (uint i = 0u; i < RM; i++)
+                for (uint j = 0u; j < RN; j++)
+                    acc[i][j] = coopMatMulAdd(a[1][i], b[1][j], acc[i][j]);
+            ++t;
+            if (t >= tiles) break;
         }
     } else {
-        for (uint k = 0u; k < pc.k; k += TK) {
-            for (uint i = 0u; i < RM; i++)
-                coopMatLoad(a[i], pc.a.v, ao + (row + i * TM) * lda + k, lda,
-                            gl_CooperativeMatrixLayoutRowMajor);
-            for (uint j = 0u; j < RN; j++)
-                coopMatLoad(b[j], pc.b.v, bo + k * ldb + col + j * TN, ldb,
-                            gl_CooperativeMatrixLayoutRowMajor);
+        for (uint i = 0u; i < RM; i++)
+            coopMatLoad(a[0][i], pc.a.v, ao + (row + i * TM) * lda, lda,
+                        gl_CooperativeMatrixLayoutRowMajor);
+        for (uint j = 0u; j < RN; j++)
+            coopMatLoad(b[0][j], pc.b.v, bo + col + j * TN, ldb,
+                        gl_CooperativeMatrixLayoutRowMajor);
+        uint t = 0u;
+        while (true) {
+            if (t + 1u < tiles)
+                for (uint i = 0u; i < RM; i++)
+                    coopMatLoad(a[1][i], pc.a.v, ao + (row + i * TM) * lda + (t + 1u) * TK, lda,
+                                gl_CooperativeMatrixLayoutRowMajor);
+            if (t + 1u < tiles)
+                for (uint j = 0u; j < RN; j++)
+                    coopMatLoad(b[1][j], pc.b.v, bo + (t + 1u) * TK * ldb + col + j * TN, ldb,
+                                gl_CooperativeMatrixLayoutRowMajor);
             for (uint i = 0u; i < RM; i++)
                 for (uint j = 0u; j < RN; j++)
-                    acc[i][j] = coopMatMulAdd(a[i], b[j], acc[i][j]);
+                    acc[i][j] = coopMatMulAdd(a[0][i], b[0][j], acc[i][j]);
+            ++t;
+            if (t >= tiles) break;
+            if (t + 1u < tiles)
+                for (uint i = 0u; i < RM; i++)
+                    coopMatLoad(a[0][i], pc.a.v, ao + (row + i * TM) * lda + (t + 1u) * TK, lda,
+                                gl_CooperativeMatrixLayoutRowMajor);
+            if (t + 1u < tiles)
+                for (uint j = 0u; j < RN; j++)
+                    coopMatLoad(b[0][j], pc.b.v, bo + (t + 1u) * TK * ldb + col + j * TN, ldb,
+                                gl_CooperativeMatrixLayoutRowMajor);
+            for (uint i = 0u; i < RM; i++)
+                for (uint j = 0u; j < RN; j++)
+                    acc[i][j] = coopMatMulAdd(a[1][i], b[1][j], acc[i][j]);
+            ++t;
+            if (t >= tiles) break;
         }
     }
 
