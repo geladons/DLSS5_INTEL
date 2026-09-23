@@ -88,6 +88,22 @@ DESKTOP-285INKS (Win 11), GPU passed through. Owner plays games via Sunshine
   and local DDA captures here (MPO plane) - only the owner's stream (and the
   layer's own readback) sees them. Do not trust local screenshots of Vulkan
   windows.
+- chain: THE model as an OOP module (extracted from m8b-live main.cpp,
+  verbatim numerics; per owner code rules). VkContext (device + coopmat
+  checks) / WeightsStore (safetensors, pack, fuse-fold, de-swizzle) /
+  ChainArena (slot layout, 3.5 GiB chunking, BDA) / ChainRecorder (14
+  pipelines, 71-block U-Net walk) / ChainEngine (absolute echo-free
+  front-end: decode -> features -> featpack -> chain -> compose -> encode ->
+  readback; --gain = vendor intensity). Shaders compile from
+  m8b-live\shaders (single source of truth). Consumers: m11d, later m8b-live.
+- m11d: DLSSNR frame daemon (TCP 127.0.0.1:47990, protocol = nr_layer.c
+  16-byte header + BGRA payload; masked magic carries a held-still UI mask
+  that passes through untouched; input alpha preserved). Lazy engine init
+  per frame size. --selftest file.bmp = one-shot validation (dumps
+  out\live_*, compare vs work\_m9b_cmp goldens, frame index 1). Demo:
+  dlss5\m11d\_demo.cmd. VALIDATED 2026-09-22 vs torch goldens (features
+  15/16 ch bit-exact, head meandiff 0.0083 = m8b level) and LIVE on vkcube
+  (~145 ms/frame at 500x500).
 - Weights: work\mlxw\dlssnr-logical.safetensors (proprietary, NOT in git;
   649 tensors, 71 blocks, resident ~325 MB VRAM). Loader m6.
 
