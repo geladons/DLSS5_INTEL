@@ -5,9 +5,10 @@ INCIDENT RESOLVED - it was never the GPU/host: 78a5d28's sparseBinding
 device-feature enable silently corrupts large dense allocations on this Arc
 driver; fixed in 2ec9135 (feature now gated behind D5C_SPARSE=1), selftest
 PASS x3 md5-identical to the 3482274 golden. M10 pass 4: barrier-scoping
-lever CLOSED with measurements. Baseline unchanged: 1083 ms/frame at
-1920x1088, 0.91 fps. Next lever: GEMM K-loop pipelining (gemm = 382 ms of
-REAL in-kernel time).
+lever CLOSED with measurements. Baseline was 1083 ms/frame at 1920x1088;
+gemm K-loop pipelining landed it at 1044-1070 ms (~3-4%, bit-exact) - the
+Arc compiler already overlapped most load latency. Next gemm lever: bigger
+per-subgroup tile (RN=4 -> 16x64) for the N%64==0 shapes.
 
 ## Barrier autopsy (pass 4, measured - do not re-litigate)
 Tax at 1080p = 1083 - 807 = ~276 ms/frame (~1260 bar() calls, ~3 buffers).
