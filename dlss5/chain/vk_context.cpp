@@ -119,7 +119,14 @@ bool VkContext::createDevice(const VkContextConfig& cfg) {
     VkPhysicalDeviceFeatures fe{};
     fe.shaderInt64 = VK_TRUE;
     fe.shaderInt16 = VK_TRUE;
-    fe.sparseBinding = vk.sparseBinding ? VK_TRUE : VK_FALSE;
+    // Arc driver: merely ENABLING the sparseBinding device feature silently
+    // corrupts large DENSE allocations (M10: head meandiff 0.7-1.9 vs 0.008
+    // expected, bench looks normal, featV stays golden). Enable the feature
+    // only for the D5C_SPARSE=1 experiment; the dense default must create
+    // the device without it.
+    bool wantSparseFeat = false;
+    if (const char* s = std::getenv("D5C_SPARSE")) wantSparseFeat = std::atoi(s) != 0;
+    fe.sparseBinding = (vk.sparseBinding && wantSparseFeat) ? VK_TRUE : VK_FALSE;
     VkPhysicalDeviceVulkan11Features f11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
     f11.storageBuffer16BitAccess = VK_TRUE;
     VkPhysicalDeviceVulkan12Features f12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};

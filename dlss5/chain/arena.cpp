@@ -169,6 +169,10 @@ void ChainArena::layout(const Stage st[7], uint64_t T6P, uint64_t packTotalIn,
     // M10 measured: 3500 MB works; 3800 MB SILENTLY breaks chain numerics
     // (head meandiff 0.71/1.60/1.26 vs 0.008 expected) on this Arc driver
     // while bench looks normal - keep the cap conservative, do not raise.
+    // CORRECTION (M10 incident): the silent-corruption trigger was NOT the
+    // chunk size - it was enabling the sparseBinding DEVICE FEATURE (see
+    // vk_context.cpp). With the feature off, 3800 MB may be fine; retest
+    // before raising the cap.
     const VkDeviceSize CHUNK_CAP = 3500ull * 1024 * 1024;
     chunks.clear();
     {
