@@ -73,6 +73,24 @@ DESKTOP-285INKS (Win 11), GPU passed through. Owner plays games via Sunshine
 - Weights: work\mlxw\dlssnr-logical.safetensors (proprietary, NOT in git;
   649 tensors, 71 blocks, resident ~325 MB VRAM). Loader m6.
 
+## Code rules (owner directive 2026-09-22 - mandatory, always)
+Large files already make edits painful (main.cpp ~3900 lines). From now on:
+- OOP/modular design is MANDATORY for new code: classes with a single clear
+  responsibility, encapsulated state, explicit ownership. No new file-scope
+  globals; state travels in structs/classes passed by reference.
+- NEVER grow main.cpp for a new concern. New subsystem = its own translation
+  unit (foo.h/foo.cpp) with a small public interface, wired in at one call
+  site. Naming style: ChainRecorder, CaptureSource, OverlayPresenter.
+- File-size discipline: soft cap ~600 lines per file; when a file grows past
+  it, split by responsibility before adding more.
+- When touching code inside an oversized file, prefer EXTRACTING the touched
+  piece into a module over editing in place - but only when the extraction is
+  safe and covered by the validation rig (below). No heroic untested rewrites.
+- One logical change per commit, small reviewable diffs. Anything touching the
+  chain or shaders MUST be rebuilt and validated (features/head dumps vs torch
+  goldens + 45-frame PASS run) before commit.
+- Comments and identifiers: English, ASCII-only (host quirk above).
+
 ## Red lines
 - Don't stop Sunshine; don't kill openclaw/gateway processes (Kimi desktop owns
   them - quit Kimi tray app instead if truly stuck).
