@@ -29,15 +29,6 @@
 
 layout(local_size_x = 32) in;
 
-// M10: one row per invocation, n <= SH_CAP -> the bit-affine weights are
-// computed ONCE into shared memory (pass 2 reads shared instead of
-// recomputing + re-reading global). The fp32 row sum keeps its exact
-// sequential order (total += w0; total += w1 over i) and every per-element
-// op is unchanged -> bit-exact with the two-pass version. Rows with
-// n > SH_CAP (global blocks, huge extents) take the original two-pass path.
-const uint SH_CAP = 1024u;
-shared float sh_w[SH_CAP];
-
 layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf { float v[]; };
 layout(buffer_reference, scalar, buffer_reference_align = 16) buffer HalfBuf  { float16_t v[]; };
 
@@ -82,42 +73,11 @@ void main() {
     if (row >= pc.m) return;
     uint base = row * pc.n;
 
-    if (pc.n <= SH_CAP) {
-        // Lane-parallel weights: each lane computes the affine weight pair
-        // for columns (lane*2, lane*2+1) (+64 strides) — fully coalesced
-        // global reads, 1/32 of the redundant ALU. Weights land in shared.
-        uint lane = gl_LocalInvocationID.x;
-        for (uint i = lane * 2u; i < pc.n; i += 64u) {
-            float w0, w1;
-            weights_at(base, i, w0, w1);
-            sh_w[i] = w0;
-            sh_w[i + 1u] = w1;
-        }
-        barrier();
-        // fp32 row sum: EXACT sequential order (i ascending, +w0 then +w1),
-        // every lane redundantly from shared — identical values to the
-        // original two-pass version.
-        float total = 0.0;
-        for (uint i = 0u; i < pc.n; i += 2u) {
-            total += sh_w[i];
-            total += sh_w[i + 1u];
-        }
-        float reciprocal = half_round(1.0 / half_round(total));
-        for (uint i = lane * 2u; i < pc.n; i += 64u) {
-            precise float p0 = sh_w[i] * reciprocal;
-            precise float p1 = sh_w[i + 1u] * reciprocal;
-            pc.c.v[base + i]      = float16_t(e4m3(half_round(p0)));
-            pc.c.v[base + i + 1u] = float16_t(e4m3(half_round(p1)));
-        }
-        return;
-    }
-
-    // long rows (global attention): original two-pass over global memory
     float total = 0.0;
     float w0, w1;
     for (uint i = 0u; i < pc.n; i += 2u) {
         weights_at(base, i, w0, w1);
-        total += w0;
+        total += w0;          // fp32 accumulation, as numpy's sum(dtype=float16)
         total += w1;
     }
     float reciprocal = half_round(1.0 / half_round(total));

@@ -84,6 +84,10 @@ target_link_libraries(d5c_chain PUBLIC vulkan-1)
 # The spv dir travels via a global property: CMAKE_CURRENT_BINARY_DIR inside a
 # function resolves in the CALLER's scope, and the chain lists live in the
 # chain/ directory scope.
+# M10 fix: the copies are OUTPUTS of per-file custom commands wired into a
+# staging target that <target> depends on - a POST_BUILD copy only runs when
+# the exe RELINKS, so shader-only changes silently ran stale spv (pass 3 was
+# "validated" against the previous shaders this way; identical metrics).
 set_property(GLOBAL PROPERTY D5C_SPV_DIR "${CMAKE_CURRENT_BINARY_DIR}")
 function(d5c_stage_shaders TGT)
     get_property(SPV_DIR GLOBAL PROPERTY D5C_SPV_DIR)
@@ -91,9 +95,20 @@ function(d5c_stage_shaders TGT)
     set(M8_SHADERS gemm gemm_rn1 cosine cosine_win softmax elementwise
                    partition transpose_we gather_residual merge featpack headpack
                    pool2 upmerge)
+    set(STAGED "")
     foreach(S ${SHADERS} ${M8_SHADERS})
-        add_custom_command(TARGET ${TGT} POST_BUILD
+        # $<TARGET_FILE_DIR> is not evaluable in an OUTPUT; consumers here are
+        # single-config (NMake) with the exe at the build root, so the caller-
+        # scope binary dir IS the target file dir.
+        set(DST ${CMAKE_CURRENT_BINARY_DIR}/${S}.spv)
+        add_custom_command(
+            OUTPUT ${DST}
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    ${SPV_DIR}/${S}.spv $<TARGET_FILE_DIR:${TGT}>/${S}.spv)
+                    ${SPV_DIR}/${S}.spv ${DST}
+            DEPENDS ${SPV_DIR}/${S}.spv
+            VERBATIM)
+        list(APPEND STAGED ${DST})
     endforeach()
+    add_custom_target(${TGT}_spv ALL DEPENDS ${STAGED})
+    add_dependencies(${TGT} ${TGT}_spv)
 endfunction()
