@@ -14,7 +14,8 @@ patches the vtable ENTRIES IN PLACE (VirtualProtect/write/restore). BattleEye
 BLOCKS loading dxgi.dll from the game dir (Blocked loading of file) - owner
 disabled BE in the launcher; Rockstar's mod check complains but launches.
 M12b is DEAD (no GTA5.exe anywhere - only Enhanced installed). Plan B if
-Enhanced breaks: Cyberpunk 2077 (DX12, no anticheat).
+Enhanced breaks: Cyberpunk 2077 (DX12, no anticheat). Owner hotkeys ship:
+CTRL+ALT=X pause toggle, CTRL+ALT+Q full detach (in-place vtable restore).
 
 ## M12a live session (2026-09-23 ~09:00-10:10)
 1. First real-game run: game CRASHED at startup with the vtable-copy hook
@@ -97,17 +98,32 @@ Enhanced breaks: Cyberpunk 2077 (DX12, no anticheat).
 4. Chain perf at 960x540: ~700 ms/frame (GEMM-bound, matches M10 notes).
 
 ## Next steps (order)
-0. OWNER: restart GTA5 Enhanced, watch the stream (slideshow + subtle
-   effect). If BattleEye kills it -> _undeploy.cmd, fall back to M12b
-   (GTA5 Legacy DX11 + DXVK x64 from GitHub -> existing m11-layer; no new
-   capture code needed).
-1. If the game's backbuffer is R10G10B10A2 (HDR), v0 passes through
-   unprocessed (logged in m12_dxgi.log) - then decide: tonemap-convert or
-   leave it.
-2. M12c polish after owner confirms: per-size engine warmup, cleaner gain
-   control, maybe async pipeline (capture thread) to unhook the 700 ms
-   present block.
-3. M13 one-click manager ONLY after owner confirms a working path.
+0. DONE 2026-09-23 ~10:00: real-game validation PASS (see live session above).
+   Remaining owner experience items: effect is subtle at default gain; if the
+   owner wants it punchier, restart m11d with --gain up to 2 (add the flag to
+   dlss5\m12-dxgi\_start_daemon.cmd) - requires daemon restart, NOT the game.
+1. M10 GEMM tuning: chain is ~1.25-1.4 s at 1920x1080 -> 0.7 fps slideshow.
+   This is THE blocker for playability. M10 notes exist in repo history.
+2. M12c polish: async pipeline (capture thread) to unhook the present block,
+   per-size engine warmup, HDR (R10G10B10A2) conversion if a game needs it
+   (GTA5E ships B8G8R8A8, not hit).
+3. M13 one-click manager after owner confirms the path is fun to demo.
+   NOTE M12b is dead: no GTA5.exe (Legacy) installed anywhere. Plan B title
+   for DX12 path if Enhanced breaks: Cyberpunk 2077 (D:\SteamLibrary, no
+   anticheat; drop the same dxgi.dll next to Cyberpunk2077.exe).
+
+## Owner controls (m12 proxy)
+- CTRL+ALT+X: pause/resume processing (full fps while paused).
+- CTRL+ALT+Q: full detach (vtables restored in place, proxy inert).
+- Scripts: dlss5\m12-dxgi\_pause.cmd / _resume.cmd (same pause channel);
+  _start_daemon.cmd (m11d); _deploy_elevated.cmd / _undeploy_elevated.cmd
+  (UAC). Env: M12_LIVE (default 4), M12_DISABLE=1, M12_DUMP=path.bmp,
+  M12_LOG, M12_PORT (47990).
+- Owner A/B evidence 2026-09-23 (GTA5E story mode, Franklin house scene,
+  1080p): dlss5\m12-dxgi\evidence\m12a_before.png (paused/original) vs
+  m12a_after.png (processed): after = visibly cleaner foliage/fence edges,
+  less shimmer on distant downtown towers, fabric folds on the hoodie read
+  sharper. Owner-visible, matches mean|d| ~2-7/255 calibration.
 
 ## Previous status (2026-09-23 ~00:10) - M11 handoff state
 The REAL 71-block DLSS 5 chain processes Vulkan presents live (m11-layer ->
