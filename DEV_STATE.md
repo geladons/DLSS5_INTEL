@@ -104,6 +104,29 @@ CTRL+ALT=X pause toggle, CTRL+ALT+Q full detach (in-place vtable restore).
    dlss5\m12-dxgi\_start_daemon.cmd) - requires daemon restart, NOT the game.
 1. M10 GEMM tuning: chain is ~1.25-1.4 s at 1920x1080 -> 0.7 fps slideshow.
    This is THE blocker for playability. M10 notes exist in repo history.
+1a. DONE 2026-09-23 ~11:45 (M10 pass 2 - first blood): per-dispatch profiler
+   (ChainProf, dlss5\chain\prof.*, env-free: EngineConfig.profPath / m11d
+   --bench N WxH [--prof csv]) measured the REAL 1080p split (median 20
+   frames, extent 1920x1088, chain 1415 ms): gather 410 ms (29%), gemm 406
+   (29%), smaxw 204 (14%), cosw 174 (12%), ew/part/pool/trans/upm ~215.
+   SURPRISE: window-attention SUPPORT kernels are 56% of the frame - not the
+   GEMMs (M10 pass 1 barrier work had pointed at GEMM; the truth needed
+   per-dispatch data). gather_residual.comp was the worst: scalar per-channel
+   loop, one token per thread -> warps strided by C floats (16x sector waste),
+   23 ms/call at L3. Fix: warp-per-token mapping (lane -> (token, C/4-vec4
+   slot), one warp covers 128/C tokens, C in {32..512}; per-element math and
+   order unchanged). gather 410 -> 38 ms (10.8x); chain 1415 -> 1059 ms
+   (0.70 -> 0.92 fps). Validated vs torch goldens: head meandiff 0.00827 ==
+   the m8b level, features maxdiff 1 f16 ulp (noise ch) - IDENTICAL numbers to
+   pre-change. GOTCHAS: (a) gather C is up to 512 (deep fam 0/1 blocks) - the
+   first warp-mapping attempt assumed C<=128 -> tpt>32 -> wpw=0 division
+   killed the process silently (GPU TDR + exit 0, looks like a hang in
+   processFrame); (b) use gl_WorkGroupID, NOT gl_GlobalInvocationID, for the
+   warp index. Bench harness: m11d --bench 20 1920x1088 --prof out.csv
+   (detached launch + poll the log; foreground GPU hangs wedge the tool).
+   NEXT M10 targets (same scalar-disease class): smaxw 210 ms + cosw 182 ms
+   (softmax.comp / cosine_win.comp: scalar loads, 2-pass softmax); then the
+   gemm 408 ms (K-loop pipelining, multi-subgroup tiles).
 2. M12c polish: async pipeline (capture thread) to unhook the present block,
    per-size engine warmup, HDR (R10G10B10A2) conversion if a game needs it
    (GTA5E ships B8G8R8A8, not hit).

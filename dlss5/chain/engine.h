@@ -14,6 +14,7 @@
 #include "weights.h"
 #include "arena.h"
 #include "recorder.h"
+#include "prof.h"
 
 #include <string>
 
@@ -29,6 +30,7 @@ struct EngineConfig {
     VkContextConfig vkCfg{};                           // device selection (headless default)
     bool debugDumps = false;                           // dump live_*.bin on frame index 1
     std::string dumpDir = "out";                       // dump destination
+    std::string profPath;                              // M10: per-dispatch CSV (empty = off)
 };
 
 struct FrameStats {
@@ -69,6 +71,7 @@ private:
     WeightsStore ws_;
     ChainArena arena_;
     ChainRecorder rec_;
+    ChainProf prof_;
 
     VkCommandPool cmdPool_ = VK_NULL_HANDLE;
     VkCommandBuffer cmd_ = VK_NULL_HANDLE;

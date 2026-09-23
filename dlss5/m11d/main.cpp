@@ -14,6 +14,9 @@
 //   one-shot validation:  m11d --selftest file.bmp [--gain F]
 //                         -> out\selftest_out.bmp + live_* dumps (frame index 1,
 //                         matching the torch goldens in work/_m9b_cmp)
+//   M10 benchmark:        m11d --bench N WxH [--prof out.csv]
+//                         synthetic frames, no sockets; prints per-frame and
+//                         median wall/gpu/chain ms; --prof adds per-dispatch CSV
 // ============================================================================
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -25,6 +28,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -126,6 +130,9 @@ int main(int argc, char** argv) {
     float gain = 1.0f;
     bool dump = false;
     std::string selftest;
+    std::string benchProf;
+    int benchN = 0;
+    uint32_t benchW = 0, benchH = 0;
     std::string weights = "C:\\Users\\AI\\Desktop\\DLSS5_INTEL\\work\\mlxw\\dlssnr-logical.safetensors";
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -134,8 +141,18 @@ int main(int argc, char** argv) {
         else if (a == "--weights" && i + 1 < argc) weights = argv[++i];
         else if (a == "--dump") dump = true;
         else if (a == "--selftest" && i + 1 < argc) selftest = argv[++i];
+        else if (a == "--bench" && i + 2 < argc) {
+            benchN = std::atoi(argv[++i]);
+            if (std::sscanf(argv[++i], "%ux%u", &benchW, &benchH) != 2) benchN = 0;
+            if (benchN <= 0 || !benchW || !benchH) {
+                std::fprintf(stderr, "[FAIL] --bench needs N WxH (e.g. --bench 20 1920x1088)\n");
+                return 1;
+            }
+        }
+        else if (a == "--prof" && i + 1 < argc) benchProf = argv[++i];
         else {
-            std::fprintf(stderr, "usage: m11d [--port N] [--gain F] [--weights PATH] [--dump] [--selftest file.bmp]\n");
+            std::fprintf(stderr, "usage: m11d [--port N] [--gain F] [--weights PATH] [--dump] "
+                                 "[--selftest file.bmp] [--bench N WxH [--prof out.csv]]\n");
             return 1;
         }
     }
@@ -160,6 +177,7 @@ int main(int argc, char** argv) {
         cfg.debugDumps = dump;
         cfg.dumpDir = "out";
         cfg.vkCfg.appName = "m11d";
+        cfg.profPath = benchProf;   // empty = profiling off (production default)
         // headless: no surface/swapchain extensions, first coopmat-capable device
         if (!engine.init(cfg)) {
             std::fprintf(stderr, "[FAIL] engine init for %ux%u\n", w, h);
@@ -192,6 +210,41 @@ int main(int argc, char** argv) {
         std::printf("[selftest] processed in %.1f ms wall (gpu %.1f | fe %.1f fp %.1f chain %.1f tail %.1f)\n",
                     st.wallMs, st.gpuTotalMs, st.feMs, st.fpMs, st.chainMs, st.tailMs);
         std::printf("[selftest] out\\selftest_out.bmp + out\\live_* dumps written\n");
+        engine.shutdown();
+        return 0;
+    }
+
+    // ------------------------------------------------------ bench (M10) ----
+    if (benchN > 0) {
+        if (!ensureEngine(benchW, benchH)) return 1;
+        const size_t px = (size_t)benchW * benchH;
+        std::vector<uint8_t> in(px * 4), out(px * 4);
+        // deterministic synthetic content (gradient + per-pixel hash): enough
+        // to keep every kernel's data-path realistic without any file I/O
+        for (size_t i = 0; i < px; ++i) {
+            uint32_t hsh = (uint32_t)(i * 2654435761u) ^ (uint32_t)(i >> 13);
+            in[i * 4 + 0] = (uint8_t)(i % benchW);
+            in[i * 4 + 1] = (uint8_t)(i / benchW);
+            in[i * 4 + 2] = (uint8_t)(hsh >> 16);
+            in[i * 4 + 3] = 255;
+        }
+        std::printf("[bench] %d frames at %ux%u (prof: %s)\n", benchN, benchW, benchH,
+                    benchProf.empty() ? "off" : benchProf.c_str());
+        std::vector<double> wall(benchN), gpu(benchN), chain(benchN);
+        for (int f = 0; f < benchN; ++f) {
+            d5c::FrameStats st{};
+            if (!engine.processFrame(in.data(), out.data(), f + 1, &st)) return 1;
+            wall[f] = st.wallMs; gpu[f] = st.gpuTotalMs; chain[f] = st.chainMs;
+            std::printf("[bench] frame %d: wall %.1f ms (gpu %.1f | chain %.1f)\n",
+                        f + 1, st.wallMs, st.gpuTotalMs, st.chainMs);
+        }
+        auto med = [](std::vector<double>& v) {
+            std::sort(v.begin(), v.end());
+            return v[v.size() / 2];
+        };
+        std::printf("[bench] MEDIAN of %d frames at %ux%u: wall %.1f ms | gpu %.1f | chain %.1f"
+                    "  =>  %.2f fps\n", benchN, benchW, benchH,
+                    med(wall), med(gpu), med(chain), 1000.0 / med(wall));
         engine.shutdown();
         return 0;
     }

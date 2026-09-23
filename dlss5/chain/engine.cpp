@@ -139,6 +139,11 @@ bool ChainEngine::init(const EngineConfig& cfg) {
     hostImg.clear(); hostImg.shrink_to_fit();   // ~2 GB host copy no longer needed
 
     rec_.init(c, arena_, ws_, st_, cfg.shaderDir);
+    if (!cfg.profPath.empty()) {
+        prof_.create(c, cfg.profPath);
+        rec_.setProf(&prof_);
+        std::printf("[prof] per-dispatch profiling ON -> %s\n", cfg.profPath.c_str());
+    }
     return createFrontEnd();
 }
 
@@ -299,6 +304,7 @@ void ChainEngine::barrierAll() {
 // ------------------------------------------------------------ record ------
 void ChainEngine::recordFrame(long frameIndex) {
     const uint32_t rl = cfg_.regionLeft, rt = cfg_.regionTop;
+    if (prof_.enabled()) prof_.begin(cmd_);
     vkCmdResetQueryPool(cmd_, tsPool_, 0, 6);
     {   // upload -> imgIn
         VkBufferMemoryBarrier bb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
@@ -339,6 +345,7 @@ void ChainEngine::recordFrame(long frameIndex) {
         vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLayout_, 0, 1,
                                 &setFinal_, 0, nullptr);
         vkCmdDispatch(cmd_, (W_ + 15) / 16, (H_ + 15) / 16, 1);
+        if (prof_.enabled()) prof_.mark(cmd_, "decode", "", 0, 0, 0, (W_ + 15) / 16, (H_ + 15) / 16, 1);
         barrierAll();
         vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 0);
         // features at the full vendor extent (temporal OFF: channels 7-9 take
@@ -353,6 +360,8 @@ void ChainEngine::recordFrame(long frameIndex) {
         p.d[0] = 0.0f; p.d[1] = 0.0f; p.d[2] = 0.0f; p.d[3] = 0.0f;
         push(p);
         vkCmdDispatch(cmd_, ((uint64_t)netW_ * netH_ + 255) / 256, 1, 1);
+        if (prof_.enabled()) prof_.mark(cmd_, "features", "", 0, 16, 0,
+                                        (uint32_t)(((uint64_t)netW_ * netH_ + 255) / 256), 1, 1);
         barrierAll();
         vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 1);
     }
@@ -362,6 +371,8 @@ void ChainEngine::recordFrame(long frameIndex) {
         vkCmdPushConstants(cmd_, rec_.featpackPipe().layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                            sizeof(fp), &fp);
         vkCmdDispatch(cmd_, (st_[0].TOK * 16 + 255) / 256, 1, 1);
+        if (prof_.enabled()) prof_.mark(cmd_, "featpack", "", 0, 16, 0,
+                                        (st_[0].TOK * 16 + 255) / 256, 1, 1);
         barrierAll();
         vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 2);
         // full 71-block DLSSNR U-Net chain (~1400 dispatches)
@@ -379,6 +390,8 @@ void ChainEngine::recordFrame(long frameIndex) {
         p.c[2] = cfg_.headGain;       // vendor residual scale
         push(p);
         vkCmdDispatch(cmd_, ((uint64_t)regionW_ * regionH_ + 255) / 256, 1, 1);
+        if (prof_.enabled()) prof_.mark(cmd_, "compose", "", 0, 0, 0,
+                                        (uint32_t)(((uint64_t)regionW_ * regionH_ + 255) / 256), 1, 1);
         barrierAll();
         vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeEncode_);
         p.a[0] = (int32_t)W_; p.a[1] = (int32_t)H_; p.a[2] = (int32_t)rl; p.a[3] = (int32_t)rt;
@@ -386,6 +399,7 @@ void ChainEngine::recordFrame(long frameIndex) {
         p.b[3] = 0;                   // absolute (direct color)
         push(p);
         vkCmdDispatch(cmd_, (W_ + 15) / 16, (H_ + 15) / 16, 1);
+        if (prof_.enabled()) prof_.mark(cmd_, "encode", "", 0, 0, 0, (W_ + 15) / 16, (H_ + 15) / 16, 1);
         barrierAll();
         vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 5);
     }
@@ -489,6 +503,7 @@ bool ChainEngine::processFrame(const uint8_t* bgraIn, uint8_t* bgraOut, long fra
     D5C_VK_RET(vkQueueSubmit(c.queue, 1, &si, fence_));
     D5C_VK_RET(vkWaitForFences(c.dev, 1, &fence_, VK_TRUE, UINT64_MAX));
     vkResetFences(c.dev, 1, &fence_);
+    if (prof_.enabled()) prof_.collect(c.dev, tsPeriodNs_, frameIndex);
 
     std::memcpy(bgraOut, rbFinalPtr_, (size_t)W_ * H_ * 4);
     if (cfg_.debugDumps && frameIndex == 1) writeDebugDumps();
@@ -533,6 +548,7 @@ void ChainEngine::shutdown() {
     if (imgIn_) vkDestroyImage(c.dev, imgIn_, nullptr);
     if (imgFinal_) vkDestroyImage(c.dev, imgFinal_, nullptr);
     arena_.freeDevice(c);
+    prof_.destroy(c.dev);
     if (fence_) vkDestroyFence(c.dev, fence_, nullptr);
     if (tsPool_) vkDestroyQueryPool(c.dev, tsPool_, nullptr);
     if (cmdPool_) vkDestroyCommandPool(c.dev, cmdPool_, nullptr);

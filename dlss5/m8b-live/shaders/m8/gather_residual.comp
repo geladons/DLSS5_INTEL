@@ -8,6 +8,14 @@
  *   optional publish: out16 = e4m3(out)        (all blocks except b0-internal/b70)
  * where (w, i) reverse-maps image token (y, x) through the block's window origin
  * (inverse of partition.comp). One invocation per image token; loops channels.
+ *
+ * M10 perf pass v2: warp-per-token mapping. tpt = C/4 vec4 slots per token,
+ * wpw = 32/tpt tokens per warp; lane = (token_in_warp, ch4_slot). Across a
+ * warp, consecutive lanes touch CONSECUTIVE vec4 addresses in a/b/c/h ->
+ * fully dense 512B per warp-instruction (the old per-token-thread mapping
+ * strided warps by C floats = one 64B sector per lane, 16x sector waste).
+ * The per-element math (widen, a + b*cos, e4m3) is UNCHANGED and in the same
+ * order -> bit-exact with the M8a-validated scalar version.
  */
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_buffer_reference2 : require
@@ -20,8 +28,10 @@
 
 layout(local_size_x = 32) in;
 
-layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf { float v[]; };
-layout(buffer_reference, scalar, buffer_reference_align = 16) buffer HalfBuf  { float16_t v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf  { float v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer Float4Buf { vec4 v4[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer HalfBuf   { float16_t v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer Half4Buf  { f16vec4 v4[]; };
 
 layout(push_constant, scalar) uniform Push {
     uint64_t a;      // attn_branch_win fp32 [W*64*C]
@@ -36,8 +46,22 @@ layout(push_constant, scalar) uniform Push {
 } pc;
 
 void main() {
-    uint t = gl_GlobalInvocationID.x;           // y*Wimg + x
+    // C in {32,64,128,256,512} -> S=C/4 vec4 slots per token is 8..128 (power
+    // of two). S >= 32: one token per warp, lane strides slots (lane, lane+32,
+    // ...). S < 32: warp covers T=32/S tokens, lane -> (token, slot). Across a
+    // warp, consecutive lanes touch CONSECUTIVE vec4 addresses in a/b/c/h ->
+    // fully dense 512B per warp-instruction (the old per-token-thread mapping
+    // strided warps by C floats = one 64B sector per lane, 16x sector waste).
+    // The per-element math (widen, a + b*cos, e4m3) is UNCHANGED and in the
+    // same order -> bit-exact with the M8a-validated scalar version.
+    uint S = pc.C / 4u;
+    uint T = S >= 32u ? 1u : 32u / S;    // tokens per warp
+    uint iters = S >= 32u ? S / 32u : 1u;  // slot strides per lane
+    uint lane = gl_LocalInvocationID.x;
+    uint t = gl_WorkGroupID.x * T + lane / S;   // image token
     if (t >= pc.Himg * pc.Wimg) return;
+    uint slot0 = lane % S;                      // first vec4 slot this lane owns
+
     uint y = t / pc.Wimg, x = t % pc.Wimg;
     uint wy = (y + pc.padTop) / 8u, wx = (x + pc.padLeft) / 8u;
     uint ly = (y + pc.padTop) % 8u, lx = (x + pc.padLeft) % 8u;
@@ -45,12 +69,33 @@ void main() {
     uint i = ly * 8u + lx;
     bool pub = (pc.flags & 1u) != 0u;
     bool b16 = (pc.flags & 2u) != 0u;
-    for (uint ch = 0u; ch < pc.C; ++ch) {
-        float bv = b16 ? f16_widen(uint(float16BitsToUint16(HalfBuf(pc.b).v[t * pc.C + ch])))
-                       : FloatBuf(pc.b).v[t * pc.C + ch];
-        float val = FloatBuf(pc.a).v[(w * 64u + i) * pc.C + ch]
-                  + bv * FloatBuf(pc.d).v[ch];
-        FloatBuf(pc.c).v[t * pc.C + ch] = val;
-        if (pub) HalfBuf(pc.h).v[t * pc.C + ch] = float16_t(e4m3(val));
+
+    uint aBase = (w * 64u + i) * S;    // window-order vec4 base
+    uint ioBase = t * S;               // image-order vec4 base
+    for (uint k = 0u; k < iters; ++k) {
+        uint slot = slot0 + k * 32u;
+        vec4 av = Float4Buf(pc.a).v4[aBase + slot];
+        vec4 bv;
+        if (b16) {
+            // widen each f16 lane separately — same values as the scalar path
+            f16vec4 r = Half4Buf(pc.b).v4[ioBase + slot];
+            bv = vec4(f16_widen(uint(float16BitsToUint16(r.x))),
+                      f16_widen(uint(float16BitsToUint16(r.y))),
+                      f16_widen(uint(float16BitsToUint16(r.z))),
+                      f16_widen(uint(float16BitsToUint16(r.w))));
+        } else {
+            bv = Float4Buf(pc.b).v4[ioBase + slot];
+        }
+        // per-element: val = a + b*cos — identical ops/order as the scalar loop
+        vec4 dv = Float4Buf(pc.d).v4[slot];
+        vec4 val = vec4(av.x + bv.x * dv.x,
+                        av.y + bv.y * dv.y,
+                        av.z + bv.z * dv.z,
+                        av.w + bv.w * dv.w);
+        Float4Buf(pc.c).v4[ioBase + slot] = val;
+        if (pub)
+            Half4Buf(pc.h).v4[ioBase + slot] =
+                f16vec4(float16_t(e4m3(val.x)), float16_t(e4m3(val.y)),
+                        float16_t(e4m3(val.z)), float16_t(e4m3(val.w)));
     }
 }

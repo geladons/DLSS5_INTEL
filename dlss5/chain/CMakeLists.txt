@@ -72,6 +72,7 @@ add_library(d5c_chain STATIC
     arena.cpp
     recorder.cpp
     recorder_blocks.cpp
+    prof.cpp
     engine.cpp)
 add_dependencies(d5c_chain d5c_shaders)
 
