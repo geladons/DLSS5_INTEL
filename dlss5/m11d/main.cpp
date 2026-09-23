@@ -257,6 +257,16 @@ int main(int argc, char** argv) {
             double wall = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - t0).count();
             if (ok) {
+                // vendor parity (nr_daemon.py:88): alpha stays as the game
+                // left it (encode forces opaque for the overlay use-case);
+                // held-still UI pixels (mask) pass through untouched.
+                for (size_t i = 0; i < px; ++i) {
+                    if (masked && maskBuf[i]) {
+                        std::memcpy(&outBuf[i * 4], &inBuf[i * 4], 4);
+                    } else {
+                        outBuf[i * 4 + 3] = inBuf[i * 4 + 3];
+                    }
+                }
                 if (!writeAll(s, outBuf.data(), px * 4))
                     std::fprintf(stderr, "[m11d] reply write failed\n");
                 std::printf("[m11d] frame %ld %ux%u%s in %.1f ms (chain %.1f)\n",
