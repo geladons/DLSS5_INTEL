@@ -1,21 +1,20 @@
-# HANDOFF_M10.md - DLSSNR chain perf (M10), state as of 2026-09-23 ~13:30
+# HANDOFF_M10.md - DLSSNR chain perf (M10), state as of 2026-09-23 ~15:40
 
 ## One-line status
-M10 pass 4: the barrier-scoping lever is CLOSED with measurements (it cannot
-pay on this driver - see "barrier autopsy"). Pass-3 shaders turned out
-numerically broken (reverted; their validation was faked by a stale-spv trap
-now fixed structurally). Baseline unchanged: 1083 ms/frame at 1920x1088,
-0.91 fps. OPEN INCIDENT: GPU/driver degraded ~13:00 after a 3800 MB buffer
-alloc experiment - selftest nondeterministically wrong on ALL configs/code,
-needs driver reload or reboot (owner action) before any further GPU work.
-Next lever after recovery: GEMM K-loop pipelining (gemm = 382 ms of REAL
-in-kernel time; the support-kernel "times" were barrier tax, now attributed).
+INCIDENT RESOLVED - it was never the GPU/host: 78a5d28's sparseBinding
+device-feature enable silently corrupts large dense allocations on this Arc
+driver; fixed in 2ec9135 (feature now gated behind D5C_SPARSE=1), selftest
+PASS x3 md5-identical to the 3482274 golden. M10 pass 4: barrier-scoping
+lever CLOSED with measurements. Baseline unchanged: 1083 ms/frame at
+1920x1088, 0.91 fps. Next lever: GEMM K-loop pipelining (gemm = 382 ms of
+REAL in-kernel time).
 
 ## Barrier autopsy (pass 4, measured - do not re-litigate)
 Tax at 1080p = 1083 - 807 = ~276 ms/frame (~1260 bar() calls, ~3 buffers).
 Probe matrix (chain ms, throwaway bar() variants, bench 20):
   3 dense buffers whole-size (production):            1083
-  2 dense buffers whole-size (CHUNK_CAP 3800):        1078  (+ BROKEN numerics - cap stays 3500)
+  2 dense buffers whole-size (CHUNK_CAP 3800):        1078  (broken numerics
+      were later traced to the sparseBinding FEATURE, not the cap size)
   1 dense buffer whole-size 2.9 GB (chunk0 only):      797  (correctness-broken probe)
   1 dense buffer 256 B:                                813
   0 barriers (dense):                                  807  (NO execution-drain component)
@@ -81,25 +80,35 @@ are in the autopsy section.
    from kernel work - precision experiments (fp16 accumulate, re-baselined
    tolerances vs torch) or cinematic-demo mode remain the structural options.
 
-## GPU incident (OPEN - owner action)
-~13:00 PDT 2026-09-23: after builds allocating a 3800 MB device buffer
-(CHUNK_CAP experiment), chain numerics went nondeterministically wrong on
-every configuration - sparse/dense, 2/3 buffers, both enumerated devices,
-clean HEAD, AND an exact rebuild of a config that passed 5x bit-identical
-40 minutes earlier. featV stays golden-exact (small buffers OK), benches stay
-fast/stable, garbage varies run to run. Code exonerated by A/B; persistent
-cross-process state points at a driver page-table corruption from the
-near-cap allocation. ACTION: reload the Arc driver or reboot the VM when
-convenient (Sunshine/Moonlight drop for a minute). Then: _validate.py must
-PASS again, re-run one sparse-vs-dense bench pair, then GEMM pipelining.
+## GPU incident (RESOLVED 2026-09-23 ~15:30 - NOT hardware)
+~13:00 PDT 2026-09-23: chain numerics went nondeterministically wrong on
+every configuration. featV stayed golden-exact, benches stayed fast/stable,
+garbage varied run to run. Suspects eliminated with evidence: shaders
+(fresh compile md5-identical to staged spv), device selection (both apps
+pick LUID 9799), input (hostImg FNV-1a stable), host RAM (torch goldens
+bit-exact). m8b-live verify ALL PASS throughout - GPU was always healthy.
+TRUE ROOT CAUSE: 78a5d28 enabled the sparseBinding VkDevice FEATURE
+whenever the queue family supports it. On this Arc driver (101.8805)
+merely enabling the feature silently corrupts large DENSE allocations.
+A/B: 3482274 (feature off) selftest PASS x3 md5-identical; 78a5d28 FAIL
+(meandiff 0.65-1.93); 78a5d28 + feature gated behind D5C_SPARSE=1
+(2ec9135) PASS x3, md5 f1e17ec9 = the 3482274 golden. The earlier
+"3800 MB CHUNK_CAP" attribution was WRONG (comment in arena.cpp
+corrected). Owner's host/vfio was never at fault.
+NOTE: the earlier "rolled-back trees also fail" observation was a false
+test - the rollback was not accompanied by a verified rebuild (the
+stale-binary trap again). Always rebuild + check exe mtime + md5 the
+dumps before believing an A/B.
 
 ## Hard gotchas (do not rediscover) - additions this pass
 - STALE-SPV TRAP (fixed, but understand it): any shader-only change now
   restages via the <target>_spv dependency, but OTHER consumers of
   d5c_stage_shaders must reconfigure to get the fix. If selftest numbers are
   bit-identical across a shader change, suspect staging, not magic.
-- CHUNK_CAP above 3500 MB: SILENT numeric corruption on this driver (3800
-  measured broken). Do not raise. (May be related to the incident above.)
+- CHUNK_CAP above 3500 MB: was blamed for silent numeric corruption -
+  WRONG, the real trigger was the sparseBinding device feature (see the
+  incident section). 3800 MB may be fine with the feature off; retest
+  before raising the cap.
 - CSV profiler timestamps are garbage without intervening barriers.
 - Validation arbitration procedure when live != golden: run the torch
   reference (work/_ref_test/dump_torch_f1.py <bmp> <outdir>, needs
