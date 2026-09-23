@@ -1,19 +1,59 @@
-# DEV_STATE.md - where we are (updated 2026-09-23 ~02:00 by Kimi)
+# DEV_STATE.md - where we are (updated 2026-09-23 ~10:10 by Kimi)
 
 ## One-line status
-M12a BUILT, VALIDATED AND DEPLOYED: dlss5\m12-dxgi dxgi.dll proxy now ships
-DX12 present frames to the m11d daemon (real 71-block DLSS 5 chain). Numeric
-selftest: single-pass processed dump mean|d| 7.1/255 vs solid-color golden
-(model-effect class), 400+ live roundtrips at 960x540, no crash. The proxy is
-deployed next to GTA5_Enhanced.exe (D:\Grand Theft Auto V Enhanced\dxgi.dll);
-m11d is RUNNING (start it with dlss5\m12-dxgi\_start_daemon.cmd). OWNER
-ACTION NEEDED: restart GTA5 Enhanced (windowed) and look at the stream.
-Expected: slideshow (~1 fps; chain ~700 ms at ~1K, ~930 ms at 1344x1088) and
-a SUBTLE model effect (calibrated mean|d| ~2-7/255). If BattleEye blocks the
-game from starting: dlss5\m12-dxgi\_undeploy.cmd, restart, tell Kimi (then we
-go M12b: GTA5 Legacy DX11 + DXVK x64 -> existing m11-layer).
+M12a LIVE ON GTA5 ENHANCED: dlss5\m12-dxgi dxgi.dll proxy ships DX12 present
+frames to the m11d daemon (real 71-block DLSS 5 chain) IN THE REAL GAME.
+2026-09-23 ~10:00 run: 195+ frames processed at 1920x1080, chain ~1.3 s/frame
+(~0.7 fps slideshow, M12_LIVE=4), no crash, no deadlock. Runtime PAUSE added:
+%TEMP%\m12_pause.flag (dlss5\m12-dxgi\_pause.cmd / _resume.cmd) - while the
+flag exists every frame passes through untouched (full fps, zero work), so
+the owner can walk to gameplay paused and A/B before/after live. GTA5
+anti-tamper FORBIDS swapping the swapchain vtable pointer (process dies with
+a replaced vtable-copy object, even with M12_DISABLE=1) - m12_hook now
+patches the vtable ENTRIES IN PLACE (VirtualProtect/write/restore). BattleEye
+BLOCKS loading dxgi.dll from the game dir (Blocked loading of file) - owner
+disabled BE in the launcher; Rockstar's mod check complains but launches.
+M12b is DEAD (no GTA5.exe anywhere - only Enhanced installed). Plan B if
+Enhanced breaks: Cyberpunk 2077 (DX12, no anticheat).
 
-## M12a session log (2026-09-23 ~00:50-02:00)
+## M12a live session (2026-09-23 ~09:00-10:10)
+1. First real-game run: game CRASHED at startup with the vtable-copy hook
+   (worked in m12_test). Bisected with M12_DISABLE=1 (hook loaded, no
+   patches): STILL crashed -> GTA5 Enhanced kills the process when the
+   swapchain vtable POINTER differs from the original (anti-tamper checks
+   the object, not just file integrity). Fix: IN-PLACE vtable patching -
+   VirtualProtect the page, overwrite Present/Present1 entries, restore
+   protection. The object and its vtable pointer stay byte-identical.
+   Passed the anti-tamper (game reached Present #480+).
+2. Second run: BLACK WINDOW, no CPU/GPU load, game alive. Root cause:
+   all four hooked_CreateSwapChain* thunks in m12_hook.cpp did
+   EnterCriticalSection(&g_cs) but never LeaveCriticalSection on ANY exit
+   path - m12_test is single-threaded so it never showed; GTA5's render
+   thread wedged on g_cs forever. Fixed: Leave on every return path.
+3. Third run: CLEAN PASS. Log: `processed 1920x1080` every ~1.4 s,
+   `present #N ... flags 0x200` flowing, m11d `frame N 1920x1080 in ~1.3 s
+   (chain ~1.25 s)`. Backbuffer is fmt 87 (B8G8R8A8) - no HDR pass-through
+   hit. Game presents via Present (which=0 path).
+4. BattleEye: with BE on, service log shows
+   `Blocked loading of file: "D:\Grand Theft Auto V Enhanced\dxgi.dll"`.
+   Owner disabled BE in the launcher settings. Rockstar launcher then warns
+   about mods but starts the game. NOTE: online play will need BE off too;
+   GTAO is off-limits with the proxy deployed regardless.
+5. Runtime pause (owner request): %TEMP%\m12_pause.flag checked every
+   onPresent (GetFileAttributesA, ~us). Flag present -> full passthrough,
+   transitions logged ("processing PAUSED/RESUMED"); on resume the stale
+   processed frame is dropped so live game pixels show until the next
+   capture. _pause.cmd / _resume.cmd for the owner; Kimi can also just
+   touch/rm the flag. Lets owner walk to gameplay at full fps, then flip
+   before/after at will.
+6. Gotchas added: taskkill from git bash eats /PID (use cmd //c wrapper);
+   GTA5 holds dxgi.dll locked while running (deploy fails Access denied);
+   setx M12_DISABLE "" cleanup needs a launcher restart to take effect.
+## M12a build session log (2026-09-23 ~00:50-02:00) - SUPERSEDED where noted
+0. SUPERSEDED: m12_hook originally used a per-object vtable COPY (item 1
+   below). GTA5 anti-tamper kills any swapchain whose vtable pointer was
+   replaced -> m12_hook was rewritten to IN-PLACE entry patching (see live
+   session above). Architecture, env keys, client/log modules unchanged.
 1. New module dlss5\m12-dxgi (OOP per AGENTS.md): m12_log (kernel32-only
    file logger, %TEMP%\m12_dxgi.log, M12_LOG overrides), m12_client (TCP,
    m11 wire protocol verbatim, port M12_PORT default 47990), m12_dx12

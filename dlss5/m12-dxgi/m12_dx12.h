@@ -23,6 +23,10 @@ public:
     // Runs the capture/blit pipeline for the current backbuffer.
     void onPresent();
 
+    // Present-hook tracing (called from the vtable thunks in m12_hook.cpp).
+    void log_present_entry(int which, UINT flags);
+    void log_present_exit(int which);
+
 private:
     bool ensureResources();
     void releaseResources();
@@ -31,6 +35,7 @@ private:
     bool waitIdle(DWORD ms);
     bool refreshDesc();
     void dump_processed();
+    static bool pauseFlagSet();  // TRUE: %TEMP%\m12_pause.flag exists
 
     static D3D12_RESOURCE_BARRIER transition(ID3D12Resource *res,
                                              D3D12_RESOURCE_STATES from,
@@ -54,8 +59,10 @@ private:
     UINT64 row_pitch_;     // 256-aligned byte row pitch of the staging buffers
     int live_every_;
     UINT64 present_count_;
+    UINT64 present_trace_;
     UINT64 last_live_ms_;
     UINT64 daemon_failures_;
     bool have_processed_;
+    bool paused_;                  // pause flag was present on last check
     std::vector<BYTE> processed_;  // last daemon reply, packed w*h*4 BGRA
 };
