@@ -12,6 +12,7 @@ add_library(m12_dxgi SHARED
     m12_client.cpp
     m12_dx12.cpp
     m12_hook.cpp
+    m12_hotkeys.cpp
     m12_exports.cpp
     m12_dxgi.def
 )

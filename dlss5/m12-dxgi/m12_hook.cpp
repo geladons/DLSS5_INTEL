@@ -16,6 +16,7 @@
 #include "m12_hook.h"
 
 #include "m12_dx12.h"
+#include "m12_hotkeys.h"
 #include "m12_log.h"
 
 #include <d3d12.h>
@@ -35,6 +36,7 @@ struct SwapchainState {
 CRITICAL_SECTION g_cs;
 std::map<void *, std::map<int, void *>> g_orig;    // vtable -> idx -> orig fn
 std::map<void *, SwapchainState *> g_objects;       // interface ptr -> state
+bool g_restored = false;   // CTRL+ALT+Q detach: never patch again
 
 void *orig_entry(void *obj, int idx)
 {
@@ -50,6 +52,7 @@ bool patch_in_place(void *obj, int idx0, void *fn0, int idx1, void *fn1, int idx
                     void *fn2, int idx3, void *fn3)
 {
     void **vt = *(void ***)obj;
+    if (g_restored) return false;
     if (g_orig.find(vt) != g_orig.end()) return true;
     DWORD old_protect = 0;
     if (!VirtualProtect(vt, 64 * sizeof(void *), PAGE_READWRITE, &old_protect)) {
@@ -302,10 +305,47 @@ void m12_hook_factory(void *factory)
 {
     if (!factory || disabled()) return;
     EnterCriticalSection(&g_cs);
+    if (g_restored) {
+        LeaveCriticalSection(&g_cs);
+        return;
+    }
     // 10 CreateSwapChain, 15 ForHwnd, 16 ForCoreWindow, 24 ForComposition.
     patch_in_place(factory, 10, (void *)&hooked_CreateSwapChain, 15,
                    (void *)&hooked_CreateSwapChainForHwnd, 16,
                    (void *)&hooked_CreateSwapChainForCoreWindow, 24,
                    (void *)&hooked_CreateSwapChainForComposition);
     LeaveCriticalSection(&g_cs);
+    m12_hotkeys_ensure_started();
+}
+
+void m12_hook_restore_all()
+{
+    EnterCriticalSection(&g_cs);
+    unsigned n_vt = (unsigned)g_orig.size();
+    unsigned n_obj = (unsigned)g_objects.size();
+    for (std::map<void *, std::map<int, void *>>::iterator vt = g_orig.begin();
+         vt != g_orig.end(); ++vt) {
+        DWORD old_protect = 0;
+        if (!VirtualProtect(vt->first, 64 * sizeof(void *), PAGE_READWRITE,
+                            &old_protect))
+            continue;
+        for (std::map<int, void *>::iterator e = vt->second.begin();
+             e != vt->second.end(); ++e)
+            ((void **)vt->first)[e->first] = e->second;
+        DWORD ignored = 0;
+        VirtualProtect(vt->first, 64 * sizeof(void *), old_protect, &ignored);
+    }
+    for (std::map<void *, SwapchainState *>::iterator o = g_objects.begin();
+         o != g_objects.end(); ++o) {
+        if (o->second) {
+            delete o->second->proc;
+            delete o->second;
+        }
+    }
+    g_objects.clear();
+    g_orig.clear();
+    g_restored = true;
+    LeaveCriticalSection(&g_cs);
+    m12_logf("proxy detached: %u vtables restored, %u objects released", n_vt,
+             n_obj);
 }
