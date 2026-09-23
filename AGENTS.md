@@ -76,6 +76,18 @@ DESKTOP-285INKS (Win 11), GPU passed through. Owner plays games via Sunshine
   bridge -> Vulkan: features -> 71-block chain (~51 ms) -> residual ->
   hpfilter high-pass -> fbcancel (echo subtract + accumulate) -> compose
   (strength, clamp) -> present to fullscreen topmost click-through overlay.
+- m11-layer: Windows port of the reference Vulkan present layer
+  (nr_layer_win.c, .def exports, VkLayer_dlssnr_win.json). Intercepts
+  vkQueuePresentKHR, forces TRANSFER_SRC|DST, TCP roundtrip to a daemon
+  (127.0.0.1:47990), writes the processed frame back into the swapchain.
+  Registered in HKCU\Software\Khronos\Vulkan\ImplicitLayers (this loader
+  REQUIRES disable_environment in the manifest; enable_environment gating
+  silently did not fire). v0 VALIDATED 2026-09-22: vkcube + daemon_stub.py
+  (green tint) = owner sees a green rotating cube in the Moonlight stream.
+  Host blindness note: windowed Vulkan flip windows are BLACK in both GDI
+  and local DDA captures here (MPO plane) - only the owner's stream (and the
+  layer's own readback) sees them. Do not trust local screenshots of Vulkan
+  windows.
 - Weights: work\mlxw\dlssnr-logical.safetensors (proprietary, NOT in git;
   649 tensors, 71 blocks, resident ~325 MB VRAM). Loader m6.
 

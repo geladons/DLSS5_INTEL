@@ -1,0 +1,5 @@
+LIBRARY nr_layer_win
+EXPORTS
+    vkGetInstanceProcAddr
+    vkGetDeviceProcAddr
+    vkNegotiateLoaderLayerInterfaceVersion
