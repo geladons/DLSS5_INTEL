@@ -1,4 +1,27 @@
-# DEV_STATE.md - where we are (updated 2026-09-23 ~18:30 by Kimi)
+# DEV_STATE.md - where we are (updated 2026-09-23 ~20:35 by Kimi)
+
+## M13 productization (owner call 2026-09-23 ~20:30) - CURRENT PRIORITY
+The DX9/DX12 injection paths are validated; owner wants the PRODUCT now,
+perf later. Scope (owner's words): a proper program with
+- convenient UI (manager app) with LOGS visible to the user,
+- model weights loaded BY THE USER (proprietary leak - we never ship them;
+  the app asks for the .safetensors path at first run),
+- settings with a KNOB: hotkey-invoked overlay showing the effect of
+  parameter changes IN REAL TIME (e.g. gain) - the chain must accept live
+  parameter updates without a daemon restart,
+- mode management (capture/screen mode, DX9 game mode, DX12 game mode;
+  pause/resume; layer on/off),
+- DLL injection/deploy management (copy dxvk d3d9.dll for DX9 games,
+  dxgi.dll proxy for DX12 games, register/cleanup, game pickers).
+Building blocks already in repo: m11d daemon (TCP 47990, --gain flag needs
+a restart today - make it runtime-adjustable, e.g. control channel or
+config reload), m11-layer x86/x64 (CTRL+ALT+X pause, CTRL+ALT+Q off,
+NR_LAYER_* env knobs), m12-dxgi proxy (M12_LIVE, pause flag, hotkeys),
+gait: m8blive overlay (screen mode). Follow owner code rules: OOP modules,
+no main.cpp growth, ~600-line file cap, ASCII-only.
+GTA4 session note: menu A/B accepted as sufficient proof; keyboard
+injection into GTA IV menu FAILED (see docs/HANDOFF_GTA4_DX9.md session
+section) - relevant if the manager must drive games itself.
 
 ## One-line status
 ACCUMULATE STOP-LOSS SHIPPED (m8blive, 2026-09-23 ~18:10-18:30): the echo
