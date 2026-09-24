@@ -1,4 +1,4 @@
-# DEV_STATE.md - where we are (updated 2026-09-23 ~15:45 by Kimi)
+# DEV_STATE.md - where we are (updated 2026-09-23 ~17:05 by Kimi)
 
 ## One-line status
 M10 pass 4 (2026-09-23 ~12:15-13:30): the barrier question is MEASURED TO DEATH
@@ -18,8 +18,14 @@ normal. A/B proof: 3482274 (feature off) PASS x3 md5-identical; 78a5d28
 FAIL; 78a5d28 + feature gated behind D5C_SPARSE=1 (2ec9135) PASS x3, md5
 f1e17ec9 = the 3482274 golden. The "3800 MB CHUNK_CAP" suspicion was wrong
 (arena.cpp comment corrected). Host/vfio exonerated - owner's call was right.
-Chain perf unchanged (1083 ms @1080p, 0.91 fps). Next real lever: GEMM
-K-loop pipelining (gemm 382 ms of real in-kernel time per frame).
+Chain perf unchanged (1083 ms @1080p baseline; 1044-1070 after gemm
+pipelining). OPEN: live-overlay feedback degradation on --echo-free 0
+(owner demo 2026-09-23 evening: first frames clean, then the accumulate
+loop re-denoises its own output and the picture degrades; screen capture
+-> process -> present is broken as a LIVE mechanism) - full analysis and
+ranked fixes in docs/HANDOFF_ECHO_DEGRADE.md. Structural answer for
+games = present-path injection (m12-dxgi for DX12; 32-bit DXVK + m11
+layer for DX9), not screen capture.
 
 ## M10 pass 4 (2026-09-23 ~12:15-13:30) - barrier autopsy + two fixes + GPU incident
 0. Reproduced baseline: --bench 20 1920x1088 -> chain median 1083 ms (handoff
