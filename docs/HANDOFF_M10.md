@@ -222,3 +222,15 @@ m11d --bench 20 1920x1088 --prof".
 When levers 1-2 land, bring the owner the structural checkpoint: precision
 experiments (fp16 accumulation with re-baselined tolerances), or accept
 cinematic-demo mode with the CTRL+ALT=X pause hotkey workflow.
+
+## 2026-09-23 GTA IV: d3d11.dll crash - NOT the layer
+
+GTA IV (CE 1.2.0.59) died reproducibly at the 2nd fullscreen ResetSwapChain
+with APPCRASH in SYSTEM d3d11.dll (0xc0000005, same offset). Cause: DXVK
+x32 dxgi.dll copied next to the game; GTA IV pulls system d3d11 (intro
+videos / EVR) and system d3d11 + DXVK dxgi = unsupported mix -> AV.
+Fix: for D3D9 games copy ONLY d3d9.dll from DXVK (d3d9.dll is
+self-contained, talks to vulkan-1 directly). Layer validated live after
+removal: processed 1920x1080 frames, m11d chain ~850 ms/frame.
+Layer gained: CTRL+ALT=X pause/resume, CTRL+ALT=Q off, holding tied to
+swapchain, NR_LAYER_NOPATCH=1 bisect arm, d3d9_test D3D9Ex reset repro.
