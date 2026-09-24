@@ -53,10 +53,47 @@ RESUMED on cursor change -> re-PARKED cycle works (_park_test2/3.log);
    --frames 31). NOTE: chain is 2.05-2.1 s at 2560x1440 in these runs vs
    1.64 s in the 17:54 run - GTA4 was loading the GPU concurrently; not a
    regression signal.
-3. NEXT: handoff step 3 (structural): DX9 via 32-bit DXVK + m11 layer ->
-   m11d; DX12 path already live (m12-dxgi, GTA5). Parking also suggests a
+3. NEXT: handoff step 3 (structural) is STARTED and the DX9 path is
+   VALIDATED END-TO-END in a synthetic app (see "DX9 path (M12c)" below):
+   32-bit D3D9 test -> DXVK 3.1.1 -> 32-bit m11 implicit layer -> m11d ->
+   real 71-block chain, 30 frames at 800x600, ~255 ms/frame. Remaining:
+   deploy DXVK x32 + this layer next to GTAIV.exe / gta_sa.exe and confirm
+   in-game (GTA IV quirks unknown: SecuRom-era, Complete Edition patched;
+   DX12 path already live (m12-dxgi, GTA5). Parking also suggests a
    future demo recipe: --echo-free 0 + park gives a STABLE enhanced still;
    moving content resumes automatically in window mode.
+
+## DX9 path (M12c) - 32-bit DXVK + m11 layer (2026-09-23 ~18:30-19:40)
+VALIDATED END-TO-END: d3d9_test.exe (own minimal 32-bit D3D9 app,
+dlss5\m11-layer\d3d9_test\) + DXVK 3.1.1 x32 d3d9.dll -> 32-bit Vulkan ->
+32-bit m11 implicit layer -> m11d -> real chain: 30 frames 800x600,
+chain ~250 ms/frame (vs 890+ ms at 1080p). Components:
+- x86 layer build: _build_x86.cmd -> x86\nr_layer_win32.dll (cl /LD,
+  same nr_layer_win.c + .def; ws2_32 only, imports just KERNEL32).
+- x86 manifest: x86\VkLayer_dlssnr_win32.json, registered in the SAME
+  HKCU\Software\Khronos\Vulkan\ImplicitLayers key as the x64 one (HKCU
+  Software is NOT Wow6432Node-redirected here; the loader's arch filter
+  picks the right manifest per process). _register_win32.cmd.
+- DXVK: _get_dxvk.cmd re-creates dxvk\x32 + x64 (binaries not in git).
+- Test app: d3d9_test\d3d9_test.c (+_build.cmd/_run_test.cmd), 800x600
+  windowed triangle, 30 presents; vk32probe.c = bare 32-bit
+  vkCreateInstance probe for loader debugging.
+TWO NON-OBVIOUS LOADER REQUIREMENTS (cost an hour; do not rediscover):
+1. The 32-bit manifest must NOT contain "enable_environment": with it,
+   loader 1.4.357 gates the implicit layer OFF unless the var is set
+   (the x64 manifest keeps its historical both-envs form and still
+   activates - x86 and x64 loaders behave differently here).
+2. The 32-bit manifest needs an ABSOLUTE library_path: the relative
+   "nr_layer_win32.dll" failed LoadLibraryEx with error 87 in the x86
+   loader path (the x64 manifest's relative path works fine in x64).
+Registry gotcha: NEVER pass reg.exe commands with quotes inline through
+git bash (cmd //c 'reg add "..."') - the wrapper mangles quotes and
+creates a bogus 'ImplicitLayers"' subkey with quote-prefixed value names;
+always run reg via a .cmd FILE (see _register_win32.cmd).
+Deploy recipe for a DX9 game: copy dxvk\x32\d3d9.dll + dxgi.dll next to
+the game exe, start m11d (build-nmake\m11d.exe, 127.0.0.1:47990), launch
+the game. Env: NR_LAYER_LIVE=1 = process every present; without it the
+layer only captures on trigger (NR_LAYER_TRIGGER file).
 
 ## M10 pass 4 (2026-09-23 ~12:15-13:30) - barrier autopsy + two fixes + GPU incident
 The barrier question is MEASURED TO DEATH and the original "barrier scoping"
