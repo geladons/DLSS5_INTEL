@@ -121,3 +121,44 @@ class ManagedProcess:
         if pid is None:
             return False, "%s not running" % self.exe_name
         return stop_pid(pid)
+
+
+# ------------------------------------------------------- suspend / resume --
+# The in-game overlay can FREEZE the game (owner request: "everything stops
+# on one frame while I turn the knobs"). NtSuspendProcess suspends every
+# thread of the target; NtResumeProcess undoes it. SAFETY: only ever called
+# on the detected game pid, always resumed when the overlay hides or the
+# manager closes; never touch Sunshine/system processes.
+_NTDLL = ctypes.windll.ntdll
+_PROCESS_SUSPEND_RESUME = 0x0800
+
+
+def _proc_handle(pid):
+    return _KERNEL32.OpenProcess(_PROCESS_SUSPEND_RESUME, False, pid)
+
+
+def suspend_pid(pid):
+    """Freeze the whole process. Returns (ok, message)."""
+    h = _proc_handle(pid)
+    if not h:
+        return False, "OpenProcess failed for pid %d" % pid
+    try:
+        # NTSTATUS 0 = SUCCESS
+        if _NTDLL.NtSuspendProcess(ctypes.c_void_p(h)) == 0:
+            return True, "game frozen (pid %d)" % pid
+        return False, "NtSuspendProcess failed for pid %d" % pid
+    finally:
+        _KERNEL32.CloseHandle(h)
+
+
+def resume_pid(pid):
+    """Undo suspend_pid."""
+    h = _proc_handle(pid)
+    if not h:
+        return False, "OpenProcess failed for pid %d" % pid
+    try:
+        if _NTDLL.NtResumeProcess(ctypes.c_void_p(h)) == 0:
+            return True, "game resumed (pid %d)" % pid
+        return False, "NtResumeProcess failed for pid %d" % pid
+    finally:
+        _KERNEL32.CloseHandle(h)

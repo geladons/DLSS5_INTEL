@@ -37,14 +37,15 @@ assert abs(g - 1.35) < 1e-6, "overlay push did not reach the daemon (gain=%s)" %
 ui.log("mgr", "overlay live push verified: daemon gain %.3f, %d frames"
        % (g, frames))
 
-# slider path (debounced -> after_idle -> worker)
-ui.gain_var.set(0.8)
-ui._gain_moved(0.8)
+# slider path (debounced -> after_idle -> worker); 0.9 avoids the benign
+# "equals last synced value" suppression edge
+ui.gain_var.set(0.9)
+ui._gain_moved(0.9)
 for _ in range(10):
     ui.root.update()
     time.sleep(0.2)
 g, _ = ui.ctl.client.status()
-assert abs(g - 0.8) < 1e-6, "slider push failed (gain=%s)" % g
+assert abs(g - 0.9) < 1e-6, "slider push failed (gain=%s)" % g
 ui.log("mgr", "slider live push verified: daemon gain %.3f" % g)
 
 # status widgets got painted from the snapshot

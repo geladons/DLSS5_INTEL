@@ -21,7 +21,7 @@ from . import deploy as deploy_mod
 from . import gamelaunch
 from . import paths
 from .daemonctl import M11dClient, DaemonError
-from .deploy import Deployer, LayerRegistry, DXVK_X32_D3D9, M12_PROXY
+from .deploy import Deployer, LayerRegistry
 from .processes import ManagedProcess, find_pid
 from .screenmode import ScreenMode
 
@@ -84,37 +84,45 @@ class StateMonitor(threading.Thread):
         snap["layers_x86"] = ls["x86"]
         # screen mode
         snap["screen_pid"] = ctl.screen.proc.pid
-        # games from cfg (basename probe, no UI var access)
-        for mode, key in (("dx9", "dx9_game"), ("dx12", "dx12_game")):
-            exe = (ctl.cfg.get(key) or "").strip()
-            snap[mode + "_exe"] = exe
-            snap[mode + "_running"] = bool(exe) and \
-                find_pid(os.path.basename(exe)) is not None
-            snap[mode + "_paused"] = (gamelaunch.dx9_paused() if mode == "dx9"
-                                      else gamelaunch.dx12_paused())
-            snap[mode + "_dll"] = None
-            snap[mode + "_guards"] = []
-            if exe and os.path.isdir(os.path.dirname(exe)):
+        # games from cfg: {"exe": {"mode","arch","name"}}
+        games = {}
+        for exe, meta in (ctl.cfg.get("games") or {}).items():
+            g = {"mode": meta.get("mode"), "arch": meta.get("arch"),
+                 "name": meta.get("name") or
+                 os.path.splitext(os.path.basename(exe))[0]}
+            g["running"] = find_pid(os.path.basename(exe)) is not None
+            g["paused"] = gamelaunch.mode_paused(g["mode"])
+            g["dll"] = None
+            g["guards"] = []
+            if os.path.isdir(os.path.dirname(exe)):
                 try:
-                    if mode == "dx9":
-                        st = ctl.dx9_status(exe)
-                    else:
-                        st = ctl.dx12_status(exe)
-                    snap[mode + "_dll"] = st.get("dll")
-                    snap[mode + "_guards"] = st.get("guards", [])
+                    g["dll"] = Deployer(os.path.dirname(exe)).mode_status(
+                        g["mode"], g["arch"])
+                    if g["mode"] == "dx9":
+                        g["guards"] = deploy_mod.dx9_guard(
+                            os.path.dirname(exe))
                 except Exception as e:
-                    snap[mode + "_guards"] = ["probe failed: %s" % e]
+                    g["guards"] = ["probe failed: %s" % e]
+            games[exe] = g
+        snap["games"] = games
         snap["weights_ok"] = ctl.weights_ok()
         snap["active_mode"] = self._active_mode(snap)
+        snap["active_game"] = self._active_game(snap)
         return snap
 
     @staticmethod
-    def _active_mode(snap):
+    def _active_game(snap):
+        for exe, g in (snap.get("games") or {}).items():
+            if g.get("running"):
+                return exe
+        return None
+
+    @classmethod
+    def _active_mode(cls, snap):
         """Which processing path is live right now (pause/gain target)."""
-        if snap.get("dx12_running"):
-            return "dx12"
-        if snap.get("dx9_running"):
-            return "dx9"
+        exe = cls._active_game(snap)
+        if exe:
+            return snap["games"][exe]["mode"]      # dx9 | dx11 | dx12
         if snap.get("screen_pid") is not None:
             return "screen"
         return None
@@ -157,6 +165,7 @@ class ActionWorker(threading.Thread):
 class M13Controller:
     def __init__(self, cfg=None):
         self.cfg = cfg or config_mod.Config()
+        self._migrate_legacy_games()
         os.makedirs(os.path.dirname(M11D_LOG), exist_ok=True)
         self.daemon = ManagedProcess("m11d.exe", M11D_EXE, M11D_CWD, M11D_LOG)
         self.screen = ScreenMode()
@@ -164,6 +173,56 @@ class M13Controller:
         self.monitor = StateMonitor(self)
         self.worker = None          # created by the UI (needs its callback)
         self.monitor.start()
+
+    def _migrate_legacy_games(self):
+        """v1 config had single dx9_game/dx12_game keys -> games dict."""
+        games = dict(self.cfg.get("games") or {})
+        changed = False
+        for key, mode in (("dx9_game", "dx9"), ("dx12_game", "dx12")):
+            exe = self.cfg.get(key)
+            if exe and exe not in games:
+                games[exe] = {"mode": mode,
+                              "arch": "x86" if mode == "dx9" else "x64",
+                              "name": os.path.splitext(
+                                  os.path.basename(exe))[0]}
+                changed = True
+        if changed:
+            self.cfg.set("games", games)
+
+    # ------------------------------------------------------- auto setup ----
+    def autosetup(self):
+        """Hands-free bring-up (runs on the worker at startup): find weights,
+        register layers, start the daemon. Every step is idempotent and
+        logged; failures surface as messages, never exceptions."""
+        steps = []
+        if not self.weights_ok():
+            found = self._autodetect_weights()
+            if found:
+                self.cfg.set("weights_path", found)
+                steps.append("weights auto-found: %s" % found)
+            else:
+                steps.append("WEIGHTS MISSING - point at "
+                             "dlssnr-logical.safetensors (Settings)")
+        ls = self.layers_status()
+        if not all(ls.values()):
+            ok, msg = self.layers_register()
+            steps.append("auto: %s" % msg)
+        else:
+            steps.append("layers already registered")
+        if self.weights_ok() and not self.daemon.running:
+            ok, msg = self.daemon_start()
+            steps.append("auto: %s" % msg)
+        return True, " | ".join(steps)
+
+    def _autodetect_weights(self):
+        """*.safetensors in the bundle weights\\ dir (or dev work\\mlxw)."""
+        d = paths.find("weights")
+        try:
+            cands = [os.path.join(d, n) for n in os.listdir(d)
+                     if n.endswith(".safetensors")]
+        except OSError:
+            return None
+        return cands[0] if cands else None
 
     # ----------------------------------------------------------- lifetime --
     def start_worker(self, on_result):
@@ -249,12 +308,10 @@ class M13Controller:
         injection). Pause = passthrough at full fps; the last processed
         frame is what the owner just saw."""
         mode = self.snapshot().get("active_mode")
-        if mode == "dx9":
-            return gamelaunch.dx9_resume() if gamelaunch.dx9_paused() \
-                else gamelaunch.dx9_pause()
-        if mode == "dx12":
-            return gamelaunch.dx12_resume() if gamelaunch.dx12_paused() \
-                else gamelaunch.dx12_pause()
+        if mode in ("dx9", "dx11", "dx12", "vulkan"):
+            if gamelaunch.mode_paused(mode):
+                return gamelaunch.mode_resume(mode)
+            return gamelaunch.mode_pause(mode)
         if mode == "screen":
             return False, ("screen mode: the overlay owns CTRL+ALT+X "
                            "(hide/show) itself")
@@ -263,101 +320,92 @@ class M13Controller:
     def processing_paused(self):
         snap = self.snapshot()
         mode = snap.get("active_mode")
-        if mode in ("dx9", "dx12"):
-            return snap.get(mode + "_paused")
+        if mode in ("dx9", "dx11", "dx12", "vulkan"):
+            return gamelaunch.mode_paused(mode)
         return None      # screen/none: not file-controllable
 
-    # ------------------------------------------------------------ DX9 path --
-    def dx9_status(self, game_exe):
-        if not game_exe:
-            return {"game": None}
-        d = Deployer(os.path.dirname(game_exe))
-        return {
-            "game": game_exe,
-            "dll": d.status("d3d9.dll", DXVK_X32_D3D9),
-            "guards": deploy_mod.dx9_guard(os.path.dirname(game_exe)),
-            "paused": gamelaunch.dx9_paused(),
-        }
+    def active_game_pid(self):
+        """Pid of the currently running managed game (for freeze/resume)."""
+        exe = self.snapshot().get("active_game")
+        if exe:
+            return find_pid(os.path.basename(exe))
+        return None
 
-    def dx9_deploy(self, game_exe):
-        if not game_exe:
-            return False, "pick the game exe first"
-        d = Deployer(os.path.dirname(game_exe))
+    # ----------------------------------------------------------- game mgmt --
+    def add_game(self, exe, mode=None, arch=None, name=None):
+        """Register a game exe; mode/arch auto-detected from the PE imports
+        when not given. Returns (ok, message)."""
+        from . import gamescan
+        exe = os.path.abspath(exe)
+        if not os.path.exists(exe):
+            return False, "game exe not found: %s" % exe
+        det_arch, apis = gamescan.pe_info(exe)
+        arch = arch or det_arch or "x64"
+        if mode is None:
+            mode = next((m for m in gamescan.API_PRIORITY if m in apis),
+                        None)
+        if mode is None:
+            return False, ("no D3D imports found in %s - pick the mode "
+                           "manually" % os.path.basename(exe))
+        games = dict(self.cfg.get("games") or {})
+        games[exe] = {"mode": mode, "arch": arch,
+                      "name": name or os.path.splitext(
+                          os.path.basename(exe))[0]}
+        self.cfg.set("games", games)
+        return True, "%s: %s/%s (%s)" % (games[exe]["name"], mode.upper(),
+                                         arch, ", ".join(apis) or "no D3D "
+                                         "imports - manual mode")
+
+    def remove_game(self, exe):
+        games = dict(self.cfg.get("games") or {})
+        if games.pop(exe, None) is not None:
+            self.cfg.set("games", games)
+            return True, "removed %s" % os.path.basename(exe)
+        return False, "not in the list"
+
+    def game_deploy(self, exe):
+        meta = (self.cfg.get("games") or {}).get(exe)
+        if not meta:
+            return False, "add the game first"
         try:
-            ok = d.deploy("d3d9.dll", DXVK_X32_D3D9)
-            return ok, "d3d9.dll deployed (dxvk x32, dxgi.dll NOT touched)"
+            out = Deployer(os.path.dirname(exe)).deploy_mode(meta["mode"],
+                                                             meta["arch"])
         except deploy_mod.DeployError as e:
             return False, str(e)
+        if not out:
+            return True, ("%s enabled (Vulkan game - the registered layer "
+                          "loads by itself, no DLLs needed)" % meta["name"])
+        bad = {d: s for d, s in out.items() if s != "deployed"}
+        if bad:
+            return False, "deploy incomplete: %s" % bad
+        return True, "%s enabled (%s: %s)" % (
+            meta["name"], meta["mode"].upper(), ", ".join(out))
 
-    def dx9_undeploy(self, game_exe):
-        if not game_exe:
-            return False, "pick the game exe first"
-        d = Deployer(os.path.dirname(game_exe))
+    def game_undeploy(self, exe):
+        meta = (self.cfg.get("games") or {}).get(exe)
+        if not meta:
+            return False, "add the game first"
         try:
-            d.undeploy("d3d9.dll", DXVK_X32_D3D9)
-            return True, "d3d9.dll removed, original restored if any"
+            Deployer(os.path.dirname(exe)).undeploy_mode(meta["mode"],
+                                                         meta["arch"])
         except deploy_mod.DeployError as e:
             return False, str(e)
+        return True, "%s disabled, originals restored" % meta["name"]
 
-    def dx9_launch(self, game_exe, live_every=1):
-        if not game_exe:
-            return False, "pick the game exe first"
-        st = self.dx9_status(game_exe)
-        if st.get("dll") != "deployed":
-            return False, "deploy d3d9.dll first"
-        return gamelaunch.launch_dx9(game_exe, live_every)
-
-    def dx9_pause(self):
-        return gamelaunch.dx9_pause()
-
-    def dx9_resume(self):
-        return gamelaunch.dx9_resume()
-
-    # ----------------------------------------------------------- DX12 path --
-    def dx12_status(self, game_exe):
-        if not game_exe:
-            return {"game": None}
-        d = Deployer(os.path.dirname(game_exe))
-        return {
-            "game": game_exe,
-            "dll": d.status("dxgi.dll", M12_PROXY),
-            "paused": gamelaunch.dx12_paused(),
-        }
-
-    def dx12_deploy(self, game_exe):
-        if not game_exe:
-            return False, "pick the game exe first"
-        d = Deployer(os.path.dirname(game_exe))
-        try:
-            ok = d.deploy("dxgi.dll", M12_PROXY)
-            return ok, ("dxgi.dll proxy deployed; NOTE: game must be RESTARTED, "
-                        "anti-cheat may block it (see DEV_STATE BattleEye note)")
-        except deploy_mod.DeployError as e:
-            return False, str(e)
-
-    def dx12_undeploy(self, game_exe):
-        if not game_exe:
-            return False, "pick the game exe first"
-        d = Deployer(os.path.dirname(game_exe))
-        try:
-            d.undeploy("dxgi.dll", M12_PROXY)
-            return True, "dxgi.dll removed, original restored if any"
-        except deploy_mod.DeployError as e:
-            return False, str(e)
-
-    def dx12_launch(self, game_exe):
-        if not game_exe:
-            return False, "pick the game exe first"
-        st = self.dx12_status(game_exe)
-        if st.get("dll") != "deployed":
-            return False, "deploy the dxgi.dll proxy first"
-        return gamelaunch.launch_dx12(game_exe)
-
-    def dx12_pause(self):
-        return gamelaunch.dx12_pause()
-
-    def dx12_resume(self):
-        return gamelaunch.dx12_resume()
+    def game_launch(self, exe):
+        meta = (self.cfg.get("games") or {}).get(exe)
+        if not meta:
+            return False, "add the game first"
+        d = Deployer(os.path.dirname(exe))
+        if d.mode_status(meta["mode"], meta["arch"]) != "deployed":
+            ok, msg = self.game_deploy(exe)     # auto-deploy on launch
+            if not ok:
+                return False, msg
+        if not self.daemon.running:
+            ok, msg = self.daemon_start()       # auto-start the chain too
+            if not ok and "already" not in msg:
+                return False, msg
+        return gamelaunch.launch_game(exe, meta["mode"])
 
     # ------------------------------------------------------------ registry --
     def layers_status(self):

@@ -15,13 +15,16 @@ CONFIG_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 
 DEFAULTS = {
-    "weights_path": None,        # asked at first run (file dialog)
+    "weights_path": None,        # autodetected from the bundle, else asked
     "gain": 1.0,                 # last used gain, pushed to m11d live
-    "overlay_hotkey": "control+alt+g",   # show/hide the gain knob
-    "dx9_game": None,            # absolute path to the DX9 game exe
-    "dx12_game": None,           # absolute path to the DX12 game exe
+    "overlay_hotkey": "control+alt+g",   # show/hide the in-game overlay
+    "dx9_game": None,            # legacy single-game keys (v1 config)
+    "dx12_game": None,
+    "games": {},                 # exe path -> {"mode": dx9|dx11|dx12,
+                                 #              "arch": x64|x86, "name": str}
     "screen_args": "",           # extra m8blive args for screen mode
     "overlay_autopause": False,  # pause processing when the overlay opens
+    "overlay_freeze": True,      # FREEZE the game while the overlay is open
 }
 
 

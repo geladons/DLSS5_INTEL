@@ -27,9 +27,9 @@ WEIGHTS_SRC = os.path.join(_REPO, "work", "mlxw",
                            "dlssnr-logical.safetensors")
 
 PKG_FILES = ["__init__.py", "config.py", "daemonctl.py", "deploy.py",
-             "gamelaunch.py", "logtail.py", "overlay.py", "paths.py",
-             "processes.py", "screenmode.py", "controller.py", "ui.py",
-             "m13.pyw"]
+             "gamelaunch.py", "gamescan.py", "logtail.py", "overlay.py",
+             "paths.py", "processes.py", "screenmode.py", "controller.py",
+             "ui.py", "ui_games.py", "m13.pyw"]
 
 # (source, dest-relative, glob-ish file list)
 ARTIFACTS = [
@@ -43,45 +43,46 @@ ARTIFACTS = [
     (os.path.join(_DLSS5, "m11-layer", "x86"), ("runtime", "layer", "x86"),
      ["nr_layer_win32.dll", "VkLayer_dlssnr_win32.json"]),
     (os.path.join(_DLSS5, "m11-layer", "dxvk", "x32"),
-     ("runtime", "dxvk", "x32"), ["d3d9.dll"]),
+     ("runtime", "dxvk", "x32"),
+     ["d3d9.dll", "d3d11.dll", "d3d10core.dll"]),
+    (os.path.join(_DLSS5, "m11-layer", "dxvk", "x64"),
+     ("runtime", "dxvk", "x64"),
+     ["d3d9.dll", "d3d11.dll", "d3d10core.dll", "dxgi.dll"]),
     (os.path.join(_DLSS5, "m12-dxgi", "build", "Release"),
      ("runtime", "m12"), ["m12_dxgi.dll"]),
 ]
 
 README = """DLSS 5 Manager - production bundle
 ==================================
-Run:  M13.cmd   (or: pythonw m13\\m13.pyw)
+Run:  M13.cmd
 
-Setup is a 4-step checklist at the top of the window; the amber line always
-tells you what to do next:
-  1. Weights   - Settings tab, point at weights\\dlssnr-logical.safetensors
-                 (the model is yours, it never ships with the bundle).
-  2. Layers    - Settings tab, "Register Vulkan layers" (one click; it
-                 registers THIS bundle's layers and removes dev-tree
-                 registrations so the layer never loads twice).
-  3. Game      - DX9/DX12 tab: pick the exe, Deploy, Launch.
-  4. Daemon    - "Start daemon" button in the top bar.
+HANDS-FREE: on start the app finds the weights by itself, registers the
+Vulkan layers by itself, starts the daemon by itself and scans ALL drives
+for games by itself. The checklist at the top shows what is ready.
 
-Tabs:
-  Screen mode  - fullscreen overlay for the desktop (watch via Moonlight).
-  DX9 game     - Deploy d3d9.dll only. Pause/Resume is instant (full fps
-                 while paused).
-  DX12 game    - Deploy dxgi.dll proxy, restart the game, Launch.
-                 Anti-cheat may block the proxy.
+To play:
+  1. Games tab - pick the game (or "Add exe manually").
+  2. "Enable DLSS 5" - deploys the right DLLs for the game's API
+     (DX9 / DX10 / DX11 via DXVK->Vulkan layer, DX12 via our dxgi proxy).
+     Mode is auto-detected from the exe; override with the mode dropdown.
+     Protected folders (Program Files etc.) trigger ONE UAC prompt.
+  3. "Launch". In game: CTRL+ALT+G opens the control overlay ON TOP of the
+     game (frameless, clicking it never minimizes the game): PAUSE/RESUME
+     processing, live gain slider, "freeze game while open" - the game
+     stops on one frame while you turn the knobs.
 
-IN GAME: press CTRL+ALT+G - a frameless control overlay floats over the
-game (not a separate window). It has PAUSE/RESUME (passthrough at full
-fps, instant), the live gain slider (next processed frame, no restarts),
-optional auto-pause-on-open, and it drags by the title strip.
-
-The manager never freezes while DLSS runs: all probing happens on a
-background thread, the window only renders.
+Screen tab: fullscreen desktop overlay (slow warm-up at 1440p: ~30 s
+weights upload, up to a minute for the first frame - it is loading, not
+dead) or window mode (fast - type part of a window title).
 
 Layer hotkeys (owned by the layer/proxy, not the manager):
   CTRL+ALT+X pause/resume processing, CTRL+ALT+Q layer off.
 
-Daemon: Start it from the top bar. Logs stream into the bottom pane.
-Config: %LOCALAPPDATA%\\DLSS5Manager\\config.json
+ANTI-CHEAT: do not enable in online/protected titles (PUBG, CS2,
+GTA Online) - DLL injection can be read as a cheat.
+
+Logs stream into the bottom pane. Config: %LOCALAPPDATA%\\DLSS5Manager\\
+config.json
 """
 
 

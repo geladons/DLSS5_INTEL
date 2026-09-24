@@ -97,3 +97,35 @@ def dx12_pause():
 def dx12_resume():
     _flag_set(M12_PAUSE, False)
     return True, "DX12 resumed (processing on)"
+
+
+# -------------------------------------------------------- generic by mode --
+# dx9/dx11/vulkan all ride the m11 Vulkan layer -> they share the trigger
+# flag (for Vulkan games the layer self-loads, no dll deploy). dx12 rides
+# the m12 proxy -> its own pause flag.
+def launch_game(exe_path, mode):
+    if mode in ("dx9", "dx11", "vulkan"):
+        return launch_dx9(exe_path)      # same layer env + trigger flag
+    if mode == "dx12":
+        return launch_dx12(exe_path)
+    return False, "unknown mode: %s" % mode
+
+
+def mode_paused(mode):
+    if mode == "dx12":
+        return dx12_paused()
+    return dx9_paused()                  # layer modes share the trigger
+
+
+def mode_pause(mode):
+    if mode == "dx12":
+        return dx12_pause()
+    ok, _ = dx9_pause()
+    return ok, "%s paused (passthrough, full fps)" % mode.upper()
+
+
+def mode_resume(mode):
+    if mode == "dx12":
+        return dx12_resume()
+    ok, _ = dx9_resume()
+    return ok, "%s resumed (processing on)" % mode.upper()

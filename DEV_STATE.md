@@ -1,4 +1,51 @@
-# DEV_STATE.md - where we are (updated 2026-09-23 ~23:20 by Kimi)
+# DEV_STATE.md - where we are (updated 2026-09-24 ~00:40 by Kimi)
+
+## M13 v3 (2026-09-24 ~00:40) - hands-free demo: auto-everything + any game
+Owner feedback on v2: still too manual, no DX10/11, overlay click minimized
+the game, game doesn't freeze, screen mode "doesn't work", GTA5 deploy
+access-denied. Fixes:
+1. AUTOSETUP (controller.autosetup on the worker at startup): weights
+   auto-found in the bundle weights\ dir, Vulkan layers auto-registered,
+   daemon auto-started. Checklist is now self-driving; the human only picks
+   a game and presses Enable/Launch. Launch also auto-deploys + auto-starts
+   the daemon.
+2. GAME SCANNER (gamescan.py): every FIXED drive (GetLogicalDrives +
+   GetDriveType), Steam libraryfolders.vdf, depth-limited, junk filter;
+   PE reader (mmap!) gives bitness + graphics API. Rules learned on the
+   owner's library: vulkan-1.dll anywhere -> mode "vulkan" (NO dll deploy
+   needed - the implicit layer self-loads; RDR2 statically imports d3d9.dll
+   yet is Vulkan/DX12); else static imports (GTA IV CE carries a stray
+   d3d10 string); else dynamic strings (GTA5 Enhanced LoadLibraries d3d12,
+   imports alone miss it). 181 candidates in ~12-22 s, biggest exe per
+   folder flagged. Anti-cheat titles flagged amber (full-path match).
+3. DX10/11 SUPPORT: DXVK 2.7.1 d3d11.dll+dxgi.dll+d3d10core.dll (x32+x64)
+   added to dlss5\m11-layer\dxvk\ and the bundle. deploy.MODE_DLLS per
+   mode: dx9={d3d9} (NEVER dxgi - GTA IV crash rule), dx11={d3d11,dxgi,
+   d3d10core}, dx12={m12 dxgi proxy}, vulkan={}.
+4. ELEVATED DEPLOY: ACL-protected game dirs (the owner's GTA5
+   access-denied) raise DeployNeedsElevation -> one UAC prompt runs a temp
+   ps1 doing the same backup+copy (deploy.DeployNeedsElevation /
+   _elevated_copy).
+5. OVERLAY: WS_EX_NOACTIVATE|TOOLWINDOW via SetWindowLongPtrW - clicking the
+   overlay no longer minimizes the game. "freeze game while open" (default
+   ON, cfg overlay_freeze): NtSuspendProcess on the active game pid when
+   the panel opens, NtResumeProcess on hide AND on manager close
+   (overlay.unfreeze in _on_close) - the game stops on one frame while the
+   knobs turn. Slider snap-back fixed: _pending_push guard (2 s) on top of
+   the deferred-command echo suppression.
+6. SCREEN MODE honesty: at 2560x1440 the m8b chain is ~70 s/frame0 (M9 perf
+   debt, --scale is a no-op shim) - the Screen tab now SAYS that, and offers
+   window mode (--window title, small extents are near-realtime). NOTE:
+   m8blive has a HARDCODED weights path to the dev tree (main.cpp:1769) -
+   works on this box only by accident; parametrize when M9 lands.
+VALIDATED: _smoke.py ALL PASS (new: PE detect GTA IV=x86/dx9, GTA5E=x64/
+dx12, RDR2=vulkan; drive scan; add_game auto; deploy_mode dx9/dx11
+roundtrip; suspend/resume freezes CPU of a busy child); _ui_smoke ALL PASS
+vs live daemon (overlay push 1.35, slider push 0.9 via NRCT); bundle
+rebuilt (58 binaries, weights 320 MB incl. DXVK both arches).
+OPEN: GTA5E live launch (dxgi.dll already deployed there = ours, sha
+match), elevated deploy untested live (UAC prompt needs the owner's click),
+RDR2 vulkan path untested in-game.
 
 ## M13 v2 (2026-09-23 ~23:20) - usable demo product pass
 Owner feedback on v1: confusing setup, drab UI, app WEDGES once DLSS runs,
