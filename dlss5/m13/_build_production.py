@@ -52,21 +52,30 @@ README = """DLSS 5 Manager - production bundle
 ==================================
 Run:  M13.cmd   (or: pythonw m13\\m13.pyw)
 
-First run: the app asks for the model weights - point it at
-weights\\dlssnr-logical.safetensors. It remembers the path.
+Setup is a 4-step checklist at the top of the window; the amber line always
+tells you what to do next:
+  1. Weights   - Settings tab, point at weights\\dlssnr-logical.safetensors
+                 (the model is yours, it never ships with the bundle).
+  2. Layers    - Settings tab, "Register Vulkan layers" (one click; it
+                 registers THIS bundle's layers and removes dev-tree
+                 registrations so the layer never loads twice).
+  3. Game      - DX9/DX12 tab: pick the exe, Deploy, Launch.
+  4. Daemon    - "Start daemon" button in the top bar.
 
 Tabs:
   Screen mode  - fullscreen overlay for the desktop (watch via Moonlight).
-  DX9 game     - pick the game exe, Deploy d3d9.dll, Launch. Pause/Resume
-                 is instant (full fps while paused).
-  DX12 game    - pick the game exe, Deploy dxgi.dll proxy, restart the
-                 game, Launch. Anti-cheat may block the proxy.
-  Settings     - weights path, Register Vulkan layers (click once; it
-                 registers THIS bundle's layers and removes dev-tree
-                 registrations so the layer never loads twice).
+  DX9 game     - Deploy d3d9.dll only. Pause/Resume is instant (full fps
+                 while paused).
+  DX12 game    - Deploy dxgi.dll proxy, restart the game, Launch.
+                 Anti-cheat may block the proxy.
 
-In game: press CTRL+ALT+G to open the gain knob - moving the slider
-changes the effect LIVE (next processed frame), no restarts.
+IN GAME: press CTRL+ALT+G - a frameless control overlay floats over the
+game (not a separate window). It has PAUSE/RESUME (passthrough at full
+fps, instant), the live gain slider (next processed frame, no restarts),
+optional auto-pause-on-open, and it drags by the title strip.
+
+The manager never freezes while DLSS runs: all probing happens on a
+background thread, the window only renders.
 
 Layer hotkeys (owned by the layer/proxy, not the manager):
   CTRL+ALT+X pause/resume processing, CTRL+ALT+Q layer off.

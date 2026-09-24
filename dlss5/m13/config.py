@@ -21,6 +21,7 @@ DEFAULTS = {
     "dx9_game": None,            # absolute path to the DX9 game exe
     "dx12_game": None,           # absolute path to the DX12 game exe
     "screen_args": "",           # extra m8blive args for screen mode
+    "overlay_autopause": False,  # pause processing when the overlay opens
 }
 
 

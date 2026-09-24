@@ -1,4 +1,40 @@
-# DEV_STATE.md - where we are (updated 2026-09-23 ~21:15 by Kimi)
+# DEV_STATE.md - where we are (updated 2026-09-23 ~23:20 by Kimi)
+
+## M13 v2 (2026-09-23 ~23:20) - usable demo product pass
+Owner feedback on v1: confusing setup, drab UI, app WEDGES once DLSS runs,
+hotkey opened a plain separate window instead of an in-game overlay. Fixes:
+1. FREEZE ROOT CAUSE: the 1 s poll called NRCT status() with a 5 s timeout
+   ON THE TK THREAD; a busy m11d answers slowly -> window froze in bursts.
+   Now controller.py owns StateMonitor (single background probe thread,
+   NRCT timeout 0.8 s; publishes a dict snapshot) + ActionWorker (every
+   mutation - start/stop/gain/deploy/pause - runs off the UI thread, results
+   return via a callback into the log queue). ui.py does ZERO I/O.
+2. REAL IN-GAME OVERLAY (overlay.py rewrite, GainKnob kept as alias):
+   frameless (overrideredirect), always-on-top, alpha 0.94, dark, centered,
+   drag by title strip. Controls: PAUSE/RESUME PROCESSING (dispatches on the
+   active path: DX9 trigger flag / DX12 m12 pause flag - detected by game
+   exe basename probe; screen mode points at its own CTRL+ALT+X), live gain
+   slider, Reset 1.0, "auto-pause on open" (cfg overlay_autopause), status
+   line (daemon pid/gain/frames), hotkey hint. Same CTRL+ALT+G poller.
+3. DARK THEME main window (clam-based ttk styles) + 4-step SETUP CHECKLIST
+   (weights / layers / game / daemon) with an always-visible "Next: ..."
+   amber hint - nothing hides in tabs anymore. Gain in screen mode now
+   restarts m8blive with the new gain (was: silently unservable).
+4. GOTCHA FIXED: Tk Scale fires its command DEFERRED even for programmatic
+   set() - a poll-driven sync re-pushed the STALE daemon gain over the value
+   the user had just chosen (found by _ui_smoke: slider push lost to the
+   echo). Both sliders now suppress the echo of their own sync and skip
+   syncing while the mouse is down on the slider.
+VALIDATED: _smoke.py 26/26 PASS (new: monitor snapshot, daemon probe via
+monitor, active_mode, worker roundtrip, overlay_autopause persist);
+_ui_smoke.py ALL PASS vs live dev daemon (overlay push 1.35 + slider push
+0.8 confirmed via NRCT STATUS); real-window screenshot _ui_shot.png (dark
+main window + centered frameless overlay). Production bundle rebuilt
+(52 binaries sha1-verified, weights ok). Port 47990 left FREE again (dev
+daemon used for validation was stopped).
+OPEN (owner to confirm live): overlay over a REAL fullscreen game (DXVK
+titles are borderless so topmost works; true exclusive fullscreen would
+need the layer to draw it instead), physical CTRL+ALT+G press.
 
 ## M13 SHIPPED (2026-09-23 ~20:35-21:10) - the manager app
 PRODUCTION BUNDLE (owner self-test 2026-09-23 ~22:10): C:\Users\AI\Desktop\
