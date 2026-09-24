@@ -48,6 +48,12 @@ public:
                       FrameStats* stats = nullptr);
     void shutdown();
 
+    // M13 control channel: live parameter update. cfg_.headGain is consumed
+    // per frame in recordFrame (compose push constant), so the new value
+    // applies to the NEXT processFrame - no engine re-init, no game
+    // re-capture. Daemon-side only (single-threaded accept loop).
+    void setHeadGain(float g) { cfg_.headGain = g; }
+
     uint32_t netW() const { return netW_; }
     uint32_t netH() const { return netH_; }
     const Stage* stages() const { return st_; }
