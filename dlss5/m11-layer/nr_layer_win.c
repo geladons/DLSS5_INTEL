@@ -18,6 +18,9 @@
  *   NR_LAYER_TRIGGER  while this file exists: process + hold (photo mode)
  *   NR_LAYER_LIVE N   every Nth present processed; between frames re-blit the
  *                     last result (slideshow mode). N=1 = every present.
+ *                     Arms CTRL+ALT+X (pause/resume passthrough) and
+ *                     CTRL+ALT+Q (layer off) hotkeys.
+ *   NR_LAYER_NOPATCH  1 = do not touch swapchains (pure passthrough; bisect)
  *   NR_LAYER_CAPTURE  write the next captured frame (header+pixels) here
  *   NR_LAYER_EVERY N  capture every Nth present even without a trigger
  *   NR_LAYER_SYNC     "semaphore" = present-semaphore ring; default = idle
@@ -58,6 +61,7 @@ typedef struct device_data {
     unsigned char *result;
     VkDeviceSize result_size;
     int holding;
+    VkSwapchainKHR holding_chain; /* the swapchain the held result belongs to */
     unsigned char *earlier;
     VkDeviceSize earlier_size;
     VkCommandBuffer ring_commands[SYNC_SLOTS];
@@ -116,6 +120,10 @@ static long live_every;
 static long nr_port = NR_DEFAULT_PORT;
 static const char *trigger_path;
 static int ui_mask;
+static int no_patch;            /* NR_LAYER_NOPATCH=1: leave swapchains alone */
+static volatile LONG g_paused;  /* CTRL+ALT+X: passthrough, full fps */
+static volatile LONG g_off;     /* CTRL+ALT+Q: layer off for good */
+static volatile LONG g_hotkeys_started;
 
 /* ------------------------------------------------------------------ */
 /* logging                                                             */
@@ -233,6 +241,46 @@ static int family_can_capture(device_data *data, uint32_t family)
 static void lock(void) { if (g_lock_ready) EnterCriticalSection(&g_lock); }
 static void unlock(void) { if (g_lock_ready) LeaveCriticalSection(&g_lock); }
 
+/* CTRL+ALT+X pauses processing (native frames, full fps), CTRL+ALT+Q turns
+ * the layer off for good. The thread has its own message loop, so the
+ * hotkeys work even inside a game that never pumps messages for us. */
+static DWORD WINAPI hotkey_thread(LPVOID param)
+{
+    (void)param;
+    if (!RegisterHotKey(NULL, 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'X')) {
+        nr_log("[nr_layer] pause hotkey unavailable (%lu)", GetLastError());
+    }
+    if (!RegisterHotKey(NULL, 2, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'Q')) {
+        nr_log("[nr_layer] off hotkey unavailable (%lu)", GetLastError());
+    }
+    nr_log("[nr_layer] hotkeys armed: CTRL+ALT+X pause/resume, CTRL+ALT+Q layer off");
+    MSG msg;
+    for (;;) {
+        LONG r = GetMessage(&msg, NULL, 0, 0);
+        if (r <= 0) break;
+        if (msg.message != WM_HOTKEY) continue;
+        if (msg.wParam == 1) {
+            InterlockedExchange(&g_paused, g_paused ? 0 : 1);
+            nr_log("[nr_layer] %s by hotkey", g_paused ? "paused" : "resumed");
+        } else if (msg.wParam == 2) {
+            InterlockedExchange(&g_off, 1);
+            nr_log("[nr_layer] layer off by hotkey");
+        }
+    }
+    return 0;
+}
+
+static void hotkeys_ensure(void)
+{
+    if (InterlockedCompareExchange(&g_hotkeys_started, 1, 0)) return;
+    HANDLE t = CreateThread(NULL, 0, hotkey_thread, NULL, 0, NULL);
+    if (t) CloseHandle(t);
+    else {
+        g_hotkeys_started = 0;
+        nr_log("[nr_layer] hotkey thread failed (%lu)", GetLastError());
+    }
+}
+
 static void remember_queue(VkDevice device, uint32_t family, VkQueue queue, int capture_ok)
 {
     if (!queue) return;
@@ -337,7 +385,12 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
         const char *port = getenv("NR_LAYER_PORT");
         nr_port = port ? strtol(port, NULL, 10) : NR_DEFAULT_PORT;
         if (nr_port <= 0) nr_port = NR_DEFAULT_PORT;
+        const char *nopatch = getenv("NR_LAYER_NOPATCH");
+        no_patch = nopatch && strcmp(nopatch, "0") != 0;
+        if (no_patch)
+            nr_log("[nr_layer] NOPATCH: swapchains left completely alone");
         if (live_every > 0)
+            hotkeys_ensure();
             nr_log("[nr_layer] live: every %ld present goes through the network, "
                  "the frames between hold the last result", live_every);
         if (sync_semaphores)
@@ -403,6 +456,8 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateSwapchainKHR(VkDevice device,
 {
     device_data *data = find_device(device);
     if (!data) return VK_ERROR_INITIALIZATION_FAILED;
+    if (no_patch)
+        return data->create_swapchain(device, info, allocator, swapchain);
     const VkImageUsageFlags copies = VK_IMAGE_USAGE_TRANSFER_SRC_BIT
                                    | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     VkSwapchainCreateInfoKHR patched = *info;
@@ -413,6 +468,8 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateSwapchainKHR(VkDevice device,
         /* Surface refused transfer usage: create it as asked and do not track,
          * rather than issue an illegal copy every frame. */
         copyable = (info->imageUsage & copies) == copies;
+        nr_log("[nr_layer] patched usage refused (0x%x); creating as asked, copyable=%d",
+             (unsigned)r, copyable);
         r = data->create_swapchain(device, info, allocator, swapchain);
     }
     if (r != VK_SUCCESS) return r;
@@ -515,6 +572,13 @@ VKAPI_ATTR void VKAPI_CALL nr_DestroySwapchainKHR(VkDevice device, VkSwapchainKH
     for (int i = 0; i < MAX_SWAPCHAINS; i++)
         if (swapchains[i].swapchain == swapchain)
             memset(&swapchains[i], 0, sizeof swapchains[i]);
+    /* A held result belongs to one swapchain; never re-blit it into another
+     * (device resets recreate swapchains, sometimes at the same size). */
+    for (int i = 0; i < 8; i++)
+        if (devices[i].holding && devices[i].holding_chain == swapchain) {
+            devices[i].holding = 0;
+            devices[i].holding_chain = VK_NULL_HANDLE;
+        }
     unlock();
     if (data && data->destroy_swapchain)
         data->destroy_swapchain(device, swapchain, allocator);
@@ -897,6 +961,14 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
         ? info->waitSemaphoreCount : 0;
     data->present_signal = VK_NULL_HANDLE;
 
+    /* Hotkeys: CTRL+ALT+Q = layer off for good. Paused (CTRL+ALT+X) means
+     * plain passthrough: native frames, full fps, the held result survives
+     * so resume continues the slideshow. */
+    if (g_off)
+        return data->present(queue, info);
+    if (g_paused && live_every > 0)
+        return data->present(queue, info);
+
     /* Live mode: every Nth present through the network, the frames between
      * re-blit the last result so the picture is steady. */
     if (live_every > 0) {
@@ -911,9 +983,11 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
             if (frame_counter % (unsigned long)live_every == 0) {
                 if (process_frame(data, chain, queue, index) == 0) {
                     data->holding = 1;
+                    data->holding_chain = chain->swapchain;
                     transfer(data, chain, queue, index, 1);
                 }
-            } else if (data->holding && data->result_size == want) {
+            } else if (data->holding && data->holding_chain == chain->swapchain
+                       && data->result_size == want) {
                 memcpy(data->mapped, data->result, (size_t)data->result_size);
                 transfer(data, chain, queue, index, 1);
             }

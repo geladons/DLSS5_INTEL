@@ -15,7 +15,7 @@ set OUT=%SRC%\x86
 if not exist %OUT% mkdir %OUT%
 cl /nologo /std:c11 /O2 /I"C:\VulkanSDK\1.4.357.0\Include" ^
    "%SRC%\nr_layer_win.c" /Fo"%OUT%\nr_layer_win32.obj" ^
-   /link /DLL /DEF:"%SRC%\nr_layer_win.def" ws2_32.lib ^
+   /link /DLL /DEF:"%SRC%\nr_layer_win.def" ws2_32.lib user32.lib ^
    /OUT:"%OUT%\nr_layer_win32.dll" /PDB:"%OUT%\nr_layer_win32.pdb" 2>&1
 if errorlevel 1 (
     echo [FAIL] cl x86
