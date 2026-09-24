@@ -6,7 +6,12 @@
 //   request: 16-byte header {magic, w, h, format} (uint32 LE)
 //            magic 0x304E524E: payload w*h*4 bytes (BGRA)
 //            magic 0x314E524E: payload w*h*4 + w*h mask bytes (1 = held-still UI)
-//   reply:   w*h*4 bytes BGRA (the processed frame)
+//            magic 0x5443524E ("NRCT"): M13 control channel, 16-byte header
+//                     {magic, cmd, payload, reserved} instead of a frame:
+//                     cmd 1 = SETGAIN (payload = float bits, reply ok+gain)
+//                     cmd 2 = STATUS  (reply ok, gain, frames processed)
+//   reply:   frame requests: w*h*4 bytes BGRA (the processed frame)
+//            control requests: 16 bytes {magic, ok, gainBits, frames}
 // One TCP connection per frame (the layer connect()s per exchange).
 //
 // Modes:
@@ -40,6 +45,7 @@
 
 static const uint32_t MAGIC_PLAIN = 0x304E524Eu;
 static const uint32_t MAGIC_MASKED = 0x314E524Eu;
+static const uint32_t MAGIC_CTRL = 0x5443524Eu;   // "NRCT" - M13 control
 
 // ---------------------------------------------------------------- BMP I/O --
 static bool ReadBmpBGRA(const std::string& path, std::vector<uint8_t>& bgra,
@@ -280,6 +286,33 @@ int main(int argc, char** argv) {
 
         uint32_t hdr[4]{};
         if (!readAll(s, (uint8_t*)hdr, 16)) { closesocket(s); continue; }
+        if (hdr[0] == MAGIC_CTRL) {
+            // M13 control: runtime parameters, handled between frames on the
+            // accept thread (the engine is driven from this thread only, so
+            // no locking is needed). Reply: {magic, ok, gainBits, frames}.
+            uint32_t rep[4] = { MAGIC_CTRL, 0, 0, 0 };
+            if (hdr[1] == 1) {                   // SETGAIN: hdr[2] = float bits
+                float g = 0.0f;
+                std::memcpy(&g, &hdr[2], 4);
+                if (g >= 0.0f && g <= 16.0f) {
+                    gain = g;
+                    engine.setHeadGain(g);       // next processed frame uses it
+                    rep[1] = 1;
+                    std::printf("[m11d] ctrl: gain -> %.3f\n", (double)g);
+                } else {
+                    std::fprintf(stderr, "[m11d] ctrl: gain %.3f out of range\n", (double)g);
+                }
+            } else if (hdr[1] == 2) {            // STATUS
+                rep[1] = 1;
+            } else {
+                std::fprintf(stderr, "[m11d] ctrl: unknown cmd %u\n", hdr[1]);
+            }
+            std::memcpy(&rep[2], &gain, 4);
+            rep[3] = (uint32_t)frameCounter;
+            writeAll(s, (const uint8_t*)rep, 16);
+            closesocket(s);
+            continue;
+        }
         const bool masked = hdr[0] == MAGIC_MASKED;
         if (hdr[0] != MAGIC_PLAIN && !masked) {
             std::fprintf(stderr, "[m11d] bad magic 0x%08x - dropping connection\n", hdr[0]);
