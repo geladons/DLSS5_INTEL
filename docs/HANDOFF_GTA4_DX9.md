@@ -1,5 +1,32 @@
 # HANDOFF: DX9 present-path injection (GTA IV validated) - 2026-09-23
 
+## Session 2026-09-23 ~20:10-20:30 (menu A/B re-capture attempt)
+- Relaunched GTA IV with the layer live: m11d was ALREADY RUNNING (pid 1940,
+  started 19:04, reuse it - do not spawn a second one; check
+  `tasklist | findstr m11d` and dlss5\m11d\_daemon_gta4.log tail).
+- New helpers in dlss5\m11-layer\:
+  - _gta4_start.py <live1|live4|uimask> - DETACHED game launch with
+    NR_LAYER_CAPTURE/_OUT pointed at dumps\gp_cap.bin / gp_out.bin
+    (mode uimask also sets NR_LAYER_TRIGGER=dumps\nr_trigger.flag +
+    NR_LAYER_UI_MASK=1).
+  - raw2png.py in.raw out.png - layer raw (16B header + BGRA) -> PNG.
+    This is the ONLY way to see the game: GDI/DDA are blind to the
+    Vulkan window (MPO). Poll gp_cap.bin mtime, convert, view.
+  - _keysend.ps1 / _keyhold.ps1 - SendInput/keybd_event key injection.
+- RESULT: menu reached fine, capture pipeline works. But KEYBOARD INJECTION
+  INTO THE GAME FAILED: keybd_event (ui.ps1 key), PostMessage WM_KEYDOWN
+  (ui.ps1 pkey) and a SendInput+AttachThreadInput focus-grab (_keysend.ps1)
+  all did NOT register in the GTA IV menu - the captured frames never
+  changed. Untested: whether the game simply wasn't focused at all, or GTA
+  IV CE menu reads raw input only. Do not rediscover blindly; if gameplay
+  navigation is ever needed again, first verify the foreground window is
+  the game and try injecting while the owner confirms focus.
+- OWNER DECISION: menu before/after (dumps\before.png / after.png) is
+  SUFFICIENT proof - faces etc. clearly show the difference. Gameplay A/B
+  and the re-blit stability check are DESCOPED for now.
+- NEXT DIRECTION (owner call): M13 PRODUCTIZATION - see DEV_STATE.md
+  "M13 productization" for the full scope. Perf work (M10) comes after.
+
 ## State
 - DX9 (32-bit DXVK + 32-bit m11 layer -> m11d) works LIVE in GTA IV CE.
 - Before/after proof: dlss5/m11-layer/dumps/before.png vs after.png
