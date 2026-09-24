@@ -46,7 +46,14 @@ launcher M13.cmd / m13.pyw; nothing installs, HKCU only). Parts:
    (knob push 1.35 + slider push 0.8 both confirmed via STATUS); real
    pythonw instance screenshotted (_ui_shot.png: status bar green, tabs,
    log pane; first-run weights prompt visible).
-GOTCHAS hit this session: (a) invoke .cmd via 'cmd //c' - single-slash /c
+GOTCHAS hit this session: (z) PYTHONW + SUBPROCESS = CONSOLE STROBE: a GUI
+app started with pythonw has NO console, so EVERY subprocess.run of a
+console tool (tasklist/taskkill) spawns a VISIBLE flashing child console;
+the manager's 1 s poll did it 2x/sec -> strobing cmd windows + frozen UI
+(owner-found). Rule: GUI process probes go through ctypes (Toolhelp32 /
+TerminateProcess) or CREATE_NO_WINDOW; never subprocess without that flag.
+Fixed in m13/processes.py (smoke monkeypatches subprocess to raise).
+(a) invoke .cmd via 'cmd //c' - single-slash /c
 is path-mangled by the git-bash wrapper into a silent no-op (stale build
 log tailed = looks like a build, nothing ran; exe mtime is the tell);
 (b) NMake dep scanner did NOT rebuild m11d main.cpp on an engine.h change
