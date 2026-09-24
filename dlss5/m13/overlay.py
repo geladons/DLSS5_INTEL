@@ -1,8 +1,19 @@
 # ============================================================================
-# m13.overlay - the hotkey-invoked gain knob: a small always-on-top window
-# with a live slider. Moving the slider pushes the new gain to m11d over the
-# NRCT control channel - the effect is visible IN THE GAME on the next
-# processed frame, no daemon restart, no game re-capture (M13 req 3).
+# m13.overlay - the in-game control overlay (hotkey-invoked, default
+# CTRL+ALT+G). NOT a normal window anymore: a frameless, always-on-top,
+# semi-transparent panel centered over the screen so it floats above the
+# game instead of opening as a separate app window. Drag by the title strip.
+#
+# Controls, all LIVE without leaving the game:
+#   [PAUSE]/[RESUME]  processing toggle on the active path (file channels;
+#                     pause = passthrough at full fps, the frame you saw is
+#                     the last processed one)
+#   gain slider       live NRCT push to m11d (next processed frame); in
+#                     screen mode it restarts the overlay with the new gain
+#   auto-pause        optional: pause processing the moment the overlay opens
+#
+# Threading: the overlay never does I/O itself. It renders ctl.snapshot()
+# (monitor thread) and routes every action through ctl.submit() (worker).
 #
 # The show/hide hotkey is POLLED via GetAsyncKeyState (edge-triggered): no
 # message-only window needed, and physical presses are what the owner uses.
@@ -15,6 +26,17 @@ import tkinter as tk
 VK = {"control": 0x11, "ctrl": 0x11, "alt": 0x12, "shift": 0x10}
 POLL_MS = 120
 DEBOUNCE_MS = 250
+STATUS_MS = 500
+
+# dark theme (shared palette with ui.py)
+BG = "#16181d"
+PANEL = "#22252d"
+FG = "#d7dae0"
+MUTED = "#8b919e"
+ACCENT = "#4f8cff"
+GREEN = "#3fb950"
+RED = "#f85149"
+AMBER = "#d29922"
 
 
 def parse_hotkey(spec):
@@ -29,6 +51,10 @@ def parse_hotkey(spec):
                 mods |= {0x11: 0x0002, 0x12: 0x0001, 0x10: 0x0004}[VK[p]]
     vk = ord(key[0].upper()) if key else ord("G")
     return mods, vk
+
+
+def hotkey_label(spec):
+    return (spec or "control+alt+g").upper().replace("CONTROL", "CTRL")
 
 
 class HotkeyPoller:
@@ -64,64 +90,192 @@ class HotkeyPoller:
         tk_widget.after(self.poll_ms, self.poll)
 
 
-class GainKnob:
-    """Always-on-top slider window; on_gain(value) does the live push."""
+class ControlOverlay:
+    """Frameless always-on-top control panel floating over the game."""
 
-    def __init__(self, master, on_gain, on_log, hotkey_spec, initial=1.0):
-        self.on_gain = on_gain
+    WIDTH, HEIGHT = 430, 320
+
+    def __init__(self, master, ctl, on_log):
+        self.ctl = ctl
         self.on_log = on_log
         self.win = tk.Toplevel(master)
-        self.win.title("DLSS5 gain")
+        self.win.overrideredirect(True)          # frameless: no OS window look
         self.win.attributes("-topmost", True)
         self.win.attributes("-alpha", 0.94)
+        self.win.configure(bg=BG, highlightthickness=1,
+                           highlightbackground=ACCENT)
         self.win.resizable(False, False)
         self.win.protocol("WM_DELETE_WINDOW", self.hide)
         self.win.withdraw()
-
-        frm = tk.Frame(self.win, padx=10, pady=8)
-        frm.pack(fill="both", expand=True)
-        self.var = tk.DoubleVar(value=initial)
-        self.title_lbl = tk.Label(frm, text="DLSS5 gain (live)", font=("Segoe UI", 10, "bold"))
-        self.title_lbl.pack(anchor="w")
-        self.scale = tk.Scale(frm, from_=0.0, to=2.0, resolution=0.05,
-                              orient="horizontal", length=260,
-                              variable=self.var, command=self._debounced_push)
-        self.scale.pack()
-        self.status = tk.Label(frm, text="daemon: ?", fg="#666")
-        self.status.pack(anchor="w")
-        row = tk.Frame(frm)
-        row.pack(fill="x", pady=(6, 0))
-        tk.Button(row, text="Push now", command=self._push).pack(side="left")
-        tk.Button(row, text="Reset 1.0",
-                  command=lambda: self.var.set(1.0)).pack(side="left", padx=4)
-        tk.Button(row, text="Hide", command=self.hide).pack(side="right")
-
         self._after_id = None
-        self.poller = HotkeyPoller(hotkey_spec, self.toggle)
+        self._drag = None
+        self._build()
+        self.poller = HotkeyPoller(ctl.cfg.get("overlay_hotkey"), self.toggle)
         self.poller.attach(master)
 
+    # ------------------------------------------------------------- build ---
+    def _build(self):
+        w = self.win
+        # title strip (drag handle)
+        strip = tk.Frame(w, bg=PANEL, height=30)
+        strip.pack(fill="x")
+        strip.pack_propagate(False)
+        self.title_lbl = tk.Label(strip, text="DLSS 5", bg=PANEL, fg=FG,
+                                  font=("Segoe UI", 10, "bold"))
+        self.title_lbl.pack(side="left", padx=10)
+        close = tk.Label(strip, text="X", bg=PANEL, fg=MUTED,
+                         font=("Segoe UI", 10, "bold"), padx=10, cursor="hand2")
+        close.pack(side="right")
+        close.bind("<Button-1>", lambda _e: self.hide())
+        close.bind("<Enter>", lambda _e: close.config(fg=RED))
+        close.bind("<Leave>", lambda _e: close.config(fg=MUTED))
+        for widget in (strip, self.title_lbl):
+            widget.bind("<ButtonPress-1>", self._drag_start)
+            widget.bind("<B1-Motion>", self._drag_move)
+
+        body = tk.Frame(w, bg=BG, padx=14, pady=10)
+        body.pack(fill="both", expand=True)
+
+        # processing toggle (the big one)
+        self.toggle_btn = tk.Button(
+            body, text="PAUSE PROCESSING", font=("Segoe UI", 10, "bold"),
+            bg=ACCENT, fg="#ffffff", activebackground="#3a70d6",
+            activeforeground="#ffffff", relief="flat", bd=0, pady=7,
+            cursor="hand2", command=self._toggle_processing)
+        self.toggle_btn.pack(fill="x")
+
+        self.mode_lbl = tk.Label(body, text="", bg=BG, fg=MUTED,
+                                 font=("Segoe UI", 8))
+        self.mode_lbl.pack(anchor="w", pady=(3, 8))
+
+        # gain
+        grow = tk.Frame(body, bg=BG)
+        grow.pack(fill="x")
+        tk.Label(grow, text="Gain", bg=BG, fg=FG,
+                 font=("Segoe UI", 9, "bold")).pack(side="left")
+        self.gain_val = tk.Label(grow, text="1.00", bg=BG, fg=ACCENT,
+                                 font=("Consolas", 10, "bold"), width=5)
+        self.gain_val.pack(side="right")
+        self.var = tk.DoubleVar(value=self.ctl.cfg.get("gain"))
+        self._suppress_scale = None   # programmatic set echo suppression:
+        self._scale_dragging = False  # Tk fires the command DEFERRED
+        self.scale = tk.Scale(
+            body, from_=0.0, to=2.0, resolution=0.05, orient="horizontal",
+            variable=self.var, command=self._debounced_push,
+            bg=BG, fg=FG, troughcolor=PANEL, highlightthickness=0, bd=0,
+            activebackground=ACCENT, showvalue=False, sliderrelief="flat")
+        self.scale.pack(fill="x", pady=(0, 4))
+        self.scale.bind("<ButtonPress-1>",
+                        lambda _e: setattr(self, "_scale_dragging", True))
+        self.scale.bind("<ButtonRelease-1>",
+                        lambda _e: setattr(self, "_scale_dragging", False))
+
+        prow = tk.Frame(body, bg=BG)
+        prow.pack(fill="x", pady=(0, 8))
+        tk.Button(prow, text="Reset 1.0", font=("Segoe UI", 8), bg=PANEL,
+                  fg=FG, activebackground="#2e323c", activeforeground=FG,
+                  relief="flat", bd=0, padx=8, cursor="hand2",
+                  command=self._reset_gain).pack(side="left")
+        self.ap_var = tk.BooleanVar(
+            value=bool(self.ctl.cfg.get("overlay_autopause")))
+        tk.Checkbutton(prow, text="auto-pause on open", variable=self.ap_var,
+                       command=self._save_autopause, bg=BG, fg=MUTED,
+                       selectcolor=PANEL, activebackground=BG,
+                       activeforeground=FG, font=("Segoe UI", 8),
+                       cursor="hand2").pack(side="right")
+
+        self.status = tk.Label(body, text="daemon: ?", bg=BG, fg=MUTED,
+                               font=("Consolas", 8), justify="left")
+        self.status.pack(anchor="w")
+
+        tk.Label(body, text="%s - hide" % hotkey_label(
+            self.ctl.cfg.get("overlay_hotkey")), bg=BG, fg="#565b66",
+            font=("Segoe UI", 8)).pack(side="bottom", pady=(8, 0))
+
+    # -------------------------------------------------------------- drag ---
+    def _drag_start(self, e):
+        self._drag = (e.x_root - self.win.winfo_x(),
+                      e.y_root - self.win.winfo_y())
+
+    def _drag_move(self, e):
+        if self._drag:
+            self.win.geometry("+%d+%d" % (e.x_root - self._drag[0],
+                                          e.y_root - self._drag[1]))
+
+    # ----------------------------------------------------------- actions ---
+    def _toggle_processing(self):
+        self.ctl.submit(self.ctl.processing_toggle)
+
     def _debounced_push(self, _val):
+        g = round(float(self.var.get()), 3)
+        if self._suppress_scale is not None and \
+                abs(g - self._suppress_scale) < 1e-9:
+            self._suppress_scale = None      # echo of a status-driven sync
+            return
+        self._suppress_scale = None
+        self.gain_val.config(text="%.2f" % g)
         if self._after_id:
             self.win.after_cancel(self._after_id)
         self._after_id = self.win.after(DEBOUNCE_MS, self._push)
 
     def _push(self):
+        self._after_id = None
         g = round(float(self.var.get()), 3)
-        try:
-            ok, msg = self.on_gain(g)
-        except Exception as e:      # never let the knob kill the UI
-            ok, msg = False, "gain push failed: %s" % e
-        self.on_log("[knob] gain %.2f -> %s" % (g, msg))
-        color = "#060" if ok else "#a00"
-        self.title_lbl.config(fg=color)
-        self.win.after(1500, lambda: self.title_lbl.config(fg="#000"))
+        self.ctl.submit(self.ctl.set_gain, g)
 
+    def _reset_gain(self):
+        self.var.set(1.0)
+        self._debounced_push(1.0)
+
+    def _save_autopause(self):
+        self.ctl.cfg.set("overlay_autopause", bool(self.ap_var.get()))
+
+    # ------------------------------------------------------------ status ---
     def set_status(self, text):
         try:
             self.status.config(text=text)
         except tk.TclError:
             pass
 
+    def _refresh(self):
+        """Render the monitor snapshot; runs only while visible."""
+        if not self.win.winfo_viewable():
+            return
+        snap = self.ctl.snapshot()
+        mode = snap.get("active_mode")
+        names = {"dx9": "DX9 game", "dx12": "DX12 game", "screen": "Screen mode"}
+        paused = self.ctl.processing_paused()
+        if paused is True:
+            self.toggle_btn.config(text="RESUME PROCESSING", bg=GREEN,
+                                   activebackground="#2ea043")
+        elif paused is False:
+            self.toggle_btn.config(text="PAUSE PROCESSING", bg=ACCENT,
+                                   activebackground="#3a70d6")
+        else:
+            self.toggle_btn.config(text="PAUSE PROCESSING", bg=PANEL,
+                                   activebackground="#2e323c")
+        self.mode_lbl.config(
+            text="target: %s" % names.get(mode, "nothing running"))
+        if snap.get("daemon_pid") is not None:
+            g, f = snap.get("daemon_gain"), snap.get("daemon_frames")
+            txt = "daemon up (pid %s)" % snap["daemon_pid"]
+            if g is not None:
+                txt += " - gain %.2f, %d frames" % (g, f or 0)
+                if not self._scale_dragging:
+                    self._suppress_scale = round(g, 3)
+                    self.var.set(g)
+                    self.gain_val.config(text="%.2f" % g)
+            if snap.get("daemon_err"):
+                txt += " [busy]"
+            self.status.config(text=txt, fg=MUTED)
+        elif snap.get("screen_pid") is not None:
+            self.status.config(text="screen overlay up (pid %s)" %
+                               snap["screen_pid"], fg=MUTED)
+        else:
+            self.status.config(text="daemon down", fg=RED)
+        self.win.after(STATUS_MS, self._refresh)
+
+    # ------------------------------------------------------------ show/hide
     def toggle(self):
         if self.win.winfo_viewable():
             self.hide()
@@ -129,8 +283,27 @@ class GainKnob:
             self.show()
 
     def show(self):
+        self._center()
         self.win.deiconify()
         self.win.lift()
+        if self.ap_var.get():
+            snap = self.ctl.snapshot()
+            mode = snap.get("active_mode")
+            if mode in ("dx9", "dx12") and not snap.get(mode + "_paused"):
+                self.ctl.submit(self.ctl.processing_toggle)
+                self.on_log("[overlay] auto-paused (%s)" % mode)
+        self.win.after(STATUS_MS, self._refresh)
+
+    def _center(self):
+        sw = self.win.winfo_screenwidth()
+        sh = self.win.winfo_screenheight()
+        x = max(0, (sw - self.WIDTH) // 2)
+        y = max(0, (sh - self.HEIGHT) // 3)
+        self.win.geometry("%dx%d+%d+%d" % (self.WIDTH, self.HEIGHT, x, y))
 
     def hide(self):
         self.win.withdraw()
+
+
+# Backwards compatibility for older imports/tests.
+GainKnob = ControlOverlay

@@ -77,5 +77,31 @@ check("m11d detectable", pid is not None, "pid=%s" % pid)
 check("nonexistent exe", processes.find_pid("definitely_not_running.exe")
       is None)
 
+# controller: monitor snapshot + async worker (no daemon mutation)
+from m13.controller import M13Controller
+ctl = M13Controller(config.Config(os.path.join(tmp, "c2.json")))
+import threading, time
+got = []
+ctl.start_worker(lambda ok, msg: got.append((ok, msg)))
+time.sleep(1.5)
+snap = ctl.snapshot()
+check("monitor snapshot", isinstance(snap, dict) and "active_mode" in snap)
+check("monitor sees daemon", snap.get("daemon_pid") is not None,
+      "pid=%s" % snap.get("daemon_pid"))
+check("monitor gain probe", snap.get("daemon_gain") is not None,
+      "gain=%s frames=%s" % (snap.get("daemon_gain"),
+                             snap.get("daemon_frames")))
+check("active_mode none", snap.get("active_mode") is None)
+done = threading.Event()
+ctl.submit(lambda: (done.set(), (True, "worker ok"))[1])
+check("worker runs actions", done.wait(5.0) and got and got[-1][1]
+      == "worker ok")
+ctl.shutdown()
+
+# config: new overlay keys survive a roundtrip
+cfg.set("overlay_autopause", True)
+cfg3 = config.Config(os.path.join(tmp, "c.json"))
+check("overlay_autopause persist", cfg3.get("overlay_autopause") is True)
+
 print("SMOKE:", "ALL PASS" if not fails else "FAILURES: %s" % fails)
 sys.exit(1 if fails else 0)
