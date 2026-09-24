@@ -115,6 +115,7 @@ static PFN_vkGetInstanceProcAddr next_instance_proc;
 static VkInstance layer_instance;
 static unsigned long frame_counter;
 static const char *capture_path;
+static const char *capture_out_path;
 static long capture_every;
 static long live_every;
 static long nr_port = NR_DEFAULT_PORT;
@@ -372,6 +373,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
     if (r == VK_SUCCESS) {
         layer_instance = *instance;
         capture_path = getenv("NR_LAYER_CAPTURE");
+        capture_out_path = getenv("NR_LAYER_CAPTURE_OUT");
         trigger_path = getenv("NR_LAYER_TRIGGER");
         const char *mask = getenv("NR_LAYER_UI_MASK");
         ui_mask = mask && strcmp(mask, "0") != 0;
@@ -859,6 +861,18 @@ static int mask_worth_sending(uint32_t held, uint32_t pixels)
     return held < (uint32_t)((uint64_t)pixels * 9 / 10) && held > pixels / 50;
 }
 
+/* NR_LAYER_CAPTURE_OUT: dump header+processed result for A/B stills. */
+static void dump_capture(const char *path, const uint32_t *header,
+                         const unsigned char *pixels, VkDeviceSize size)
+{
+    if (!path) return;
+    FILE *file = fopen(path, "wb");
+    if (!file) return;
+    fwrite(header, sizeof(uint32_t), 4, file);
+    fwrite(pixels, 1, (size_t)size, file);
+    fclose(file);
+}
+
 static int process_frame(device_data *data, swapchain_data *chain,
                          VkQueue queue, uint32_t index)
 {
@@ -903,6 +917,7 @@ static int process_frame(device_data *data, swapchain_data *chain,
             return -1;
         }
         memcpy(data->mapped, data->result, (size_t)needed);
+        dump_capture(capture_out_path, header, data->result, needed);
         nr_log("[nr_layer] processed %ux%u with a ui mask",
              chain->extent.width, chain->extent.height);
         return 0;
@@ -913,6 +928,7 @@ static int process_frame(device_data *data, swapchain_data *chain,
         return -1;
     }
     memcpy(data->mapped, data->result, (size_t)needed);
+    dump_capture(capture_out_path, header, data->result, needed);
     nr_log("[nr_layer] processed %ux%u", chain->extent.width, chain->extent.height);
     return 0;
 }
