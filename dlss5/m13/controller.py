@@ -8,16 +8,15 @@ import os
 from . import config as config_mod
 from . import deploy as deploy_mod
 from . import gamelaunch
+from . import paths
 from .daemonctl import M11dClient, DaemonError
 from .deploy import Deployer, LayerRegistry, DXVK_X32_D3D9, M12_PROXY
 from .processes import ManagedProcess
 from .screenmode import ScreenMode
 
-_M13_DIR = os.path.dirname(os.path.abspath(__file__))
-_REPO = os.path.dirname(os.path.dirname(_M13_DIR))
-M11D_EXE = os.path.join(_REPO, "dlss5", "m11d", "build-nmake", "m11d.exe")
+M11D_EXE = paths.find("m11d_exe")
 M11D_CWD = os.path.dirname(M11D_EXE)
-M11D_LOG = os.path.join(_REPO, "work", "_m11", "m11d.log")
+M11D_LOG = os.path.join(paths.find("logs"), "m11d.log")
 
 
 class M13Controller:
@@ -178,9 +177,20 @@ class M13Controller:
         }
 
     def layers_register(self):
+        """Register OUR manifests and unregister the other layout's copies
+        (dev vs production) - two registered dlssnr layers would both patch
+        presents and double-process every frame."""
+        own = {deploy_mod.MANIFEST_X64, deploy_mod.MANIFEST_X86}
+        removed = 0
+        for key in ("layer_x64", "layer_x86"):
+            for cand in paths.find_all(key):
+                if cand not in own and LayerRegistry.registered(cand):
+                    LayerRegistry.unregister(cand)
+                    removed += 1
         LayerRegistry.register(deploy_mod.MANIFEST_X64)
         LayerRegistry.register(deploy_mod.MANIFEST_X86)
-        return True, "both layer manifests registered in HKCU"
+        return True, ("layers registered; removed %d other-copy "
+                      "registration(s)") % removed
 
     def layers_unregister(self):
         LayerRegistry.unregister(deploy_mod.MANIFEST_X64)

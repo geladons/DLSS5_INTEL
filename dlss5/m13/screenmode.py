@@ -12,14 +12,12 @@
 # ============================================================================
 import os
 
+from . import paths
 from .processes import ManagedProcess
 
-_REPO = os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__))))
-M8B_EXE = os.path.join(_REPO, "dlss5", "m8b-live", "build", "Release",
-                       "m8blive.exe")
+M8B_EXE = paths.find("m8b_exe")
 M8B_CWD = os.path.dirname(M8B_EXE)
-M8B_LOG = os.path.join(_REPO, "docs", "m8b-live.log")
+M8B_LOG = os.path.join(paths.find("logs"), "m8b-live.log")
 
 
 class ScreenMode:
