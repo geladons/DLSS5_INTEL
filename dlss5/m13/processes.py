@@ -1,49 +1,94 @@
 # ============================================================================
-# m13.processes - detached process control for daemon/overlay binaries.
+# m13.processes - process probes and detached launches.
 #
-# HARD RULES honored here (from AGENTS.md / handoffs):
-#  - GPU/daemon binaries run DETACHED only (DETACHED_PROCESS | NEW_PROCESS_
-#    GROUP, stdout to a log file) - a foreground GPU hang wedges the caller.
-#  - Sunshine is never touched; we only manage m11d.exe / m8blive.exe.
-#  - Never spawn a second m11d: pid() check BEFORE start.
+# GOTCHA (owner-found 2026-09-23): pythonw has NO console, so every
+# subprocess.run(["tasklist"]) spawns a VISIBLE console window that flashes
+# and closes - the 1 s UI poll did this twice a second (m11d + m8blive
+# probes), the screen strobed and the UI wedged. ALL process queries go
+# through ctypes Toolhelp32/TerminateProcess now: no child processes, no
+# consoles, microseconds per call. subprocess remains only as a fallback
+# and always with CREATE_NO_WINDOW.
+#
+# HARD RULES: GPU/daemon binaries run DETACHED only; Sunshine is never
+# touched; never spawn a second m11d (pid probe BEFORE start).
 # ============================================================================
+import ctypes
 import subprocess
+from ctypes import wintypes
 
 DETACHED = 0x00000008 | 0x00000200   # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+CREATE_NO_WINDOW = 0x08000000
+
+_TH32CS_SNAPPROCESS = 0x00000002
+_INVALID_HANDLE = ctypes.c_void_p(-1).value
+_KERNEL32 = ctypes.windll.kernel32
+_KERNEL32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+_KERNEL32.Process32FirstW.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+_KERNEL32.Process32NextW.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+
+
+class PROCESSENTRY32W(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("cntUsage", wintypes.DWORD),
+        ("th32ProcessID", wintypes.DWORD),
+        ("th32DefaultHeapID", ctypes.c_void_p),
+        ("th32ModuleID", wintypes.DWORD),
+        ("cntThreads", wintypes.DWORD),
+        ("th32ParentProcessID", wintypes.DWORD),
+        ("pcPriClassBase", ctypes.c_long),
+        ("dwFlags", wintypes.DWORD),
+        ("szExeFile", ctypes.c_wchar * 260),
+    ]
+
+
+def find_pids(exe_name):
+    """All PIDs whose image name matches (case-insensitive), Toolhelp32."""
+    want = exe_name.lower()
+    snap = _KERNEL32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
+    if snap in (None, _INVALID_HANDLE):
+        return []
+    pids = []
+    try:
+        entry = PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+        ok = _KERNEL32.Process32FirstW(snap, ctypes.byref(entry))
+        while ok:
+            if entry.szExeFile.lower() == want:
+                pids.append(entry.th32ProcessID)
+            ok = _KERNEL32.Process32NextW(snap, ctypes.byref(entry))
+    finally:
+        _KERNEL32.CloseHandle(snap)
+    return pids
 
 
 def find_pid(exe_name):
-    """PID of the first running instance, or None. tasklist-based."""
-    try:
-        out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq %s" % exe_name],
-                             capture_output=True, text=True, timeout=15).stdout
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    for line in out.splitlines():
-        parts = line.split()
-        if len(parts) >= 2 and parts[0].lower() == exe_name.lower():
-            try:
-                return int(parts[1])
-            except ValueError:
-                return None
-    return None
+    """First PID of a running instance, or None."""
+    pids = find_pids(exe_name)
+    return pids[0] if pids else None
+
+
+def stop_pid(pid, force=True):
+    """TerminateProcess by PID; taskkill only as a CREATE_NO_WINDOW fallback."""
+    h = _KERNEL32.OpenProcess(0x0001, False, pid)   # PROCESS_TERMINATE
+    if h:
+        try:
+            if _KERNEL32.TerminateProcess(h, 1):
+                return True, "terminated pid %d" % pid
+        finally:
+            _KERNEL32.CloseHandle(h)
+    r = subprocess.run(["taskkill", "/PID", str(pid)] + (["/F"] if force
+                        else []), capture_output=True, text=True, timeout=15,
+                       creationflags=CREATE_NO_WINDOW)
+    return r.returncode == 0, (r.stdout + r.stderr).strip()
 
 
 def start_detached(exe, args, cwd, log_path):
-    """Launch detached; stdout/stderr appended to log_path. Returns Popen."""
+    """Launch detached; stdout/stderr appended to log_path. No console."""
     lf = open(log_path, "a", buffering=1)
     return subprocess.Popen([exe] + list(args), cwd=cwd, stdout=lf,
                             stderr=subprocess.STDOUT, close_fds=True,
                             creationflags=DETACHED)
-
-
-def stop_pid(pid, force=True):
-    """taskkill by PID (works for detached children we no longer own)."""
-    cmd = ["taskkill", "/PID", str(pid)]
-    if force:
-        cmd.append("/F")
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-    return r.returncode == 0, (r.stdout + r.stderr).strip()
 
 
 class ManagedProcess:
@@ -75,5 +120,4 @@ class ManagedProcess:
         pid = self.pid
         if pid is None:
             return False, "%s not running" % self.exe_name
-        ok, msg = stop_pid(pid)
-        return ok, msg
+        return stop_pid(pid)
