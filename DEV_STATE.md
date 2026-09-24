@@ -1,6 +1,57 @@
-# DEV_STATE.md - where we are (updated 2026-09-23 ~20:35 by Kimi)
+# DEV_STATE.md - where we are (updated 2026-09-23 ~21:15 by Kimi)
 
-## M13 productization (owner call 2026-09-23 ~20:30) - CURRENT PRIORITY
+## M13 SHIPPED (2026-09-23 ~20:35-21:10) - the manager app
+DLSS 5 Manager lives in dlss5\m13\ (stdlib-only tkinter, user Python 3.12,
+launcher M13.cmd / m13.pyw; nothing installs, HKCU only). Parts:
+1. m11d runtime control channel (commit bc21abd): new magic 0x5443524E
+   "NRCT" on the SAME TCP 47990 accept loop - cmd 1 SETGAIN (float bits,
+   0..16), cmd 2 STATUS (gain + frame counter); reply {magic, ok, gain,
+   frames}. chain/engine.h gained ChainEngine::setHeadGain (cfg_.headGain
+   is consumed per frame in recordFrame -> next processed frame uses the
+   new value, NO engine re-init, NO game re-capture). VALIDATED: selftest
+   exact golden meandiffs; live test gain 2.0 vs 1.0 same-frame outputs
+   differ (mean|d| 7.5/255) without restart (dlss5\m13\_ctrl_validate.py).
+2. Manager core (commit 6e727c2): config.py (%LOCALAPPDATA%\DLSS5Manager
+   config.json, weights path asked at first run), daemonctl.py (NRCT
+   client; alive() only trusts an NRCT reply magic - raw connect succeeds
+   against Sunshine's wildcard 47990), processes.py (detached-only,
+   tasklist/taskkill), deploy.py (Deployer .m13bak backup/restore +
+   dx9_guard DXVK-dxgi detection; LayerRegistry via WINREG - no reg.exe
+   quoting gotcha), gamelaunch.py (file-channel pause/resume ONLY: DX9 =
+   NR_LAYER_TRIGGER flag, processing ON while it exists; DX12 =
+   %TEMP%\m12_pause.flag, paused while it exists; no input injection),
+   screenmode.py, logtail.py. _smoke.py 20/20 PASS.
+3. UI (this commit): controller.py glue + ui.py main window (status bar
+   with daemon/layers/screen state @1s poll, daemon start/stop + gain
+   slider, Screen/DX9/DX12/Settings tabs, deploy/undeploy/launch/pause
+   buttons, threaded log pane of m11d/m12/layer/m8blive logs) + overlay.py
+   GainKnob (always-on-top slider on a polled global hotkey, default
+   CTRL+ALT+G, edge-triggered GetAsyncKeyState - physical press only).
+   VALIDATED: _ui_smoke.py drives the real window against the live daemon
+   (knob push 1.35 + slider push 0.8 both confirmed via STATUS); real
+   pythonw instance screenshotted (_ui_shot.png: status bar green, tabs,
+   log pane; first-run weights prompt visible).
+GOTCHAS hit this session: (a) invoke .cmd via 'cmd //c' - single-slash /c
+is path-mangled by the git-bash wrapper into a silent no-op (stale build
+log tailed = looks like a build, nothing ran; exe mtime is the tell);
+(b) NMake dep scanner did NOT rebuild m11d main.cpp on an engine.h change
+- delete the .obj or verify the compile line in the log (stale-binary trap
+again); (c) LogTail must start at EOF (tail semantics) - reading whole
+history MBs into the pane wedged see() O(n^2) at startup; (d) inline
+PowerShell eats $_; Add-Type wrapper class collides with a same-named
+declared class (declare P/Invoke directly, or use [W.U32+RECT] for nested
+structs); (e) the registered x64 manifest is build\Release\
+VkLayer_dlssnr_win.json (NOT the m11-layer root copy) - deploy.py points
+there. The old m11d (pid 1940) was replaced by the new-binary daemon
+(pid 10068 at the time, gain reset to 1.0) - check `tasklist | findstr m11d`
+before assuming state. SCREEN-MODE gain is a launch arg: the knob restarts
+m8blive for that mode (cheap, no game attached); game modes are live.
+OPEN: knob hotkey needs one physical owner press to confirm; DX9 launch
+env assumes NR_LAYER_LIVE=1 semantics with the trigger flag (validated in
+nr_layer_win.c: on = flag exists); m8blive stop uses taskkill (its hide/
+show self-restart is unrelated).
+
+## M13 productization (owner call 2026-09-23 ~20:30) - DONE, see above
 The DX9/DX12 injection paths are validated; owner wants the PRODUCT now,
 perf later. Scope (owner's words): a proper program with
 - convenient UI (manager app) with LOGS visible to the user,
