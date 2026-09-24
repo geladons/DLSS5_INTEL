@@ -62,14 +62,17 @@ long-term temporal behavior of the accumulate loop on a live screen.
    present). Validated live: PARKED -> RESUMED -> re-PARKED cycle
    (_park_test2/3.log); --novideo 31-frame verify ALL PASS. Full details in
    DEV_STATE.md "Accumulate stop-loss session".
-3. STRUCTURAL FIX (the real answer for games): stop capturing the screen
-   at all - inject into the game's present path:
-   - DX12: m12-dxgi dxgi.dll proxy (WORKS on GTA5, M12a).
-   - DX9 (GTA4, GTA SA): 32-bit DXVK + the m11 Vulkan implicit layer
-     (nr_layer_win, VALIDATED on vkcube) feeding m11d. No screen capture
-     -> no feedback loop by construction, game-locked resolution, and the
-     layer sees the pre-present frame. This was already noted as "M12b"
-     in earlier session notes.
+3. IN PROGRESS 2026-09-23 ~19:40 (DX9 path validated end-to-end in a
+   synthetic app): 32-bit DXVK 3.1.1 + the 32-bit m11 implicit layer
+   (x86\nr_layer_win32.dll) -> m11d. Own 32-bit D3D9 test app: 30 frames
+   800x600 through the real 71-block chain, ~255 ms/frame. Two loader
+   requirements found: no enable_environment in the 32-bit manifest
+   (gates the layer off) and an ABSOLUTE library_path (relative fails
+   with error 87 in the x86 loader path). Registry: HKCU ImplicitLayers
+   is NOT Wow6432Node-redirected; both manifests live in the same key.
+   Full details + deploy recipe in DEV_STATE.md "DX9 path (M12c)".
+   Remaining: deploy next to GTAIV.exe / gta_sa.exe and confirm in-game.
+   DX12 (m12-dxgi, GTA5) was already live.
 4. Do NOT chase this inside --echo-free 1 (capture-excluded) mode: it is
    invisible in the Moonlight stream, useless for the owner.
 
