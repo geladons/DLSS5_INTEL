@@ -15,17 +15,14 @@ import os
 import shutil
 import winreg
 
-_REPO = os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__))))
+from . import paths
 
-DXVK_X32_D3D9 = os.path.join(_REPO, "dlss5", "m11-layer", "dxvk", "x32",
-                             "d3d9.dll")
-M12_PROXY = os.path.join(_REPO, "dlss5", "m12-dxgi", "build", "Release",
-                         "m12_dxgi.dll")
-MANIFEST_X64 = os.path.join(_REPO, "dlss5", "m11-layer",
-                            "VkLayer_dlssnr_win.json")
-MANIFEST_X86 = os.path.join(_REPO, "dlss5", "m11-layer", "x86",
-                            "VkLayer_dlssnr_win32.json")
+# Runtime artifacts: production bundle layout first, dev tree fallback
+# (see paths.py - the same code serves both).
+DXVK_X32_D3D9 = paths.find("dxvk_d3d9")
+M12_PROXY = paths.find("m12_proxy")
+MANIFEST_X64 = paths.find("layer_x64")
+MANIFEST_X86 = paths.find("layer_x86")
 
 LAYERS_KEY = r"Software\Khronos\Vulkan\ImplicitLayers"
 BACKUP_SUFFIX = ".m13bak"

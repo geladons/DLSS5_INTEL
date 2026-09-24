@@ -1,6 +1,21 @@
 # DEV_STATE.md - where we are (updated 2026-09-23 ~21:15 by Kimi)
 
 ## M13 SHIPPED (2026-09-23 ~20:35-21:10) - the manager app
+PRODUCTION BUNDLE (owner self-test 2026-09-23 ~22:10): C:\Users\AI\Desktop\
+production - fully self-contained (manager py files, m11d.exe+spv, m8blive
++spv, x86/x64 layer dlls + manifests with library_path PATCHED to the bundle,
+DXVK x32 d3d9.dll ONLY, m12_dxgi.dll, weights\dlssnr-logical.safetensors
+291 MB sha1-verified, README.txt, M13.cmd launcher). Rebuild any time:
+python dlss5\m13\_build_production.py [dest]. NEW: m13\paths.py - all
+artifact locations resolve production-layout first, dev-tree fallback, so
+the SAME code runs in the repo and in the bundle (dev smoke still 20/20).
+layers_register() now UNREGISTERS the other layout's dlssnr manifests (dev
+vs production) - two registered copies would both patch presents and double-
+process. VALIDATED: prod smoke ALL PASS (paths/deploy roundtrip/controller),
+prod m11d --selftest vs goldens from its own cwd -> exact golden meandiffs
+VALIDATION PASS. Port 47990 deliberately left FREE for the owner test - the
+prod manager's Start button spawns the prod daemon; a stray repo m11d would
+make it refuse (by design). Bundle is NOT in git (weights inside).
 DLSS 5 Manager lives in dlss5\m13\ (stdlib-only tkinter, user Python 3.12,
 launcher M13.cmd / m13.pyw; nothing installs, HKCU only). Parts:
 1. m11d runtime control channel (commit bc21abd): new magic 0x5443524E

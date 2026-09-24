@@ -13,13 +13,12 @@ import os
 import threading
 import time
 
-_REPO = os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__))))
+from . import paths
 
-M11D_LOG = os.path.join(_REPO, "work", "_m11", "m11d.log")
+M11D_LOG = os.path.join(paths.find("logs"), "m11d.log")
 M12_LOG = os.path.join(os.environ.get("TEMP", "."), "m12_dxgi.log")
 LAYER_LOG = os.path.join(os.environ.get("TEMP", "."), "nr_layer_win.log")
-M8B_LOG = os.path.join(_REPO, "docs", "m8b-live.log")
+M8B_LOG = os.path.join(paths.find("logs"), "m8b-live.log")
 
 DEFAULT_SOURCES = [
     ("m11d", M11D_LOG),
@@ -34,18 +33,24 @@ POLL_S = 0.25
 class LogTail(threading.Thread):
     """Follow one file; callback(tag, line) for each new line. Daemon thread."""
 
-    def __init__(self, tag, path, callback):
+    def __init__(self, tag, path, callback, skip_backlog=True):
         super().__init__(daemon=True, name="logtail-" + tag)
         self.tag = tag
         self.path = path
         self.callback = callback
+        self.skip_backlog = skip_backlog
         self._stop = threading.Event()
 
     def run(self):
-        pos = 0
+        pos = None     # None = not positioned yet
         while not self._stop.is_set():
             try:
                 size = os.path.getsize(self.path)
+                if pos is None:
+                    # tail semantics: only NEW lines, not the whole history
+                    # (m8b-live.log can be many MB - flooding the UI at
+                    # startup wedges it; see() per line is quadratic)
+                    pos = size if self.skip_backlog else 0
                 if size < pos:      # rotated/truncated -> restart at head
                     pos = 0
                 if size > pos:
