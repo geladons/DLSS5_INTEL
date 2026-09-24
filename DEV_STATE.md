@@ -1,8 +1,66 @@
-# DEV_STATE.md - where we are (updated 2026-09-23 ~17:05 by Kimi)
+# DEV_STATE.md - where we are (updated 2026-09-23 ~18:30 by Kimi)
 
 ## One-line status
-M10 pass 4 (2026-09-23 ~12:15-13:30): the barrier question is MEASURED TO DEATH
-and the original "barrier scoping" plan is dead - see HANDOFF_M10.md "M10 pass 4".
+ACCUMULATE STOP-LOSS SHIPPED (m8blive, 2026-09-23 ~18:10-18:30): the echo
+degradation mechanism is MEASURED (cheap experiment, _exp_nowiggle.log) and
+the drift is BOUNDED by an accumulate parking gate. Measured mechanism: the
+settle gate is INERT in practice - chain time (~1.6-2.0 s at 2560x1440,
+~0.9-1.0 s at 1920x1088) is always > refreshMs (800 ms), so forceRefresh
+bypasses the settle gate on EVERY frame and the loop self-sustains on its own
+presents (wiggle or not; experiment ran WITHOUT --wiggle-idle: 100 frames,
+fbmean decayed 182 -> 0.00 while the per-frame SIGNED residual kept drifting
+R -0.76/255 at frame 60 - verify ALL PASS + fbmean are blind to it; the decay
+lives in the integrated chain output, not the delta). Fix in main.cpp
+(overlay loop only, chain/shaders untouched): after 3 consecutive processed
+frames with fbmean < 1.0 the accumulation PARKS - the overlay holds the last
+good frame, zero chain work, resume on est >= 4.0 (real change; a moved
+cursor forces est 1e9) or a GPU probe (upload+fbcancel+stats only, no
+chain/present, every --acc-probe-ms, default 4 s). Validated live: PARKED ->
+RESUMED on cursor change -> re-PARKED cycle works (_park_test2/3.log);
+--novideo 31-frame verify ALL PASS. New CLI: --acc-park-thresh 1.0,
+--acc-park-frames 3, --acc-resume-thresh 4.0, --acc-probe-ms 4000.
+
+## Accumulate stop-loss session (2026-09-23 ~17:50-18:30)
+0. CHEAP EXPERIMENT (handoff step 1) - NEGATIVE for the "no wiggle" recipe,
+   POSITIVE for the mechanism. Ran m8blive --echo-free 0 --frames 1000000
+   with NO --wiggle-idle on the live desktop (GTA4 open): the loop processed
+   100 frames at ~0.6 fps without any wiggle - each present is itself a
+   desktop update, so DDA keeps delivering, and forceRefresh (chain 1.65 s >
+   refreshMs 0.8 s) bypasses the settle gate EVERY frame ("0 settled skips"
+   in the earlier _gta4_demo2.log, same cause). fbmean path: 182 (seed) ->
+   4.4 -> ~0.4 -> exactly 0.00 from frame ~30 (capture == lastPresented
+   bit-exact) - yet verify frame 60 shows SIGNED delta mean R=-0.757/255,
+   i.e. the chain's response to a zero delta (deterministic noise channels
+   make network(black) != 0) is integrated into the presented frame every
+   forced frame. That integration IS the owner-visible color decay; fbmean
+   and verify cannot see it because they measure deltas, not the integral.
+   Conclusion: removing --wiggle-idle does NOT save the demo; only parking
+   the accumulation or present-path injection does.
+1. STOP-LOSS (handoff step 2) in main.cpp: park/resume state machine + GPU
+   probe as designed above. Parked steady state measured (_park_test2.log):
+   settled skips + quiet probes only, NO chain dispatches at all - 0 drift,
+   ~3% GPU (one upload+fbcancel per probe). Resume path (_park_test3.log,
+   --cursor-draw + wiggle): PARKED -> RESUMED (est 1e9 on cursor move) -> 3
+   processed frames -> re-PARKED, cycle repeats. Known accepted behavior:
+   fullscreen --echo-free 0 covers the desktop, so DDA can only ever see the
+   overlay itself - while parked the loop resumes only on cursor activity
+   (cursor-draw ON), hide/show toggle (resumeForce), probe (window mode) or
+   display change; that matches the demo flow (hide -> warm capture -> show
+   -> process fresh frame -> park holds it WITHOUT decay).
+2. Validation: build OK; --novideo --frames 31 -> verify {10,30} ALL PASS,
+   result PASS (chain numerics untouched; the 10-frame --novideo run ends
+   "FAIL" because verify frame 10 is never reached - pre-existing, needs
+   --frames 31). NOTE: chain is 2.05-2.1 s at 2560x1440 in these runs vs
+   1.64 s in the 17:54 run - GTA4 was loading the GPU concurrently; not a
+   regression signal.
+3. NEXT: handoff step 3 (structural): DX9 via 32-bit DXVK + m11 layer ->
+   m11d; DX12 path already live (m12-dxgi, GTA5). Parking also suggests a
+   future demo recipe: --echo-free 0 + park gives a STABLE enhanced still;
+   moving content resumes automatically in window mode.
+
+## M10 pass 4 (2026-09-23 ~12:15-13:30) - barrier autopsy + two fixes + GPU incident
+The barrier question is MEASURED TO DEATH and the original "barrier scoping"
+plan is dead - see HANDOFF_M10.md "M10 pass 4".
 Two real fixes shipped: (1) pass-3 shaders (cosine_win/softmax) were NUMERICALLY
 BROKEN and their "validation" was an artifact of a stale-spv POST_BUILD trap
 (now fixed structurally in d5c_stage_shaders); reverted, exact golden meandiffs
