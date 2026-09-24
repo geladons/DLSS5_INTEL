@@ -42,15 +42,26 @@ Verify reads the chain's own buffers (final vs native readback), not the
 long-term temporal behavior of the accumulate loop on a live screen.
 
 ## Ranked next steps
-1. CHEAP EXPERIMENT (do first): demo WITHOUT --wiggle-idle on a static
-   screen. Expect: settle gate parks the loop -> NO degradation. This
-   confirms the accumulate-on-micro-deltas mechanism. If confirmed, the
-   demo recipe becomes: pause the game (static) -> one clean processed
-   frame -> parks. Check why settle gate did not park with wiggle off
-   before (settle-thresh, --settle-thresh CLI exists).
-2. STOP-LOSS for live content: freeze accumulation when the residual is
-   below a threshold for N frames (park, show last good frame), resume on
-   real change. Bounded work in main.cpp compose/fbcancel path.
+1. DONE 2026-09-23 ~18:00 (NEGATIVE result, mechanism nailed instead): demo
+   WITHOUT --wiggle-idle on a live desktop (_exp_nowiggle.log, 100 frames):
+   the loop does NOT park - every present is itself a desktop update (DDA
+   keeps delivering) and forceRefresh (chain ~1.65 s > refreshMs 0.8 s)
+   bypasses the settle gate on EVERY frame ("0 settled skips" everywhere).
+   fbmean decayed 182 -> 0.00 (capture == lastPresented bit-exact) while the
+   per-frame SIGNED residual kept integrating (verify frame 60: R -0.76/255)
+   - the degradation is the integral of the chain's zero-delta response
+   (network(black+noise) != 0), invisible to both fbmean and verify.
+   Removing --wiggle-idle does NOT save the demo.
+2. DONE 2026-09-23 ~18:10 (STOP-LOSS SHIPPED): accumulate parking gate in
+   main.cpp (overlay loop only). After --acc-park-frames (3) consecutive
+   frames with fbmean < --acc-park-thresh (1.0) the accumulation PARKS:
+   overlay holds the last good frame, zero chain work (measured: settled
+   skips + quiet GPU probes only, 0 drift), resume on est >=
+   --acc-resume-thresh (4.0; cursor moves force 1e9) or on a GPU probe
+   (upload+fbcancel+stats only, every --acc-probe-ms 4000, no chain/no
+   present). Validated live: PARKED -> RESUMED -> re-PARKED cycle
+   (_park_test2/3.log); --novideo 31-frame verify ALL PASS. Full details in
+   DEV_STATE.md "Accumulate stop-loss session".
 3. STRUCTURAL FIX (the real answer for games): stop capturing the screen
    at all - inject into the game's present path:
    - DX12: m12-dxgi dxgi.dll proxy (WORKS on GTA5, M12a).

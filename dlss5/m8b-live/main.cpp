@@ -1065,6 +1065,15 @@ int main(int argc, char** argv) {
                                  // window's client area, overlay covers only that rect.
     std::string outPref;         // --output NAME: capture-output preference (substring,
                                  // case-insensitive, e.g. "DISPLAY5"; empty = auto)
+    double accParkThresh = 1.0;  // --acc-park-thresh X: STOP-LOSS - park the accumulate
+                                 // feedback loop when mean|corrected delta| stays below
+                                 // this (0-255) (accumulate mode only, see live loop)
+    long accParkFrames = 3;      // --acc-park-frames N: consecutive small-delta frames
+                                 // required before parking
+    double accResumeThresh = 4.0;  // --acc-resume-thresh X: real-change level (sparse
+                                 // estimate or probe fbmean) that resumes a parked loop
+    long accProbeMs = 4000;      // --acc-probe-ms N: parked-mode GPU staleness probe
+                                 // cadence (fbcancel+stats only, no chain, no present)
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--frames" && i + 1 < argc) framesTarget = std::atol(argv[++i]);
@@ -1085,8 +1094,12 @@ int main(int argc, char** argv) {
         else if (a == "--temporal" && i + 1 < argc) temporal = std::atoi(argv[++i]);
         else if (a == "--gain" && i + 1 < argc) headGain = (float)std::atof(argv[++i]);
         else if (a == "--echo-free" && i + 1 < argc) g_echoFreeWanted = std::atoi(argv[++i]) != 0;
+        else if (a == "--acc-park-thresh" && i + 1 < argc) accParkThresh = std::atof(argv[++i]);
+        else if (a == "--acc-park-frames" && i + 1 < argc) accParkFrames = std::atol(argv[++i]);
+        else if (a == "--acc-resume-thresh" && i + 1 < argc) accResumeThresh = std::atof(argv[++i]);
+        else if (a == "--acc-probe-ms" && i + 1 < argc) accProbeMs = std::atol(argv[++i]);
         else if (a == "--window" && i + 1 < argc) winTitle = argv[++i];
-        else { std::fprintf(stderr, "usage: m8blive [--frames N] [--nowiggle] [--novideo] [--nocursor] [--cursor-draw] [--output NAME] [--scale S(ignored)] [--wiggle-idle SECS] [--max-delta N] [--settle-thresh X] [--refresh-ms N] [--strength F] [--colorpass 0|1] [--resgate T] [--pace-ms N] [--temporal 0|1] [--echo-free 0|1] [--gain F] [--window TITLE]\n"); return 1; }
+        else { std::fprintf(stderr, "usage: m8blive [--frames N] [--nowiggle] [--novideo] [--nocursor] [--cursor-draw] [--output NAME] [--scale S(ignored)] [--wiggle-idle SECS] [--max-delta N] [--settle-thresh X] [--refresh-ms N] [--strength F] [--colorpass 0|1] [--resgate T] [--pace-ms N] [--temporal 0|1] [--echo-free 0|1] [--gain F] [--window TITLE] [--acc-park-thresh X] [--acc-park-frames N] [--acc-resume-thresh X] [--acc-probe-ms N]\n"); return 1; }
     }
     if (wiggleForbidden) wiggleIdleSec = 0;
     if (maxDelta < 1) maxDelta = 1;
@@ -1112,6 +1125,9 @@ int main(int argc, char** argv) {
     if (!novideo)
         std::printf("feedback-cancellation: ON (echo subtract + accumulate, max-delta=%d/255, settle-thresh=%.3f)\n",
                     maxDelta, settleThresh);
+    if (!novideo && !g_echoFreeWanted)
+        std::printf("accumulate stop-loss: park below %.2f/255 for %ld frames, resume at %.2f, probe every %ld ms\n",
+                    accParkThresh, accParkFrames, accResumeThresh, accProbeMs);
     std::printf("composite: vendor compose_head, gain=%.2f (legacy strength/colorpass/resgate ignored on the M9b path)\n",
                 (double)headGain);
     if (renderScale != 0.55f)
@@ -2847,6 +2863,20 @@ int main(int argc, char** argv) {
     auto tLastProcessed = clk::now(); // settle-gate staleness bound (force refresh cadence)
     bool needReseed = false;          // hidden->shown resume: zero+seed fbcancel on next processed frame
 
+    // ACCUMULATE STOP-LOSS (2026-09-23, mechanism measured in
+    // _exp_nowiggle.log): while the corrected residual stays tiny, the chain
+    // re-denoises its own output every forced-refresh frame and the composed
+    // frame DRIFTS (owner-visible color decay) even though fbmean reads ~0
+    // and verify PASSes - the per-frame signed residual is real (frame 60:
+    // R -0.76/255). Root trigger: chain time (~1.8 s at 1440p) > refreshMs,
+    // so forceRefresh bypasses the settle gate on EVERY frame and the loop
+    // self-sustains on its own presents. Parking freezes the accumulation
+    // (overlay holds the last good frame); resume on a real change (sparse
+    // estimate) or a cheap GPU probe (fbcancel stats only, no chain/present).
+    bool accParked = false;           // accumulation parked (static screen)
+    long accSmallStreak = 0;          // consecutive small-residual processed frames
+    auto tLastAccProbe = clk::now();  // parked-mode probe cadence
+
     // M8c ACCESS_LOST recovery (shared by hidden + visible loops): the
     // duplication session died (display mode change, output detach, TDR,
     // Sunshine/Moonlight moving the game to another display). Re-enumerate
@@ -3252,6 +3282,39 @@ int main(int argc, char** argv) {
                             estMeanDelta, settleThresh, settled);
             continue;
         }
+        // ---- (b0.5) ACCUMULATE STOP-LOSS (accumulate/legacy mode only; the
+        // echo-free path has no accumulation to drift). Parking freezes the
+        // feedback integration: the overlay keeps showing the last good frame
+        // while the residual is below noise, so the chain's phantom residual
+        // cannot integrate into visible color decay. Resume on a real change
+        // (sparse est >= resume thresh; a moved cursor forces est to 1e9, so
+        // the mirror repaints too) or on a GPU probe that detects one.
+        bool probeOnly = false;
+        if (!novideo && !g_overlayExcluded && !resumeForce) {
+            if (!accParked && fbFrames >= 3) {
+                if (fbMeanLast < accParkThresh) ++accSmallStreak; else accSmallStreak = 0;
+                if (accSmallStreak >= accParkFrames) {
+                    accParked = true;
+                    tLastAccProbe = clk::now();
+                    std::printf("[m8b] accumulate PARKED (fbmean %.3f < %.2f for %ld frames) - holding last good frame\n",
+                                fbMeanLast, accParkThresh, accSmallStreak);
+                }
+            }
+            if (accParked) {
+                if (estMeanDelta >= accResumeThresh) {
+                    accParked = false;
+                    accSmallStreak = 0;
+                    std::printf("[m8b] accumulate RESUMED on real change (est %.2f >= %.2f)\n",
+                                estMeanDelta, accResumeThresh);
+                } else if (std::chrono::duration<double, std::milli>(clk::now() - tLastAccProbe).count()
+                           >= (double)accProbeMs) {
+                    probeOnly = true;   // cheap detect-only frame: upload+fbcancel+stats
+                    tLastAccProbe = clk::now();
+                } else {
+                    continue;   // parked: zero work, overlay holds the last good frame
+                }
+            }
+        }
         // ---- (b1) PRESENT PACING (freeze fix): never process more often than
         // --pace-ms (default 66 => <=15 fps). Real desktop updates arrive at
         // 100+ fps; without a cap the loop ran a 51 ms chain + blocking FIFO
@@ -3302,7 +3365,7 @@ int main(int argc, char** argv) {
         // them; if no image frees up after ~4 tries we SKIP this frame (the
         // DDA frame was already released; nothing GPU-side was recorded yet).
         uint32_t imageIndex = 0;
-        if (!novideo) {
+        if (!novideo && !probeOnly) {
             VkResult ar = VK_NOT_READY;
             bool got = false;
             for (int tries = 0; tries < 4 && !g_stop.load(); ++tries) {
@@ -3326,7 +3389,7 @@ int main(int argc, char** argv) {
         // replaces decode: it writes the corrected delta into the decode
         // output slot; imgIn still gets the raw capture for the letterbox
         // content scan and encode alpha.
-        const bool verify = (verifyIdx < 3 && verifyFrames[verifyIdx] == frame);
+        const bool verify = !probeOnly && (verifyIdx < 3 && verifyFrames[verifyIdx] == frame);
         const auto tFrameStart = clk::now();
         begin();
         vkCmdResetQueryPool(cmd, tsPool, 0, 6);
@@ -3432,6 +3495,7 @@ int main(int argc, char** argv) {
             vkCmdDispatch(cmd, W / 16, H / 16, 1);
             barrierAll();
         }
+        if (!probeOnly) {   // skip chain+compose+encode on detect-only probes
         {   // M9b front-end: decode -> features at FULL vendor extent (no
             // letterbox/rescale pair — the U-Net runs per-pixel on the region)
             Push p{};
@@ -3517,6 +3581,7 @@ int main(int argc, char** argv) {
             }
             vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool, 5);
         }
+        }   // !probeOnly (chain/compose/encode skipped on detect-only probes)
         if (frame == 1) {   // one-shot debug: copy chain-path buffers for stats
             // M9b: sources live in different arena chunks -> one copy per entry
             // (every slot sits whole inside its chunk by construction).
@@ -3566,7 +3631,7 @@ int main(int argc, char** argv) {
             vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                  VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &hb, 0, nullptr, 0, nullptr);
         }
-        if (!novideo) {   // blit composite -> swapchain image
+        if (!novideo && !probeOnly) {   // blit composite -> swapchain image
             VkImageMemoryBarrier imb{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
             imb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             imb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -3630,12 +3695,12 @@ int main(int argc, char** argv) {
             VkPipelineStageFlags st = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
             VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
             si.commandBufferCount = 1; si.pCommandBuffers = &cmd;
-            if (!novideo) {
+            if (!novideo && !probeOnly) {
                 si.waitSemaphoreCount = 1; si.pWaitSemaphores = &semImage; si.pWaitDstStageMask = &st;
                 si.signalSemaphoreCount = 1; si.pSignalSemaphores = &semRender;
             }
             VK_CHECK(vkQueueSubmit(c.queue, 1, &si, fence));
-            if (!novideo) {
+            if (!novideo && !probeOnly) {
                 if (!shownOnce) {
                     // deferred show: the very first presented image is already
                     // on the swapchain, so the overlay appears with content —
@@ -3673,6 +3738,18 @@ int main(int argc, char** argv) {
             const uint32_t sumAbs = *fbStatsPtr;   // host-coherent, fence-passed
             fbMeanLast = (double)sumAbs / ((double)W * H * 3.0);
             ++fbFrames;
+        }
+        if (probeOnly) {   // detect-only frame: decide stay-parked vs resume
+            if (fbMeanLast >= accResumeThresh) {
+                accParked = false;
+                accSmallStreak = 0;
+                std::printf("[m8b] accumulate probe: REAL CHANGE (fbmean %.2f >= %.2f) - resuming\n",
+                            fbMeanLast, accResumeThresh);
+            } else {
+                std::printf("[m8b] accumulate probe: quiet (fbmean %.2f < %.2f) - stay parked\n",
+                            fbMeanLast, accResumeThresh);
+            }
+            continue;   // no chain, no present: the overlay keeps the last good frame
         }
         {   // per-stage GPU timestamp readback + timing line
             uint64_t ts[6]{};
