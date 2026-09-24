@@ -27,6 +27,27 @@ MANIFEST_X86 = paths.find("layer_x86")
 LAYERS_KEY = r"Software\Khronos\Vulkan\ImplicitLayers"
 BACKUP_SUFFIX = ".m13bak"
 
+# Injection modes: which DLLs land next to the game exe.
+#  dx9  - DXVK d3d9.dll ONLY (the dxgi-from-DXVK + system d3d11 mix killed
+#         GTA IV - never deploy dxgi.dll for a D3D9 game)
+#  dx11 - DXVK d3d11.dll + dxgi.dll (+d3d10core.dll: system d3d10.dll
+#         forwards to it, that is how DX10 rides the same path)
+#  dx12 - our own m12 dxgi.dll proxy (no DXVK involved)
+MODE_DLLS = {
+    "dx9":    ("d3d9.dll",),
+    "dx11":   ("d3d11.dll", "dxgi.dll", "d3d10core.dll"),
+    "dx12":   ("dxgi.dll",),
+    "vulkan": (),     # nothing to deploy: the implicit layer self-loads
+}
+
+
+def mode_dll_source(mode, arch, dll_name):
+    """Source path for one dll of a mode. arch: 'x64' | 'x86'."""
+    if mode == "dx12":
+        return M12_PROXY
+    dxvk_dir = paths.find("dxvk_x64" if arch == "x64" else "dxvk_x32")
+    return os.path.join(dxvk_dir, dll_name)
+
 
 class DeployError(Exception):
     pass
@@ -137,10 +158,58 @@ class Deployer:
                 if st != "deployed":
                     shutil.copy2(tgt, bak)          # park the game's own dll
             shutil.copy2(source_path, tgt)
+        except PermissionError:
+            raise DeployNeedsElevation(dll_name)
         except OSError as e:
-            raise DeployError("copy failed (%s) - game running or needs "
-                              "elevation?" % e) from e
+            raise DeployError("copy failed (%s) - game running?" % e) from e
         return self.status(dll_name, source_path) == "deployed"
+
+    def deploy_mode(self, mode, arch):
+        """Deploy every dll of an injection mode; auto-elevates on ACL
+        dirs (one UAC prompt copies them all). Returns status dict."""
+        if mode not in MODE_DLLS:
+            raise DeployError("unknown mode: %s" % mode)
+        if mode == "dx9":
+            warns = dx9_guard(self.game_dir)
+            if warns:
+                raise DeployError(" ".join(warns))
+        out = {}
+        need_elevation = []
+        for dll in MODE_DLLS[mode]:
+            src = mode_dll_source(mode, arch, dll)
+            try:
+                self.deploy(dll, src)
+                out[dll] = "deployed"
+            except DeployNeedsElevation:
+                need_elevation.append((src, dll))
+        if need_elevation:
+            _elevated_copy(self.game_dir, need_elevation)
+            for _src, dll in need_elevation:
+                out[dll] = self.status(dll, mode_dll_source(mode, arch, dll))
+        return out
+
+    def undeploy_mode(self, mode, arch):
+        """Remove every dll of a mode, restoring originals."""
+        for dll in MODE_DLLS.get(mode, ()):
+            try:
+                self.undeploy(dll, mode_dll_source(mode, arch, dll))
+            except PermissionError:
+                _elevated_remove(self.game_dir, dll)
+        return True
+
+    def mode_status(self, mode, arch):
+        """-> 'deployed' | 'partial' | 'foreign' | 'clean' for a mode."""
+        states = [self.status(dll, mode_dll_source(mode, arch, dll))
+                  for dll in MODE_DLLS.get(mode, ())]
+        if not states:
+            return "deployed"       # vulkan: nothing to deploy
+        if all(s == "deployed" for s in states):
+            return "deployed"
+        if any(s == "deployed" for s in states):
+            return "partial"
+        if any(s == "foreign" for s in states):
+            return "foreign"
+        return "clean"
 
     def undeploy(self, dll_name, source_path):
         """Remove our DLL; restore the backed-up original if present."""
@@ -160,6 +229,76 @@ class Deployer:
             raise DeployError("undeploy failed (%s) - game running?" % e
                               ) from e
         return self.status(dll_name, source_path)
+
+
+class DeployNeedsElevation(DeployError):
+    """The game dir is ACL-protected (Program Files, launcher-owned)."""
+
+
+# --------------------------------------------------------- elevated copy ---
+_PS_COPY = r"""
+param([string]$Json)
+$pairs = $Json | ConvertFrom-Json
+foreach ($p in $pairs) {
+    $dst = $p.dst; $bak = $dst + '.m13bak'
+    if ((Test-Path $dst) -and -not (Test-Path $bak)) {
+        Copy-Item $dst $bak -Force
+    }
+    Copy-Item $p.src $dst -Force
+}
+"""
+
+_PS_REMOVE = r"""
+param([string]$Dst)
+$bak = $Dst + '.m13bak'
+if (Test-Path $Dst) { Remove-Item $Dst -Force }
+if (Test-Path $bak) { Move-Item $bak $Dst -Force }
+"""
+
+
+def _run_elevated(ps_body, arg):
+    """Run a small PowerShell script elevated (one UAC prompt), wait for it.
+    Quoting gotcha: the script goes to a temp .ps1, the arg is JSON."""
+    import json as _json
+    import subprocess
+    import tempfile
+    from .processes import CREATE_NO_WINDOW
+    fd, script = tempfile.mkstemp(suffix=".ps1", prefix="m13elev_")
+    with os.fdopen(fd, "w") as f:
+        f.write(ps_body)
+    argfile = script + ".json"
+    with open(argfile, "w") as f:
+        _json.dump(arg, f)
+    inner = ('& "%s" -Json (Get-Content -Raw "%s")'
+             % (script.replace('"', '`"'), argfile.replace('"', '`"')))
+    cmd = ["powershell", "-NoProfile", "-Command",
+           "Start-Process", "powershell", "-Verb", "RunAs", "-Wait",
+           "-WindowStyle", "Hidden", "-ArgumentList",
+           "'-NoProfile','-ExecutionPolicy','Bypass','-Command',\"%s\"" % inner]
+    try:
+        subprocess.run(cmd, timeout=120, creationflags=CREATE_NO_WINDOW,
+                       capture_output=True)
+    finally:
+        for p in (script, argfile):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+
+def _elevated_copy(game_dir, pairs):
+    """pairs: [(src, dll_name)] copied into game_dir with .m13bak backups."""
+    args = [{"src": s, "dst": os.path.join(game_dir, d)} for s, d in pairs]
+    _run_elevated(_PS_COPY, args)
+    missing = [d for s, d in pairs
+               if not os.path.exists(os.path.join(game_dir, d))]
+    if missing:
+        raise DeployError("elevated copy did not land: %s (UAC declined?)"
+                          % ", ".join(missing))
+
+
+def _elevated_remove(game_dir, dll_name):
+    _run_elevated(_PS_REMOVE, os.path.join(game_dir, dll_name))
 
 
 def dx9_guard(game_dir):

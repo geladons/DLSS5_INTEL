@@ -34,20 +34,26 @@ _PROD = {
     "m11d_exe":   ("runtime", "m11d", "m11d.exe"),
     "m8b_exe":    ("runtime", "m8b", "m8blive.exe"),
     "dxvk_d3d9":  ("runtime", "dxvk", "x32", "d3d9.dll"),
+    "dxvk_x32":   ("runtime", "dxvk", "x32"),
+    "dxvk_x64":   ("runtime", "dxvk", "x64"),
     "m12_proxy":  ("runtime", "m12", "m12_dxgi.dll"),
     "layer_x64":  ("runtime", "layer", "x64", "VkLayer_dlssnr_win.json"),
     "layer_x86":  ("runtime", "layer", "x86", "VkLayer_dlssnr_win32.json"),
+    "weights":    ("weights",),
     "logs":       ("logs",),
 }
 _DEV = {
     "m11d_exe":   ("dlss5", "m11d", "build-nmake", "m11d.exe"),
     "m8b_exe":    ("dlss5", "m8b-live", "build", "Release", "m8blive.exe"),
     "dxvk_d3d9":  ("dlss5", "m11-layer", "dxvk", "x32", "d3d9.dll"),
+    "dxvk_x32":   ("dlss5", "m11-layer", "dxvk", "x32"),
+    "dxvk_x64":   ("dlss5", "m11-layer", "dxvk", "x64"),
     "m12_proxy":  ("dlss5", "m12-dxgi", "build", "Release", "m12_dxgi.dll"),
     # the REGISTERED x64 manifest lives next to the built dll
     "layer_x64":  ("dlss5", "m11-layer", "build", "Release",
                    "VkLayer_dlssnr_win.json"),
     "layer_x86":  ("dlss5", "m11-layer", "x86", "VkLayer_dlssnr_win32.json"),
+    "weights":    ("work", "mlxw"),
     "logs":       ("work", "_m11"),
 }
 
@@ -57,8 +63,8 @@ def find(key):
     Returned even if missing - callers surface 'file not found' themselves."""
     for root, table in ((BUNDLE, _PROD), (REPO, _DEV)):
         cand = os.path.join(root, *table[key])
-        if key == "logs":
-            return cand            # dirs are created on demand
+        if key in ("logs", "weights"):
+            return cand            # dirs are probed/created on demand
         if os.path.exists(cand):
             return cand
     return os.path.join(REPO, *_DEV[key])

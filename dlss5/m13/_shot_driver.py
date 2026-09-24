@@ -10,7 +10,7 @@ from m13.ui import ManagerUI
 
 ui = ManagerUI()
 ui.overlay.show()
-end = time.time() + 10.0
+end = time.time() + 30.0
 while time.time() < end:
     ui.root.update()
     time.sleep(0.05)

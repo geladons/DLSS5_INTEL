@@ -103,5 +103,76 @@ cfg.set("overlay_autopause", True)
 cfg3 = config.Config(os.path.join(tmp, "c.json"))
 check("overlay_autopause persist", cfg3.get("overlay_autopause") is True)
 
+# gamescan: PE import parsing on real exes
+from m13 import gamescan
+gta4 = r"D:\downdloads\Grand Theft Auto IV\GTAIV.exe"
+gta5 = r"D:\Grand Theft Auto V Enhanced\GTA5_Enhanced.exe"
+if os.path.exists(gta4):
+    arch, apis = gamescan.pe_info(gta4)
+    check("pe GTAIV x86+dx9", arch == "x86" and "dx9" in apis,
+          "%s %s" % (arch, apis))
+if os.path.exists(gta5):
+    arch, apis = gamescan.pe_info(gta5)
+    check("pe GTA5E x64+dx12", arch == "x64" and "dx12" in apis,
+          "%s %s" % (arch, apis))
+rdr2 = r"D:\Red Dead Redemption 2\RDR2.exe"
+if os.path.exists(rdr2):
+    arch, apis = gamescan.pe_info(rdr2)
+    check("pe RDR2 vulkan", apis and apis[0] == "vulkan",
+          "%s %s" % (arch, apis))
+t0 = time.time()
+found = gamescan.scan()
+check("drive scan returns", isinstance(found, list) and len(found) > 0,
+      "%d candidates in %.1fs" % (len(found), time.time() - t0))
+
+# add_game auto-detect (no deploy, temp config)
+ctl2 = M13Controller(config.Config(os.path.join(tmp, "c3.json")))
+if os.path.exists(gta4):
+    ok, msg = ctl2.add_game(gta4)
+    meta = (ctl2.cfg.get("games") or {}).get(gta4) or {}
+    check("add_game auto dx9/x86", ok and meta.get("mode") == "dx9"
+          and meta.get("arch") == "x86", msg)
+
+# deploy_mode roundtrip in a temp dir (dx9 x86, dx11 x64)
+g2 = os.path.join(tmp, "game2")
+os.makedirs(g2)
+d2 = Deployer(g2)
+out = d2.deploy_mode("dx9", "x86")
+check("deploy_mode dx9", out.get("d3d9.dll") == "deployed", str(out))
+check("dx9 deploys ONLY d3d9", not os.path.exists(os.path.join(g2,
+      "dxgi.dll")))
+out = d2.deploy_mode("dx11", "x64")
+check("deploy_mode dx11 x3", all(s == "deployed" for s in out.values())
+      and len(out) == 3, str(out))
+check("mode_status deployed", d2.mode_status("dx11", "x64") == "deployed")
+d2.undeploy_mode("dx11", "x64")
+check("undeploy_mode dx11", d2.mode_status("dx11", "x64") == "clean")
+ctl2.shutdown()
+
+# suspend/resume on a sacrificial child process (busy loop = measurable CPU)
+import subprocess
+sleeper = subprocess.Popen([sys.executable, "-c", "while True: pass"],
+                           creationflags=processes.CREATE_NO_WINDOW)
+time.sleep(0.4)
+def cputime(pid):
+    import ctypes
+    h = ctypes.windll.kernel32.OpenProcess(0x0400, False, pid)  # QUERY_LIMITED
+
+    class FT(ctypes.Structure):
+        _fields_ = [("lo", ctypes.c_ulong), ("hi", ctypes.c_ulong)]
+    creation, exit_, kernel, user = FT(), FT(), FT(), FT()
+    ctypes.windll.kernel32.GetProcessTimes(
+        ctypes.c_void_p(h), ctypes.byref(creation), ctypes.byref(exit_),
+        ctypes.byref(kernel), ctypes.byref(user))
+    ctypes.windll.kernel32.CloseHandle(h)
+    return (kernel.hi << 32 | kernel.lo) + (user.hi << 32 | user.lo)
+ok, _ = processes.suspend_pid(sleeper.pid)
+t1 = cputime(sleeper.pid); time.sleep(0.4); t2 = cputime(sleeper.pid)
+check("suspend freezes cpu", ok and t2 - t1 < 100000, "delta=%d" % (t2 - t1))
+ok, _ = processes.resume_pid(sleeper.pid)
+t3 = cputime(sleeper.pid); time.sleep(0.4); t4 = cputime(sleeper.pid)
+check("resume unfreezes", ok and t4 - t3 > 100000, "delta=%d" % (t4 - t3))
+sleeper.terminate()
+
 print("SMOKE:", "ALL PASS" if not fails else "FAILURES: %s" % fails)
 sys.exit(1 if fails else 0)

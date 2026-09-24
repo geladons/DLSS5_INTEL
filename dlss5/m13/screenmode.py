@@ -29,8 +29,21 @@ class ScreenMode:
         return self.proc.running
 
     def start(self, gain=1.0, extra_args=()):
+        """Fullscreen desktop overlay. NOTE: at 2560x1440 the chain is SLOW
+        (weights upload ~30 s, frame 0 ~60-70 s - it is warming up, not
+        dead). The UI says so; keep it honest."""
         args = ["--frames", "1000000", "--echo-free", "0", "--gain",
                 "%.3f" % gain]
+        args += [a for a in extra_args if a]
+        return self.proc.start(args)
+
+    def start_window(self, title, gain=1.0, extra_args=()):
+        """Window-attached overlay (--window): much smaller extent, so much
+        faster than fullscreen - the usable demo path for screen mode."""
+        if not title.strip():
+            return False, "window title is empty"
+        args = ["--frames", "1000000", "--echo-free", "0", "--gain",
+                "%.3f" % gain, "--window", title.strip()]
         args += [a for a in extra_args if a]
         return self.proc.start(args)
 
