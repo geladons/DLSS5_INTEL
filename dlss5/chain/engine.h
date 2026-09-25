@@ -27,6 +27,7 @@ struct EngineConfig {
     std::string weightsPath;                           // dlssnr-logical.safetensors
     std::string shaderDir;                             // dir with *.spv (trailing slash)
     float headGain = 1.0f;                             // vendor residual scale (--gain)
+    float headBlend = 1.0f;                            // vendor mix factor (--blend, M13 knob #2)
     VkContextConfig vkCfg{};                           // device selection (headless default)
     bool debugDumps = false;                           // dump live_*.bin on frame index 1
     std::string dumpDir = "out";                       // dump destination
@@ -53,6 +54,7 @@ public:
     // applies to the NEXT processFrame - no engine re-init, no game
     // re-capture. Daemon-side only (single-threaded accept loop).
     void setHeadGain(float g) { cfg_.headGain = g; }
+    void setHeadBlend(float b) { cfg_.headBlend = b; }
 
     uint32_t netW() const { return netW_; }
     uint32_t netH() const { return netH_; }

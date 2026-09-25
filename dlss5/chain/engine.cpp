@@ -397,6 +397,7 @@ void ChainEngine::recordFrame(long frameIndex) {
         p.c[0] = 12.0f / 255.0f;      // legacy accumulate clamp (unused in absolute mode)
         p.c[1] = 0.0f;                // absolute mode (no accumulate)
         p.c[2] = cfg_.headGain;       // vendor residual scale
+        p.c[3] = cfg_.headBlend;      // vendor mix factor (M13 knob #2)
         push(p);
         vkCmdDispatch(cmd_, ((uint64_t)regionW_ * regionH_ + 255) / 256, 1, 1);
         if (prof_.enabled()) prof_.mark(cmd_, "compose", "", 0, 0, 0,
