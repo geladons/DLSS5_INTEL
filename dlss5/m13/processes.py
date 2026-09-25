@@ -68,6 +68,30 @@ def find_pid(exe_name):
     return pids[0] if pids else None
 
 
+_USER32 = ctypes.windll.user32
+
+
+def hwnd_for_pid(pid):
+    """First visible top-level window owned by pid (for foreground restore)."""
+    found = []
+    WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND,
+                                     wintypes.LPARAM)
+
+    def cb(hwnd, _lp):
+        if not _USER32.IsWindowVisible(hwnd):
+            return True
+        if _USER32.GetWindow(hwnd, 4):      # GW_OWNER: skip owned popups
+            return True
+        p = wintypes.DWORD()
+        _USER32.GetWindowThreadProcessId(hwnd, ctypes.byref(p))
+        if p.value == pid:
+            found.append(hwnd)
+            return False
+        return True
+    _USER32.EnumWindows(WNDENUMPROC(cb), 0)
+    return found[0] if found else None
+
+
 def stop_pid(pid, force=True):
     """TerminateProcess by PID; taskkill only as a CREATE_NO_WINDOW fallback."""
     h = _KERNEL32.OpenProcess(0x0001, False, pid)   # PROCESS_TERMINATE

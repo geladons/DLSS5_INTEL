@@ -29,6 +29,7 @@ from tkinter import filedialog, ttk
 from tkinter.scrolledtext import ScrolledText
 
 from .controller import M13Controller
+from .i18n import set_language, tr
 from .logtail import LogHub
 from .overlay import ControlOverlay, hotkey_label
 from .splash import Splash
@@ -57,8 +58,9 @@ EASTER_EGG_CLICKS = 5
 class ManagerUI:
     def __init__(self):
         self.ctl = M13Controller()
+        set_language(self.ctl.cfg.get("language"))
         self.root = tk.Tk()
-        self.root.title("DLSS 5 Менеджер")
+        self.root.title(tr("app_title"))
         self.root.geometry("1024x760")
         self.root.minsize(900, 640)
         self.root.configure(bg=BG)
@@ -167,14 +169,13 @@ class ManagerUI:
         self.logo.bind("<Button-1>", self._logo_click)
         ttl = tk.Frame(head, bg=BG)
         ttl.pack(side="left")
-        self.title_lbl = tk.Label(ttl, text="DLSS 5 Менеджер", bg=BG, fg=FG,
+        self.title_lbl = tk.Label(ttl, text=tr("app_title"), bg=BG, fg=FG,
                                   font=("Segoe UI", 14, "bold"))
         self.title_lbl.pack(anchor="w")
-        tk.Label(ttl, text="реальная 71-блочная нейросеть, живая, на твоей "
-                           "Arc Pro B50", bg=BG, fg=MUTED,
+        tk.Label(ttl, text=tr("app_subtitle"), bg=BG, fg=MUTED,
                  font=("Segoe UI", 8)).pack(anchor="w")
-        ttk.Button(head, text="Игровой оверлей (%s)" % hotkey_label(
-            self.ctl.cfg.get("overlay_hotkey")),
+        ttk.Button(head, text=tr("overlay_button", hotkey_label(
+            self.ctl.cfg.get("overlay_hotkey"))),
             command=self.overlay.toggle).pack(side="right")
 
         bar = tk.Frame(self.root, bg=PANEL,
@@ -184,18 +185,18 @@ class ManagerUI:
         inner.pack(fill="x", padx=10, pady=8)
         self.dot = tk.Label(inner, text="●", font=("Segoe UI", 10), bg=PANEL)
         self.dot.pack(side="left")
-        self.st_daemon = tk.Label(inner, text="демон: ...", bg=PANEL,
+        self.st_daemon = tk.Label(inner, text=tr("daemon_down"), bg=PANEL,
                                   fg=MUTED, font=("Segoe UI", 9, "bold"))
         self.st_daemon.pack(side="left", padx=(6, 14))
-        self.btn_start = ttk.Button(inner, text="Запустить демон",
+        self.btn_start = ttk.Button(inner, text=tr("daemon_start"),
                                     style="Accent.TButton",
                                     command=self._daemon_start)
         self.btn_start.pack(side="left")
-        ttk.Button(inner, text="Стоп", style="Danger.TButton",
+        ttk.Button(inner, text=tr("daemon_stop"), style="Danger.TButton",
                    command=lambda: self.ctl.submit(
                        self.ctl.daemon_stop)).pack(side="left", padx=6)
-        tk.Label(inner, text="сила", bg=PANEL, fg=MUTED).pack(side="left",
-                                                              padx=(18, 4))
+        tk.Label(inner, text=tr("gain"), bg=PANEL, fg=MUTED).pack(
+            side="left", padx=(18, 4))
         self.gain_var = tk.DoubleVar(value=self.ctl.cfg.get("gain"))
         self._suppress_scale = None   # programmatic-set echo suppression:
         self._scale_dragging = False  # Tk fires the scale command DEFERRED
@@ -232,15 +233,14 @@ class ManagerUI:
         if self._egg_clicks < EASTER_EGG_CLICKS:
             return
         self._egg_clicks = 0
-        self.title_lbl.config(text="DLSS 5 «Пятёрочка»")
-        self.log("mgr", "ПАСХАЛКА: нейросеть обучена на 10 000 часах GTA IV "
-                        "и одном очень терпеливом владельце.")
+        self.title_lbl.config(text=tr("egg_title"))
+        self.log("mgr", tr("egg_log"))
         colors = (ACCENT, ACCENT2, GREEN, AMBER, RED, "#ff6ec7")
 
         def flash(i=0):
             if i >= 12:
                 self._draw_logo(ACCENT)
-                self.title_lbl.config(text="DLSS 5 Менеджер")
+                self.title_lbl.config(text=tr("app_title"))
                 return
             self._draw_logo(colors[i % len(colors)])
             self.root.after(150, lambda: flash(i + 1))
@@ -252,12 +252,11 @@ class ManagerUI:
         box.pack(fill="x", padx=12, pady=4)
         row = tk.Frame(box, bg=PANEL)
         row.pack(fill="x", padx=10, pady=(8, 2))
-        tk.Label(row, text="Автонастройка:", bg=PANEL, fg=MUTED,
+        tk.Label(row, text=tr("autosetup"), bg=PANEL, fg=MUTED,
                  font=("Segoe UI", 9, "bold")).pack(side="left")
         self.steps = {}
-        for key, label in (("weights", "Веса"), ("layers", "Слои Vulkan"),
-                           ("daemon", "Демон"), ("game", "Игра готова")):
-            lbl = tk.Label(row, text=label, bg=PANEL, fg=MUTED,
+        for key in ("weights", "layers", "daemon", "game"):
+            lbl = tk.Label(row, text=tr("step_" + key), bg=PANEL, fg=MUTED,
                            font=("Segoe UI", 9), padx=10)
             lbl.pack(side="left")
             self.steps[key] = lbl
@@ -268,42 +267,34 @@ class ManagerUI:
     # --------------------------------------------------------- Screen tab --
     def _tab_screen(self, nb):
         t = ttk.Frame(nb, padding=10)
-        nb.add(t, text="  Экран  ")
-        ttk.Label(t, text="Полноэкранный оверлей рабочего стола (смотри "
-                          "через трансляцию Moonlight). ВАЖНО: демон и "
-                          "оверлей экрана не живут вместе - каждому нужно "
-                          "~12 ГБ видеопамяти из 16. При запуске одного "
-                          "второй останавливается автоматически.",
+        nb.add(t, text=tr("tab_screen"))
+        ttk.Label(t, text=tr("screen_note"),
                   style="Muted.TLabel", wraplength=900,
                   justify="left").pack(anchor="w")
         row = ttk.Frame(t)
         row.pack(anchor="w", pady=8)
-        ttk.Button(row, text="Запустить оверлей экрана",
+        ttk.Button(row, text=tr("screen_start"),
                    style="Accent.TButton",
                    command=self._screen_start).pack(side="left")
-        ttk.Button(row, text="Стоп", style="Danger.TButton",
+        ttk.Button(row, text=tr("screen_stop"), style="Danger.TButton",
                    command=lambda: self.ctl.submit(
                        self.ctl.screen_stop)).pack(side="left", padx=6)
-        ttk.Label(row, text="горячие клавиши: CTRL+ALT+X скрыть/показать, "
-                            "CTRL+ALT+Q выход",
+        ttk.Label(row, text=tr("screen_hotkeys"),
                   style="Muted.TLabel").pack(side="left", padx=14)
 
         row2 = ttk.Frame(t)
         row2.pack(anchor="w", pady=(4, 2))
-        ttk.Label(row2, text="Режим окна - заголовок содержит:").pack(
-            side="left")
+        ttk.Label(row2, text=tr("screen_window_mode")).pack(side="left")
         self.win_var = tk.StringVar()
         ttk.Entry(row2, textvariable=self.win_var, width=30).pack(
             side="left", padx=6)
-        ttk.Button(row2, text="Запустить на окне",
+        ttk.Button(row2, text=tr("screen_window_start"),
                    command=self._screen_window_start).pack(side="left")
-        self.screen_info = ttk.Label(t, text="оверлей: выкл",
+        self.screen_info = ttk.Label(t, text=tr("screen_state_off"),
                                      style="Muted.TLabel")
         self.screen_info.pack(anchor="w", pady=6)
         self.screen_tail = ttk.Label(
-            t, text="Прогрев 1440p: загрузка весов ~30 с, первый кадр до "
-                    "минуты - это загрузка, а не зависание. Для быстрого "
-                    "демо используй режим окна выше.",
+            t, text=tr("screen_warmup"),
             style="Muted.TLabel", wraplength=900, justify="left")
         self.screen_tail.pack(anchor="w")
 
@@ -319,10 +310,10 @@ class ManagerUI:
     # ------------------------------------------------------- Settings tab --
     def _tab_settings(self, nb):
         t = ttk.Frame(nb, padding=10)
-        nb.add(t, text="  Настройки  ")
+        nb.add(t, text=tr("tab_settings"))
         row = ttk.Frame(t)
         row.pack(anchor="w", pady=4, fill="x")
-        ttk.Label(row, text="веса (.safetensors):").pack(side="left")
+        ttk.Label(row, text=tr("weights_label")).pack(side="left")
         self.weights_var = tk.StringVar(
             value=self.ctl.cfg.get("weights_path") or "")
         ttk.Entry(row, textvariable=self.weights_var,
@@ -336,47 +327,70 @@ class ManagerUI:
                 self.weights_var.set(p)
                 self.ctl.cfg.set("weights_path", p)
                 self.log("mgr", "weights path set: %s" % p)
-        ttk.Button(row, text="Обзор...", command=browse_weights).pack(
+        ttk.Button(row, text=tr("browse"), command=browse_weights).pack(
             side="left")
-        ttk.Button(row, text="Сохранить", command=lambda: (
+        ttk.Button(row, text=tr("save"), command=lambda: (
             self.ctl.cfg.set("weights_path", self.weights_var.get()),
             self.log("mgr", "weights path saved"))).pack(side="left", padx=6)
 
         row2 = ttk.Frame(t)
         row2.pack(anchor="w", pady=6)
-        ttk.Button(row2, text="Зарегистрировать слои Vulkan (HKCU)",
+        ttk.Button(row2, text=tr("layers_register"),
                    command=lambda: self.ctl.submit(
                        self.ctl.layers_register)).pack(side="left")
-        ttk.Button(row2, text="Снять регистрацию",
+        ttk.Button(row2, text=tr("layers_unregister"),
                    command=lambda: self.ctl.submit(
                        self.ctl.layers_unregister)).pack(side="left", padx=6)
-        self.layers_info = ttk.Label(row2, text="слои: ?",
+        self.layers_info = ttk.Label(row2, text=tr("layers_unknown"),
                                      style="Muted.TLabel")
         self.layers_info.pack(side="left", padx=10)
+
+        lang = ttk.Frame(t)
+        lang.pack(anchor="w", pady=6)
+        ttk.Label(lang, text=tr("language_label")).pack(side="left")
+        self.lang_var = tk.StringVar(
+            value="Русский" if self.ctl.cfg.get("language") == "ru"
+            else "English")
+        lang_box = ttk.Combobox(lang, textvariable=self.lang_var, width=10,
+                                state="readonly",
+                                values=("English", "Русский"))
+        lang_box.pack(side="left", padx=6)
+
+        def lang_changed(_e=None):
+            self.ctl.cfg.set("language", "ru"
+                             if self.lang_var.get().startswith("Р") else "en")
+        lang_box.bind("<<ComboboxSelected>>", lang_changed)
+        ttk.Label(lang, text=tr("language_note"),
+                  style="Muted.TLabel").pack(side="left")
 
         opts = ttk.Frame(t)
         opts.pack(anchor="w", pady=6)
         self.freeze_var = tk.BooleanVar(
             value=bool(self.ctl.cfg.get("overlay_freeze")))
-        ttk.Checkbutton(opts, text="Замораживать кадр, пока оверлей открыт "
-                                   "(фото-режим с живым превью)",
+        ttk.Checkbutton(opts, text=tr("opt_freeze"),
                         variable=self.freeze_var,
                         command=lambda: self.ctl.cfg.set(
                             "overlay_freeze", bool(self.freeze_var.get()))
                         ).pack(anchor="w")
         self.ap_var = tk.BooleanVar(
             value=bool(self.ctl.cfg.get("overlay_autopause")))
-        ttk.Checkbutton(opts, text="Ставить обработку на паузу при открытии "
-                                   "оверлея",
+        ttk.Checkbutton(opts, text=tr("opt_autopause"),
                         variable=self.ap_var,
                         command=lambda: self.ctl.cfg.set(
                             "overlay_autopause", bool(self.ap_var.get()))
                         ).pack(anchor="w")
+        self.focus_var = tk.BooleanVar(
+            value=bool(self.ctl.cfg.get("overlay_focus")))
+        ttk.Checkbutton(opts, text=tr("opt_focus"),
+                        variable=self.focus_var,
+                        command=lambda: self.ctl.cfg.set(
+                            "overlay_focus", bool(self.focus_var.get()))
+                        ).pack(anchor="w")
 
-        ttk.Label(t, text="Горячая клавиша оверлея: %s (меняется в "
-                          "config.json)" % self.ctl.cfg.get("overlay_hotkey"),
+        ttk.Label(t, text=tr("hotkey_note",
+                             self.ctl.cfg.get("overlay_hotkey")),
                   style="Muted.TLabel").pack(anchor="w", pady=(10, 2))
-        ttk.Label(t, text="Конфиг: %s" % self.ctl.cfg.path,
+        ttk.Label(t, text=tr("config_note", self.ctl.cfg.path),
                   style="Muted.TLabel").pack(anchor="w")
 
     # ----------------------------------------------------------- actions ---
@@ -416,10 +430,10 @@ class ManagerUI:
     def _render(self, snap):
         up = snap.get("daemon_pid") is not None
         if up:
-            txt = "работает (pid %s)" % snap["daemon_pid"]
+            txt = tr("daemon_up", snap["daemon_pid"])
             g, f = snap.get("daemon_gain"), snap.get("daemon_frames")
             if g is not None:
-                txt += " - сила %.2f, %d кадров" % (g, f or 0)
+                txt += tr("daemon_up_stats", g, f or 0)
                 # do not fight an in-flight user push (slider snap-back)
                 pending = self._pending_push
                 stale_push = pending and (time.time() - pending[1] > 2.0
@@ -431,24 +445,24 @@ class ManagerUI:
                     self.gain_scale.set(g)
                     self.gain_lbl.config(text="%.2f" % g)
             if snap.get("daemon_err"):
-                txt += " [занят]"
+                txt += tr("daemon_busy")
             self.dot.config(text="●", fg=GREEN)
-            self.st_daemon.config(text="демон: " + txt, fg=GREEN)
+            self.st_daemon.config(text=txt, fg=GREEN)
             self.daemon_info.config(text="NRCT live control OK"
                                     if not snap.get("daemon_err") else
                                     snap["daemon_err"])
         else:
             self.dot.config(text="●", fg=RED)
-            self.st_daemon.config(text="демон: остановлен", fg=RED)
+            self.st_daemon.config(text=tr("daemon_down"), fg=RED)
             self.daemon_info.config(text="")
 
         lx = snap.get("layers_x64"), snap.get("layers_x86")
-        self.layers_info.config(text="слои: x64 %s / x86 %s" % (
-            "OK" if lx[0] else "НЕТ", "OK" if lx[1] else "НЕТ"))
+        self.layers_info.config(text=tr("layers_state", "OK" if lx[0]
+                                        else "NO", "OK" if lx[1] else "NO"))
         screen_up = snap.get("screen_pid") is not None
-        self.screen_info.config(text="оверлей: %s" % (
-            "РАБОТАЕТ (pid %s, греется - первые кадры долгие)"
-            % snap["screen_pid"] if screen_up else "выкл"))
+        self.screen_info.config(
+            text=tr("screen_state_up", snap["screen_pid"]) if screen_up
+            else tr("screen_state_off"))
         self.games_tab.render(snap)
         self._render_checklist(snap)
 
@@ -461,22 +475,18 @@ class ManagerUI:
         states = {"weights": weights, "layers": layers, "daemon": daemon,
                   "game": game}
         for key, ok in states.items():
-            base = {"weights": "Веса", "layers": "Слои Vulkan",
-                    "daemon": "Демон", "game": "Игра готова"}[key]
+            base = tr("step_" + key)
             self.steps[key].config(text=("✔ " if ok else "· ") + base,
                                    fg=GREEN if ok else MUTED)
         if not weights:
-            hint, color = ("Не найдены веса - вкладка «Настройки», укажи "
-                           "dlssnr-logical.safetensors", AMBER)
+            hint, color = tr("hint_no_weights"), AMBER
         elif not layers or not daemon:
-            hint, color = "Настраиваю сам, несколько секунд...", AMBER
+            hint, color = tr("hint_working"), AMBER
         elif not game:
-            hint, color = ("Выбери игру карточкой на вкладке «Игры» и нажми "
-                           "«Включить DLSS 5»", AMBER)
+            hint, color = tr("hint_pick_game"), AMBER
         else:
-            hint, color = ("Всё готово! Жми «Играть»; в игре %s открывает "
-                           "панель управления." % hotkey_label(
-                               self.ctl.cfg.get("overlay_hotkey")), GREEN)
+            hint, color = tr("hint_ready", hotkey_label(
+                self.ctl.cfg.get("overlay_hotkey"))), GREEN
         self.hint.config(text=hint, fg=color)
 
     # -------------------------------------------------------------- log ---

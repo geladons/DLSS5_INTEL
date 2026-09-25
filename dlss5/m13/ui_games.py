@@ -15,6 +15,7 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, ttk
 
+from .i18n import tr
 from .icons import IconCache
 
 MODE_NAMES = {"dx9": "DX9", "dx11": "DX11", "dx12": "DX12",
@@ -62,7 +63,7 @@ class GameCard:
         mid = tk.Frame(self.frame, bg=PANEL)
         mid.pack(pady=(2, 0))
         color = MODE_COLORS.get(mode, MODE_COLORS[None])
-        tk.Label(mid, text=MODE_NAMES.get(mode, "режим ?"), bg=PANEL, fg=color,
+        tk.Label(mid, text=MODE_NAMES.get(mode, "?"), bg=PANEL, fg=color,
                  font=("Segoe UI", 8, "bold")).pack(side="left")
         if arch:
             tk.Label(mid, text=" " + arch, bg=PANEL, fg=MUTED,
@@ -72,15 +73,15 @@ class GameCard:
                      font=("Segoe UI", 9, "bold")).pack(side="left")
         sub = []
         if launch_exe:
-            sub.append("через %s" % os.path.basename(launch_exe))
+            sub.append(tr("via", os.path.basename(launch_exe)))
         if saved:
-            sub.append("сохранена")
+            sub.append(tr("saved_mark"))
         self.sub_lbl = tk.Label(self.frame, text=" · ".join(sub) or source,
                                 bg=PANEL, fg=MUTED, font=("Segoe UI", 7),
                                 wraplength=CARD_W - 12, justify="center")
         self.sub_lbl.pack()
-        self.state_lbl = tk.Label(self.frame, text="не добавлена", bg=PANEL,
-                                  fg=MUTED, font=("Segoe UI", 8))
+        self.state_lbl = tk.Label(self.frame, text=tr("state_not_added"),
+                                  bg=PANEL, fg=MUTED, font=("Segoe UI", 8))
         self.state_lbl.pack(pady=(3, 0))
         for w in (self.frame, self.icon_lbl, self.name_lbl, self.sub_lbl,
                   self.state_lbl, mid):
@@ -121,15 +122,15 @@ class GamesTab:
 
     def _build(self, nb):
         t = ttk.Frame(nb, padding=10)
-        nb.add(t, text="  Игры  ")
+        nb.add(t, text=tr("tab_games"))
         self.tab_frame = t
         top = ttk.Frame(t)
         top.pack(fill="x")
-        ttk.Button(top, text="Пересканировать", style="Accent.TButton",
+        ttk.Button(top, text=tr("rescan"), style="Accent.TButton",
                    command=self.scan_start).pack(side="left")
-        ttk.Button(top, text="Добавить exe вручную...",
+        ttk.Button(top, text=tr("add_manual"),
                    command=self._add_manual).pack(side="left", padx=6)
-        self.scan_info = ttk.Label(top, text="сканирую диски...",
+        self.scan_info = ttk.Label(top, text=tr("scanning"),
                                    style="Muted.TLabel")
         self.scan_info.pack(side="left", padx=10)
 
@@ -150,25 +151,24 @@ class GamesTab:
 
         act = ttk.Frame(t)
         act.pack(fill="x", pady=(2, 0))
-        ttk.Label(act, text="режим:").pack(side="left")
-        self.mode_var = tk.StringVar(value="авто")
+        ttk.Label(act, text=tr("mode_label")).pack(side="left")
+        self.mode_var = tk.StringVar(value=tr("mode_auto"))
         self.mode_box = ttk.Combobox(
             act, textvariable=self.mode_var, width=7, state="readonly",
-            values=("авто", "DX9", "DX11", "DX12", "Vulkan"))
+            values=(tr("mode_auto"), "DX9", "DX11", "DX12", "Vulkan"))
         self.mode_box.pack(side="left", padx=(4, 10))
-        ttk.Button(act, text="Включить DLSS 5", style="Accent.TButton",
+        ttk.Button(act, text=tr("enable"), style="Accent.TButton",
                    command=self._enable).pack(side="left")
-        ttk.Button(act, text="Играть",
+        ttk.Button(act, text=tr("play"),
                    command=self._launch).pack(side="left", padx=6)
-        ttk.Button(act, text="Пауза / продолжить",
+        ttk.Button(act, text=tr("pause_resume"),
                    command=lambda: self.ctl.submit(
                        self.ctl.processing_toggle)).pack(side="left")
-        ttk.Button(act, text="Отключить",
+        ttk.Button(act, text=tr("disable"),
                    command=self._disable).pack(side="left", padx=6)
-        ttk.Button(act, text="Убрать", style="Danger.TButton",
+        ttk.Button(act, text=tr("remove"), style="Danger.TButton",
                    command=self._remove).pack(side="left")
-        ttk.Label(t, text="⚠ Античит: не включай в онлайн-играх (PUBG, CS2, "
-                          "GTA Online) - внедрение DLL могут посчитать читом.",
+        ttk.Label(t, text=tr("anticheat_warn"),
                   style="Muted.TLabel", foreground=AMBER,
                   wraplength=860).pack(anchor="w", pady=(6, 0))
 
@@ -189,7 +189,7 @@ class GamesTab:
             card.set_selected(path == exe)
         meta = (self.ctl.cfg.get("games") or {}).get(exe or "")
         if meta:
-            self.mode_var.set(MODE_NAMES.get(meta["mode"], "авто"))
+            self.mode_var.set(MODE_NAMES.get(meta["mode"], tr("mode_auto")))
 
     def _chosen_mode(self):
         v = self.mode_var.get().lower()
@@ -197,7 +197,7 @@ class GamesTab:
 
     # ------------------------------------------------------------ actions --
     def _add_manual(self):
-        p = filedialog.askopenfilename(title="exe игры",
+        p = filedialog.askopenfilename(title=tr("pick_exe"),
                                        filetypes=[("exe", "*.exe")])
         if p:
             self.ctl.submit(self.ctl.add_game, p, None, None, None, None)
@@ -205,7 +205,7 @@ class GamesTab:
     def _enable(self):
         exe = self.selected_exe()
         if not exe:
-            self.ui.log("mgr", "сначала выбери игру из карточек")
+            self.ui.log("mgr", tr("pick_game"))
             return
         launch = None
         for g in self.scanned:
@@ -223,7 +223,7 @@ class GamesTab:
     def _launch(self):
         exe = self.selected_exe()
         if not exe:
-            self.ui.log("mgr", "сначала выбери игру из карточек")
+            self.ui.log("mgr", tr("pick_game"))
             return
         if exe not in (self.ctl.cfg.get("games") or {}):
             launch = None
@@ -246,7 +246,7 @@ class GamesTab:
 
     # --------------------------------------------------------------- scan --
     def scan_start(self):
-        self.scan_info.config(text="сканирую диски (до ~20 с)...")
+        self.scan_info.config(text=tr("scanning"))
         threading.Thread(target=self._scan_worker, daemon=True,
                          name="m13-scan").start()
 
@@ -266,10 +266,10 @@ class GamesTab:
         except queue.Empty:
             return
         if kind == "error":
-            self.scan_info.config(text="ошибка сканирования: %s" % payload)
+            self.scan_info.config(text=tr("scan_failed", payload))
             return
         self.scanned = payload
-        self.scan_info.config(text="найдено игр: %d" % len(self.scanned))
+        self.scan_info.config(text=tr("games_found", len(self.scanned)))
         self.ui.log("mgr", "game scan: %d games (grouped, launchers "
                     "resolved)" % len(self.scanned))
         self.cards_fill()
@@ -289,7 +289,7 @@ class GamesTab:
         for exe, meta in known.items():
             if all(e["exe"] != exe for e in entries):
                 entries.append(dict(
-                    exe=exe, name=meta["name"] + " (сохранена)",
+                    exe=exe, name=meta["name"] + " (%s)" % tr("saved_mark"),
                     mode=meta["mode"], arch=meta.get("arch"), source="saved",
                     launch_exe=meta.get("launch_exe"), anticheat=False,
                     saved=True))
@@ -308,17 +308,17 @@ class GamesTab:
             meta = games.get(exe)
             if meta:
                 if meta["running"]:
-                    state, color = "ЗАПУЩЕНА", GREEN
+                    state, color = tr("state_running"), GREEN
                     if meta["paused"]:
-                        state += " (пауза)"
+                        state += tr("state_paused")
                 elif meta["dll"] == "deployed":
-                    state, color = "DLSS 5 включён", ACCENT
+                    state, color = tr("state_enabled"), ACCENT
                 elif meta["dll"] in ("foreign", "partial"):
-                    state, color = "чужие DLL! проверь папку", RED
+                    state, color = tr("state_foreign"), RED
                 else:
-                    state, color = "добавлена", MUTED
+                    state, color = tr("state_added"), MUTED
             else:
-                state, color = "не добавлена", MUTED
+                state, color = tr("state_not_added"), MUTED
             if card.anticheat and not (meta and meta["running"]):
-                state, color = "⚠ античит-риск", AMBER
+                state, color = tr("state_anticheat"), AMBER
             card.set_state(state, color)
