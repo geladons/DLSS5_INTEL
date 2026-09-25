@@ -8,22 +8,13 @@ import math
 import random
 import tkinter as tk
 
+from .i18n import splash_lines, tr
+
 BG = "#0d1017"
 ACCENT = "#5b8cff"
 ACCENT2 = "#9a6bff"
 FG = "#e6e9f0"
 MUTED = "#8a91a5"
-
-LINES = [
-    "Будим нейросеть...",
-    "Уговариваем Arc Pro B50...",
-    "Загружаем 71 блок DLSS 5...",
-    "Дообучаем на котиках...",
-    "Разглаживаем пиксели...",
-    "Просим Vulkan не падать...",
-    "Колдуем кооперативные матрицы...",
-    "Почти готово. Секрет: нейросеть тоже боится GTA IV.",
-]
 
 MIN_SHOW_MS = 3400
 
@@ -55,9 +46,10 @@ class Splash:
         self.cv.pack(pady=(18, 0))
         tk.Label(self.win, text="D L S S   5", bg=BG, fg=FG,
                  font=("Segoe UI", 22, "bold")).pack()
-        tk.Label(self.win, text="нейросетевой апскейл на Intel Arc",
+        tk.Label(self.win, text=tr("splash_subtitle"),
                  bg=BG, fg=MUTED, font=("Segoe UI", 9)).pack()
-        self.line = tk.Label(self.win, text=random.choice(LINES), bg=BG,
+        self._lines = splash_lines()
+        self.line = tk.Label(self.win, text=random.choice(self._lines), bg=BG,
                              fg=ACCENT, font=("Segoe UI", 9, "italic"))
         self.line.pack(pady=(8, 0))
         self.bar_bg = tk.Canvas(self.win, width=280, height=4, bg="#1f2430",
@@ -106,7 +98,7 @@ class Splash:
             self.cv.create_oval(x - r, y - r, x + r, y + r, fill=color,
                                 outline="")
         if t % 26 == 0:
-            self.line.config(text=random.choice(LINES))
+            self.line.config(text=random.choice(self._lines))
         progress = min(1.0, t / (MIN_SHOW_MS / 60.0))
         self.bar_bg.coords(self.bar, 0, 0, 280 * progress, 4)
         self.win.after(60, self._tick)
