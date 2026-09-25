@@ -1,27 +1,48 @@
 # ============================================================================
-# m13.gamescan - find installed games and pick the right injection mode.
+# m13.gamescan - find REAL installed games (not every exe on the drive) and
+# pick the right injection mode.
 #
-# Scanner sources (no registry writes, read-only):
-#   - Steam: every library from steamapps\libraryfolders.vdf -> <lib>\steamapps
-#     \common\<game>\**\*.exe (max depth 3 below common\<game>)
-#   - Rockstar / Epic / GOG / plain roots (shallow scan)
-#   - manual entries from the manager
-# Junk exes (uninstallers, launchers, crash reporters, redists) are filtered;
-# the largest exe in a folder is flagged as the likely game binary.
+# v2 (owner feedback: "180 games found, really I have 10"):
+#   - candidates are GROUPED per install root (Steam common\<game>, top-level
+#     folder on a data drive, one app folder under Program Files); a group
+#     becomes a game ONLY when it contains at least one exe with graphics-API
+#     evidence (static imports, delay-loads or dll-name strings). One group =
+#     one game card. Tools/launchers/updaters never become cards.
+#   - LAUNCHER WRAPPERS: pirate/GOG/Rockstar installs often start through a
+#     tiny stub (D:\STALKER2\Stalker2.exe, PlayRDR2.exe, Launcher.exe) while
+#     the real renderer binary sits deeper (Stalker2\Binaries\Win64\...
+#     Shipping.exe). The card's inject target is the REAL binary (mode detect,
+#     DLL deploy); launch_exe is the wrapper when one is detected, so the
+#     crack/launcher chain still runs.
+#   - pe_info() now also parses the DELAY-LOAD import directory: UE5 titles
+#     (STALKER 2) delay-load d3d12.dll, so the classic import table alone
+#     mis-detects them as dx11 (they statically import d3d11 for the RHI but
+#     render through d3d12).
 #
 # pe_info() is a tiny stdlib-only PE reader: bitness from the optional-header
-# magic, graphics API from the import table (d3d9/d3d10/d3d11/d3d12/dxgi).
-# Suggested mode: dx12 > dx11 > dx9. Known anti-cheat titles get a warning
-# flag - injecting a DLL into those can get the owner BANNED online.
+# magic, graphics API from the import + delay-import tables and dll-name
+# strings (mmap: game exes are tens of MB, the tables can sit far in).
+# Suggested mode: vulkan > dx12 > dx11 > dx9 (vulkan needs NO dll deploy -
+# the registered implicit layer loads by itself). Known anti-cheat titles get
+# a warning flag - injecting a DLL into those can get the owner BANNED online.
 # ============================================================================
 import os
 import re
 
+# Junk exe names: never a game binary and never a launch wrapper.
 JUNK_WORDS = ("unins", "setup", "redist", "crash", "report", "updater",
-              "launcher", "helper", "service", "broker", "cef", "eac",
-              "battleye", "_be", "be.exe", "anticheat", "installer",
-              "vcred", "dotnet", "dxsetup", "maintenancetool", "torrent",
-              "vkconfig", "sunshine", "obs64", "sharex", "notepad")
+              "helper", "service", "broker", "cef", "eac", "battleye",
+              "_be", "be.exe", "anticheat", "installer", "vcred", "dotnet",
+              "dxsetup", "maintenancetool", "torrent", "vkconfig", "sunshine",
+              "obs64", "sharex", "notepad", "websetup", "patcher",
+              "protected", "fossilize", "cmake", "dxgi-info", "vkcube",
+              "msedge", "chrome", "firefox", "opera", "brave", "iexplore",
+              "onedrive", "teams", "spotify", "discord", "steamwebhelper",
+              "copilot")
+
+# Launcher-ish names: fine as a launch wrapper, never the renderer binary.
+WRAPPER_HINTS = ("launcher", "launch", "play", "start", "run")
+MAIN_BAD = ("launcher", "patcher")
 
 ANTICHEAT_HINTS = ("pubg", "counter-strike", "cs2", "valorant", "fortnite",
                    "apex", "destiny", "rust", "rainbow", "tarkov", "faceit",
@@ -36,16 +57,27 @@ API_DLLS = {"vulkan": ("vulkan-1.dll",), "dx12": ("d3d12.dll",),
             "dx11": ("d3d11.dll", "d3d10.dll", "d3d10_1.dll",
                      "d3d10core.dll"), "dx9": ("d3d9.dll",)}
 
+# Directories never descended into while scanning a group.
+DIR_SKIP = ("redist", "redistributables", "_commonredist", "_redist",
+            "support", "installers", "directx", "dotnet", "winsxs",
+            "appdata", "documents", "saved games", "screenshots", "mods",
+            "uninstall", "language changer", "crashdumps", "logs")
+
+WRAPPER_MAX_SIZE = 15 * 1024 * 1024     # a wrapper stub is small
+MAIN_MIN_SIZE = 300 * 1024              # a real renderer binary is not tiny
+
 
 class Game:
-    def __init__(self, exe, source):
-        self.exe = exe
-        self.name = os.path.splitext(os.path.basename(exe))[0]
+    def __init__(self, exe, source, root=None, name=None):
+        self.exe = exe                # inject target (mode detect + deploy)
+        self.launch_exe = exe         # what "Launch" actually starts
+        self.root = root or os.path.dirname(exe)
+        self.name = name or os.path.splitext(os.path.basename(exe))[0]
         self.source = source
-        self.arch = None          # "x64" | "x86" | None (unreadable)
-        self.apis = []            # subset of ("dx12","dx11","dx9")
+        self.arch = None              # "x64" | "x86" | None (unreadable)
+        self.apis = []
         self.size = 0
-        self.likely = False       # biggest exe in its folder
+        self.likely = False           # chosen as the group's main binary
         self.anticheat = any(h in exe.lower() for h in ANTICHEAT_HINTS)
 
     @property
@@ -55,15 +87,42 @@ class Game:
                 return m
         return None
 
+    @property
+    def via_wrapper(self):
+        return self.launch_exe.lower() != self.exe.lower()
+
     def __repr__(self):
-        return "Game(%s %s %s)" % (self.name, self.arch, self.apis)
+        return "Game(%s %s %s%s)" % (
+            self.name, self.arch, self.apis,
+            " via %s" % os.path.basename(self.launch_exe)
+            if self.via_wrapper else "")
 
 
 # ------------------------------------------------------------ PE parsing ---
+def _read_imports(data, rva2off, imp_rva, stride, name_off, bound=4096):
+    """Walk an import-style directory; returns a set of dll names (lower)."""
+    dlls = set()
+    desc = rva2off(imp_rva)
+    for _ in range(bound):
+        if desc is None or desc + stride > len(data):
+            break
+        name_rva = int.from_bytes(data[desc + name_off:desc + name_off + 4],
+                                  "little")
+        if name_rva == 0:
+            break
+        noff = rva2off(name_rva & 0x7FFFFFFF)   # delay-load names may be RVA
+        if noff is not None and noff < len(data):
+            z = data.find(b"\0", noff, noff + 64)
+            if z > noff:
+                dlls.add(data[noff:z].decode("ascii", "replace").lower())
+        desc += stride
+    return dlls
+
+
 def pe_info(exe):
     """-> (arch, apis). Pure-Python PE import walk; never raises.
-    Uses mmap: game exes are tens of MB, the import directory can sit far
-    past the first few MB (that is why a plain 4 MB head read missed it)."""
+    Covers the classic import table AND the delay-load directory (UE5 games
+    like STALKER 2 delay-load d3d12.dll - the plain table says d3d11)."""
     import mmap
     arch, dlls, dyn_dlls = None, set(), set()
     try:
@@ -88,10 +147,6 @@ def pe_info(exe):
                 dd_base = opt + 96
             else:
                 return None, []
-            imp_rva = int.from_bytes(data[dd_base + 8:dd_base + 12], "little")
-            imp_sz = int.from_bytes(data[dd_base + 12:dd_base + 16], "little")
-            if not imp_rva or not imp_sz:
-                return arch, []
             secs = []
             sbase = opt + optsz
             for i in range(nsec):
@@ -107,27 +162,34 @@ def pe_info(exe):
                         return raw + (rva - va)
                 return None
 
-            desc = rva2off(imp_rva)
-            for _ in range(4096):       # bounded walk, no infinite loops
-                if desc is None or desc + 20 > len(data):
-                    break
-                name_rva = int.from_bytes(data[desc + 12:desc + 16], "little")
-                if name_rva == 0:
-                    break
-                noff = rva2off(name_rva)
-                if noff is not None and noff < len(data):
-                    z = data.find(b"\0", noff, noff + 64)
-                    if z > noff:
-                        dlls.add(data[noff:z].decode("ascii",
-                                                     "replace").lower())
-                desc += 20
+            # classic import table (data directory #1)
+            imp_rva = int.from_bytes(data[dd_base + 8:dd_base + 12], "little")
+            imp_sz = int.from_bytes(data[dd_base + 12:dd_base + 16], "little")
+            if imp_rva and imp_sz:
+                dlls |= _read_imports(data, rva2off, imp_rva, 20, 12)
+            # delay-load directory (data directory #13): 32-byte entries,
+            # name RVA at offset 4 (UE5 d3d12.dll lives HERE)
+            dly_rva = int.from_bytes(data[dd_base + 13 * 8:dd_base + 13 * 8 + 4],
+                                     "little")
+            if dly_rva:
+                dlls |= _read_imports(data, rva2off, dly_rva, 32, 4, bound=256)
             # Dynamic loading: games like GTA5 Enhanced LoadLibrary their
             # D3D runtime, so imports alone miss it - scan for the dll name
-            # strings in the whole binary (mmap find is C-speed).
+            # strings in the whole binary (mmap find is C-speed). Metro
+            # Exodus keeps the names as UTF-16 - scan wide strings too, but
+            # NOT for vulkan-1.dll: STALKER 2 carries a wide vulkan string
+            # (bundled XeSS) while being a pure DX12 title.
             for needle in (b"d3d12.dll", b"d3d11.dll", b"d3d10core.dll",
                            b"d3d10.dll", b"d3d9.dll", b"vulkan-1.dll"):
                 if data.find(needle) >= 0 or \
                         data.find(needle.upper()) >= 0:
+                    dyn_dlls.add(needle.decode())
+            for needle in (b"d3d12.dll", b"d3d11.dll", b"d3d10core.dll",
+                           b"d3d10.dll", b"d3d9.dll"):
+                wide = bytearray()
+                for c in needle:
+                    wide += bytes((c, 0))
+                if data.find(bytes(wide)) >= 0:
                     dyn_dlls.add(needle.decode())
         finally:
             mm.close()
@@ -137,7 +199,7 @@ def pe_info(exe):
     #  1. vulkan-1.dll anywhere -> Vulkan: needs NO dll deploy (the implicit
     #     layer loads by itself). RDR2 statically imports d3d9.dll yet is a
     #     Vulkan/DX12 game - the dll names alone lie.
-    #  2. else trust STATIC imports (GTA IV CE carries a stray d3d10 string)
+    #  2. else trust STATIC + DELAY-LOAD imports (precise PE directories)
     #  3. else dynamic strings (GTA5 Enhanced LoadLibraries d3d12)
     if any(d in dlls or d in dyn_dlls for d in API_DLLS["vulkan"]):
         return arch, ["vulkan"]
@@ -165,10 +227,12 @@ def fixed_drives():
 # Never descend into these at drive-root level (system noise, not games).
 ROOT_SKIP = ("windows", "$recycle.bin", "system volume information",
              "programdata", "recovery", "perflogs", "msocache", "intel",
-             "users", "pagefile.sys", "amd", "nvidia")
-# Inside these, games DO live - scan them, but not their system subdirs.
-VENDOR_SKIP = ("windows", "microsoft", "common files", "internet explorer",
-               "windowsapps", "windows defender", "dotnet", "msbuild")
+             "users", "pagefile.sys", "amd", "nvidia", "vulkansdk",
+             "virtualdisplaydriver", "git", "inetpub", "temp",
+             "windowsapps", "wpsystem", "msdownld.tmp",
+             "62ae52d0132f45be2e0207", "wpmod", "xboxgames")
+# Program Files: scanned one app-folder at a time (each folder = a group).
+APPSTORE_DIRS = ("program files", "program files (x86)")
 
 
 def steam_libraries():
@@ -184,40 +248,155 @@ def steam_libraries():
     return [r for r in roots if os.path.isdir(r)]
 
 
-def _scan_dir(root, depth, out, source):
-    """Collect *.exe under root up to depth levels deep."""
+def steam_games(lib):
+    """-> [(name, installdir)] from appmanifest_*.acf of one library."""
+    out = []
+    apps = os.path.join(lib, "steamapps")
+    try:
+        names = [n for n in os.listdir(apps)
+                 if n.startswith("appmanifest_") and n.endswith(".acf")]
+    except OSError:
+        return out
+    for n in names:
+        try:
+            with open(os.path.join(apps, n), "r", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            continue
+        name = re.search(r'"name"\s+"([^"]+)"', text)
+        inst = re.search(r'"installdir"\s+"([^"]+)"', text)
+        if inst:
+            out.append((name.group(1) if name else None, inst.group(1)))
+    return out
+
+
+def _collect_exes(root, depth):
+    """All *.exe under root up to depth levels deep (junk dirs skipped)."""
+    out = []
     if depth < 0 or not os.path.isdir(root):
-        return
+        return out
     try:
         entries = list(os.scandir(root))
     except OSError:
-        return
+        return out
     for e in entries:
         if e.is_file() and e.name.lower().endswith(".exe"):
-            low = e.name.lower()
-            if not any(w in low for w in JUNK_WORDS):
-                out.append(Game(e.path, source))
+            out.append(e.path)
     if depth:
         for e in entries:
-            if e.is_dir() and not e.name.lower() in (
-                    "redist", "redistributables", "_commonredist", "support",
-                    "installers", "directx", "dotnet", "winsxs", "appdata",
-                    "documents", "saved games", "screenshots", "mods"):
-                _scan_dir(e.path, depth - 1, out, source)
+            if e.is_dir() and e.name.lower() not in DIR_SKIP:
+                out.extend(_collect_exes(e.path, depth - 1))
+    return out
+
+
+def _norm(s):
+    return re.sub(r"[^a-z0-9]+", "", s.lower())
+
+
+def _is_junk_name(exe):
+    low = os.path.basename(exe).lower()
+    return any(w in low for w in JUNK_WORDS)
+
+
+def _is_main_candidate(exe):
+    """A renderer binary: not junk and not a launcher/patcher stub."""
+    low = os.path.basename(exe).lower()
+    return not _is_junk_name(exe) and not any(w in low for w in MAIN_BAD)
+
+
+def _pick_wrapper(root_exes, main_exe, folder_name):
+    """Choose the launch wrapper among the group's ROOT-level exes, or None.
+    A wrapper is small, not junk, and either launcher-named or named like the
+    game folder / the main binary (GOG stub Stalker2.exe, PlayRDR2.exe)."""
+    main_stem = _norm(os.path.splitext(os.path.basename(main_exe))[0])
+    folder_norm = _norm(folder_name)
+    best, best_rank = None, -1
+    for exe in root_exes:
+        if exe.lower() == main_exe.lower() or _is_junk_name(exe):
+            continue
+        try:
+            size = os.path.getsize(exe)
+        except OSError:
+            continue
+        if size > WRAPPER_MAX_SIZE:
+            continue
+        stem = _norm(os.path.splitext(os.path.basename(exe))[0])
+        rank = -1
+        if "launcher" in stem:
+            rank = 3
+        elif any(stem.startswith(h) for h in ("play", "start", "run", "launch")):
+            rank = 2
+        elif stem and (stem == folder_norm
+                       or (len(stem) >= 4 and main_stem.startswith(stem))
+                       or (len(stem) >= 4 and stem in main_stem)):
+            rank = 1
+        if rank > best_rank:
+            best, best_rank = exe, rank
+    return best
+
+
+def _game_from_group(root, source, name=None, depth=4):
+    """One install root -> one Game, or None when nothing renderable lives
+    inside (tools, launchers, redists, random app folders)."""
+    exes = _collect_exes(root, depth)
+    if not exes:
+        return None
+    root_level = [e for e in exes
+                  if os.path.dirname(e).lower() == os.path.abspath(root).lower()]
+    mains = []
+    for e in exes:
+        if not _is_main_candidate(e):
+            continue
+        try:
+            size = os.path.getsize(e)
+        except OSError:
+            continue
+        if size < MAIN_MIN_SIZE:
+            continue
+        arch, apis = pe_info(e)
+        if not apis:
+            continue                      # no graphics API -> not a game binary
+        g = Game(e, source, root=root, name=name)
+        g.arch, g.apis, g.size = arch, apis, size
+        mains.append(g)
+    if not mains:
+        return None
+    # main binary: biggest API-positive exe; prefer a name similar to the
+    # folder on ties (avoids picking a bundled dedicated server etc.)
+    folder_norm = _norm(os.path.basename(os.path.abspath(root)))
+    mains.sort(key=lambda g: (
+        -g.size,
+        0 if _norm(os.path.splitext(os.path.basename(g.exe))[0]) in folder_norm
+        or folder_norm in _norm(os.path.splitext(os.path.basename(g.exe))[0])
+        else 1))
+    main = mains[0]
+    main.likely = True
+    if not name:
+        # a folder name reads far better than "Stalker2-Win64-Shipping"
+        name = os.path.basename(os.path.abspath(root))
+        main.name = name
+    wrapper = _pick_wrapper(root_level, main.exe,
+                            os.path.basename(os.path.abspath(root)))
+    if wrapper:
+        main.launch_exe = wrapper
+    return main
 
 
 def scan(extra_dirs=()):
-    """-> [Game] sorted: likely games first, then by size desc.
-    Covers every fixed drive (any install location), not just launchers."""
-    games = []
+    """-> [Game]: one entry per REAL game found on this machine.
+    Sources: Steam manifests (proper names), then every fixed drive grouped
+    per install root. Groups without an API-positive binary are dropped -
+    that is how 180 exe candidates become the owner's actual ~10 games."""
+    games = {}
+    steam_roots = []
     for lib in steam_libraries():
         common = os.path.join(lib, "steamapps", "common")
-        try:
-            subs = [e.path for e in os.scandir(common) if e.is_dir()]
-        except OSError:
-            subs = []
-        for game_dir in subs:
-            _scan_dir(game_dir, 3, games, "steam")
+        steam_roots.append(os.path.abspath(common).lower())
+        for name, installdir in steam_games(lib):
+            g = _game_from_group(os.path.join(common, installdir), "steam",
+                                 name=name)
+            if g:
+                games[g.exe.lower()] = g
     for drive in fixed_drives():
         try:
             top = [e for e in os.scandir(drive) if e.is_dir()]
@@ -227,29 +406,46 @@ def scan(extra_dirs=()):
             name = e.name.lower()
             if name in ROOT_SKIP:
                 continue
-            # C:\ root dirs are mostly system - depth 2; data drives depth 3
-            depth = 2 if drive.lower().startswith("c:") else 3
-            _scan_dir(e.path, depth, games, "drive " + drive[0])
+            if any(os.path.abspath(e.path).lower().startswith(r)
+                   for r in steam_roots):
+                continue                  # steam covers its own library
+            if name in APPSTORE_DIRS:
+                try:
+                    subs = [s for s in os.scandir(e.path) if s.is_dir()]
+                except OSError:
+                    continue
+                for s in subs:
+                    if s.name.lower() in ("steam", "common files"):
+                        continue          # steam has its own manifest path
+                    g = _game_from_group(s.path, e.name, depth=3)
+                    if g and g.exe.lower() not in games:
+                        games[g.exe.lower()] = g
+                continue
+            # A folder with NO root-level exes is a container (downloads,
+            # "Games"): each subfolder is its own install root.
+            try:
+                has_root_exe = any(x.is_file()
+                                   and x.name.lower().endswith(".exe")
+                                   for x in os.scandir(e.path))
+            except OSError:
+                has_root_exe = False
+            if not has_root_exe:
+                try:
+                    subs = [s for s in os.scandir(e.path) if s.is_dir()]
+                except OSError:
+                    continue
+                for s in subs:
+                    g = _game_from_group(s.path, "drive " + drive[0],
+                                         depth=3)
+                    if g and g.exe.lower() not in games:
+                        games[g.exe.lower()] = g
+                continue
+            g = _game_from_group(e.path, "drive " + drive[0])
+            if g and g.exe.lower() not in games:
+                games[g.exe.lower()] = g
     for d in extra_dirs:
-        _scan_dir(d, 3, games, "manual")
-
-    seen, uniq = set(), []
-    for g in games:
-        if g.exe.lower() not in seen:
-            seen.add(g.exe.lower())
-            uniq.append(g)
-    by_dir = {}
-    for g in uniq:
-        try:
-            g.size = os.path.getsize(g.exe)
-        except OSError:
-            pass
-        by_dir.setdefault(os.path.dirname(g.exe).lower(), []).append(g)
-    for group in by_dir.values():
-        big = max(group, key=lambda g: g.size)
-        if big.size > 0:
-            big.likely = True
-    for g in uniq:
-        g.arch, g.apis = pe_info(g.exe)
-    uniq.sort(key=lambda g: (not g.likely, not g.mode, -g.size))
-    return uniq
+        g = _game_from_group(d, "manual")
+        if g and g.exe.lower() not in games:
+            games[g.exe.lower()] = g
+    out = sorted(games.values(), key=lambda g: g.name.lower())
+    return out
