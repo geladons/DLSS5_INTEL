@@ -134,10 +134,52 @@ def _free_cursor():
         pass
 
 
+class _INPUT(ctypes.Structure):
+    """SendInput MOUSEINPUT shim (x64 layout)."""
+    _fields_ = [("type", ctypes.c_ulong), ("dx", ctypes.c_long),
+                ("dy", ctypes.c_long), ("mouseData", ctypes.c_ulong),
+                ("dwFlags", ctypes.c_ulong), ("time", ctypes.c_ulong),
+                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
+
+
+def _input_jiggle():
+    """A zero-move SendInput: having 'just received input' is what lets a
+    background process win SetForegroundWindow (the foreground lock)."""
+    try:
+        inp = _INPUT(0, 0, 0, 0, 0x0001, 0, None)   # MOUSEEVENTF_MOVE by 0,0
+        _u32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
+    except (ValueError, OSError):
+        pass
+
+
+def _force_foreground(hwnd):
+    """Robust foreground steal: AttachThreadInput dance around
+    SetForegroundWindow/BringWindowToTop after an input jiggle."""
+    _input_jiggle()
+    try:
+        fg = _u32.GetForegroundWindow()
+        cur_tid = ctypes.windll.kernel32.GetCurrentThreadId()
+        fg_tid = _u32.GetWindowThreadProcessId(fg, None) if fg else 0
+        attached = False
+        if fg_tid and fg_tid != cur_tid:
+            attached = bool(_u32.AttachThreadInput(cur_tid, fg_tid, True))
+        try:
+            _u32.ShowWindow(hwnd, SW_RESTORE)
+            _u32.BringWindowToTop(hwnd)
+            _u32.SetForegroundWindow(hwnd)
+            _u32.SetActiveWindow(hwnd)
+            _u32.SetFocus(hwnd)
+        finally:
+            if attached:
+                _u32.AttachThreadInput(cur_tid, fg_tid, False)
+    except (ValueError, OSError):
+        pass
+
+
 class ControlOverlay:
     """Frameless always-on-top control panel floating over the game."""
 
-    WIDTH, HEIGHT = 440, 340
+    WIDTH, HEIGHT = 440, 396
 
     def __init__(self, master, ctl, on_log):
         self.ctl = ctl
@@ -156,6 +198,7 @@ class ControlOverlay:
         self._frozen_pid = None      # fallback freeze: suspended game pid
         self._freeze_flags = False   # primary freeze: layer/proxy flags
         self._pending_push = None    # (value, time) of an in-flight push
+        self._after_id_blend = None  # debounce timer for the blend knob
         self._game_hwnd = None       # foreground restore target
         self._focus_mode = False     # we took the foreground this session
         self._build()
@@ -207,6 +250,11 @@ class ControlOverlay:
         grow.pack(fill="x")
         tk.Label(grow, text=tr("ov_gain"), bg=BG, fg=FG,
                  font=("Segoe UI", 9, "bold")).pack(side="left")
+        tk.Button(grow, text=tr("ov_reset"), font=("Segoe UI", 7),
+                  bg=PANEL, fg=MUTED, activebackground=PANEL2,
+                  activeforeground=FG, relief="flat", bd=0, padx=6,
+                  cursor="hand2", command=self._reset_gain).pack(
+            side="left", padx=(8, 0))
         self.gain_val = tk.Label(grow, text="1.00", bg=BG, fg=ACCENT,
                                  font=("Consolas", 10, "bold"), width=5)
         self.gain_val.pack(side="right")
@@ -224,12 +272,30 @@ class ControlOverlay:
         self.scale.bind("<ButtonRelease-1>",
                         lambda _e: setattr(self, "_scale_dragging", False))
 
+        # blend (effect mix: 0 = original frame, 1 = full network output)
+        brow = tk.Frame(body, bg=BG)
+        brow.pack(fill="x")
+        tk.Label(brow, text=tr("ov_blend"), bg=BG, fg=FG,
+                 font=("Segoe UI", 9, "bold")).pack(side="left")
+        tk.Button(brow, text=tr("ov_blend_reset"), font=("Segoe UI", 7),
+                  bg=PANEL, fg=MUTED, activebackground=PANEL2,
+                  activeforeground=FG, relief="flat", bd=0, padx=6,
+                  cursor="hand2", command=self._reset_blend).pack(
+            side="left", padx=(8, 0))
+        self.blend_val = tk.Label(brow, text="1.00", bg=BG, fg=ACCENT,
+                                  font=("Consolas", 10, "bold"), width=5)
+        self.blend_val.pack(side="right")
+        self.blend_var = tk.DoubleVar(value=float(
+            self.ctl.cfg.get("blend") or 1.0))
+        self.blend_scale = tk.Scale(
+            body, from_=0.0, to=1.0, resolution=0.05, orient="horizontal",
+            variable=self.blend_var, command=self._debounced_blend,
+            bg=BG, fg=FG, troughcolor=PANEL2, highlightthickness=0, bd=0,
+            activebackground=ACCENT, showvalue=False, sliderrelief="flat")
+        self.blend_scale.pack(fill="x", pady=(0, 4))
+
         prow = tk.Frame(body, bg=BG)
         prow.pack(fill="x", pady=(0, 4))
-        tk.Button(prow, text=tr("ov_reset"), font=("Segoe UI", 8), bg=PANEL,
-                  fg=FG, activebackground=PANEL2, activeforeground=FG,
-                  relief="flat", bd=0, padx=8, cursor="hand2",
-                  command=self._reset_gain).pack(side="left")
         self.ap_var = tk.BooleanVar(
             value=bool(self.ctl.cfg.get("overlay_autopause")))
         tk.Checkbutton(prow, text=tr("ov_autopause"), variable=self.ap_var,
@@ -291,6 +357,22 @@ class ControlOverlay:
     def _reset_gain(self):
         self.var.set(1.0)
         self._debounced_push(1.0)
+
+    def _debounced_blend(self, _val):
+        b = round(float(self.blend_var.get()), 3)
+        self.blend_val.config(text="%.2f" % b)
+        if self._after_id_blend:
+            self.win.after_cancel(self._after_id_blend)
+        self._after_id_blend = self.win.after(DEBOUNCE_MS, self._push_blend)
+
+    def _push_blend(self):
+        self._after_id_blend = None
+        b = round(float(self.blend_var.get()), 3)
+        self.ctl.submit(self.ctl.set_blend, b)
+
+    def _reset_blend(self):
+        self.blend_var.set(1.0)
+        self._debounced_blend(1.0)
 
     def _save_autopause(self):
         self.ctl.cfg.set("overlay_autopause", bool(self.ap_var.get()))
@@ -354,21 +436,41 @@ class ControlOverlay:
     def _take_focus(self):
         """Become a NORMAL activatable window while open: the game loses
         focus (releasing its cursor grip, often auto-pausing), our mouse
-        works. NOACTIVATE returns on hide."""
+        works. NOACTIVATE returns on hide. Games re-clip/re-hide the cursor
+        EVERY FRAME, so a keeper loop re-frees it while we are visible."""
         try:
             hwnd = int(self.win.wm_frame(), 16)
         except (ValueError, tk.TclError):
             return
         _set_noactivate(hwnd, False)
+        _force_foreground(hwnd)
         self.win.focus_force()
-        try:
-            _u32.SetForegroundWindow(hwnd)
-        except (ValueError, OSError):
-            pass
         _free_cursor()
+        self._warp_cursor()
         self._focus_mode = True
         # games re-hide the cursor once on focus loss; assert it again
         self.win.after(350, _free_cursor)
+        self.win.after(700, _free_cursor)
+        self._cursor_keeper()
+
+    def _warp_cursor(self):
+        """Park the OS cursor over the panel so the user SEES it at once
+        (many games pin the invisible cursor to the screen center)."""
+        try:
+            self.win.update_idletasks()
+            x = self.win.winfo_rootx() + self.win.winfo_width() // 2
+            y = self.win.winfo_rooty() + 40
+            _u32.SetCursorPos(x, y)
+        except (tk.TclError, ValueError, OSError):
+            pass
+
+    def _cursor_keeper(self):
+        """While the panel is open, keep the cursor free: FPS games re-apply
+        ClipCursor/ShowCursor(false) on every frame, one-shot is not enough."""
+        if not self._focus_mode or not self.win.winfo_viewable():
+            return
+        _free_cursor()
+        self.win.after(150, self._cursor_keeper)
 
     def _return_focus(self):
         if not self._focus_mode:

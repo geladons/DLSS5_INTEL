@@ -302,6 +302,7 @@ class M13Controller:
             ok, msg = self.screen.stop()
             notes.append("screen overlay stopped (%s)" % msg)
         args = ["--port", "47990", "--gain", "%.3f" % self.cfg.get("gain"),
+                "--blend", "%.3f" % float(self.cfg.get("blend") or 1.0),
                 "--weights", self.cfg.get("weights_path")]
         ok, msg = self.daemon.start(args)
         if notes:
@@ -315,9 +316,9 @@ class M13Controller:
     def set_gain(self, gain):
         """Live gain push. Daemon up: NRCT, next processed frame; if a game
         frame is FROZEN (photo mode) the layer/proxy is asked to reprocess
-        the held raw frame so the frozen picture updates. Daemon down but
-        screen mode up: restart m8blive with the new gain (cheap, no game
-        attached). Always persisted."""
+        the held raw frame so the frozen picture updates. Screen mode up:
+        the knob FILE retunes m8blive live (no restart - a restart costs
+        the ~30 s weights upload and looks like a crash). Always persisted."""
         gain = max(0.0, min(16.0, float(gain)))
         self.cfg.set("gain", gain)
         if self.daemon.running:
@@ -331,12 +332,30 @@ class M13Controller:
                               "reprocessing)" % g)
             return True, "gain -> %.3f (live)" % g
         if self.screen.running:
-            ok, msg = self.screen.stop()
-            if not ok:
-                return False, "gain saved; screen restart failed: %s" % msg
-            ok, msg = self.screen_start(gain)
-            return ok, "gain %.3f - screen overlay restarted (%s)" % (gain, msg)
+            from .screenmode import write_knobs
+            write_knobs(gain, float(self.cfg.get("blend")))
+            return True, "gain -> %.3f (live, screen mode)" % gain
         return False, "daemon down - gain saved for next start"
+
+    def set_blend(self, blend):
+        """Live blend push (vendor mix factor 0..1). Same routing as gain."""
+        blend = max(0.0, min(1.0, float(blend)))
+        self.cfg.set("blend", blend)
+        if self.daemon.running:
+            try:
+                self.client.set_blend(blend)
+            except DaemonError as e:
+                return False, "blend saved but daemon push failed: %s" % e
+            if gamelaunch.freeze_active():
+                gamelaunch.reproc_bump()
+                return True, ("blend -> %.3f (live; frozen frame "
+                              "reprocessing)" % blend)
+            return True, "blend -> %.3f (live)" % blend
+        if self.screen.running:
+            from .screenmode import write_knobs
+            write_knobs(float(self.cfg.get("gain")), blend)
+            return True, "blend -> %.3f (live, screen mode)" % blend
+        return False, "daemon down - blend saved for next start"
 
     # ---------------------------------------------------------- screen mode --
     def screen_start(self, gain=None):
@@ -348,7 +367,8 @@ class M13Controller:
             ok, msg = self.daemon.stop()
             notes.append("daemon stopped first (%s)" % msg)
         extra = (self.cfg.get("screen_args") or "").split()
-        ok, msg = self.screen.start(gain=g, extra_args=extra)
+        ok, msg = self.screen.start(gain=g, blend=float(
+            self.cfg.get("blend") or 1.0), extra_args=extra)
         if notes:
             msg = " | ".join(notes + [msg])
         return ok, msg

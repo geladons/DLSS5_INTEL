@@ -155,6 +155,8 @@ _S = {
         "ru": "❄ Игра приостановлена (запущена не из менеджера - живого "
               "превью нет)."},
     "ov_gain": {"en": "Intensity", "ru": "Сила эффекта"},
+    "ov_blend": {"en": "Effect mix", "ru": "Доля эффекта"},
+    "ov_blend_reset": {"en": "Reset 1.0", "ru": "Сброс 1.0"},
     "ov_reset": {"en": "Reset 1.0", "ru": "Сброс 1.0"},
     "ov_autopause": {"en": "auto-pause on open", "ru": "пауза при открытии"},
     "ov_freeze_opt": {"en": "freeze the frame while this panel is open",

@@ -17,6 +17,7 @@ CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 DEFAULTS = {
     "weights_path": None,        # autodetected from the bundle, else asked
     "gain": 1.0,                 # last used gain, pushed to m11d live
+    "blend": 1.0,                # effect mix: 0 = original, 1 = full network
     "language": "en",            # UI language: en (primary) | ru
     "overlay_hotkey": "control+alt+g",   # show/hide the in-game overlay
     "dx9_game": None,            # legacy single-game keys (v1 config)

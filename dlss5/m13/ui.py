@@ -59,7 +59,20 @@ class ManagerUI:
     def __init__(self):
         self.ctl = M13Controller()
         set_language(self.ctl.cfg.get("language"))
+        # Own taskbar identity + icon (pythonw would otherwise show the
+        # generic Python icon and group with every other pythonw window).
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "DLSS5.Manager")
+        except (AttributeError, OSError):
+            pass
         self.root = tk.Tk()
+        try:
+            self.root.iconbitmap(default=os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "icon.ico"))
+        except tk.TclError:
+            pass
         self.root.title(tr("app_title"))
         self.root.geometry("1024x760")
         self.root.minsize(900, 640)
@@ -196,14 +209,14 @@ class ManagerUI:
                    command=lambda: self.ctl.submit(
                        self.ctl.daemon_stop)).pack(side="left", padx=6)
         tk.Label(inner, text=tr("gain"), bg=PANEL, fg=MUTED).pack(
-            side="left", padx=(18, 4))
+            side="left", padx=(10, 4))
         self.gain_var = tk.DoubleVar(value=self.ctl.cfg.get("gain"))
         self._suppress_scale = None   # programmatic-set echo suppression:
         self._scale_dragging = False  # Tk fires the scale command DEFERRED
         self._pending_push = None     # (value, time) of an in-flight push
         self.gain_scale = tk.Scale(
             inner, from_=0.0, to=2.0, resolution=0.05, orient="horizontal",
-            length=200, variable=self.gain_var, command=self._gain_moved,
+            length=140, variable=self.gain_var, command=self._gain_moved,
             bg=PANEL, fg=FG, troughcolor=PANEL2, highlightthickness=0, bd=0,
             activebackground=ACCENT, showvalue=False, sliderrelief="flat")
         self.gain_scale.pack(side="left")
@@ -216,6 +229,20 @@ class ManagerUI:
                                  bg=PANEL, fg=ACCENT,
                                  font=("Consolas", 10, "bold"), width=5)
         self.gain_lbl.pack(side="left")
+        tk.Label(inner, text=tr("ov_blend").lower(), bg=PANEL,
+                 fg=MUTED).pack(side="left", padx=(8, 4))
+        self.blend_var = tk.DoubleVar(
+            value=float(self.ctl.cfg.get("blend") or 1.0))
+        self.blend_scale = tk.Scale(
+            inner, from_=0.0, to=1.0, resolution=0.05, orient="horizontal",
+            length=100, variable=self.blend_var, command=self._blend_moved,
+            bg=PANEL, fg=FG, troughcolor=PANEL2, highlightthickness=0, bd=0,
+            activebackground=ACCENT, showvalue=False, sliderrelief="flat")
+        self.blend_scale.pack(side="left")
+        self.blend_lbl = tk.Label(inner, text="%.2f" % self.blend_var.get(),
+                                  bg=PANEL, fg=ACCENT,
+                                  font=("Consolas", 10, "bold"), width=5)
+        self.blend_lbl.pack(side="left")
         self.daemon_info = tk.Label(inner, text="", bg=PANEL, fg=MUTED,
                                     font=("Segoe UI", 8))
         self.daemon_info.pack(side="right")
@@ -305,7 +332,8 @@ class ManagerUI:
     def _screen_window_start(self):
         self.ctl.cfg.set("gain", round(float(self.gain_var.get()), 3))
         self.ctl.submit(lambda: self.ctl.screen.start_window(
-            self.win_var.get(), self.ctl.cfg.get("gain")))
+            self.win_var.get(), self.ctl.cfg.get("gain"),
+            float(self.ctl.cfg.get("blend") or 1.0)))
 
     # ------------------------------------------------------- Settings tab --
     def _tab_settings(self, nb):
@@ -416,6 +444,11 @@ class ManagerUI:
         self._pending_push = (g, time.time())
         self.root.after_idle(lambda: self.ctl.submit(self.ctl.set_gain, g))
 
+    def _blend_moved(self, _v):
+        b = round(float(self.blend_var.get()), 3)
+        self.blend_lbl.config(text="%.2f" % b)
+        self.root.after_idle(lambda: self.ctl.submit(self.ctl.set_blend, b))
+
     # -------------------------------------------------------------- poll ---
     def _poll(self):
         """Render the monitor snapshot. Zero I/O on this thread."""
@@ -448,7 +481,7 @@ class ManagerUI:
                 txt += tr("daemon_busy")
             self.dot.config(text="●", fg=GREEN)
             self.st_daemon.config(text=txt, fg=GREEN)
-            self.daemon_info.config(text="NRCT live control OK"
+            self.daemon_info.config(text="NRCT OK"
                                     if not snap.get("daemon_err") else
                                     snap["daemon_err"])
         else:
