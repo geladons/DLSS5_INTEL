@@ -172,10 +172,16 @@ class M13Controller:
         self.client = M11dClient(timeout=NRCT_TIMEOUT)
         self.monitor = StateMonitor(self)
         self.worker = None          # created by the UI (needs its callback)
+        self.launched_exes = set()  # launch targets started BY US this
+                                    # session (they carry the layer freeze env)
         self.monitor.start()
 
     def _migrate_legacy_games(self):
-        """v1 config had single dx9_game/dx12_game keys -> games dict."""
+        """v1 config had single dx9_game/dx12_game keys -> games dict.
+        v3 -> v4: entries pointing at launcher STUBS (the owner added
+        Launcher.exe / the GOG stub as the game) are retargeted to the real
+        renderer binary; the stub becomes launch_exe so the crack chain
+        still runs. Dead paths are dropped."""
         games = dict(self.cfg.get("games") or {})
         changed = False
         for key, mode in (("dx9_game", "dx9"), ("dx12_game", "dx12")):
@@ -186,6 +192,29 @@ class M13Controller:
                               "name": os.path.splitext(
                                   os.path.basename(exe))[0]}
                 changed = True
+        from . import gamescan
+        for exe in list(games):
+            if not os.path.exists(exe):
+                del games[exe]
+                changed = True
+                continue
+            low = os.path.basename(exe).lower()
+            _arch, apis = gamescan.pe_info(exe)
+            stub = (not apis) or any(w in low for w in gamescan.MAIN_BAD)
+            if not stub:
+                continue
+            g = gamescan._game_from_group(os.path.dirname(exe), "saved")
+            if not g or g.exe.lower() == exe.lower():
+                continue
+            meta = games.pop(exe)
+            if g.exe in games:            # real entry exists: just teach it
+                games[g.exe]["launch_exe"] = exe      # the wrapper
+            else:
+                meta["launch_exe"] = exe
+                meta["mode"] = g.mode or meta.get("mode")
+                meta["arch"] = g.arch or meta.get("arch")
+                games[g.exe] = meta
+            changed = True
         if changed:
             self.cfg.set("games", games)
 
@@ -265,26 +294,42 @@ class M13Controller:
             return False, "set the weights path first (Settings tab)"
         if self.daemon.running:
             return False, "m11d already running (pid %s)" % self.daemon.pid
+        notes = []
+        if self.screen.running:
+            # VRAM EXCLUSIVITY: m11d and m8blive each reserve an ~11.7 GB
+            # arena; the Arc Pro B50 has 16 GB - both at once = OOM crash
+            # (that was "screen mode kills the daemon").
+            ok, msg = self.screen.stop()
+            notes.append("screen overlay stopped (%s)" % msg)
         args = ["--port", "47990", "--gain", "%.3f" % self.cfg.get("gain"),
                 "--weights", self.cfg.get("weights_path")]
-        return self.daemon.start(args)
+        ok, msg = self.daemon.start(args)
+        if notes:
+            msg = " | ".join(notes + [msg])
+        return ok, msg
 
     def daemon_stop(self):
         return self.daemon.stop()
 
     # --------------------------------------------------------------- gain --
     def set_gain(self, gain):
-        """Live gain push. Daemon up: NRCT, next processed frame. Daemon down
-        but screen mode up: restart m8blive with the new gain (cheap, no game
+        """Live gain push. Daemon up: NRCT, next processed frame; if a game
+        frame is FROZEN (photo mode) the layer/proxy is asked to reprocess
+        the held raw frame so the frozen picture updates. Daemon down but
+        screen mode up: restart m8blive with the new gain (cheap, no game
         attached). Always persisted."""
         gain = max(0.0, min(16.0, float(gain)))
         self.cfg.set("gain", gain)
         if self.daemon.running:
             try:
                 g, _ = self.client.set_gain(gain)
-                return True, "gain -> %.3f (live)" % g
             except DaemonError as e:
                 return False, "gain saved but daemon push failed: %s" % e
+            if gamelaunch.freeze_active():
+                gamelaunch.reproc_bump()
+                return True, ("gain -> %.3f (live; frozen frame "
+                              "reprocessing)" % g)
+            return True, "gain -> %.3f (live)" % g
         if self.screen.running:
             ok, msg = self.screen.stop()
             if not ok:
@@ -296,8 +341,17 @@ class M13Controller:
     # ---------------------------------------------------------- screen mode --
     def screen_start(self, gain=None):
         g = self.cfg.get("gain") if gain is None else gain
+        notes = []
+        if self.daemon.running:
+            # VRAM EXCLUSIVITY (see daemon_start): m8blive needs its own
+            # ~11.7 GB arena; keeping m11d up would OOM the card.
+            ok, msg = self.daemon.stop()
+            notes.append("daemon stopped first (%s)" % msg)
         extra = (self.cfg.get("screen_args") or "").split()
-        return self.screen.start(gain=g, extra_args=extra)
+        ok, msg = self.screen.start(gain=g, extra_args=extra)
+        if notes:
+            msg = " | ".join(notes + [msg])
+        return ok, msg
 
     def screen_stop(self):
         return self.screen.stop()
@@ -332,9 +386,11 @@ class M13Controller:
         return None
 
     # ----------------------------------------------------------- game mgmt --
-    def add_game(self, exe, mode=None, arch=None, name=None):
+    def add_game(self, exe, mode=None, arch=None, name=None, launch_exe=None):
         """Register a game exe; mode/arch auto-detected from the PE imports
-        when not given. Returns (ok, message)."""
+        when not given. launch_exe: an optional launcher wrapper to START
+        instead of the game binary (pirate/GOG/Rockstar stubs). Returns
+        (ok, message)."""
         from . import gamescan
         exe = os.path.abspath(exe)
         if not os.path.exists(exe):
@@ -348,13 +404,18 @@ class M13Controller:
             return False, ("no D3D imports found in %s - pick the mode "
                            "manually" % os.path.basename(exe))
         games = dict(self.cfg.get("games") or {})
-        games[exe] = {"mode": mode, "arch": arch,
-                      "name": name or os.path.splitext(
-                          os.path.basename(exe))[0]}
+        meta = {"mode": mode, "arch": arch,
+                "name": name or os.path.splitext(os.path.basename(exe))[0]}
+        if launch_exe and os.path.abspath(launch_exe).lower() != exe.lower():
+            if os.path.exists(launch_exe):
+                meta["launch_exe"] = os.path.abspath(launch_exe)
+        games[exe] = meta
         self.cfg.set("games", games)
-        return True, "%s: %s/%s (%s)" % (games[exe]["name"], mode.upper(),
-                                         arch, ", ".join(apis) or "no D3D "
-                                         "imports - manual mode")
+        via = (" (launch via %s)" % os.path.basename(meta["launch_exe"])
+               if meta.get("launch_exe") else "")
+        return True, "%s: %s/%s (%s)%s" % (
+            meta["name"], mode.upper(), arch,
+            ", ".join(apis) or "no D3D imports - manual mode", via)
 
     def remove_game(self, exe):
         games = dict(self.cfg.get("games") or {})
@@ -362,6 +423,13 @@ class M13Controller:
             self.cfg.set("games", games)
             return True, "removed %s" % os.path.basename(exe)
         return False, "not in the list"
+
+    @staticmethod
+    def launch_target(exe, meta=None):
+        """What 'Launch' actually starts (the wrapper when registered)."""
+        meta = meta or {}
+        target = meta.get("launch_exe") or exe
+        return target if os.path.exists(target) else exe
 
     def game_deploy(self, exe):
         meta = (self.cfg.get("games") or {}).get(exe)
@@ -405,7 +473,30 @@ class M13Controller:
             ok, msg = self.daemon_start()       # auto-start the chain too
             if not ok and "already" not in msg:
                 return False, msg
-        return gamelaunch.launch_game(exe, meta["mode"])
+        target = self.launch_target(exe, meta)
+        ok, msg = gamelaunch.launch_game(target, meta["mode"])
+        if ok:
+            self.launched_exes.add(os.path.abspath(target).lower())
+            if target.lower() != exe.lower():
+                msg = "%s (via %s)" % (msg, os.path.basename(target))
+        return ok, msg
+
+    # ------------------------------------------------------- freeze support --
+    def freeze_supported(self):
+        """True when the ACTIVE game understands the freeze/reprocess flags:
+        always for DX12 (the proxy reads fixed %TEMP% names); for the Vulkan
+        layer modes only when we launched the game (it carries the env)."""
+        snap = self.snapshot()
+        mode = snap.get("active_mode")
+        if mode == "dx12":
+            return True
+        if mode not in ("dx9", "dx11", "vulkan"):
+            return False
+        exe = snap.get("active_game")
+        meta = (self.cfg.get("games") or {}).get(exe or "") or {}
+        target = os.path.abspath(self.launch_target(exe, meta)).lower() \
+            if exe else None
+        return bool(target) and target in self.launched_exes
 
     # ------------------------------------------------------------ registry --
     def layers_status(self):

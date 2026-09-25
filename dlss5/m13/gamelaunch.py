@@ -1,6 +1,6 @@
 # ============================================================================
 # m13.gamelaunch - detached game launching with the injection env, and
-# FILE-BASED pause/resume channels.
+# FILE-BASED pause/resume/freeze channels.
 #
 # The manager NEVER injects input into games (keybd_event/PostMessage failed
 # in the GTA IV menu - docs/HANDOFF_GTA4_DX9.md). All runtime control is
@@ -11,6 +11,15 @@
 #  - DX12 (m12-dxgi proxy): %TEMP%\m12_pause.flag - while it EXISTS every
 #    frame passes through untouched (full fps). Pause = create, resume =
 #    delete. The proxy owns CTRL+ALT+X/Q itself.
+#  - FREEZE (photo mode, both paths): %TEMP%\m13_freeze.flag - while it
+#    EXISTS the layer/proxy holds the raw frame captured at freeze time and
+#    re-blits its processed result: the picture stands still while the game
+#    keeps running. The layer learns the flag paths from NR_LAYER_FREEZE /
+#    NR_LAYER_REPROC env (manager-launched games); the m12 proxy reads the
+#    fixed %TEMP% names directly (works for externally started games too).
+#  - REPROCESS: bumping %TEMP%\m13_reproc.flag's mtime makes the layer/proxy
+#    re-send the SAME raw frame to the daemon - after an NRCT gain push the
+#    frozen picture updates from the untouched original (live knobs).
 # ============================================================================
 import os
 import subprocess
@@ -19,6 +28,8 @@ from .processes import DETACHED
 
 DX9_TRIGGER = os.path.join(os.environ.get("TEMP", "."), "m13_dx9_trigger.flag")
 M12_PAUSE = os.path.join(os.environ.get("TEMP", "."), "m12_pause.flag")
+FREEZE_FLAG = os.path.join(os.environ.get("TEMP", "."), "m13_freeze.flag")
+REPROC_FLAG = os.path.join(os.environ.get("TEMP", "."), "m13_reproc.flag")
 
 
 def _flag_exists(path):
@@ -52,13 +63,36 @@ def _launch(exe_path, env_extra=None):
     return True, "launched pid %d (log: %s)" % (p.pid, log)
 
 
+# ------------------------------------------------------------ freeze flags --
+def freeze_set(present):
+    """Photo mode on/off (shared by the layer and the m12 proxy)."""
+    _flag_set(FREEZE_FLAG, present)
+
+
+def freeze_active():
+    return _flag_exists(FREEZE_FLAG)
+
+
+def reproc_bump():
+    """Ask the layer/proxy to re-send the held raw frame (after a gain push).
+    Writing fresh content updates the mtime the layer watches."""
+    try:
+        with open(REPROC_FLAG, "w") as f:
+            f.write(str(os.getpid()) + " " + repr(__import__("time").time()))
+    except OSError:
+        pass
+
+
 # --------------------------------------------------------------------- DX9 --
 def launch_dx9(exe_path, live_every=1):
     """Launch a DX9 game under DXVK + the m11 layer (managed live mode)."""
     _flag_set(DX9_TRIGGER, True)   # processing ON from the first present
+    freeze_set(False)              # never launch into a frozen frame
     return _launch(exe_path, {
         "NR_LAYER_LIVE": str(live_every),
         "NR_LAYER_TRIGGER": DX9_TRIGGER,
+        "NR_LAYER_FREEZE": FREEZE_FLAG,
+        "NR_LAYER_REPROC": REPROC_FLAG,
     })
 
 
@@ -82,6 +116,7 @@ def launch_dx12(exe_path):
     """Launch a DX12 game with the m12-dxgi proxy active (M12_LIVE default
     4 comes from the proxy itself; no env needed)."""
     _flag_set(M12_PAUSE, False)    # make sure we start un-paused
+    freeze_set(False)
     return _launch(exe_path)
 
 
