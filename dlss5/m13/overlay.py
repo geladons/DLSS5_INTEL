@@ -1,50 +1,44 @@
 # ============================================================================
-# m13.overlay - the in-game control overlay (hotkey-invoked, default
-# CTRL+ALT+G). NOT a normal window anymore: a frameless, always-on-top,
-# semi-transparent panel centered over the screen so it floats above the
-# game instead of opening as a separate app window. Drag by the title strip.
+# m13.overlay - in-game control overlay (hotkey, default CTRL+ALT+G).
+# Frameless, always-on-top, semi-transparent panel centered over the screen;
+# WS_EX_NOACTIVATE means clicking it never minimizes the game.
 #
-# Controls, all LIVE without leaving the game:
-#   [PAUSE]/[RESUME]  processing toggle on the active path (file channels;
-#                     pause = passthrough at full fps, the frame you saw is
-#                     the last processed one)
-#   gain slider       live NRCT push to m11d (next processed frame); in
-#                     screen mode it restarts the overlay with the new gain
-#   auto-pause        optional: pause processing the moment the overlay opens
+# PHOTO MODE (owner's ideal flow): open the overlay -> the frame FREEZES
+# (the layer/proxy holds the raw frame and re-blits its processed result,
+# the game keeps running underneath). Turn the gain knob -> the manager
+# pushes the gain to the daemon (NRCT) and bumps the reprocess flag -> the
+# SAME original frame is reprocessed and the frozen picture updates. Close
+# the overlay -> the freeze flag drops and the game continues with the new
+# settings. If the active game does not understand the flags (started
+# outside the manager, layer modes only), the old NtSuspendProcess freeze
+# is the fallback (no live reprocess then).
 #
 # Threading: the overlay never does I/O itself. It renders ctl.snapshot()
 # (monitor thread) and routes every action through ctl.submit() (worker).
-#
-# The show/hide hotkey is POLLED via GetAsyncKeyState (edge-triggered): no
-# message-only window needed, and physical presses are what the owner uses.
-# Injected modifiers are unreliable on this host, so we never synthesize
-# keystrokes - the owner presses the combo.
 # ============================================================================
 import ctypes
 import time
 import tkinter as tk
 
 from .processes import suspend_pid, resume_pid
-from .gamelaunch import mode_paused as gamelaunch_mode_paused
+from . import gamelaunch
 
 VK = {"control": 0x11, "ctrl": 0x11, "alt": 0x12, "shift": 0x10}
 POLL_MS = 120
 DEBOUNCE_MS = 250
 STATUS_MS = 500
 
-# Extended window styles applied after mapping: NOACTIVATE is THE fix for
-# "clicking the overlay minimizes the game" - the panel never steals focus
-# from the game window; TOOLWINDOW keeps it out of Alt-Tab.
 GWL_EXSTYLE = -20
 WS_EX_NOACTIVATE = 0x08000000
 WS_EX_TOOLWINDOW = 0x00000080
 
 # dark theme (shared palette with ui.py)
-BG = "#16181d"
-PANEL = "#22252d"
-FG = "#d7dae0"
-MUTED = "#8b919e"
-ACCENT = "#4f8cff"
+BG = "#0d1017"
+PANEL = "#161a23"
+PANEL2 = "#1f2430"
+FG = "#e6e9f0"
+MUTED = "#8a91a5"
+ACCENT = "#5b8cff"
 GREEN = "#3fb950"
 RED = "#f85149"
 AMBER = "#d29922"
@@ -104,7 +98,7 @@ class HotkeyPoller:
 class ControlOverlay:
     """Frameless always-on-top control panel floating over the game."""
 
-    WIDTH, HEIGHT = 430, 320
+    WIDTH, HEIGHT = 440, 340
 
     def __init__(self, master, ctl, on_log):
         self.ctl = ctl
@@ -112,7 +106,7 @@ class ControlOverlay:
         self.win = tk.Toplevel(master)
         self.win.overrideredirect(True)          # frameless: no OS window look
         self.win.attributes("-topmost", True)
-        self.win.attributes("-alpha", 0.94)
+        self.win.attributes("-alpha", 0.95)
         self.win.configure(bg=BG, highlightthickness=1,
                            highlightbackground=ACCENT)
         self.win.resizable(False, False)
@@ -120,7 +114,8 @@ class ControlOverlay:
         self.win.withdraw()
         self._after_id = None
         self._drag = None
-        self._frozen_pid = None      # game pid suspended while we are open
+        self._frozen_pid = None      # fallback freeze: suspended game pid
+        self._freeze_flags = False   # primary freeze: layer/proxy flags
         self._pending_push = None    # (value, time) of an in-flight push
         self._build()
         self.poller = HotkeyPoller(ctl.cfg.get("overlay_hotkey"), self.toggle)
@@ -142,13 +137,13 @@ class ControlOverlay:
     def _build(self):
         w = self.win
         # title strip (drag handle)
-        strip = tk.Frame(w, bg=PANEL, height=30)
+        strip = tk.Frame(w, bg=PANEL, height=34)
         strip.pack(fill="x")
         strip.pack_propagate(False)
-        self.title_lbl = tk.Label(strip, text="DLSS 5", bg=PANEL, fg=FG,
+        self.title_lbl = tk.Label(strip, text="◆ DLSS 5", bg=PANEL, fg=ACCENT,
                                   font=("Segoe UI", 10, "bold"))
         self.title_lbl.pack(side="left", padx=10)
-        close = tk.Label(strip, text="X", bg=PANEL, fg=MUTED,
+        close = tk.Label(strip, text="✕", bg=PANEL, fg=MUTED,
                          font=("Segoe UI", 10, "bold"), padx=10, cursor="hand2")
         close.pack(side="right")
         close.bind("<Button-1>", lambda _e: self.hide())
@@ -161,9 +156,14 @@ class ControlOverlay:
         body = tk.Frame(w, bg=BG, padx=14, pady=10)
         body.pack(fill="both", expand=True)
 
+        self.freeze_lbl = tk.Label(
+            body, text="", bg=BG, fg=AMBER, font=("Segoe UI", 8),
+            justify="left", anchor="w")
+        self.freeze_lbl.pack(fill="x", pady=(0, 6))
+
         # processing toggle (the big one)
         self.toggle_btn = tk.Button(
-            body, text="PAUSE PROCESSING", font=("Segoe UI", 10, "bold"),
+            body, text="ПАУЗА ОБРАБОТКИ", font=("Segoe UI", 10, "bold"),
             bg=ACCENT, fg="#ffffff", activebackground="#3a70d6",
             activeforeground="#ffffff", relief="flat", bd=0, pady=7,
             cursor="hand2", command=self._toggle_processing)
@@ -176,7 +176,7 @@ class ControlOverlay:
         # gain
         grow = tk.Frame(body, bg=BG)
         grow.pack(fill="x")
-        tk.Label(grow, text="Gain", bg=BG, fg=FG,
+        tk.Label(grow, text="Сила эффекта", bg=BG, fg=FG,
                  font=("Segoe UI", 9, "bold")).pack(side="left")
         self.gain_val = tk.Label(grow, text="1.00", bg=BG, fg=ACCENT,
                                  font=("Consolas", 10, "bold"), width=5)
@@ -187,7 +187,7 @@ class ControlOverlay:
         self.scale = tk.Scale(
             body, from_=0.0, to=2.0, resolution=0.05, orient="horizontal",
             variable=self.var, command=self._debounced_push,
-            bg=BG, fg=FG, troughcolor=PANEL, highlightthickness=0, bd=0,
+            bg=BG, fg=FG, troughcolor=PANEL2, highlightthickness=0, bd=0,
             activebackground=ACCENT, showvalue=False, sliderrelief="flat")
         self.scale.pack(fill="x", pady=(0, 4))
         self.scale.bind("<ButtonPress-1>",
@@ -197,13 +197,13 @@ class ControlOverlay:
 
         prow = tk.Frame(body, bg=BG)
         prow.pack(fill="x", pady=(0, 4))
-        tk.Button(prow, text="Reset 1.0", font=("Segoe UI", 8), bg=PANEL,
-                  fg=FG, activebackground="#2e323c", activeforeground=FG,
+        tk.Button(prow, text="Сброс 1.0", font=("Segoe UI", 8), bg=PANEL,
+                  fg=FG, activebackground=PANEL2, activeforeground=FG,
                   relief="flat", bd=0, padx=8, cursor="hand2",
                   command=self._reset_gain).pack(side="left")
         self.ap_var = tk.BooleanVar(
             value=bool(self.ctl.cfg.get("overlay_autopause")))
-        tk.Checkbutton(prow, text="auto-pause on open", variable=self.ap_var,
+        tk.Checkbutton(prow, text="пауза при открытии", variable=self.ap_var,
                        command=self._save_autopause, bg=BG, fg=MUTED,
                        selectcolor=PANEL, activebackground=BG,
                        activeforeground=FG, font=("Segoe UI", 8),
@@ -213,17 +213,17 @@ class ControlOverlay:
         frow.pack(fill="x", pady=(0, 6))
         self.fr_var = tk.BooleanVar(
             value=bool(self.ctl.cfg.get("overlay_freeze")))
-        tk.Checkbutton(frow, text="freeze game while open (one frame stays)",
+        tk.Checkbutton(frow, text="замораживать кадр, пока панель открыта",
                        variable=self.fr_var, command=self._save_freeze,
                        bg=BG, fg=MUTED, selectcolor=PANEL,
                        activebackground=BG, activeforeground=FG,
                        font=("Segoe UI", 8), cursor="hand2").pack(side="left")
 
-        self.status = tk.Label(body, text="daemon: ?", bg=BG, fg=MUTED,
+        self.status = tk.Label(body, text="демон: ?", bg=BG, fg=MUTED,
                                font=("Consolas", 8), justify="left")
         self.status.pack(anchor="w")
 
-        tk.Label(body, text="%s - hide" % hotkey_label(
+        tk.Label(body, text="%s — скрыть панель" % hotkey_label(
             self.ctl.cfg.get("overlay_hotkey")), bg=BG, fg="#565b66",
             font=("Segoe UI", 8)).pack(side="bottom", pady=(8, 0))
 
@@ -282,25 +282,26 @@ class ControlOverlay:
             return
         snap = self.ctl.snapshot()
         mode = snap.get("active_mode")
-        names = {"dx9": "DX9 game", "dx11": "DX11 game", "dx12": "DX12 game",
-                 "vulkan": "Vulkan game", "screen": "Screen mode"}
+        names = {"dx9": "игра DX9", "dx11": "игра DX11",
+                 "dx12": "игра DX12", "vulkan": "игра Vulkan",
+                 "screen": "режим экрана"}
         paused = self.ctl.processing_paused()
         if paused is True:
-            self.toggle_btn.config(text="RESUME PROCESSING", bg=GREEN,
+            self.toggle_btn.config(text="ВОЗОБНОВИТЬ ОБРАБОТКУ", bg=GREEN,
                                    activebackground="#2ea043")
         elif paused is False:
-            self.toggle_btn.config(text="PAUSE PROCESSING", bg=ACCENT,
+            self.toggle_btn.config(text="ПАУЗА ОБРАБОТКИ", bg=ACCENT,
                                    activebackground="#3a70d6")
         else:
-            self.toggle_btn.config(text="PAUSE PROCESSING", bg=PANEL,
-                                   activebackground="#2e323c")
+            self.toggle_btn.config(text="ПАУЗА ОБРАБОТКИ", bg=PANEL,
+                                   activebackground=PANEL2)
         self.mode_lbl.config(
-            text="target: %s" % names.get(mode, "nothing running"))
+            text="цель: %s" % names.get(mode, "ничего не запущено"))
         if snap.get("daemon_pid") is not None:
             g, f = snap.get("daemon_gain"), snap.get("daemon_frames")
-            txt = "daemon up (pid %s)" % snap["daemon_pid"]
+            txt = "демон работает (pid %s)" % snap["daemon_pid"]
             if g is not None:
-                txt += " - gain %.2f, %d frames" % (g, f or 0)
+                txt += " — сила %.2f, кадров %d" % (g, f or 0)
                 pending = self._pending_push
                 stale_push = pending and (time.time() - pending[1] > 2.0
                                           or abs(pending[0] - g) < 0.001)
@@ -311,13 +312,13 @@ class ControlOverlay:
                     self.var.set(g)
                     self.gain_val.config(text="%.2f" % g)
             if snap.get("daemon_err"):
-                txt += " [busy]"
+                txt += " [занят]"
             self.status.config(text=txt, fg=MUTED)
         elif snap.get("screen_pid") is not None:
-            self.status.config(text="screen overlay up (pid %s)" %
-                               snap["screen_pid"], fg=MUTED)
+            self.status.config(text="оверлей экрана работает (pid %s)"
+                               % snap["screen_pid"], fg=MUTED)
         else:
-            self.status.config(text="daemon down", fg=RED)
+            self.status.config(text="демон остановлен", fg=RED)
         self.win.after(STATUS_MS, self._refresh)
 
     # ------------------------------------------------------------ show/hide
@@ -334,23 +335,43 @@ class ControlOverlay:
         self.win.lift()
         snap = self.ctl.snapshot()
         mode = snap.get("active_mode")
-        if self.ap_var.get() and mode in ("dx9", "dx11", "dx12", "vulkan") \
-                and not gamelaunch_mode_paused(mode):
+        game_mode = mode in ("dx9", "dx11", "dx12", "vulkan")
+        # Photo mode: freeze the frame so knob turns reprocess the original.
+        if self.ctl.cfg.get("overlay_freeze") and game_mode:
+            if self.ctl.freeze_supported():
+                gamelaunch.freeze_set(True)
+                self._freeze_flags = True
+                self.freeze_lbl.config(
+                    text="❄ Кадр заморожен. Крути ползунок — переобработаю "
+                         "исходный кадр с новой силой.", fg=AMBER)
+                self.on_log("[overlay] frame frozen (flags); knob turns "
+                            "reprocess the original")
+            else:
+                pid = self.ctl.active_game_pid()
+                if pid:
+                    ok, msg = suspend_pid(pid)
+                    self._frozen_pid = pid if ok else None
+                    self.freeze_lbl.config(
+                        text="❄ Игра приостановлена (запущена не из "
+                             "менеджера - живого превью нет).", fg=AMBER)
+                    self.on_log("[overlay] %s" % msg)
+        elif game_mode:
+            self.freeze_lbl.config(text="")
+        # optional: pause processing the moment the overlay opens (not
+        # combined with the freeze - a frozen frame IS the preview)
+        if self.ap_var.get() and game_mode and not self._freeze_flags \
+                and not gamelaunch.mode_paused(mode):
             self.ctl.submit(self.ctl.processing_toggle)
             self.on_log("[overlay] auto-paused (%s)" % mode)
-        # owner request: the game FREEZES on one frame while the panel is
-        # open (knobs turn calmly); closing the panel resumes it
-        if self.ctl.cfg.get("overlay_freeze") and mode in (
-                "dx9", "dx11", "dx12", "vulkan"):
-            pid = self.ctl.active_game_pid()
-            if pid:
-                ok, msg = suspend_pid(pid)
-                self._frozen_pid = pid if ok else None
-                self.on_log("[overlay] %s" % msg)
         self.win.after(STATUS_MS, self._refresh)
 
     def unfreeze(self):
-        """Resume a frozen game; called on hide AND on manager close."""
+        """Release any freeze; called on hide AND on manager close."""
+        if self._freeze_flags:
+            gamelaunch.freeze_set(False)
+            self._freeze_flags = False
+            self.on_log("[overlay] freeze released - game continues with "
+                        "the new settings")
         if self._frozen_pid is not None:
             ok, msg = resume_pid(self._frozen_pid)
             self.on_log("[overlay] %s" % msg)
@@ -365,6 +386,7 @@ class ControlOverlay:
 
     def hide(self):
         self.unfreeze()
+        self.freeze_lbl.config(text="")
         self.win.withdraw()
 
 

@@ -1,18 +1,111 @@
 # ============================================================================
-# m13.ui_games - the Games tab: drive scanner results + one-click enable /
-# launch / disable. The demo must be hands-free: scanning starts by itself,
-# "Launch" auto-deploys and auto-starts the daemon when needed.
+# m13.ui_games - the Games tab: found games as ICON CARDS (owner feedback:
+# "a list of 180 exe files is unreadable - show the actual games as icons").
+# One card per real game (gamescan groups candidates; only API-positive
+# install roots become cards). A card shows the exe icon, the game name,
+# the detected graphics API, the launch wrapper (pirate/GOG stubs) and the
+# live status (enabled / running / anti-cheat risk).
 #
 # All heavy work (drive scan, deploy, launch) runs off the Tk thread; this
 # class only renders and queues.
 # ============================================================================
+import os
 import queue
 import threading
 import tkinter as tk
 from tkinter import filedialog, ttk
 
+from .icons import IconCache
+
 MODE_NAMES = {"dx9": "DX9", "dx11": "DX11", "dx12": "DX12",
               "vulkan": "Vulkan"}
+MODE_COLORS = {"dx9": "#d29922", "dx11": "#58a6ff", "dx12": "#9a6bff",
+               "vulkan": "#3fb950", None: "#8a91a5"}
+
+BG = "#0d1017"
+PANEL = "#161a23"
+PANEL2 = "#1f2430"
+FG = "#e6e9f0"
+MUTED = "#8a91a5"
+ACCENT = "#5b8cff"
+GREEN = "#3fb950"
+RED = "#f85149"
+AMBER = "#d29922"
+
+CARD_W = 150
+CARD_H = 172
+CARD_COLS = 4
+
+
+class GameCard:
+    """One clickable icon card in the grid."""
+
+    def __init__(self, tab, parent, exe, name, mode, arch, source,
+                 launch_exe=None, anticheat=False, saved=False):
+        self.tab = tab
+        self.exe = exe
+        self.anticheat = anticheat
+        self.frame = tk.Frame(parent, bg=PANEL, width=CARD_W, height=CARD_H,
+                              highlightthickness=1,
+                              highlightbackground=PANEL2,
+                              highlightcolor=ACCENT, cursor="hand2")
+        self.frame.pack_propagate(False)
+        self.icon_lbl = tk.Label(self.frame, bg=PANEL)
+        self.icon_lbl.pack(pady=(10, 4))
+        img = tab.icons.get(self.frame, exe)
+        self.icon_lbl.config(image=img)
+        self._img = img     # keep a reference
+        self.name_lbl = tk.Label(self.frame, text=name, bg=PANEL, fg=FG,
+                                 font=("Segoe UI", 9, "bold"),
+                                 wraplength=CARD_W - 14, justify="center")
+        self.name_lbl.pack()
+        mid = tk.Frame(self.frame, bg=PANEL)
+        mid.pack(pady=(2, 0))
+        color = MODE_COLORS.get(mode, MODE_COLORS[None])
+        tk.Label(mid, text=MODE_NAMES.get(mode, "режим ?"), bg=PANEL, fg=color,
+                 font=("Segoe UI", 8, "bold")).pack(side="left")
+        if arch:
+            tk.Label(mid, text=" " + arch, bg=PANEL, fg=MUTED,
+                     font=("Segoe UI", 8)).pack(side="left")
+        if anticheat:
+            tk.Label(mid, text=" ⚠", bg=PANEL, fg=AMBER,
+                     font=("Segoe UI", 9, "bold")).pack(side="left")
+        sub = []
+        if launch_exe:
+            sub.append("через %s" % os.path.basename(launch_exe))
+        if saved:
+            sub.append("сохранена")
+        self.sub_lbl = tk.Label(self.frame, text=" · ".join(sub) or source,
+                                bg=PANEL, fg=MUTED, font=("Segoe UI", 7),
+                                wraplength=CARD_W - 12, justify="center")
+        self.sub_lbl.pack()
+        self.state_lbl = tk.Label(self.frame, text="не добавлена", bg=PANEL,
+                                  fg=MUTED, font=("Segoe UI", 8))
+        self.state_lbl.pack(pady=(3, 0))
+        for w in (self.frame, self.icon_lbl, self.name_lbl, self.sub_lbl,
+                  self.state_lbl, mid):
+            w.bind("<Button-1>", self._click)
+            w.bind("<Double-Button-1>", self._dbl)
+        for w in mid.winfo_children():
+            w.bind("<Button-1>", self._click)
+            w.bind("<Double-Button-1>", self._dbl)
+
+    def _click(self, _e):
+        self.tab.select(self.exe)
+
+    def _dbl(self, _e):
+        self.tab.select(self.exe)
+        self.tab._launch()
+
+    def set_selected(self, on):
+        self.frame.config(highlightbackground=ACCENT if on else PANEL2,
+                          bg=PANEL2 if on else PANEL)
+        for w in (self.icon_lbl, self.name_lbl, self.sub_lbl,
+                  self.state_lbl):
+            w.config(bg=PANEL2 if on else PANEL)
+
+    def set_state(self, text, color):
+        self.state_lbl.config(text=text, fg=color)
 
 
 class GamesTab:
@@ -21,95 +114,108 @@ class GamesTab:
         self.ctl = ui.ctl
         self.scanq = queue.Queue()
         self.scanned = []
+        self.cards = {}             # exe -> GameCard
+        self._selected = None
+        self.icons = IconCache(size=48)
         self._build(nb)
 
     def _build(self, nb):
         t = ttk.Frame(nb, padding=10)
-        nb.add(t, text="  Games  ")
+        nb.add(t, text="  Игры  ")
+        self.tab_frame = t
         top = ttk.Frame(t)
         top.pack(fill="x")
-        ttk.Button(top, text="Rescan drives", style="Accent.TButton",
+        ttk.Button(top, text="Пересканировать", style="Accent.TButton",
                    command=self.scan_start).pack(side="left")
-        ttk.Button(top, text="Add exe manually...",
+        ttk.Button(top, text="Добавить exe вручную...",
                    command=self._add_manual).pack(side="left", padx=6)
-        self.scan_info = ttk.Label(top, text="scanning...",
+        self.scan_info = ttk.Label(top, text="сканирую диски...",
                                    style="Muted.TLabel")
         self.scan_info.pack(side="left", padx=10)
 
-        cols = ("name", "mode", "state", "path")
-        self.tree = ttk.Treeview(t, columns=cols, show="headings", height=10)
-        for cid, label, w in (("name", "Game", 200), ("mode", "Mode", 70),
-                              ("state", "Status", 170), ("path", "Path", 420)):
-            self.tree.heading(cid, text=label)
-            self.tree.column(cid, width=w, anchor="w")
-        self.tree.tag_configure("running", foreground="#3fb950")
-        self.tree.tag_configure("enabled", foreground="#4f8cff")
-        self.tree.tag_configure("foreign", foreground="#f85149")
-        self.tree.tag_configure("warn", foreground="#d29922")
-        self.tree.tag_configure("plain", foreground="#8b919e")
-        self.tree.pack(fill="both", expand=True, pady=6)
-        self.tree.bind("<<TreeviewSelect>>", lambda _e: self._sel_changed())
+        # scrollable card grid
+        wrap = tk.Frame(t, bg=BG)
+        wrap.pack(fill="both", expand=True, pady=6)
+        self.canvas = tk.Canvas(wrap, bg=BG, highlightthickness=0, height=380)
+        vsb = ttk.Scrollbar(wrap, orient="vertical",
+                            command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.grid_frame = tk.Frame(self.canvas, bg=BG)
+        self.canvas.create_window((0, 0), window=self.grid_frame, anchor="nw")
+        self.grid_frame.bind("<Configure>", lambda _e: self.canvas.configure(
+            scrollregion=self.canvas.bbox("all")))
+        self.canvas.bind_all("<MouseWheel>", self._wheel)
 
         act = ttk.Frame(t)
         act.pack(fill="x", pady=(2, 0))
-        ttk.Label(act, text="mode:").pack(side="left")
-        self.mode_var = tk.StringVar(value="auto")
-        self.mode_box = ttk.Combobox(act, textvariable=self.mode_var, width=7,
-                                     state="readonly",
-                                     values=("auto", "DX9", "DX11", "DX12",
-                                             "Vulkan"))
+        ttk.Label(act, text="режим:").pack(side="left")
+        self.mode_var = tk.StringVar(value="авто")
+        self.mode_box = ttk.Combobox(
+            act, textvariable=self.mode_var, width=7, state="readonly",
+            values=("авто", "DX9", "DX11", "DX12", "Vulkan"))
         self.mode_box.pack(side="left", padx=(4, 10))
-        ttk.Button(act, text="Enable DLSS 5", style="Accent.TButton",
+        ttk.Button(act, text="Включить DLSS 5", style="Accent.TButton",
                    command=self._enable).pack(side="left")
-        ttk.Button(act, text="Launch",
+        ttk.Button(act, text="Играть",
                    command=self._launch).pack(side="left", padx=6)
-        ttk.Button(act, text="Pause / Resume",
+        ttk.Button(act, text="Пауза / продолжить",
                    command=lambda: self.ctl.submit(
                        self.ctl.processing_toggle)).pack(side="left")
-        ttk.Button(act, text="Disable",
+        ttk.Button(act, text="Отключить",
                    command=self._disable).pack(side="left", padx=6)
-        ttk.Button(act, text="Remove", style="Danger.TButton",
+        ttk.Button(act, text="Убрать", style="Danger.TButton",
                    command=self._remove).pack(side="left")
-        ttk.Label(t, text="Anti-cheat warning: do not enable in online/"
-                          "protected titles (PUBG, CS2, GTA Online) - the "
-                          "DLL injection can be read as a cheat.",
-                  style="Muted.TLabel", foreground="#d29922",
+        ttk.Label(t, text="⚠ Античит: не включай в онлайн-играх (PUBG, CS2, "
+                          "GTA Online) - внедрение DLL могут посчитать читом.",
+                  style="Muted.TLabel", foreground=AMBER,
                   wraplength=860).pack(anchor="w", pady=(6, 0))
+
+    def _wheel(self, e):
+        try:
+            if self.canvas.winfo_viewable():
+                self.canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+        except tk.TclError:
+            pass
 
     # ---------------------------------------------------------- selection --
     def selected_exe(self):
-        sel = self.tree.selection()
-        if not sel:
-            return None
-        tags = self.tree.item(sel[0], "tags")
-        return tags[-1] if tags else None
+        return self._selected
 
-    def _sel_changed(self):
-        exe = self.selected_exe()
+    def select(self, exe):
+        self._selected = exe
+        for path, card in self.cards.items():
+            card.set_selected(path == exe)
         meta = (self.ctl.cfg.get("games") or {}).get(exe or "")
         if meta:
-            self.mode_var.set(MODE_NAMES.get(meta["mode"], "auto"))
+            self.mode_var.set(MODE_NAMES.get(meta["mode"], "авто"))
 
     def _chosen_mode(self):
         v = self.mode_var.get().lower()
-        return None if v == "auto" else v
+        return None if v in ("авто", "auto") else v
 
     # ------------------------------------------------------------ actions --
     def _add_manual(self):
-        p = filedialog.askopenfilename(title="game exe",
+        p = filedialog.askopenfilename(title="exe игры",
                                        filetypes=[("exe", "*.exe")])
         if p:
-            self.ctl.submit(self.ctl.add_game, p, None, None, None)
+            self.ctl.submit(self.ctl.add_game, p, None, None, None, None)
 
     def _enable(self):
         exe = self.selected_exe()
         if not exe:
-            self.ui.log("mgr", "pick a game in the list first")
+            self.ui.log("mgr", "сначала выбери игру из карточек")
             return
-        self.ctl.submit(self._enable_worker, exe, self._chosen_mode())
+        launch = None
+        for g in self.scanned:
+            if g.exe == exe:
+                launch = g.launch_exe if g.via_wrapper else None
+        self.ctl.submit(self._enable_worker, exe, self._chosen_mode(),
+                        launch)
 
-    def _enable_worker(self, exe, mode):
-        ok, msg = self.ctl.add_game(exe, mode)
+    def _enable_worker(self, exe, mode, launch_exe=None):
+        ok, msg = self.ctl.add_game(exe, mode, launch_exe=launch_exe)
         if not ok:
             return False, msg
         return self.ctl.game_deploy(exe)
@@ -117,10 +223,15 @@ class GamesTab:
     def _launch(self):
         exe = self.selected_exe()
         if not exe:
-            self.ui.log("mgr", "pick a game in the list first")
+            self.ui.log("mgr", "сначала выбери игру из карточек")
             return
         if exe not in (self.ctl.cfg.get("games") or {}):
-            self.ctl.submit(self._enable_worker, exe, self._chosen_mode())
+            launch = None
+            for g in self.scanned:
+                if g.exe == exe:
+                    launch = g.launch_exe if g.via_wrapper else None
+            self.ctl.submit(self._enable_worker, exe, self._chosen_mode(),
+                            launch)
         self.ctl.submit(self.ctl.game_launch, exe)
 
     def _disable(self):
@@ -135,7 +246,7 @@ class GamesTab:
 
     # --------------------------------------------------------------- scan --
     def scan_start(self):
-        self.scan_info.config(text="scanning drives...")
+        self.scan_info.config(text="сканирую диски (до ~20 с)...")
         threading.Thread(target=self._scan_worker, daemon=True,
                          name="m13-scan").start()
 
@@ -155,57 +266,59 @@ class GamesTab:
         except queue.Empty:
             return
         if kind == "error":
-            self.scan_info.config(text="scan failed: %s" % payload)
+            self.scan_info.config(text="ошибка сканирования: %s" % payload)
             return
         self.scanned = payload
-        self.scan_info.config(text="%d game candidates found"
-                              % len(self.scanned))
-        self.ui.log("mgr", "game scan: %d candidates" % len(self.scanned))
-        self.tree_fill()
+        self.scan_info.config(text="найдено игр: %d" % len(self.scanned))
+        self.ui.log("mgr", "game scan: %d games (grouped, launchers "
+                    "resolved)" % len(self.scanned))
+        self.cards_fill()
 
-    def tree_fill(self):
-        self.tree.delete(*self.tree.get_children())
+    def cards_fill(self):
+        for w in self.grid_frame.winfo_children():
+            w.destroy()
+        self.cards = {}
         known = self.ctl.cfg.get("games") or {}
-        rows = []
+        entries = []
         for g in self.scanned:
-            rows.append((g.exe, g.name + (" *" if g.likely else ""),
-                         (g.mode or "?").upper() + ("/" + g.arch
-                                                    if g.arch else ""),
-                         g.anticheat))
+            entries.append(dict(exe=g.exe, name=g.name, mode=g.mode,
+                                arch=g.arch, source=g.source,
+                                launch_exe=(g.launch_exe
+                                            if g.via_wrapper else None),
+                                anticheat=g.anticheat, saved=False))
         for exe, meta in known.items():
-            if all(r[0] != exe for r in rows):
-                rows.append((exe, meta["name"] + " (saved)",
-                             meta["mode"].upper(), False))
-        for exe, name, mode, ac in rows:
-            self.tree.insert("", "end", values=(name, mode, "...", exe),
-                             tags=("warn" if ac else "plain", exe))
+            if all(e["exe"] != exe for e in entries):
+                entries.append(dict(
+                    exe=exe, name=meta["name"] + " (сохранена)",
+                    mode=meta["mode"], arch=meta.get("arch"), source="saved",
+                    launch_exe=meta.get("launch_exe"), anticheat=False,
+                    saved=True))
+        for i, e in enumerate(entries):
+            card = GameCard(self, self.grid_frame, **e)
+            card.frame.grid(row=i // CARD_COLS, column=i % CARD_COLS,
+                            padx=6, pady=6, sticky="n")
+            self.cards[e["exe"]] = card
+        if self._selected in self.cards:
+            self.cards[self._selected].set_selected(True)
 
     # ------------------------------------------------------------- render --
     def render(self, snap):
         games = snap.get("games") or {}
-        for item in self.tree.get_children():
-            tags = self.tree.item(item, "tags")
-            exe = tags[-1] if tags else ""
-            vals = list(self.tree.item(item, "values"))
+        for exe, card in self.cards.items():
             meta = games.get(exe)
-            warn = "warn" in tags
             if meta:
-                state = meta["dll"] or "?"
                 if meta["running"]:
-                    state += " | RUNNING"
+                    state, color = "ЗАПУЩЕНА", GREEN
                     if meta["paused"]:
-                        state += " (paused)"
-                    tag = "running"
+                        state += " (пауза)"
                 elif meta["dll"] == "deployed":
-                    tag = "enabled"
+                    state, color = "DLSS 5 включён", ACCENT
                 elif meta["dll"] in ("foreign", "partial"):
-                    tag = "foreign"
+                    state, color = "чужие DLL! проверь папку", RED
                 else:
-                    tag = "warn" if warn else "plain"
+                    state, color = "добавлена", MUTED
             else:
-                state = "not added"
-                tag = "warn" if warn else "plain"
-            if warn and tag in ("plain", "enabled"):
-                state += " | ANTI-CHEAT RISK"
-            vals[2] = state
-            self.tree.item(item, values=vals, tags=(tag, exe))
+                state, color = "не добавлена", MUTED
+            if card.anticheat and not (meta and meta["running"]):
+                state, color = "⚠ античит-риск", AMBER
+            card.set_state(state, color)
