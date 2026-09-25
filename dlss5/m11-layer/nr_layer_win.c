@@ -21,6 +21,13 @@
  *                     Arms CTRL+ALT+X (pause/resume passthrough) and
  *                     CTRL+ALT+Q (layer off) hotkeys.
  *   NR_LAYER_NOPATCH  1 = do not touch swapchains (pure passthrough; bisect)
+ *   NR_LAYER_FREEZE   while this file exists (live mode only): the last raw
+ *                     frame is HELD - every present re-blits the processed
+ *                     result so the picture freezes while the game runs on
+ *   NR_LAYER_REPROC   mtime change of this file while frozen: re-send the
+ *                     held RAW frame to the daemon (it reprocesses with the
+ *                     current gain) and hold the fresh result. This is the
+ *                     in-game "photo mode with live knobs" (m13 overlay).
  *   NR_LAYER_CAPTURE  write the next captured frame (header+pixels) here
  *   NR_LAYER_EVERY N  capture every Nth present even without a trigger
  *   NR_LAYER_SYNC     "semaphore" = present-semaphore ring; default = idle
@@ -77,6 +84,11 @@ typedef struct device_data {
     int have_earlier;
     unsigned char *outgoing;
     VkDeviceSize outgoing_size;
+    unsigned char *raw;          /* freeze mode: the held UNPROCESSED frame */
+    VkDeviceSize raw_size;
+    int raw_held;
+    FILETIME reproc_stamp;       /* last seen NR_LAYER_REPROC mtime */
+    int reproc_seen;
     PFN_vkGetDeviceProcAddr get_device_proc;
     PFN_vkQueuePresentKHR present;
     PFN_vkCreateSwapchainKHR create_swapchain;
@@ -120,6 +132,8 @@ static long capture_every;
 static long live_every;
 static long nr_port = NR_DEFAULT_PORT;
 static const char *trigger_path;
+static const char *freeze_path;
+static const char *reproc_path;
 static int ui_mask;
 static int no_patch;            /* NR_LAYER_NOPATCH=1: leave swapchains alone */
 static volatile LONG g_paused;  /* CTRL+ALT+X: passthrough, full fps */
@@ -375,6 +389,8 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
         capture_path = getenv("NR_LAYER_CAPTURE");
         capture_out_path = getenv("NR_LAYER_CAPTURE_OUT");
         trigger_path = getenv("NR_LAYER_TRIGGER");
+        freeze_path = getenv("NR_LAYER_FREEZE");
+        reproc_path = getenv("NR_LAYER_REPROC");
         const char *mask = getenv("NR_LAYER_UI_MASK");
         ui_mask = mask && strcmp(mask, "0") != 0;
         const char *every = getenv("NR_LAYER_EVERY");
@@ -544,6 +560,7 @@ static void release_device(device_data *data)
     free(data->result);
     free(data->earlier);
     free(data->outgoing);
+    free(data->raw);
 }
 
 VKAPI_ATTR void VKAPI_CALL nr_DestroyDevice(VkDevice device,
@@ -945,6 +962,71 @@ static VkResult present_now(device_data *data, VkQueue queue,
     return data->present(queue, &patched);
 }
 
+/* ------------------------------------------------ freeze + live reprocess --
+ * m13 overlay "photo mode": while NR_LAYER_FREEZE exists the layer holds the
+ * RAW frame captured at freeze time and re-blits its processed result every
+ * present (the game keeps running underneath; the picture stands still).
+ * When the manager pushes a new gain to the daemon it bumps NR_LAYER_REPROC's
+ * mtime; the next present re-sends the SAME raw frame, so the knob turns are
+ * visible on the frozen frame, processed from the untouched original. */
+static int reproc_changed(device_data *data)
+{
+    if (!reproc_path) return 0;
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (!GetFileAttributesExA(reproc_path, GetFileExInfoStandard, &fa)) {
+        data->reproc_seen = 0;
+        return 0;
+    }
+    if (!data->reproc_seen
+        || fa.ftLastWriteTime.dwLowDateTime != data->reproc_stamp.dwLowDateTime
+        || fa.ftLastWriteTime.dwHighDateTime != data->reproc_stamp.dwHighDateTime) {
+        data->reproc_stamp = fa.ftLastWriteTime;
+        data->reproc_seen = 1;
+        return 1;
+    }
+    return 0;
+}
+
+/* Send the held raw frame to the daemon; reply lands in data->result. */
+static int resend_raw(device_data *data, swapchain_data *chain)
+{
+    uint32_t header[4] = { 0x304E524Eu, chain->extent.width,
+                           chain->extent.height, (uint32_t)chain->format };
+    if (exchange(header, sizeof header, data->raw, (size_t)data->raw_size,
+                 data->result, (size_t)data->raw_size)) {
+        nr_log("[nr_layer] reprocess: the daemon did not answer");
+        return -1;
+    }
+    nr_log("[nr_layer] reprocessed the held frame (live knob turn)");
+    return 0;
+}
+
+/* Hold the frame being presented right now as the frozen raw frame, process
+ * it once (so the frozen picture starts processed at the current gain). */
+static int freeze_capture(device_data *data, swapchain_data *chain,
+                          VkQueue queue, uint32_t index)
+{
+    VkDeviceSize needed = (VkDeviceSize)chain->extent.width
+                        * chain->extent.height * 4;
+    if (ensure_resources(data, needed)) return -1;
+    if (transfer(data, chain, queue, index, 0)) return -1;
+    if (data->raw_size < needed) {
+        unsigned char *grown = (unsigned char *)realloc(data->raw,
+                                                        (size_t)needed);
+        if (!grown) return -1;
+        data->raw = grown;
+        data->raw_size = needed;
+    }
+    memcpy(data->raw, data->mapped, (size_t)needed);
+    data->raw_size = needed;
+    data->raw_held = 1;
+    if (resend_raw(data, chain)) return -1;
+    memcpy(data->mapped, data->result, (size_t)needed);
+    nr_log("[nr_layer] frame frozen (%ux%u); knobs reprocess the original",
+           chain->extent.width, chain->extent.height);
+    return 0;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                                                   const VkPresentInfoKHR *info)
 {
@@ -990,12 +1072,35 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
     if (live_every > 0) {
         int on = !trigger_path || _access(trigger_path, 0) == 0;
         if (!on) data->holding = 0;
+        int frozen = freeze_path && _access(freeze_path, 0) == 0;
+        if (!frozen) {
+            data->raw_held = 0;
+            data->reproc_seen = 0;
+        }
         for (uint32_t i = 0; on && i < info->swapchainCount; i++) {
             swapchain_data *chain = find_swapchain(info->pSwapchains[i]);
             if (!chain || info->pImageIndices[i] >= chain->image_count) continue;
             uint32_t index = info->pImageIndices[i];
             VkDeviceSize want = (VkDeviceSize)chain->extent.width
                               * chain->extent.height * 4;
+            if (frozen) {
+                /* Photo mode: hold the frozen frame; reprocess on demand. */
+                if (!data->raw_held || data->raw_size != want) {
+                    if (freeze_capture(data, chain, queue, index) == 0)
+                        transfer(data, chain, queue, index, 1);
+                } else {
+                    if (reproc_changed(data)
+                        && resend_raw(data, chain) != 0)
+                        nr_log("[nr_layer] reprocess failed; keeping the "
+                               "previous result");
+                    if (data->result_size == want) {
+                        memcpy(data->mapped, data->result,
+                               (size_t)data->result_size);
+                        transfer(data, chain, queue, index, 1);
+                    }
+                }
+                continue;
+            }
             if (frame_counter % (unsigned long)live_every == 0) {
                 if (process_frame(data, chain, queue, index) == 0) {
                     data->holding = 1;
