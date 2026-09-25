@@ -18,6 +18,7 @@ import struct
 MAGIC_CTRL = 0x5443524E          # "NRCT", little-endian uint32
 CMD_SETGAIN = 1
 CMD_STATUS = 2
+CMD_SETBLEND = 3
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 47990
 
@@ -70,6 +71,13 @@ class M11dClient:
             raise DaemonError("gain %.3f out of range 0..16" % gain)
         payload = struct.unpack("<I", struct.pack("<f", gain))[0]
         return self._roundtrip(CMD_SETGAIN, payload)
+
+    def set_blend(self, blend):
+        """Live blend (vendor mix factor 0..1) update; next processed frame."""
+        if not 0.0 <= blend <= 1.0:
+            raise DaemonError("blend %.3f out of range 0..1" % blend)
+        payload = struct.unpack("<I", struct.pack("<f", blend))[0]
+        return self._roundtrip(CMD_SETBLEND, payload)
 
     def alive(self):
         """True only when an NRCT-speaking m11d answers (Sunshine doesn't)."""
