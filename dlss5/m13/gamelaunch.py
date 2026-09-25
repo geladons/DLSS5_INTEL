@@ -85,10 +85,14 @@ def reproc_bump():
 
 # --------------------------------------------------------------------- DX9 --
 def launch_dx9(exe_path, live_every=1):
-    """Launch a DX9 game under DXVK + the m11 layer (managed live mode)."""
+    """Launch a DX9 game under DXVK + the m11 layer (managed live mode).
+    ENABLE_NR_LAYER=1 is REQUIRED: the loader honors the manifest's
+    enable_environment gating (vkcube test 2026-09-24 - no var, no layer).
+    Children (launcher wrappers) inherit the env."""
     _flag_set(DX9_TRIGGER, True)   # processing ON from the first present
     freeze_set(False)              # never launch into a frozen frame
     return _launch(exe_path, {
+        "ENABLE_NR_LAYER": "1",
         "NR_LAYER_LIVE": str(live_every),
         "NR_LAYER_TRIGGER": DX9_TRIGGER,
         "NR_LAYER_FREEZE": FREEZE_FLAG,
