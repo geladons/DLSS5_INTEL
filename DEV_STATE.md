@@ -1,4 +1,67 @@
-# DEV_STATE.md - where we are (updated 2026-09-24 ~00:40 by Kimi)
+# DEV_STATE.md - where we are (updated 2026-09-24 ~17:55 by Kimi)
+
+## M13 v4 (2026-09-24 ~17:55) - friendly UI, real-games scanner, photo mode,
+## screen-mode VRAM fix
+Owner feedback on v3: boring/unfriendly UI (add an easter egg), scanner
+found "180 games" (really ~10), STALKER 2 shows no API, launcher pirates
+(STALKER 2, RDR2) do not work, overlay should freeze the frame and show
+knob turns LIVE on the frozen original, screen mode crashes the daemon.
+Fixes:
+1. SCREEN MODE CRASH ROOT CAUSE: m11d and m8blive each reserve an ~11.7 GB
+   arena; the Arc Pro B50 has 16 GB - both at once = OOM. controller now
+   enforces VRAM EXCLUSIVITY: screen_start stops the daemon first,
+   daemon_start stops the screen overlay first (logged). Screen tab
+   explains it + the 1440p warm-up honestly.
+2. PHOTO MODE (the owner's ideal overlay): new layer/proxy mechanism -
+   NR_LAYER_FREEZE / %TEMP%\m13_freeze.flag holds the RAW frame captured
+   at freeze time and re-blits its processed result every present (the
+   game keeps running, the picture stands still - no NtSuspendProcess).
+   Manager knob turn = NRCT SETGAIN + bump %TEMP%\m13_reproc.flag mtime
+   (NR_LAYER_REPROC env) -> the SAME raw frame is re-sent and the frozen
+   picture updates from the untouched original. Overlay close drops the
+   flag: the game continues with the new settings. m12_dx12: captureToCpu
+   split into grabRaw/sendRaw, fixed %TEMP% flag names (externally
+   started DX12 games covered). Fallback for layer-mode games started
+   outside the manager: old process suspend (no live preview).
+   VALIDATED E2E on vkcube: "frame frozen (500x500)" -> 4x "reprocessed
+   the held frame (live knob turn)" -> live processing resumes. x64+x86
+   layer + m12 proxy rebuilt and shipped in the bundle.
+3. SCANNER v2 (gamescan.py rewrite): candidates grouped per install root;
+   a group becomes a card ONLY with an API-positive renderer binary
+   (browsers/updaters/tools die). pe_info parses the DELAY-LOAD directory
+   (UE5/STALKER 2 delay-loads d3d12.dll - was misread as dx11) and wide
+   d3d strings (Metro Exodus), vulkan stays ascii-only (STALKER 2 carries
+   a wide vulkan string from XeSS but is DX12). Launch wrappers resolved:
+   launch_exe = Stalker2.exe / Launcher.exe / PlayGTAV.exe /
+   REDprelauncher.exe while the REAL renderer binary is the inject/deploy
+   target. Result on the owner's box: EXACTLY 10 games (was 180), 15 s.
+   Config migration retargets v3 stub entries (owner's "Launcher" dx12
+   and "Stalker2" vulkan entries -> RDR2.exe via Launcher.exe,
+   Stalker2-Win64-Shipping.exe dx12 via Stalker2.exe).
+4. UI v4: Russian, deep-navy theme, games as ICON CARDS (icons.py -
+   SHGetFileInfoW->DIB->zlib PNG->PhotoImage, stdlib only), pill
+   checklist, splash screen with animated neural doodle + joke lines,
+   hidden easter egg (5 clicks on the header diamond), README.txt in
+   Russian (UTF-8).
+VALIDATED: _smoke.py ALL PASS except "resume unfreezes" which fails
+ENVIRONMENTALLY on this host right now (GetProcessTimes returns 0 CPU
+for ANY child process, even never-suspended - pre-existing host quirk,
+processes.py untouched); _ui_smoke ALL PASS vs live daemon (gain pushes
+1.35/0.9 via NRCT); production bundle rebuilt (58 binaries sha1-verified)
+and boot-tested: autosetup green, daemon auto-started, 10 game cards with
+real exe icons, migration applied to the live config.
+GOTCHA fixed during validation: FOUR layer registrations were active
+(dev + prod x64 + x86 - the prod manager cannot unregister the dev copies
+it cannot see; dedupe only works dev-side). Dev manifests unregistered by
+hand; prod pair remains. If presents ever double-process, check
+HKCU\Software\Khronos\Vulkan\ImplicitLayers for duplicates.
+The layer loads ONLY with ENABLE_NR_LAYER=1 (the loader DOES honor the
+manifest enable_environment gating now - proven in the vkcube freeze
+test: no var, no layer). gamelaunch sets ENABLE_NR_LAYER=1 for every
+manager-launched game (wrappers inherit it to their children).
+OPEN: live in-game test of photo mode with the owner (vkcube-verified
+mechanics; real game pending), GTA5E elevated deploy still needs the
+owner's UAC click.
 
 ## M13 v3 (2026-09-24 ~00:40) - hands-free demo: auto-everything + any game
 Owner feedback on v2: still too manual, no DX10/11, overlay click minimized
