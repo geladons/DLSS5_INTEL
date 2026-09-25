@@ -1,4 +1,55 @@
-# DEV_STATE.md - where we are (updated 2026-09-24 ~23:20 by Kimi)
+# DEV_STATE.md - where we are (updated 2026-09-25 ~12:00 by Kimi)
+
+## M13 v6 (2026-09-25 ~12:00) - overlay mouse capture hardening, second
+## knob (effect mix/blend), live screen-mode retune, no-console launcher
+Owner feedback on v5: (1) in-game overlay STILL did not get the mouse,
+(2) only one knob (gain) - want more, (3) screen/window mode misbehaved
+and turning gain there killed the daemon (it was a RESTART with the ~30 s
+weights upload), (4) too many windows: a console opens with the app, no
+app icon, UAC worries.
+Fixes:
+1. OVERLAY MOUSE: _take_focus() now does the full steal - SendInput
+   zero-move jiggle (beats the foreground lock), AttachThreadInput dance
+   around SetForegroundWindow/SetActiveWindow/SetFocus, SetCursorPos warp
+   onto the panel (games pin the hidden cursor to screen center), and a
+   150 ms _cursor_keeper() loop that re-frees the cursor (ClipCursor NULL
+   + ShowCursor + arrow) the whole time the panel is open - FPS games
+   re-clip/re-hide EVERY FRAME, one-shot release was not enough.
+2. SECOND KNOB "Effect mix" (vendor blend factor, compose recipe
+   out = clamp(source + blend*(predicted - source)), hardcoded 1.0 before):
+   compose.comp pc.c.w, chain EngineConfig.headBlend + setHeadBlend(),
+   m11d --blend arg + NRCT cmd 3 SETBLEND (float bits, 0..1 clamp),
+   m8blive --blend + live knob file (below). UI: second slider in the
+   in-game overlay AND in the manager header; per-slider Reset buttons;
+   config.json "blend" persists. blend=0 selftest = BIT-EXACT passthrough
+   (maxdiff 0 vs the input bmp) - the whole new path validated.
+3. SCREEN MODE LIVE KNOBS: m8blive polls %TEMP%\m13_screen_knobs.txt
+   ("gain blend", mtime-checked, clamps g 0..16 / b 0..1, stale-file
+   protection via lastWrite init) once per processed frame
+   (LiveKnobs/pollKnobs in main.cpp). Manager set_gain/set_blend now
+   REWRITE THE FILE instead of restarting m8blive - no more 30 s
+   "crashes". Verified live: wrote 1.5/0.4 mid-run, the running m8blive
+   logged "[knobs] live: gain 1.500 blend 0.400" and retuned.
+4. NO CONSOLE + ICON: new primary launcher "DLSS5 Manager.vbs" (WScript
+   discovery of pyw/pythonw/per-user installs, window style 0 - zero
+   console). M13.cmd kept as fallback (flashes for a split second, hands
+   over to the VBS). m13.pyw redirects sys.stderr to logs\manager_err.log
+   (pythonw would otherwise lose tracebacks). icon.ico (the diamond logo,
+   16..256 px) via iconbitmap(default=...) + AppUserModelID
+   "DLSS5.Manager" (own taskbar group, not generic Python). UAC answer
+   for the README: admin is asked ONLY when enabling a game in Program
+   Files (once per game); layers are HKCU, daemon and screen mode need
+   no admin.
+5. UNIVERSALITY: m11d no longer hardcodes the weights path (--weights is
+   required, controller always passes it; _demo.cmd updated) and the
+   "Intel Arc Pro B50" banner is gone from the daemon output.
+Verified: m11d --selftest vs work/_m9b_cmp goldens (features meandiff
+8.8e-08, fp16 noise level as before), blend=0 bit-exact passthrough,
+45-frame m8blive run PASS (verify frames {10,30,60} ALL PASS, exit 0),
+_smoke.py (only the known host-quirk "resume unfreezes" FAIL), 
+_ui_smoke.py ALL PASS vs live daemon, production bundle rebuilt and
+launched via the VBS (no console, icon in the title bar, autosetup
+brought the daemon up itself).
 
 ## M13 v5 (2026-09-24 ~23:20) - universal bundle, en/ru i18n, in-game
 ## overlay focus + cursor release
