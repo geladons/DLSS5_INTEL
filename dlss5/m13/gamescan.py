@@ -230,21 +230,37 @@ ROOT_SKIP = ("windows", "$recycle.bin", "system volume information",
              "users", "pagefile.sys", "amd", "nvidia", "vulkansdk",
              "virtualdisplaydriver", "git", "inetpub", "temp",
              "windowsapps", "wpsystem", "msdownld.tmp",
-             "62ae52d0132f45be2e0207", "wpmod", "xboxgames")
+             "wpmod", "xboxgames")
 # Program Files: scanned one app-folder at a time (each folder = a group).
 APPSTORE_DIRS = ("program files", "program files (x86)")
+# Container folders whose children are covered by launcher manifests.
+STORE_CONTAINERS = ("steam", "common files", "epic games", "gog galaxy")
 
 
 def steam_libraries():
-    """All Steam library roots from libraryfolders.vdf."""
+    """All Steam library roots from libraryfolders.vdf. The install path
+    comes from the registry (HKCU\\Software\\Valve\\Steam); the default
+    location is the fallback."""
     roots = []
-    vdf = r"C:\Program Files (x86)\Steam\steamapps\libraryfolders.vdf"
+    base = None
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r"Software\Valve\Steam") as k:
+            base = winreg.QueryValueEx(k, "SteamPath")[0]
+    except (ImportError, OSError):
+        pass
+    if not base or not os.path.isdir(base):
+        base = r"C:\Program Files (x86)\Steam"
+    vdf = os.path.join(base, "steamapps", "libraryfolders.vdf")
     try:
         with open(vdf, "r", errors="replace") as f:
             for m in re.finditer(r'"path"\s+"([^"]+)"', f.read()):
                 roots.append(m.group(1).replace("\\\\", "\\"))
     except OSError:
         pass
+    if not roots and os.path.isdir(os.path.join(base, "steamapps")):
+        roots.append(base)
     return [r for r in roots if os.path.isdir(r)]
 
 
@@ -267,6 +283,59 @@ def steam_games(lib):
         inst = re.search(r'"installdir"\s+"([^"]+)"', text)
         if inst:
             out.append((name.group(1) if name else None, inst.group(1)))
+    return out
+
+
+def epic_games():
+    """-> [(name, install_dir)] from Epic launcher JSON manifests."""
+    import glob
+    import json
+    out = []
+    man = os.path.join(os.environ.get("PROGRAMDATA", r"C:\ProgramData"),
+                       "Epic", "EpicGamesLauncher", "Data", "Manifests")
+    for f in glob.glob(os.path.join(man, "*.item")):
+        try:
+            with open(f, "r", errors="replace") as fh:
+                j = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        loc = j.get("InstallLocation")
+        if loc and os.path.isdir(loc):
+            out.append((j.get("DisplayName"), loc))
+    return out
+
+
+def gog_games():
+    """-> [(name, install_dir)] from GOG Galaxy registry entries."""
+    out = []
+    try:
+        import winreg
+    except ImportError:
+        return out
+    key_path = r"SOFTWARE\WOW6432Node\GOG.com\Games"
+    for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+        try:
+            with winreg.OpenKey(hive, key_path) as k:
+                i = 0
+                while True:
+                    try:
+                        sub = winreg.EnumKey(k, i)
+                    except OSError:
+                        break
+                    i += 1
+                    try:
+                        with winreg.OpenKey(k, sub) as sk:
+                            path = winreg.QueryValueEx(sk, "path")[0]
+                            try:
+                                name = winreg.QueryValueEx(sk, "gameName")[0]
+                            except OSError:
+                                name = None
+                    except OSError:
+                        continue
+                    if path and os.path.isdir(path):
+                        out.append((name, path))
+        except OSError:
+            continue
     return out
 
 
@@ -384,9 +453,10 @@ def _game_from_group(root, source, name=None, depth=4):
 
 def scan(extra_dirs=()):
     """-> [Game]: one entry per REAL game found on this machine.
-    Sources: Steam manifests (proper names), then every fixed drive grouped
-    per install root. Groups without an API-positive binary are dropped -
-    that is how 180 exe candidates become the owner's actual ~10 games."""
+    Sources: Steam manifests (proper names), Epic manifests, GOG registry,
+    then every fixed drive grouped per install root. Groups without an
+    API-positive binary are dropped - that is how 180 exe candidates become
+    the actual ~10 games."""
     games = {}
     steam_roots = []
     for lib in steam_libraries():
@@ -397,6 +467,14 @@ def scan(extra_dirs=()):
                                  name=name)
             if g:
                 games[g.exe.lower()] = g
+    store_roots = []
+    for source, entries in (("epic", epic_games()), ("gog", gog_games())):
+        for name, path in entries:
+            store_roots.append(os.path.abspath(path).lower())
+            g = _game_from_group(path, source, name=name)
+            if g and g.exe.lower() not in games:
+                games[g.exe.lower()] = g
+    covered = steam_roots + store_roots
     for drive in fixed_drives():
         try:
             top = [e for e in os.scandir(drive) if e.is_dir()]
@@ -407,16 +485,16 @@ def scan(extra_dirs=()):
             if name in ROOT_SKIP:
                 continue
             if any(os.path.abspath(e.path).lower().startswith(r)
-                   for r in steam_roots):
-                continue                  # steam covers its own library
+                   for r in covered):
+                continue                  # store manifests cover their own
             if name in APPSTORE_DIRS:
                 try:
                     subs = [s for s in os.scandir(e.path) if s.is_dir()]
                 except OSError:
                     continue
                 for s in subs:
-                    if s.name.lower() in ("steam", "common files"):
-                        continue          # steam has its own manifest path
+                    if s.name.lower() in STORE_CONTAINERS:
+                        continue          # stores have their own manifests
                     g = _game_from_group(s.path, e.name, depth=3)
                     if g and g.exe.lower() not in games:
                         games[g.exe.lower()] = g
