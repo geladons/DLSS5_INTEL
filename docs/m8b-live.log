@@ -5266,3 +5266,184 @@ chain: full 71-block DLSSNR U-Net @ 1344x1088 vendor extent (real weights, resid
 verify frames {10,30,60}: ALL PASS
 === M8B-LIVE result: PASS ===
 exit code: 0 (ended 22.09.2026 17:21:53,22) 
+ 
+=== M8B-LIVE run: m8blive.exe --frames 45 --wiggle-idle 1 
+started 25/09/2026 11:03:52.55 
+=== M8B-LIVE (M9b U-Net): REAL DLSS 5 graph (71 blocks, 7 scales) live on the desktop, Intel Arc Pro B50 ===
+transport: m4-present-simple (CPU bridge) | core: M9 U-Net chain at vendor-aligned extent
+frame target: 2560x1440 B8G8R8A8, frames=45 (processed), wiggle-idle=1s, video=1
+feedback-cancellation: ON (echo subtract + accumulate, max-delta=12/255, settle-thresh=0.500)
+composite: vendor compose_head, gain=1.00 (legacy strength/colorpass/resgate ignored on the M9b path)
+
+[cap] DXGI inventory (adapter x outputs):
+  [a0] Intel(R) Arc(TM) Pro B50 Graphics            | \\.\DISPLAY5     | attached=1 primary=1 rect=(0,0)-(2560,1440)
+[cap] picked '\\.\DISPLAY5' on adapter 'Intel(R) Arc(TM) Pro B50 Graphics' (luid 00000000:000098e6) origin=(0,0), rule=cursor
+[D3D11] hardware device created on adapter 'Intel(R) Arc(TM) Pro B50 Graphics' (luid 00000000:000098e6), feature level 0xb100
+[DDA] DuplicateOutput active: 2560x1440 format=87 rotation=1 origin=(0,0)
+[info] cursor-wiggle generator armed (wiggle-idle=1s)
+[DDA] initial content frame on try 1 (acquired#1, skippedBlack=0)
+[cap] native sample mean=196.28 (0 => capture black)
+[VK] device "Intel(R) Arc(TM) Pro B50 Graphics" LUID=00000000:000098e6   <== MATCHES DXGI adapter
+[VK] device "Intel(R) Arc(TM) Pro B50 Graphics" LUID=00000000:00011a32 
+[VK] coopmat 8x16x16 f16xf16->f32: OK
+[win] overlay EXCLUDED from capture (WDA_EXCLUDEFROMCAPTURE) - echo-free absolute pipeline
+[win] overlay created (HIDDEN until first present): 2560x1440 at (0,0) | exStyle=TOPMOST|TRANSPARENT|LAYERED|NOACTIVATE|TOOLWINDOW (CLICK-THROUGH)
+[hotkey] registered: CTRL+ALT+Q=quit CTRL+ALT+X=toggle overlay (QX)
+[cursor] drawing hardware cursor into mirror (DDA never captures it); OFF (default; the real hardware cursor stays visible above the overlay)
+[VK] logical device up (compute+graphics family 0, swapchain + coopmat)
+[present] format=44 images=3 mode=FIFO path=blit.comp STORAGE direct compositeAlpha=OPAQUE(supported=0x9)
+[bridge] upload buffer 14745600 bytes persistently mapped (CPU bridge; zero-copy deferred to M5)
+[VK] 9 transport pipelines up (+ blit + fbcancel + hpfilter + temporal); standin REMOVED
+[geometry] region 2560x1440 -> vendor-aligned network extent 2560x1472 (U-Net 7 scales)
+  L0: 1472x2560  TOK=3768320
+  L1:  736x1280  TOK=942080
+  L2:  368x640   TOK=235520
+  L3:  184x320   TOK=58880
+  L4:   92x160   TOK=14720
+  L5:   48x80    TOK=3840
+  L6:   24x40    TOK=960
+loading DLSSNR graph... (weights + chain setup; ~1-2 s, not a hang)
+safetensors: 649 tensors, data base 64976
+pack: 649 tensors (278.03 MiB)
+pack offsets cross-checked vs docs/pack-layout.txt: OK
+arena: 11397.03 MB scratch after weights; total 11675.1 MB
+[mem] arena chunked: 4 device buffers (cap 3.42 GiB):  1773.03 MB  3221.97 MB  3479.59 MB  3200.47 MB
+weight upload: 11675.1 MB in 29718.5 ms (0.38 GB/s incl. preprocessing)
+[chain] weights resident, setup 36647 ms
+[chain] 14 pipelines up (10 kernels + featpack/headpack + pool2/upmerge), 4 BDA chunk bases, chunk0 0xffffb8078e340000
+[VK-FAIL] vkQueueSubmit(c.queue, 1, &si, fence) -> -4 at C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m8b-live\main.cpp:1753
+exit code: 1 (ended 25/09/2026 11:04:36.97) 
+ 
+=== M8B-LIVE run: m8blive.exe --frames 45 --wiggle-idle 1 
+started 25/09/2026 11:06:24.29 
+=== M8B-LIVE (M9b U-Net): REAL DLSS 5 graph (71 blocks, 7 scales) live on the desktop, Intel Arc Pro B50 ===
+transport: m4-present-simple (CPU bridge) | core: M9 U-Net chain at vendor-aligned extent
+frame target: 2560x1440 B8G8R8A8, frames=45 (processed), wiggle-idle=1s, video=1
+feedback-cancellation: ON (echo subtract + accumulate, max-delta=12/255, settle-thresh=0.500)
+composite: vendor compose_head, gain=1.00 (legacy strength/colorpass/resgate ignored on the M9b path)
+
+[cap] DXGI inventory (adapter x outputs):
+  [a0] Intel(R) Arc(TM) Pro B50 Graphics            | \\.\DISPLAY5     | attached=1 primary=1 rect=(0,0)-(2560,1440)
+[cap] picked '\\.\DISPLAY5' on adapter 'Intel(R) Arc(TM) Pro B50 Graphics' (luid 00000000:000098e6) origin=(0,0), rule=cursor
+[D3D11] hardware device created on adapter 'Intel(R) Arc(TM) Pro B50 Graphics' (luid 00000000:000098e6), feature level 0xb100
+[DDA] DuplicateOutput active: 2560x1440 format=87 rotation=1 origin=(0,0)
+[info] cursor-wiggle generator armed (wiggle-idle=1s)
+[DDA] initial content frame on try 1 (acquired#1, skippedBlack=0)
+[cap] native sample mean=196.03 (0 => capture black)
+[VK] device "Intel(R) Arc(TM) Pro B50 Graphics" LUID=00000000:000098e6   <== MATCHES DXGI adapter
+[VK] device "Intel(R) Arc(TM) Pro B50 Graphics" LUID=00000000:00011a32 
+[VK] coopmat 8x16x16 f16xf16->f32: OK
+[win] overlay EXCLUDED from capture (WDA_EXCLUDEFROMCAPTURE) - echo-free absolute pipeline
+[win] overlay created (HIDDEN until first present): 2560x1440 at (0,0) | exStyle=TOPMOST|TRANSPARENT|LAYERED|NOACTIVATE|TOOLWINDOW (CLICK-THROUGH)
+[hotkey] registered: CTRL+ALT+Q=quit CTRL+ALT+X=toggle overlay (QX)
+[cursor] drawing hardware cursor into mirror (DDA never captures it); OFF (default; the real hardware cursor stays visible above the overlay)
+[VK] logical device up (compute+graphics family 0, swapchain + coopmat)
+[present] format=44 images=3 mode=FIFO path=blit.comp STORAGE direct compositeAlpha=OPAQUE(supported=0x9)
+[bridge] upload buffer 14745600 bytes persistently mapped (CPU bridge; zero-copy deferred to M5)
+[VK] 9 transport pipelines up (+ blit + fbcancel + hpfilter + temporal); standin REMOVED
+[geometry] region 2560x1440 -> vendor-aligned network extent 2560x1472 (U-Net 7 scales)
+  L0: 1472x2560  TOK=3768320
+  L1:  736x1280  TOK=942080
+  L2:  368x640   TOK=235520
+  L3:  184x320   TOK=58880
+  L4:   92x160   TOK=14720
+  L5:   48x80    TOK=3840
+  L6:   24x40    TOK=960
+loading DLSSNR graph... (weights + chain setup; ~1-2 s, not a hang)
+safetensors: 649 tensors, data base 64976
+pack: 649 tensors (278.03 MiB)
+pack offsets cross-checked vs docs/pack-layout.txt: OK
+arena: 11397.03 MB scratch after weights; total 11675.1 MB
+[mem] arena chunked: 4 device buffers (cap 3.42 GiB):  1773.03 MB  3221.97 MB  3479.59 MB  3200.47 MB
+weight upload: 11675.1 MB in 17457.2 ms (0.65 GB/s incl. preprocessing)
+[chain] weights resident, setup 23890 ms
+[chain] 14 pipelines up (10 kernels + featpack/headpack + pool2/upmerge), 4 BDA chunk bases, chunk0 0xffffb8078e340000
+[fb] cancellation state up: lastPresented 14745600 B (zeroed, device-local), stats mapped
+[stage] frame0 upload+decode: 12.327 ms
+[geometry] region FIXED rows [0,1440) cols [0,2560) of 2560x1440 -> extent 2560x1472
+[mem] intermediates device-local; readback host-coherent; blit sets 3
+[m8b] entering live loop (45 frames, event-driven; --frames counts PROCESSED frames)
+[win] overlay shown (first present)
+[frame] 0 processed @ 11:07:28.699 in 34488.7 ms (acq 8.0 fbmean 0.00 bridge 4.3 rec 208.0 gpu 34498.7 | fe 51.1 fp 408.0 chain 33979.2 hp 0.0 tail 50.4)
+[m8b] frame 0 | rolling 0.0 fps | dropped 0 | fresh
+[frame] 1 processed @ 11:08:03.236 in 33761.8 ms (acq 74.3 fbmean 0.00 bridge 1.9 rec 39.6 gpu 34418.1 | fe 45.5 fp 57.8 chain 33606.9 hp 0.0 tail 51.6)
+[dbg] featV   n=60293120 min=-5.09766 max=5.28516 mean=0.0717611 nonzero=87.5%
+[dbg] HEAD    n=60293120 min=-7.93116 max=0.894984 mean=-0.252665 nonzero=25.0%
+[dbg] head ch0: mean=-0.0211 std=0.1184 (residual scale 0.25x, /255 units: DC=-1.35 std=7.55)
+[dbg] head ch1: mean=0.0202 std=0.1200 (residual scale 0.25x, /255 units: DC=+1.29 std=7.65)
+[dbg] head ch2: mean=0.0085 std=0.1194 (residual scale 0.25x, /255 units: DC=+0.54 std=7.61)
+[dbg] x16     n=60293120 min=0x0000 max=0xc519 nonzero=87.5%
+[dbg] ADA     n=120586240 min=-3.28541 max=3.22462 mean=-0.0465454 nonzero=100.0%
+[dbg] MRG70   n=120586240 min=-47.1633 max=47.6532 mean=-0.102262 nonzero=100.0%
+[dbg] G2      n=120586240 min=-3.15211e+08 max=2.01005e+10 mean=198617 nonzero=50.0%
+[dbg] headW   n=512 min=0x0000 max=0xab44 nonzero=25.0%
+[dbg] B4DS    n=15073280 min=-80 max=80 mean=-0.459099 nonzero=100.0% nan/inf=0 | first8: -3.75 9 26 -2.75 -1.25 -11 -11 4.5
+[dbg] B22DS   n=1966080 min=-32 max=28 mean=-0.0868729 nonzero=95.8% nan/inf=0 | first8: 3.25 -0.9375 1.75 -9 1.5 6 0.125 3.25
+[dbg] B38     n=983040 min=-7.5 max=6.5 mean=-0.00231129 nonzero=99.9% nan/inf=0 | first8: 0.875 0.3438 -0.9375 -0.8125 -0.1094 -1.375 3.25 -0.375
+[dbg] B48     n=3768320 min=-22 max=26 mean=0.185905 nonzero=100.0% nan/inf=0 | first8: 2.5 -1.875 -3 -2 -6 -1.375 9 0.375
+[dbg] B69     n=30146560 min=-160 max=144 mean=1.84395 nonzero=100.0% nan/inf=0 | first8: -0.3438 -11 0.6875 -9 2.75 -18 -13 7.5
+[dbg] sinT    n=32 min=-0.341064 max=0.736816 mean=0.281882 nonzero=100.0%
+[dbg] cosT    n=32 min=-0.983887 max=1 mean=0.575806 nonzero=100.0%
+[dbg] FRS     n=120586240 min=-5 max=11 mean=-0.207269 nonzero=99.9% nan/inf=0 | first8: -1.125 -0.875 -0.4062 0.2344 -0.75 0.1094 -0.1016 -0.75
+[frame] 2 processed @ 11:08:52.781 in 27502.3 ms (acq 64.2 fbmean 0.00 bridge 3.0 rec 1.5 gpu 27510.1 | fe 38.9 fp 51.6 chain 27367.8 hp 0.0 tail 44.0)
+[frame] 3 processed @ 11:09:25.408 in 32604.6 ms (acq 8.5 fbmean 0.00 bridge 2.6 rec 1.6 gpu 32613.4 | fe 47.2 fp 58.5 chain 32445.1 hp 0.0 tail 53.8)
+[frame] 4 processed @ 11:09:59.541 in 34108.7 ms (acq 8.8 fbmean 0.00 bridge 1.8 rec 2.0 gpu 34118.6 | fe 48.5 fp 61.0 chain 33947.8 hp 0.0 tail 51.3)
+[frame] 5 processed @ 11:10:33.731 in 34166.2 ms (acq 9.1 fbmean 0.00 bridge 2.4 rec 1.8 gpu 34175.5 | fe 46.4 fp 60.3 chain 34009.3 hp 0.0 tail 50.2)
+[frame] 6 processed @ 11:11:07.474 in 33722.4 ms (acq 7.0 fbmean 0.00 bridge 1.5 rec 1.6 gpu 33731.6 | fe 46.1 fp 60.1 chain 33564.0 hp 0.4 tail 51.9)
+[frame] 7 processed @ 11:11:40.006 in 32509.1 ms (acq 8.6 fbmean 0.00 bridge 2.4 rec 1.7 gpu 32518.2 | fe 48.7 fp 59.7 chain 32349.5 hp 0.0 tail 51.2)
+[frame] 8 processed @ 11:12:14.337 in 34309.3 ms (acq 6.9 fbmean 0.00 bridge 1.6 rec 1.5 gpu 34319.1 | fe 48.2 fp 61.0 chain 34150.1 hp 0.0 tail 49.9)
+[frame] 9 processed @ 11:12:45.279 in 30916.9 ms (acq 9.5 fbmean 0.00 bridge 3.1 rec 1.8 gpu 30926.3 | fe 46.8 fp 57.9 chain 30762.5 hp 0.0 tail 49.6)
+[frame] 10 processed @ 11:13:17.962 in 32608.7 ms (acq 12.5 fbmean 0.00 bridge 1.8 rec 46.4 gpu 32620.8 | fe 44.9 fp 57.2 chain 32456.5 hp 0.0 tail 50.1)
+[metrics] frame 10 region 2560x1440: mean|final-native| B=4.99481 G=5.09932 R=5.09096 (must be > 0)
+[metrics] frame 10 SIGNED delta mean B=0.5568 G=1.2430 R=-1.3208 (0-255; |mean|<=0.5 => no color drift; high-pass target)
+[metrics] structure: mean |grad(delta)| B=0.97446 G=0.93010 R=0.95567 (> 0); changed 98.31% => PASS
+[knobs] live: gain 1.500 blend 0.400
+[frame] 11 processed @ 11:13:50.060 in 31924.7 ms (acq 8.2 fbmean 0.00 bridge 2.4 rec 6.2 gpu 31934.2 | fe 46.5 fp 59.2 chain 31769.1 hp 0.0 tail 50.0)
+[knobs] live: gain 1.000 blend 1.000
+[frame] 12 processed @ 11:14:23.144 in 33052.2 ms (acq 6.8 fbmean 0.00 bridge 1.3 rec 12.3 gpu 33062.0 | fe 49.3 fp 60.2 chain 32893.1 hp 0.0 tail 49.7)
+[frame] 13 processed @ 11:14:53.094 in 29927.5 ms (acq 8.2 fbmean 0.00 bridge 2.4 rec 1.8 gpu 29936.8 | fe 48.2 fp 58.6 chain 29776.5 hp 0.0 tail 44.3)
+[frame] 14 processed @ 11:15:24.295 in 31178.0 ms (acq 8.6 fbmean 0.00 bridge 2.2 rec 1.8 gpu 31186.6 | fe 38.2 fp 51.3 chain 31039.3 hp 0.0 tail 49.3)
+[frame] 15 processed @ 11:15:57.259 in 32940.6 ms (acq 8.3 fbmean 0.00 bridge 2.0 rec 2.2 gpu 32950.2 | fe 46.6 fp 58.5 chain 32785.9 hp 0.0 tail 49.6)
+[frame] 16 processed @ 11:16:29.964 in 32682.6 ms (acq 8.0 fbmean 0.00 bridge 2.3 rec 1.6 gpu 32691.9 | fe 48.0 fp 58.4 chain 32527.4 hp 0.0 tail 48.8)
+[frame] 17 processed @ 11:17:02.744 in 32756.6 ms (acq 8.4 fbmean 0.00 bridge 2.2 rec 1.7 gpu 32766.2 | fe 46.4 fp 56.3 chain 32603.6 hp 0.0 tail 50.2)
+[frame] 18 processed @ 11:17:35.708 in 32941.7 ms (acq 7.6 fbmean 0.00 bridge 2.0 rec 1.7 gpu 32950.8 | fe 44.6 fp 57.7 chain 32789.4 hp 0.0 tail 49.9)
+[frame] 19 processed @ 11:18:08.430 in 32699.3 ms (acq 8.5 fbmean 0.00 bridge 2.1 rec 2.2 gpu 32708.6 | fe 44.9 fp 57.4 chain 32547.0 hp 0.0 tail 49.9)
+[frame] 20 processed @ 11:18:41.183 in 32728.9 ms (acq 8.9 fbmean 0.00 bridge 2.6 rec 1.7 gpu 32738.3 | fe 45.8 fp 58.8 chain 32574.7 hp 0.0 tail 49.6)
+[frame] 21 processed @ 11:19:11.231 in 30025.8 ms (acq 7.8 fbmean 0.00 bridge 2.1 rec 1.8 gpu 30034.4 | fe 46.6 fp 58.5 chain 29878.1 hp 0.0 tail 42.6)
+[frame] 22 processed @ 11:19:38.188 in 26935.9 ms (acq 8.2 fbmean 0.00 bridge 2.0 rec 1.9 gpu 26944.0 | fe 37.1 fp 49.3 chain 26806.7 hp 0.0 tail 42.9)
+[frame] 23 processed @ 11:20:09.384 in 31175.3 ms (acq 8.0 fbmean 0.00 bridge 1.7 rec 1.6 gpu 31183.1 | fe 39.6 fp 49.1 chain 31037.6 hp 0.0 tail 49.0)
+[frame] 24 processed @ 11:20:42.228 in 32821.1 ms (acq 8.3 fbmean 0.00 bridge 2.3 rec 1.8 gpu 32830.1 | fe 47.0 fp 57.0 chain 32667.0 hp 0.0 tail 50.1)
+[frame] 25 processed @ 11:21:15.582 in 33330.6 ms (acq 8.2 fbmean 0.00 bridge 2.2 rec 2.6 gpu 33339.8 | fe 45.5 fp 57.0 chain 33177.7 hp 0.0 tail 50.5)
+[frame] 26 processed @ 11:21:49.241 in 33635.0 ms (acq 8.9 fbmean 0.00 bridge 1.9 rec 2.2 gpu 33644.5 | fe 46.1 fp 58.3 chain 33480.4 hp 0.0 tail 50.3)
+[frame] 27 processed @ 11:22:22.119 in 32857.1 ms (acq 8.1 fbmean 0.00 bridge 2.3 rec 1.7 gpu 32865.4 | fe 47.5 fp 57.8 chain 32701.6 hp 0.0 tail 50.2)
+[frame] 28 processed @ 11:22:55.191 in 33048.1 ms (acq 8.0 fbmean 0.00 bridge 2.5 rec 2.2 gpu 33057.6 | fe 44.8 fp 58.5 chain 32895.1 hp 0.0 tail 49.6)
+[frame] 29 processed @ 11:23:28.003 in 32788.7 ms (acq 8.2 fbmean 0.00 bridge 2.3 rec 1.6 gpu 32798.3 | fe 48.4 fp 58.0 chain 32633.4 hp 0.0 tail 48.9)
+[frame] 30 processed @ 11:24:00.812 in 32778.4 ms (acq 12.4 fbmean 0.00 bridge 1.9 rec 2.6 gpu 32790.4 | fe 45.5 fp 58.5 chain 32625.1 hp 0.0 tail 49.3)
+[metrics] frame 30 region 2560x1440: mean|final-native| B=5.17563 G=5.27565 R=5.22996 (must be > 0)
+[metrics] frame 30 SIGNED delta mean B=0.5769 G=1.2153 R=-1.3041 (0-255; |mean|<=0.5 => no color drift; high-pass target)
+[metrics] structure: mean |grad(delta)| B=0.98957 G=0.94798 R=0.96996 (> 0); changed 96.80% => PASS
+[frame] 31 processed @ 11:24:32.035 in 30967.1 ms (acq 8.7 fbmean 0.00 bridge 2.3 rec 1.9 gpu 30976.8 | fe 46.5 fp 58.3 chain 30819.9 hp 0.0 tail 42.4)
+[frame] 32 processed @ 11:25:03.893 in 31835.0 ms (acq 8.0 fbmean 0.00 bridge 2.0 rec 1.6 gpu 31844.7 | fe 37.5 fp 49.0 chain 31698.6 hp 0.0 tail 49.9)
+[frame] 33 processed @ 11:25:37.347 in 33429.4 ms (acq 8.1 fbmean 0.00 bridge 2.3 rec 2.9 gpu 33439.2 | fe 49.0 fp 59.8 chain 33271.0 hp 0.0 tail 49.6)
+[frame] 34 processed @ 11:26:10.159 in 32789.1 ms (acq 7.9 fbmean 0.00 bridge 2.2 rec 2.2 gpu 32798.1 | fe 44.1 fp 57.6 chain 32637.4 hp 0.0 tail 49.9)
+[frame] 35 processed @ 11:26:43.051 in 32870.6 ms (acq 7.8 fbmean 0.00 bridge 2.1 rec 1.7 gpu 32878.3 | fe 49.0 fp 58.6 chain 32713.8 hp 0.0 tail 49.2)
+[frame] 36 processed @ 11:27:16.387 in 33314.0 ms (acq 8.1 fbmean 0.00 bridge 2.2 rec 1.7 gpu 33323.4 | fe 46.3 fp 57.9 chain 33160.2 hp 0.0 tail 49.6)
+[frame] 37 processed @ 11:27:49.026 in 32616.0 ms (acq 7.9 fbmean 0.00 bridge 2.4 rec 1.6 gpu 32625.1 | fe 48.1 fp 58.7 chain 32460.1 hp 0.0 tail 49.1)
+[frame] 38 processed @ 11:28:22.301 in 33252.2 ms (acq 8.2 fbmean 0.00 bridge 2.9 rec 1.5 gpu 33261.6 | fe 44.4 fp 57.5 chain 33101.0 hp 0.0 tail 49.2)
+[frame] 39 processed @ 11:28:55.317 in 32993.0 ms (acq 8.3 fbmean 0.00 bridge 2.4 rec 1.8 gpu 33002.1 | fe 46.2 fp 58.2 chain 32839.0 hp 0.0 tail 49.7)
+[frame] 40 processed @ 11:29:25.671 in 30330.3 ms (acq 8.1 fbmean 0.00 bridge 2.6 rec 1.7 gpu 30339.6 | fe 47.7 fp 57.8 chain 30182.2 hp 0.0 tail 42.7)
+[frame] 41 processed @ 11:29:57.330 in 31637.3 ms (acq 8.6 fbmean 0.00 bridge 2.0 rec 1.5 gpu 31645.6 | fe 36.9 fp 50.1 chain 31501.4 hp 0.0 tail 48.9)
+[frame] 42 processed @ 11:30:30.343 in 32989.6 ms (acq 8.3 fbmean 0.00 bridge 2.3 rec 1.8 gpu 32999.1 | fe 46.6 fp 58.5 chain 32834.8 hp 0.0 tail 49.7)
+[frame] 43 processed @ 11:31:03.390 in 33023.2 ms (acq 8.3 fbmean 0.00 bridge 2.6 rec 1.7 gpu 33032.9 | fe 48.0 fp 58.1 chain 32865.9 hp 0.0 tail 51.2)
+[frame] 44 processed @ 11:31:36.481 in 33069.1 ms (acq 7.7 fbmean 0.00 bridge 1.9 rec 1.7 gpu 33078.6 | fe 46.3 fp 59.8 chain 32912.8 hp 0.0 tail 50.3)
+[m8b] frame 44 | rolling 0.0 fps | dropped 0 | fresh
+
+=== M8B-LIVE summary ===
+frames: 45, wall: 1482.56 s, avg fps: 0.03, last rolling fps: 0.0
+dropped (DDA timeout/black/access-lost): 0
+feedback-cancellation: 0 processed frames, 0 settled skips, last mean|corrected delta| = 0.000/255 (clamp +/-12)
+present: FIFO, format 44, path blit.comp STORAGE
+chain: full 71-block DLSSNR U-Net @ 2560x1472 vendor extent (real weights, resident)
+verify frames {10,30,60}: ALL PASS
+=== M8B-LIVE result: PASS ===
+exit code: 0 (ended 25/09/2026 11:31:40.17) 

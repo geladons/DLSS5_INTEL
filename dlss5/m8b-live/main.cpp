@@ -640,6 +640,49 @@ static std::atomic<bool> g_resumeRequested{false}; // hidden->shown: loop must f
 static std::atomic<bool> g_quitHotkey{false};     // CTRL+ALT+Q: clean shutdown -> exit 0
 enum { HK_QUIT = 1, HK_TOGGLE = 2 };
 
+// ------------------------------------------- live knob file (M13) -----------
+// Screen-mode knobs WITHOUT a restart (owner feedback 2026-09-25: turning the
+// gain slider in screen/window mode restarted m8blive and "killed the
+// daemon"). The manager writes %TEMP%\m13_screen_knobs.txt ("gain blend");
+// we stat it once per PROCESSED frame (a frame costs ~50 ms - a stat is
+// noise) and retune on mtime change. Missing file = keep current values.
+struct LiveKnobs {
+    float gain = 1.0f, blend = 1.0f;
+    std::string path;
+    unsigned long long lastWrite = 0;   // last seen mtime (filetime quad)
+    bool logged = false;
+};
+
+static unsigned long long filetimeNow() {
+    FILETIME ft{};
+    GetSystemTimeAsFileTime(&ft);
+    return ((unsigned long long)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+}
+
+static void pollKnobs(LiveKnobs& k) {
+    if (k.path.empty()) return;
+    WIN32_FILE_ATTRIBUTE_DATA fa{};
+    if (!GetFileAttributesExA(k.path.c_str(), GetFileExInfoStandard, &fa))
+        return;                          // absent - keep current values
+    unsigned long long wt = ((unsigned long long)fa.ftLastWriteTime.dwHighDateTime << 32)
+                            | fa.ftLastWriteTime.dwLowDateTime;
+    if (wt == k.lastWrite) return;
+    k.lastWrite = wt;
+    FILE* f = fopen(k.path.c_str(), "r");
+    if (!f) return;
+    float g = k.gain, b = k.blend;
+    if (std::fscanf(f, "%f %f", &g, &b) == 2) {
+        if (g < 0.0f) g = 0.0f; if (g > 16.0f) g = 16.0f;
+        if (b < 0.0f) b = 0.0f; if (b > 1.0f) b = 1.0f;
+        if (g != k.gain || b != k.blend || !k.logged) {
+            std::printf("[knobs] live: gain %.3f blend %.3f\n", (double)g, (double)b);
+            k.logged = true;
+        }
+        k.gain = g; k.blend = b;
+    }
+    fclose(f);
+}
+
 // ------------------------------------------- cursor-into-mirror (B) --------
 // DDA NEVER captures the hardware cursor: while the overlay is up, the mirror
 // is a dead photo (the capture is our own last present). Drawing the cursor
@@ -1061,6 +1104,9 @@ int main(int argc, char** argv) {
     float headGain = 1.0f;       // --gain F: vendor head residual scale (default 1.0 =
                                  // the real compose_head recipe; the old 0.2
                                  // calibration belonged to the 288-token miniature).
+    float headBlend = 1.0f;      // --blend F: vendor compose mix factor 0..1 (M13 knob #2;
+                                 // 0 = pass the source through, 1 = full effect). LIVE:
+                                 // the knob file below can retune it without a restart.
     std::string winTitle;        // --window TITLE: per-window mode - capture/crop the target
                                  // window's client area, overlay covers only that rect.
     std::string outPref;         // --output NAME: capture-output preference (substring,
@@ -1093,6 +1139,7 @@ int main(int argc, char** argv) {
         else if (a == "--pace-ms" && i + 1 < argc) paceMs = std::atol(argv[++i]);
         else if (a == "--temporal" && i + 1 < argc) temporal = std::atoi(argv[++i]);
         else if (a == "--gain" && i + 1 < argc) headGain = (float)std::atof(argv[++i]);
+        else if (a == "--blend" && i + 1 < argc) headBlend = (float)std::atof(argv[++i]);
         else if (a == "--echo-free" && i + 1 < argc) g_echoFreeWanted = std::atoi(argv[++i]) != 0;
         else if (a == "--acc-park-thresh" && i + 1 < argc) accParkThresh = std::atof(argv[++i]);
         else if (a == "--acc-park-frames" && i + 1 < argc) accParkFrames = std::atol(argv[++i]);
@@ -1114,6 +1161,20 @@ int main(int argc, char** argv) {
     }
     if (strength < 0.0f) strength = 0.0f;
     if (strength > 2.0f) strength = 2.0f;
+    if (headBlend < 0.0f) headBlend = 0.0f;
+    if (headBlend > 1.0f) headBlend = 1.0f;
+    // Live knobs (M13 screen mode): the manager retunes gain/blend via this
+    // file instead of restarting us (a restart costs the ~30 s weights upload).
+    LiveKnobs knobs;
+    knobs.gain = headGain; knobs.blend = headBlend;
+    {   char tmp[MAX_PATH];
+        DWORD tl = GetEnvironmentVariableA("TEMP", tmp, MAX_PATH);
+        if (tl && tl < MAX_PATH) knobs.path = std::string(tmp) + "\\m13_screen_knobs.txt";
+    }
+    // Ignore writes older than THIS launch: a stale file from a previous
+    // manager session must not override the CLI args (the manager writes
+    // the file with the SAME values right before starting us anyway).
+    knobs.lastWrite = filetimeNow();
     colorpass = colorpass ? 1 : 0;
     if (resGate < 0) resGate = 0;
     if (resGate > 255) resGate = 255;
@@ -3536,6 +3597,8 @@ int main(int argc, char** argv) {
             vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool, 4);
         }
         {   // compose (vendor compose_head on the raw head at full extent) + encode
+            pollKnobs(knobs);                    // M13 live retune, no restart
+            headGain = knobs.gain; headBlend = knobs.blend;
             Push p{};
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeCompose);
             p.a[0] = (int32_t)W; p.a[1] = region.top; p.a[2] = region.left; p.a[3] = netW;
@@ -3543,6 +3606,7 @@ int main(int argc, char** argv) {
             p.c[0] = (float)maxDelta / 255.0f;             // accumulate-mode clamp (legacy)
             p.c[1] = (novideo || echoFree) ? 0.0f : 1.0f;  // accumulate mode (legacy video)
             p.c[2] = headGain;                             // --gain (vendor residual scale, default 1)
+            p.c[3] = headBlend;                            // --blend (vendor mix factor, default 1)
             push(p);
             vkCmdDispatch(cmd, ((uint64_t)regionW * regionH + 255) / 256, 1, 1);
             barrierAll();

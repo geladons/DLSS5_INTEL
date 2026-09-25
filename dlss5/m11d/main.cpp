@@ -10,6 +10,7 @@
 //                     {magic, cmd, payload, reserved} instead of a frame:
 //                     cmd 1 = SETGAIN (payload = float bits, reply ok+gain)
 //                     cmd 2 = STATUS  (reply ok, gain, frames processed)
+//                     cmd 3 = SETBLEND(payload = float bits 0..1, reply ok+gain)
 //   reply:   frame requests: w*h*4 bytes BGRA (the processed frame)
 //            control requests: 16 bytes {magic, ok, gainBits, frames}
 // One TCP connection per frame (the layer connect()s per exchange).
@@ -134,16 +135,18 @@ int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
     int port = 47990;
     float gain = 1.0f;
+    float blend = 1.0f;
     bool dump = false;
     std::string selftest;
     std::string benchProf;
     int benchN = 0;
     uint32_t benchW = 0, benchH = 0;
-    std::string weights = "C:\\Users\\AI\\Desktop\\DLSS5_INTEL\\work\\mlxw\\dlssnr-logical.safetensors";
+    std::string weights;   // REQUIRED: --weights PATH (no machine-specific default)
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--port" && i + 1 < argc) port = std::atoi(argv[++i]);
         else if (a == "--gain" && i + 1 < argc) gain = (float)std::atof(argv[++i]);
+        else if (a == "--blend" && i + 1 < argc) blend = (float)std::atof(argv[++i]);
         else if (a == "--weights" && i + 1 < argc) weights = argv[++i];
         else if (a == "--dump") dump = true;
         else if (a == "--selftest" && i + 1 < argc) selftest = argv[++i];
@@ -157,13 +160,19 @@ int main(int argc, char** argv) {
         }
         else if (a == "--prof" && i + 1 < argc) benchProf = argv[++i];
         else {
-            std::fprintf(stderr, "usage: m11d [--port N] [--gain F] [--weights PATH] [--dump] "
+            std::fprintf(stderr, "usage: m11d [--port N] [--gain F] [--blend F] [--weights PATH] [--dump] "
                                  "[--selftest file.bmp] [--bench N WxH [--prof out.csv]]\n");
             return 1;
         }
     }
-    std::printf("=== M11D: DLSSNR daemon (real 71-block DLSS 5 U-Net, Intel Arc Pro B50) ===\n");
-    std::printf("weights: %s\ngain: %.2f\n", weights.c_str(), (double)gain);
+    if (weights.empty()) {
+        std::fprintf(stderr, "[FAIL] --weights PATH is required\n");
+        return 1;
+    }
+    if (blend < 0.0f) blend = 0.0f;
+    if (blend > 1.0f) blend = 1.0f;
+    std::printf("=== M11D: DLSSNR daemon (real 71-block DLSS 5 U-Net) ===\n");
+    std::printf("weights: %s\ngain: %.2f blend: %.2f\n", weights.c_str(), (double)gain, (double)blend);
 
     d5c::ChainEngine engine;
     uint32_t curW = 0, curH = 0;
@@ -180,6 +189,7 @@ int main(int argc, char** argv) {
         cfg.weightsPath = weights;
         cfg.shaderDir = ".\\";            // spv staged next to the exe
         cfg.headGain = gain;
+        cfg.headBlend = blend;
         cfg.debugDumps = dump;
         cfg.dumpDir = "out";
         cfg.vkCfg.appName = "m11d";
@@ -301,6 +311,17 @@ int main(int argc, char** argv) {
                     std::printf("[m11d] ctrl: gain -> %.3f\n", (double)g);
                 } else {
                     std::fprintf(stderr, "[m11d] ctrl: gain %.3f out of range\n", (double)g);
+                }
+            } else if (hdr[1] == 3) {            // SETBLEND: hdr[2] = float bits
+                float b = 0.0f;
+                std::memcpy(&b, &hdr[2], 4);
+                if (b >= 0.0f && b <= 1.0f) {
+                    blend = b;
+                    engine.setHeadBlend(b);
+                    rep[1] = 1;
+                    std::printf("[m11d] ctrl: blend -> %.3f\n", (double)b);
+                } else {
+                    std::fprintf(stderr, "[m11d] ctrl: blend %.3f out of range\n", (double)b);
                 }
             } else if (hdr[1] == 2) {            // STATUS
                 rep[1] = 1;

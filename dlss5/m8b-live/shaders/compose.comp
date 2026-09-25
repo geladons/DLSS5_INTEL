@@ -19,7 +19,9 @@
 //
 //   push a = (fullStridePx, regionTop, regionLeft, netW)
 //        b = (regionW, regionH, 0, 0)
-//        c = (maxDelta01, accumulateMode, gain, 0)
+//        c = (maxDelta01, accumulateMode, gain, blend)
+//   M13 knob #2: blend = the vendor recipe's mix factor (was hardcoded 1.0).
+//   gain scales the residual BEFORE clamp; blend mixes AFTER: 0 = source.
 // ============================================================================
 #extension GL_GOOGLE_include_directive : require
 #include "publish.glsl"
@@ -100,18 +102,20 @@ void main() {
     uint hP = (y * uint(pc.a.w) + x) * 16u;        // head token (region origin == net origin)
     float m = pc.c.x > 0.0 && pc.c.x < 1.0 ? pc.c.x : 1.0;   // accumulate clamp
     float gain = pc.c.z;
+    float blend = pc.c.w;                          // vendor mix factor (1.0 = full)
     for (uint c = 0u; c < 3u; ++c) {
         float source = nat[natP * 3u + c];
         float halfv = halfr(head[hP + c]) * 0.25 * gain;
         if (pc.c.y > 0.5) {
             // Legacy accumulate mode (feedback cancellation).
-            float delta = clamp(halfv, -m, m);
+            float delta = clamp(halfv, -m, m) * blend;
             fin[p * 3u + c] = source + delta;
             nro[p * 3u + c] = clamp(source + delta, 0.0, 1.0);
         } else {
-            // Vendor compose_head at intensity 1 (composition.py:23-32).
+            // Vendor compose_head (composition.py:23-32) with the live
+            // blend knob: out = clamp(source + blend * (predicted - source)).
             float predicted = clamp(source + halfv, 0.0, 1.0);
-            float finalv = clamp(source + 1.0 * (predicted - source), 0.0, 1.0);
+            float finalv = clamp(source + blend * (predicted - source), 0.0, 1.0);
             fin[p * 3u + c] = finalv;
             nro[p * 3u + c] = predicted;
         }
