@@ -31,11 +31,15 @@ private:
     bool ensureResources();
     void releaseResources();
     bool captureToCpu(ID3D12Resource *bb);
+    bool grabRaw(ID3D12Resource *bb);   // backbuffer -> raw_ (no daemon)
+    bool sendRaw();                     // raw_ -> daemon -> processed_
     bool blitToBackbuffer(ID3D12Resource *bb);
     bool waitIdle(DWORD ms);
     bool refreshDesc();
     void dump_processed();
     static bool pauseFlagSet();  // TRUE: %TEMP%\m12_pause.flag exists
+    static bool freezeFlagSet(); // TRUE: %TEMP%\m13_freeze.flag exists
+    bool reprocChanged();        // mtime bump of %TEMP%\m13_reproc.flag
 
     static D3D12_RESOURCE_BARRIER transition(ID3D12Resource *res,
                                              D3D12_RESOURCE_STATES from,
@@ -65,4 +69,8 @@ private:
     bool have_processed_;
     bool paused_;                  // pause flag was present on last check
     std::vector<BYTE> processed_;  // last daemon reply, packed w*h*4 BGRA
+    std::vector<BYTE> raw_;      // freeze mode: the held UNPROCESSED frame
+    bool raw_held_ = false;
+    FILETIME reproc_stamp_ = {}; // last seen m13_reproc.flag mtime
+    bool reproc_seen_ = false;
 };

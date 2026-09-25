@@ -192,8 +192,8 @@ bool M12Dx12Processor::refreshDesc()
     return fmt_supported_;
 }
 
-// Backbuffer -> readback -> daemon -> processed_ (packed B,G,R,A bytes).
-bool M12Dx12Processor::captureToCpu(ID3D12Resource *bb)
+// Backbuffer -> readback -> raw_ (packed B,G,R,A bytes, no daemon yet).
+bool M12Dx12Processor::grabRaw(ID3D12Resource *bb)
 {
     if (!waitIdle(15000)) {
         m12_logf("capture: waitIdle timed out");
@@ -235,16 +235,24 @@ bool M12Dx12Processor::captureToCpu(ID3D12Resource *bb)
 
     BYTE *mapped = NULL;
     if (FAILED(readback_->Map(0, NULL, (void **)&mapped))) return false;
-    std::vector<BYTE> packed((std::size_t)width_ * height_ * 4);    for (UINT y = 0; y < height_; y++)
-        memcpy(packed.data() + (std::size_t)y * width_ * 4,
+    raw_.resize((std::size_t)width_ * height_ * 4);
+    for (UINT y = 0; y < height_; y++)
+        memcpy(raw_.data() + (std::size_t)y * width_ * 4,
                mapped + (std::size_t)y * row_pitch_, (std::size_t)width_ * 4);
     readback_->Unmap(0, NULL);
 
-    if (needs_rbswap_) swizzle_rb(packed.data(), packed.size());
+    if (needs_rbswap_) swizzle_rb(raw_.data(), raw_.size());
+    return true;
+}
 
+// raw_ -> daemon -> processed_. Re-sending the same raw_ with a new daemon
+// gain is exactly the "live knob on a frozen frame" reprocess.
+bool M12Dx12Processor::sendRaw()
+{
+    if (raw_.empty()) return false;
     const uint32_t header[4] = {0x304E524Eu, width_, height_, 44u};
-    std::vector<BYTE> reply(packed.size());
-    if (m12_exchange(header, packed.data(), packed.size(), reply.data(),
+    std::vector<BYTE> reply(raw_.size());
+    if (m12_exchange(header, raw_.data(), raw_.size(), reply.data(),
                      reply.size()) != 0) {
         daemon_failures_++;
         if (daemon_failures_ <= 3 || daemon_failures_ % 100 == 0)
@@ -258,6 +266,12 @@ bool M12Dx12Processor::captureToCpu(ID3D12Resource *bb)
     m12_logf("processed %ux%u", width_, height_);
     dump_processed();
     return true;
+}
+
+// Backbuffer -> readback -> daemon -> processed_ (packed B,G,R,A bytes).
+bool M12Dx12Processor::captureToCpu(ID3D12Resource *bb)
+{
+    return grabRaw(bb) && sendRaw();
 }
 
 void M12Dx12Processor::dump_processed()
@@ -333,13 +347,49 @@ bool M12Dx12Processor::blitToBackbuffer(ID3D12Resource *bb)
 
 // %TEMP%\m12_pause.flag: cheap runtime pause switch. While the flag exists
 // every frame passes through untouched (full fps, zero GPU/TCP work).
+static bool temp_flag_set(const char *name)
+{
+    char path[MAX_PATH];
+    if (!GetTempPathA(MAX_PATH, path)) return false;
+    if (lstrlenA(path) + lstrlenA(name) + 1 > MAX_PATH) return false;
+    lstrcatA(path, name);
+    return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
+}
+
 bool M12Dx12Processor::pauseFlagSet()
+{
+    return temp_flag_set("m12_pause.flag");
+}
+
+// %TEMP%\m13_freeze.flag: m13 overlay photo mode. While it exists the held
+// RAW frame's processed result is re-blitted every present (the picture
+// stands still; the game keeps running underneath).
+bool M12Dx12Processor::freezeFlagSet()
+{
+    return temp_flag_set("m13_freeze.flag");
+}
+
+// %TEMP%\m13_reproc.flag: mtime bump = the manager pushed a new gain to the
+// daemon; re-send the held raw frame so the frozen picture updates.
+bool M12Dx12Processor::reprocChanged()
 {
     char path[MAX_PATH];
     if (!GetTempPathA(MAX_PATH, path)) return false;
     if (lstrlenA(path) + 16 > MAX_PATH) return false;
-    lstrcatA(path, "m12_pause.flag");
-    return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
+    lstrcatA(path, "m13_reproc.flag");
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (!GetFileAttributesExA(path, GetFileExInfoStandard, &fa)) {
+        reproc_seen_ = false;
+        return false;
+    }
+    if (!reproc_seen_
+        || fa.ftLastWriteTime.dwLowDateTime != reproc_stamp_.dwLowDateTime
+        || fa.ftLastWriteTime.dwHighDateTime != reproc_stamp_.dwHighDateTime) {
+        reproc_stamp_ = fa.ftLastWriteTime;
+        reproc_seen_ = true;
+        return true;
+    }
+    return false;
 }
 
 void M12Dx12Processor::onPresent()
@@ -372,6 +422,27 @@ void M12Dx12Processor::onPresent()
         return;
     HRESULT hr = sc_->GetBuffer(index, IID_PPV_ARGS(&bb));
     if (FAILED(hr)) return;
+
+    // Freeze (photo mode): hold the frame captured when the flag appeared,
+    // reprocess it from the raw original whenever the knob turns.
+    if (freezeFlagSet()) {
+        if (!raw_held_ || raw_.size() != (std::size_t)width_ * height_ * 4) {
+            if (grabRaw(bb.Get())) {
+                raw_held_ = true;
+                sendRaw();
+                m12_logf("frame frozen; knob turns reprocess the original");
+            }
+        } else if (reprocChanged()) {
+            sendRaw();
+        }
+        if (have_processed_) blitToBackbuffer(bb.Get());
+        return;
+    }
+    if (raw_held_) {
+        raw_held_ = false;
+        reproc_seen_ = false;
+        m12_logf("freeze released - live processing continues");
+    }
 
     present_count_++;
     // Live capture stride (every Nth present) plus a hard minimum interval:
