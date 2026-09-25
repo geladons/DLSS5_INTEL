@@ -30,7 +30,7 @@ PKG_FILES = ["__init__.py", "config.py", "daemonctl.py", "deploy.py",
              "gamelaunch.py", "gamescan.py", "i18n.py", "icons.py",
              "logtail.py", "overlay.py", "paths.py", "processes.py",
              "screenmode.py", "splash.py", "controller.py", "ui.py",
-             "ui_games.py", "m13.pyw"]
+             "ui_games.py", "m13.pyw", "icon.ico"]
 
 # (source, dest-relative, glob-ish file list)
 ARTIFACTS = [
@@ -53,10 +53,54 @@ ARTIFACTS = [
      ("runtime", "m12"), ["m12_dxgi.dll"]),
 ]
 
+LAUNCHER_VBS = r'''' DLSS 5 Manager launcher: starts pythonw with NO console.
+' Double-click THIS file (or the shortcut to it). M13.cmd is the fallback.
+Option Explicit
+Dim sh, fso, root, script, pyw, v, q
+Set sh = CreateObject("WScript.Shell")
+Set fso = CreateObject("Scripting.FileSystemObject")
+root = fso.GetParentFolderName(WScript.ScriptFullName)
+script = root & "\m13\m13.pyw"
+q = Chr(34)
+
+Function TryLaunch(cmd)
+  On Error Resume Next
+  sh.Run q & cmd & q & " " & q & script & q, 0, False
+  TryLaunch = (Err.Number = 0)
+  Err.Clear
+  On Error GoTo 0
+End Function
+
+If TryLaunch("pyw.exe") Then WScript.Quit 0
+If TryLaunch("pythonw.exe") Then WScript.Quit 0
+For Each v In Array("313", "312", "311", "310")
+  pyw = sh.ExpandEnvironmentStrings("%LOCALAPPDATA%") & _
+        "\Programs\Python\Python" & v & "\pythonw.exe"
+  If fso.FileExists(pyw) Then
+    If TryLaunch(pyw) Then WScript.Quit 0
+  End If
+Next
+MsgBox "Python 3.10+ not found." & vbCrLf & _
+       "Install it from https://www.python.org/ and run again.", _
+       vbExclamation, "DLSS 5 Manager"
+'''
+
+LAUNCHER_CMD = (
+    "@echo off\r\n"
+    "rem Fallback launcher: hand over to the console-free VBS launcher and\r\n"
+    "rem exit at once (this window flashes for a split second only).\r\n"
+    "start \"\" wscript.exe //nologo \"%~dp0DLSS5 Manager.vbs\"\r\n")
+
+
 README = """DLSS 5 Manager - production bundle
 ==================================
-Launch: M13.cmd   (needs Python 3.10+ installed; the launcher finds it
-itself via the py launcher, PATH, or the standard per-user install).
+Launch: "DLSS5 Manager.vbs"   (double-click; NO console window opens,
+needs Python 3.10+ installed - the launcher finds it itself via the py
+launcher, PATH, or the standard per-user install).
+M13.cmd is the fallback launcher (its window flashes for a split second).
+UAC: Windows asks for admin rights ONLY when you enable a game installed
+in a protected folder (Program Files) - once per game. Everything else
+(the daemon, the Vulkan layers in HKCU, screen mode) needs no admin.
 
 Everything is automatic: on startup the manager finds the weights,
 registers the Vulkan layers, starts the daemon and scans the drives. The
@@ -92,10 +136,12 @@ injection can be read as a cheat.
 Logs are in the bottom pane. Config: %LOCALAPPDATA%\\DLSS5Manager\\config.json
 
 ----
-Коротко по-русски: запуск - M13.cmd, дальше вкладка «Игры»: выбери
-карточку, «Включить DLSS 5», «Играть». В игре CTRL+ALT+G - панель с
-ползунком силы и заморозкой кадра. Русский язык включается на вкладке
-Settings -> Language. Античит: в онлайн-играх не включать.
+Коротко по-русски: запуск - «DLSS5 Manager.vbs» (без чёрного окна
+консоли), дальше вкладка «Игры»: выбери карточку, «Включить DLSS 5»,
+«Играть». В игре CTRL+ALT+G - панель с ползунками и заморозкой кадра.
+Русский язык включается на вкладке Settings -> Language. Античит: в
+онлайн-играх не включать. UAC спросит только для игр из Program Files
+(один раз на игру).
 """
 
 
@@ -163,31 +209,10 @@ def main():
         shutil.copy2(WEIGHTS_SRC, w_dst)
     assert sha1(WEIGHTS_SRC) == sha1(w_dst), "weights hash mismatch"
 
+    with open(os.path.join(DEST, "DLSS5 Manager.vbs"), "w", newline="") as f:
+        f.write(LAUNCHER_VBS.replace("\n", "\r\n"))
     with open(os.path.join(DEST, "M13.cmd"), "w", newline="") as f:
-        f.write(
-            "@echo off\r\n"
-            "rem Find a pythonw.exe on ANY machine: the py launcher first,\r\n"
-            "rem then PATH, then the standard per-user installs.\r\n"
-            "set \"PYW=\"\r\n"
-            "where pyw.exe >nul 2>nul && set \"PYW=pyw.exe\"\r\n"
-            "if not defined PYW (\r\n"
-            "  where pythonw.exe >nul 2>nul && set \"PYW=pythonw.exe\"\r\n"
-            ")\r\n"
-            "if not defined PYW (\r\n"
-            "  for %%V in (313 312 311 310) do (\r\n"
-            "    if exist \"%LOCALAPPDATA%\\Programs\\Python\\Python%%V\\"
-            "pythonw.exe\" set \"PYW=%LOCALAPPDATA%\\Programs\\Python\\"
-            "Python%%V\\pythonw.exe\"\r\n"
-            "  )\r\n"
-            ")\r\n"
-            "if not defined PYW (\r\n"
-            "  echo Python 3.10+ not found. Install it from "
-            "https://www.python.org/ and run again.\r\n"
-            "  pause\r\n"
-            "  exit /b 1\r\n"
-            ")\r\n"
-            "start \"DLSS5 Manager\" /min cmd /c \"\"%PYW%\" "
-            "\"%~dp0m13\\m13.pyw\" 2> \"%~dp0logs\\manager_err.log\"\"\r\n")
+        f.write(LAUNCHER_CMD)
     with open(os.path.join(DEST, "README.txt"), "w", newline="\r\n",
               encoding="utf-8") as f:
         f.write(README.replace("\n", "\r\n"))
