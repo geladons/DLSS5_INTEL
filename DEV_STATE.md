@@ -1,4 +1,55 @@
-# DEV_STATE.md - where we are (updated 2026-09-24 ~17:55 by Kimi)
+# DEV_STATE.md - where we are (updated 2026-09-24 ~23:20 by Kimi)
+
+## M13 v5 (2026-09-24 ~23:20) - universal bundle, en/ru i18n, in-game
+## overlay focus + cursor release
+Owner feedback on v4: too personalized to this PC, Russian should be the
+optional language (English primary), in-game overlay did not pause the
+game and the mouse never appeared (even in menus with a visible cursor).
+Fixes:
+1. i18n: new m13/i18n.py holds ALL UI strings (92 keys, en+ru) and the
+   splash lines. config.json "language": en|ru (default en), switchable in
+   Settings -> Language (takes effect after restart). ui.py, ui_games.py,
+   splash.py, overlay.py render via tr(); the only Cyrillic left in code
+   is the i18n table itself. "Arc Pro B50" and "Moonlight" purged from
+   user-facing text (neutral "your GPU" / "your streaming client").
+2. UNIVERSAL: gamescan.py - Steam install path from
+   HKCU\Software\Valve\Steam\SteamPath (libraryfolders.vdf as before),
+   Epic manifests (%ProgramData%\Epic\EpicGamesLauncher\Data\Manifests\
+   *.item) and GOG registry (HKLM/HKCU WOW6432Node\GOG.com\Games) as
+   first-class sources with proper display names; store container folders
+   (Epic Games, GOG Galaxy) skipped in the drive walk. Machine-specific
+   ROOT_SKIP entry removed. _build_production.py M13.cmd no longer
+   hardcodes C:\Users\AI\...\Python312: pyw launcher -> pythonw on PATH ->
+   %LOCALAPPDATA%\Programs\Python\Python31x, plus a clear "install Python"
+   message; stderr of the manager lands in logs\manager_err.log. README
+   is English-first with a short Russian block.
+3. OVERLAY MOUSE/FOCUS: the panel was WS_EX_NOACTIVATE + topmost, so the
+   game kept the cursor clipped/hidden and clicks never reached it. New
+   config "overlay_focus" (default True, Settings checkbox): on show() the
+   overlay drops NOACTIVATE, takes the foreground (focus_force +
+   SetForegroundWindow), releases the clip (ClipCursor NULL), forces the
+   arrow cursor visible (ShowCursor loop + SetCursor) and repeats the
+   release after 350 ms (games re-clip). The game loses focus -> most
+   single-player titles self-pause and release the mouse; exclusive-
+   fullscreen games may minimize (documented in the checkbox text). On
+   hide() focus returns to the game window (new processes.hwnd_for_pid
+   finds the game's visible top-level HWND) and NOACTIVATE is restored.
+   Frame freeze/reprocess from v4 is unchanged and works together with
+   this: freeze flags keep the picture, focus mode frees the mouse.
+Verified: py_compile all touched modules, _smoke.py (only the known
+host-quirk "resume unfreezes" FAIL - GetProcessTimes returns 0 for any
+child here, NOT a regression), _ui_smoke.py ALL PASS against the live
+daemon, screenshots of Games + Settings tabs (work\_ui_v5.png), i18n key
+coverage check (92/92 both langs), production bundle rebuilt and launched
+via M13.cmd (manager + m11d both up). Commits: 79b0152 (i18n+focus),
+c7e305d (universal scan), 4d5acf9 (bundle).
+NOTE: M13.cmd pythonw via PATH picks the FIRST pythonw.exe on PATH; on
+this box that is the Kimi runtime venv pythonw - it runs the manager fine
+(tkinter present), but on a foreign PC PATH usually has no pythonw and
+the %LOCALAPPDATA% fallback fires. Consider preferring the per-user
+install over PATH if this ever bites.
+LIVE GAME TEST still pending: owner should test overlay in a real game
+(mouse capture release + freeze preview + exclusive fullscreen behavior).
 
 ## M13 v4 (2026-09-24 ~17:55) - friendly UI, real-games scanner, photo mode,
 ## screen-mode VRAM fix
