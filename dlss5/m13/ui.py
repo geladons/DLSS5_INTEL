@@ -6,10 +6,15 @@
 # the daemon itself and scans every fixed drive for games itself. The human
 # only picks a game and presses "Enable" / "Launch".
 #
+# v3 look (owner: "boring and unfriendly"): deep-navy palette, icon cards
+# for games, pill checklist with plain-Russian hints, a startup SPLASH with
+# a neural-net doodle and joke loading lines (splash.py), and a hidden
+# easter egg (click the logo five times).
+#
 # Layout:
-#   header     title + daemon state + gain + in-game overlay button
+#   header     logo + title + daemon state + gain + in-game overlay button
 #   checklist  auto-driven setup steps (weights/layers/daemon/games)
-#   notebook   Games (scanner) | Screen | Settings
+#   notebook   Games (icon cards) | Screen | Settings
 #   log pane   threaded tails of m11d/m12/layer/m8blive logs
 #
 # RESPONSIVENESS RULE: this file NEVER calls a blocking probe. All state
@@ -26,16 +31,19 @@ from tkinter.scrolledtext import ScrolledText
 from .controller import M13Controller
 from .logtail import LogHub
 from .overlay import ControlOverlay, hotkey_label
+from .splash import Splash
 from .ui_games import GamesTab
 
 POLL_MS = 500
 
-BG = "#16181d"
-PANEL = "#22252d"
-PANEL2 = "#2a2e37"
-FG = "#d7dae0"
-MUTED = "#8b919e"
-ACCENT = "#4f8cff"
+BG = "#0d1017"
+PANEL = "#161a23"
+PANEL2 = "#1f2430"
+BORDER = "#2a3040"
+FG = "#e6e9f0"
+MUTED = "#8a91a5"
+ACCENT = "#5b8cff"
+ACCENT2 = "#9a6bff"
 GREEN = "#3fb950"
 RED = "#f85149"
 AMBER = "#d29922"
@@ -43,16 +51,20 @@ AMBER = "#d29922"
 TAG_COLORS = {"m11d": GREEN, "m12": "#58a6ff", "layer": AMBER,
               "m8blive": MUTED, "mgr": FG}
 
+EASTER_EGG_CLICKS = 5
+
+
 class ManagerUI:
     def __init__(self):
         self.ctl = M13Controller()
         self.root = tk.Tk()
-        self.root.title("DLSS 5 Manager")
-        self.root.geometry("980x720")
-        self.root.minsize(860, 620)
+        self.root.title("DLSS 5 Менеджер")
+        self.root.geometry("1024x760")
+        self.root.minsize(900, 640)
         self.root.configure(bg=BG)
         self.logq = queue.Queue()
         self.hub = LogHub(self._enqueue_log)
+        self._egg_clicks = 0
         self._style()
         self._build()
         self.ctl.start_worker(self._on_action_result)
@@ -60,9 +72,28 @@ class ManagerUI:
         self.root.after(200, self._drain_log)
         self.root.after(POLL_MS, self._poll)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
-        # hands-free bring-up + first game scan
+        # hands-free bring-up + first game scan (worker thread)
         self.ctl.submit(self.ctl.autosetup)
         self.games_tab.scan_start()
+        self._splash()
+
+    # ------------------------------------------------------------ splash ---
+    def _splash(self):
+        """Startup easter egg: a small splash over the (withdrawn) main
+        window while the autosetup runs; the main window appears when the
+        minimum show time passed."""
+        self.root.withdraw()
+        splash = Splash(self.root)
+        splash.start()
+
+        def reveal():
+            if splash.ready_to_close():
+                splash.close()
+                self.root.deiconify()
+                self.root.lift()
+                return
+            self.root.after(250, reveal)
+        self.root.after(250, reveal)
 
     # ------------------------------------------------------------- style ---
     def _style(self):
@@ -77,10 +108,10 @@ class ManagerUI:
         s.configure("TLabel", background=BG, foreground=FG)
         s.configure("Muted.TLabel", background=BG, foreground=MUTED)
         s.configure("TLabelframe", background=BG, foreground=FG,
-                    bordercolor=PANEL2)
+                    bordercolor=BORDER)
         s.configure("TLabelframe.Label", background=BG, foreground=FG)
         s.configure("TButton", background=PANEL, foreground=FG,
-                    padding=(10, 5), borderwidth=0)
+                    padding=(12, 6), borderwidth=0)
         s.map("TButton", background=[("active", PANEL2)],
               foreground=[("disabled", "#565b66")])
         s.configure("Accent.TButton", background=ACCENT, foreground="#ffffff",
@@ -90,20 +121,18 @@ class ManagerUI:
         s.map("Danger.TButton", background=[("active", "#523035")])
         s.configure("TNotebook", background=BG, borderwidth=0)
         s.configure("TNotebook.Tab", background=PANEL, foreground=MUTED,
-                    padding=(16, 7))
+                    padding=(18, 8))
         s.map("TNotebook.Tab", background=[("selected", PANEL2)],
               foreground=[("selected", FG)])
         s.configure("TEntry", fieldbackground=PANEL, foreground=FG,
-                    insertcolor=FG, bordercolor=PANEL2)
+                    insertcolor=FG, bordercolor=BORDER)
         s.configure("Horizontal.TScale", background=BG, troughcolor=PANEL)
         s.configure("TCheckbutton", background=BG, foreground=FG)
         s.map("TCheckbutton", background=[("active", BG)])
         s.configure("TCombobox", fieldbackground=PANEL, foreground=FG,
                     background=PANEL)
-        s.configure("Treeview", background="#101216", fieldbackground="#101216",
-                    foreground=FG, rowheight=22, borderwidth=0)
-        s.configure("Treeview.Heading", background=PANEL, foreground=MUTED)
-        s.map("Treeview", background=[("selected", "#27324a")])
+        s.configure("Vertical.TScrollbar", background=PANEL,
+                    troughcolor=BG, borderwidth=0, arrowcolor=FG)
 
     # ------------------------------------------------------------- build ---
     def _build(self):
@@ -120,8 +149,8 @@ class ManagerUI:
         self._tab_screen(nb)
         self._tab_settings(nb)
 
-        self.logtxt = ScrolledText(self.root, height=9, state="disabled",
-                                   font=("Consolas", 9), bg="#101216",
+        self.logtxt = ScrolledText(self.root, height=8, state="disabled",
+                                   font=("Consolas", 9), bg="#0a0c11",
                                    fg=FG, insertbackground=FG,
                                    relief="flat", bd=6)
         self.logtxt.pack(fill="both", expand=False, padx=10, pady=6)
@@ -130,30 +159,42 @@ class ManagerUI:
 
     def _build_header(self):
         head = tk.Frame(self.root, bg=BG)
-        head.pack(fill="x", padx=10, pady=(10, 4))
-        tk.Label(head, text="DLSS 5 Manager", bg=BG, fg=FG,
-                 font=("Segoe UI", 13, "bold")).pack(side="left")
-        self.dot = tk.Label(head, text="?", font=("Segoe UI", 10), bg=BG)
-        self.dot.pack(side="left", padx=(18, 4))
-        self.st_daemon = tk.Label(head, text="daemon: ?", bg=BG, fg=MUTED,
-                                  font=("Segoe UI", 9))
-        self.st_daemon.pack(side="left")
-        ttk.Button(head, text="In-game overlay (%s)" % hotkey_label(
+        head.pack(fill="x", padx=12, pady=(12, 4))
+        self.logo = tk.Canvas(head, width=30, height=30, bg=BG,
+                              highlightthickness=0, cursor="hand2")
+        self.logo.pack(side="left", padx=(0, 8))
+        self._draw_logo(ACCENT)
+        self.logo.bind("<Button-1>", self._logo_click)
+        ttl = tk.Frame(head, bg=BG)
+        ttl.pack(side="left")
+        self.title_lbl = tk.Label(ttl, text="DLSS 5 Менеджер", bg=BG, fg=FG,
+                                  font=("Segoe UI", 14, "bold"))
+        self.title_lbl.pack(anchor="w")
+        tk.Label(ttl, text="реальная 71-блочная нейросеть, живая, на твоей "
+                           "Arc Pro B50", bg=BG, fg=MUTED,
+                 font=("Segoe UI", 8)).pack(anchor="w")
+        ttk.Button(head, text="Игровой оверлей (%s)" % hotkey_label(
             self.ctl.cfg.get("overlay_hotkey")),
             command=self.overlay.toggle).pack(side="right")
 
-        bar = tk.Frame(self.root, bg=PANEL)
-        bar.pack(fill="x", padx=10, pady=4)
+        bar = tk.Frame(self.root, bg=PANEL,
+                       highlightthickness=1, highlightbackground=BORDER)
+        bar.pack(fill="x", padx=12, pady=4)
         inner = tk.Frame(bar, bg=PANEL)
-        inner.pack(fill="x", padx=8, pady=8)
-        self.btn_start = ttk.Button(inner, text="Start daemon",
+        inner.pack(fill="x", padx=10, pady=8)
+        self.dot = tk.Label(inner, text="●", font=("Segoe UI", 10), bg=PANEL)
+        self.dot.pack(side="left")
+        self.st_daemon = tk.Label(inner, text="демон: ...", bg=PANEL,
+                                  fg=MUTED, font=("Segoe UI", 9, "bold"))
+        self.st_daemon.pack(side="left", padx=(6, 14))
+        self.btn_start = ttk.Button(inner, text="Запустить демон",
                                     style="Accent.TButton",
                                     command=self._daemon_start)
         self.btn_start.pack(side="left")
-        ttk.Button(inner, text="Stop", style="Danger.TButton",
+        ttk.Button(inner, text="Стоп", style="Danger.TButton",
                    command=lambda: self.ctl.submit(
                        self.ctl.daemon_stop)).pack(side="left", padx=6)
-        tk.Label(inner, text="gain", bg=PANEL, fg=MUTED).pack(side="left",
+        tk.Label(inner, text="сила", bg=PANEL, fg=MUTED).pack(side="left",
                                                               padx=(18, 4))
         self.gain_var = tk.DoubleVar(value=self.ctl.cfg.get("gain"))
         self._suppress_scale = None   # programmatic-set echo suppression:
@@ -178,55 +219,93 @@ class ManagerUI:
                                     font=("Segoe UI", 8))
         self.daemon_info.pack(side="right")
 
+    def _draw_logo(self, color):
+        self.logo.delete("all")
+        self.logo.create_polygon(15, 2, 28, 15, 15, 28, 2, 15, fill=color,
+                                 outline="")
+        self.logo.create_polygon(15, 8, 22, 15, 15, 22, 8, 15, fill=BG,
+                                 outline="")
+
+    def _logo_click(self, _e):
+        """Hidden easter egg: five clicks on the diamond."""
+        self._egg_clicks += 1
+        if self._egg_clicks < EASTER_EGG_CLICKS:
+            return
+        self._egg_clicks = 0
+        self.title_lbl.config(text="DLSS 5 «Пятёрочка»")
+        self.log("mgr", "ПАСХАЛКА: нейросеть обучена на 10 000 часах GTA IV "
+                        "и одном очень терпеливом владельце.")
+        colors = (ACCENT, ACCENT2, GREEN, AMBER, RED, "#ff6ec7")
+
+        def flash(i=0):
+            if i >= 12:
+                self._draw_logo(ACCENT)
+                self.title_lbl.config(text="DLSS 5 Менеджер")
+                return
+            self._draw_logo(colors[i % len(colors)])
+            self.root.after(150, lambda: flash(i + 1))
+        flash()
+
     def _build_checklist(self):
-        box = tk.Frame(self.root, bg=PANEL)
-        box.pack(fill="x", padx=10, pady=4)
+        box = tk.Frame(self.root, bg=PANEL,
+                       highlightthickness=1, highlightbackground=BORDER)
+        box.pack(fill="x", padx=12, pady=4)
         row = tk.Frame(box, bg=PANEL)
-        row.pack(fill="x", padx=8, pady=6)
-        tk.Label(row, text="Setup (automatic):", bg=PANEL, fg=MUTED,
+        row.pack(fill="x", padx=10, pady=(8, 2))
+        tk.Label(row, text="Автонастройка:", bg=PANEL, fg=MUTED,
                  font=("Segoe UI", 9, "bold")).pack(side="left")
         self.steps = {}
-        for key, label in (("weights", "Weights"), ("layers", "Layers"),
-                           ("daemon", "Daemon"), ("game", "Game ready")):
+        for key, label in (("weights", "Веса"), ("layers", "Слои Vulkan"),
+                           ("daemon", "Демон"), ("game", "Игра готова")):
             lbl = tk.Label(row, text=label, bg=PANEL, fg=MUTED,
                            font=("Segoe UI", 9), padx=10)
             lbl.pack(side="left")
             self.steps[key] = lbl
         self.hint = tk.Label(box, text="", bg=PANEL, fg=AMBER,
                              font=("Segoe UI", 9), anchor="w")
-        self.hint.pack(fill="x", padx=8, pady=(0, 6))
+        self.hint.pack(fill="x", padx=10, pady=(0, 8))
 
     # --------------------------------------------------------- Screen tab --
     def _tab_screen(self, nb):
         t = ttk.Frame(nb, padding=10)
-        nb.add(t, text="  Screen  ")
-        ttk.Label(t, text="Fullscreen desktop overlay (watch through the "
-                          "Moonlight stream). SLOW warm-up at 1440p: weights "
-                          "upload ~30 s, first frame up to a minute - it is "
-                          "loading, not dead. For a quick demo use window "
-                          "mode below.", style="Muted.TLabel", wraplength=860,
+        nb.add(t, text="  Экран  ")
+        ttk.Label(t, text="Полноэкранный оверлей рабочего стола (смотри "
+                          "через трансляцию Moonlight). ВАЖНО: демон и "
+                          "оверлей экрана не живут вместе - каждому нужно "
+                          "~12 ГБ видеопамяти из 16. При запуске одного "
+                          "второй останавливается автоматически.",
+                  style="Muted.TLabel", wraplength=900,
                   justify="left").pack(anchor="w")
         row = ttk.Frame(t)
         row.pack(anchor="w", pady=8)
-        ttk.Button(row, text="Start fullscreen overlay", style="Accent.TButton",
+        ttk.Button(row, text="Запустить оверлей экрана",
+                   style="Accent.TButton",
                    command=self._screen_start).pack(side="left")
-        ttk.Button(row, text="Stop", style="Danger.TButton",
+        ttk.Button(row, text="Стоп", style="Danger.TButton",
                    command=lambda: self.ctl.submit(
                        self.ctl.screen_stop)).pack(side="left", padx=6)
-        ttk.Label(row, text="hotkeys: CTRL+ALT+X hide/show, CTRL+ALT+Q quit",
+        ttk.Label(row, text="горячие клавиши: CTRL+ALT+X скрыть/показать, "
+                            "CTRL+ALT+Q выход",
                   style="Muted.TLabel").pack(side="left", padx=14)
 
         row2 = ttk.Frame(t)
         row2.pack(anchor="w", pady=(4, 2))
-        ttk.Label(row2, text="Window mode - title contains:").pack(side="left")
+        ttk.Label(row2, text="Режим окна - заголовок содержит:").pack(
+            side="left")
         self.win_var = tk.StringVar()
-        ttk.Entry(row2, textvariable=self.win_var, width=30).pack(side="left",
-                                                                  padx=6)
-        ttk.Button(row2, text="Start on window",
+        ttk.Entry(row2, textvariable=self.win_var, width=30).pack(
+            side="left", padx=6)
+        ttk.Button(row2, text="Запустить на окне",
                    command=self._screen_window_start).pack(side="left")
-        self.screen_info = ttk.Label(t, text="overlay: ?",
+        self.screen_info = ttk.Label(t, text="оверлей: выкл",
                                      style="Muted.TLabel")
         self.screen_info.pack(anchor="w", pady=6)
+        self.screen_tail = ttk.Label(
+            t, text="Прогрев 1440p: загрузка весов ~30 с, первый кадр до "
+                    "минуты - это загрузка, а не зависание. Для быстрого "
+                    "демо используй режим окна выше.",
+            style="Muted.TLabel", wraplength=900, justify="left")
+        self.screen_tail.pack(anchor="w")
 
     def _screen_start(self):
         self.ctl.cfg.set("gain", round(float(self.gain_var.get()), 3))
@@ -240,10 +319,10 @@ class ManagerUI:
     # ------------------------------------------------------- Settings tab --
     def _tab_settings(self, nb):
         t = ttk.Frame(nb, padding=10)
-        nb.add(t, text="  Settings  ")
+        nb.add(t, text="  Настройки  ")
         row = ttk.Frame(t)
         row.pack(anchor="w", pady=4, fill="x")
-        ttk.Label(row, text="weights (.safetensors):").pack(side="left")
+        ttk.Label(row, text="веса (.safetensors):").pack(side="left")
         self.weights_var = tk.StringVar(
             value=self.ctl.cfg.get("weights_path") or "")
         ttk.Entry(row, textvariable=self.weights_var,
@@ -257,21 +336,21 @@ class ManagerUI:
                 self.weights_var.set(p)
                 self.ctl.cfg.set("weights_path", p)
                 self.log("mgr", "weights path set: %s" % p)
-        ttk.Button(row, text="Browse...", command=browse_weights).pack(
+        ttk.Button(row, text="Обзор...", command=browse_weights).pack(
             side="left")
-        ttk.Button(row, text="Save", command=lambda: (
+        ttk.Button(row, text="Сохранить", command=lambda: (
             self.ctl.cfg.set("weights_path", self.weights_var.get()),
             self.log("mgr", "weights path saved"))).pack(side="left", padx=6)
 
         row2 = ttk.Frame(t)
         row2.pack(anchor="w", pady=6)
-        ttk.Button(row2, text="Register Vulkan layers (HKCU)",
+        ttk.Button(row2, text="Зарегистрировать слои Vulkan (HKCU)",
                    command=lambda: self.ctl.submit(
                        self.ctl.layers_register)).pack(side="left")
-        ttk.Button(row2, text="Unregister",
+        ttk.Button(row2, text="Снять регистрацию",
                    command=lambda: self.ctl.submit(
                        self.ctl.layers_unregister)).pack(side="left", padx=6)
-        self.layers_info = ttk.Label(row2, text="layers: ?",
+        self.layers_info = ttk.Label(row2, text="слои: ?",
                                      style="Muted.TLabel")
         self.layers_info.pack(side="left", padx=10)
 
@@ -279,23 +358,25 @@ class ManagerUI:
         opts.pack(anchor="w", pady=6)
         self.freeze_var = tk.BooleanVar(
             value=bool(self.ctl.cfg.get("overlay_freeze")))
-        ttk.Checkbutton(opts, text="Freeze game while the overlay is open",
+        ttk.Checkbutton(opts, text="Замораживать кадр, пока оверлей открыт "
+                                   "(фото-режим с живым превью)",
                         variable=self.freeze_var,
                         command=lambda: self.ctl.cfg.set(
                             "overlay_freeze", bool(self.freeze_var.get()))
                         ).pack(anchor="w")
         self.ap_var = tk.BooleanVar(
             value=bool(self.ctl.cfg.get("overlay_autopause")))
-        ttk.Checkbutton(opts, text="Pause processing when the overlay opens",
+        ttk.Checkbutton(opts, text="Ставить обработку на паузу при открытии "
+                                   "оверлея",
                         variable=self.ap_var,
                         command=lambda: self.ctl.cfg.set(
                             "overlay_autopause", bool(self.ap_var.get()))
                         ).pack(anchor="w")
 
-        ttk.Label(t, text="Overlay hotkey: %s (change in config.json)"
-                  % self.ctl.cfg.get("overlay_hotkey"),
+        ttk.Label(t, text="Горячая клавиша оверлея: %s (меняется в "
+                          "config.json)" % self.ctl.cfg.get("overlay_hotkey"),
                   style="Muted.TLabel").pack(anchor="w", pady=(10, 2))
-        ttk.Label(t, text="Config: %s" % self.ctl.cfg.path,
+        ttk.Label(t, text="Конфиг: %s" % self.ctl.cfg.path,
                   style="Muted.TLabel").pack(anchor="w")
 
     # ----------------------------------------------------------- actions ---
@@ -335,10 +416,10 @@ class ManagerUI:
     def _render(self, snap):
         up = snap.get("daemon_pid") is not None
         if up:
-            txt = "up (pid %s)" % snap["daemon_pid"]
+            txt = "работает (pid %s)" % snap["daemon_pid"]
             g, f = snap.get("daemon_gain"), snap.get("daemon_frames")
             if g is not None:
-                txt += " - gain %.2f, %d frames" % (g, f or 0)
+                txt += " - сила %.2f, %d кадров" % (g, f or 0)
                 # do not fight an in-flight user push (slider snap-back)
                 pending = self._pending_push
                 stale_push = pending and (time.time() - pending[1] > 2.0
@@ -350,23 +431,24 @@ class ManagerUI:
                     self.gain_scale.set(g)
                     self.gain_lbl.config(text="%.2f" % g)
             if snap.get("daemon_err"):
-                txt += " [busy]"
-            self.dot.config(text="O", fg=GREEN)
-            self.st_daemon.config(text="daemon: " + txt, fg=GREEN)
+                txt += " [занят]"
+            self.dot.config(text="●", fg=GREEN)
+            self.st_daemon.config(text="демон: " + txt, fg=GREEN)
             self.daemon_info.config(text="NRCT live control OK"
                                     if not snap.get("daemon_err") else
                                     snap["daemon_err"])
         else:
-            self.dot.config(text="O", fg=RED)
-            self.st_daemon.config(text="daemon: down", fg=RED)
+            self.dot.config(text="●", fg=RED)
+            self.st_daemon.config(text="демон: остановлен", fg=RED)
             self.daemon_info.config(text="")
 
         lx = snap.get("layers_x64"), snap.get("layers_x86")
-        self.layers_info.config(text="layers: x64 %s / x86 %s" % (
-            "reg" if lx[0] else "MISSING", "reg" if lx[1] else "MISSING"))
-        self.screen_info.config(text="overlay: %s" % (
-            "UP (pid %s)" % snap["screen_pid"] if snap.get("screen_pid")
-            else "off"))
+        self.layers_info.config(text="слои: x64 %s / x86 %s" % (
+            "OK" if lx[0] else "НЕТ", "OK" if lx[1] else "НЕТ"))
+        screen_up = snap.get("screen_pid") is not None
+        self.screen_info.config(text="оверлей: %s" % (
+            "РАБОТАЕТ (pid %s, греется - первые кадры долгие)"
+            % snap["screen_pid"] if screen_up else "выкл"))
         self.games_tab.render(snap)
         self._render_checklist(snap)
 
@@ -379,21 +461,21 @@ class ManagerUI:
         states = {"weights": weights, "layers": layers, "daemon": daemon,
                   "game": game}
         for key, ok in states.items():
-            base = {"weights": "Weights", "layers": "Layers",
-                    "daemon": "Daemon", "game": "Game ready"}[key]
-            self.steps[key].config(text=("[x] " if ok else "[ ] ") + base,
+            base = {"weights": "Веса", "layers": "Слои Vulkan",
+                    "daemon": "Демон", "game": "Игра готова"}[key]
+            self.steps[key].config(text=("✔ " if ok else "· ") + base,
                                    fg=GREEN if ok else MUTED)
         if not weights:
-            hint, color = ("Weights not found - Settings tab, Browse to "
+            hint, color = ("Не найдены веса - вкладка «Настройки», укажи "
                            "dlssnr-logical.safetensors", AMBER)
         elif not layers or not daemon:
-            hint, color = "Setting up automatically...", AMBER
+            hint, color = "Настраиваю сам, несколько секунд...", AMBER
         elif not game:
-            hint, color = ("Pick a game in the Games tab and press "
-                           "'Enable DLSS 5'", AMBER)
+            hint, color = ("Выбери игру карточкой на вкладке «Игры» и нажми "
+                           "«Включить DLSS 5»", AMBER)
         else:
-            hint, color = ("Ready. Launch the game; %s opens the in-game "
-                           "overlay." % hotkey_label(
+            hint, color = ("Всё готово! Жми «Играть»; в игре %s открывает "
+                           "панель управления." % hotkey_label(
                                self.ctl.cfg.get("overlay_hotkey")), GREEN)
         self.hint.config(text=hint, fg=color)
 
