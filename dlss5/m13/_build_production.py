@@ -27,9 +27,9 @@ WEIGHTS_SRC = os.path.join(_REPO, "work", "mlxw",
                            "dlssnr-logical.safetensors")
 
 PKG_FILES = ["__init__.py", "config.py", "daemonctl.py", "deploy.py",
-             "gamelaunch.py", "gamescan.py", "logtail.py", "overlay.py",
-             "paths.py", "processes.py", "screenmode.py", "controller.py",
-             "ui.py", "ui_games.py", "m13.pyw"]
+             "gamelaunch.py", "gamescan.py", "icons.py", "logtail.py",
+             "overlay.py", "paths.py", "processes.py", "screenmode.py",
+             "splash.py", "controller.py", "ui.py", "ui_games.py", "m13.pyw"]
 
 # (source, dest-relative, glob-ish file list)
 ARTIFACTS = [
@@ -54,35 +54,37 @@ ARTIFACTS = [
 
 README = """DLSS 5 Manager - production bundle
 ==================================
-Run:  M13.cmd
+Запуск: M13.cmd
 
-HANDS-FREE: on start the app finds the weights by itself, registers the
-Vulkan layers by itself, starts the daemon by itself and scans ALL drives
-for games by itself. The checklist at the top shows what is ready.
+Всё само: при старте менеджер находит веса, регистрирует слои Vulkan,
+запускает демон и сканирует диски. Сканер показывает ТОЛЬКО реальные игры
+(иконки-карточки), а не каждый exe на диске. Игры с лаунчером (Stalker 2,
+RDR2) определяются сами: DLSS ставится на настоящий exe игры, а запуск
+идёт через её лаунчер.
 
-To play:
-  1. Games tab - pick the game (or "Add exe manually").
-  2. "Enable DLSS 5" - deploys the right DLLs for the game's API
-     (DX9 / DX10 / DX11 via DXVK->Vulkan layer, DX12 via our dxgi proxy).
-     Mode is auto-detected from the exe; override with the mode dropdown.
-     Protected folders (Program Files etc.) trigger ONE UAC prompt.
-  3. "Launch". In game: CTRL+ALT+G opens the control overlay ON TOP of the
-     game (frameless, clicking it never minimizes the game): PAUSE/RESUME
-     processing, live gain slider, "freeze game while open" - the game
-     stops on one frame while you turn the knobs.
+Как играть:
+  1. Вкладка "Игры" - выбери карточку игры (или "Добавить exe вручную").
+  2. "Включить DLSS 5" - ставит нужные DLL под API игры
+     (DX9/DX10/DX11 через DXVK->Vulkan слой, DX12 через наш dxgi-прокси).
+     Режим определяется автоматически; можно переопределить выпадайкой.
+     Защищённые папки (Program Files) спросят UAC один раз.
+  3. "Играть". В игре CTRL+ALT+G открывает панель ПОВЕРХ игры:
+     кадр ЗАМОРАЖИВАЕТСЯ, крути ползунок силы - замороженный кадр
+     переобрабатывается из исходника с новыми настройками. Закрыл панель -
+     игра продолжается уже с новой силой эффекта.
 
-Screen tab: fullscreen desktop overlay (slow warm-up at 1440p: ~30 s
-weights upload, up to a minute for the first frame - it is loading, not
-dead) or window mode (fast - type part of a window title).
+Вкладка "Экран": полноэкранный оверлей рабочего стола. ВАЖНО: демон и
+оверлей экрана не работают одновременно (каждому нужно ~12 ГБ из 16 ГБ
+видеопамяти) - менеджер сам останавливает одно перед запуском другого.
+Прогрев 1440p: ~30 с загрузка весов, до минуты первый кадр.
 
-Layer hotkeys (owned by the layer/proxy, not the manager):
-  CTRL+ALT+X pause/resume processing, CTRL+ALT+Q layer off.
+Горячие клавиши слоя/прокси (в игре): CTRL+ALT+X пауза/продолжить
+обработку, CTRL+ALT+Q выключить слой.
 
-ANTI-CHEAT: do not enable in online/protected titles (PUBG, CS2,
-GTA Online) - DLL injection can be read as a cheat.
+АНТИЧИТ: не включай в онлайн-играх (PUBG, CS2, GTA Online) - внедрение
+DLL могут посчитать читом.
 
-Logs stream into the bottom pane. Config: %LOCALAPPDATA%\\DLSS5Manager\\
-config.json
+Логи - в нижней панели. Конфиг: %LOCALAPPDATA%\\DLSS5Manager\\config.json
 """
 
 
@@ -155,7 +157,8 @@ def main():
                 'start "DLSS5 Manager" /min '
                 '"C:\\Users\\AI\\AppData\\Local\\Programs\\Python\\'
                 'Python312\\pythonw.exe" "%~dp0m13\\m13.pyw"\r\n')
-    with open(os.path.join(DEST, "README.txt"), "w", newline="\r\n") as f:
+    with open(os.path.join(DEST, "README.txt"), "w", newline="\r\n",
+              encoding="utf-8") as f:
         f.write(README.replace("\n", "\r\n"))
 
     total = sum(os.path.getsize(p) for p in
