@@ -27,9 +27,10 @@ WEIGHTS_SRC = os.path.join(_REPO, "work", "mlxw",
                            "dlssnr-logical.safetensors")
 
 PKG_FILES = ["__init__.py", "config.py", "daemonctl.py", "deploy.py",
-             "gamelaunch.py", "gamescan.py", "icons.py", "logtail.py",
-             "overlay.py", "paths.py", "processes.py", "screenmode.py",
-             "splash.py", "controller.py", "ui.py", "ui_games.py", "m13.pyw"]
+             "gamelaunch.py", "gamescan.py", "i18n.py", "icons.py",
+             "logtail.py", "overlay.py", "paths.py", "processes.py",
+             "screenmode.py", "splash.py", "controller.py", "ui.py",
+             "ui_games.py", "m13.pyw"]
 
 # (source, dest-relative, glob-ish file list)
 ARTIFACTS = [
@@ -54,37 +55,47 @@ ARTIFACTS = [
 
 README = """DLSS 5 Manager - production bundle
 ==================================
-Запуск: M13.cmd
+Launch: M13.cmd   (needs Python 3.10+ installed; the launcher finds it
+itself via the py launcher, PATH, or the standard per-user install).
 
-Всё само: при старте менеджер находит веса, регистрирует слои Vulkan,
-запускает демон и сканирует диски. Сканер показывает ТОЛЬКО реальные игры
-(иконки-карточки), а не каждый exe на диске. Игры с лаунчером (Stalker 2,
-RDR2) определяются сами: DLSS ставится на настоящий exe игры, а запуск
-идёт через её лаунчер.
+Everything is automatic: on startup the manager finds the weights,
+registers the Vulkan layers, starts the daemon and scans the drives. The
+scanner shows ONLY real games (icon cards), not every exe on the disk.
+Launcher-based games (Stalker 2, RDR2) are detected by themselves: DLSS 5
+deploys onto the real game binary while "Play" goes through its launcher.
 
-Как играть:
-  1. Вкладка "Игры" - выбери карточку игры (или "Добавить exe вручную").
-  2. "Включить DLSS 5" - ставит нужные DLL под API игры
-     (DX9/DX10/DX11 через DXVK->Vulkan слой, DX12 через наш dxgi-прокси).
-     Режим определяется автоматически; можно переопределить выпадайкой.
-     Защищённые папки (Program Files) спросят UAC один раз.
-  3. "Играть". В игре CTRL+ALT+G открывает панель ПОВЕРХ игры:
-     кадр ЗАМОРАЖИВАЕТСЯ, крути ползунок силы - замороженный кадр
-     переобрабатывается из исходника с новыми настройками. Закрыл панель -
-     игра продолжается уже с новой силой эффекта.
+How to play:
+  1. Games tab - pick a game card (or "Add exe manually...").
+  2. "Enable DLSS 5" - deploys the right DLLs for the game API
+     (DX9/DX10/DX11 via DXVK->Vulkan layer, DX12 via our dxgi proxy).
+     The mode is detected automatically; override with the dropdown.
+     Protected folders (Program Files) ask for UAC once.
+  3. "Play". In game CTRL+ALT+G opens the control panel ON TOP of the
+     game: the frame FREEZES, turn the intensity slider - the frozen
+     frame is reprocessed from the original with the new settings. Close
+     the panel and the game continues with the new intensity.
 
-Вкладка "Экран": полноэкранный оверлей рабочего стола. ВАЖНО: демон и
-оверлей экрана не работают одновременно (каждому нужно ~12 ГБ из 16 ГБ
-видеопамяти) - менеджер сам останавливает одно перед запуском другого.
-Прогрев 1440p: ~30 с загрузка весов, до минуты первый кадр.
+Screen tab: fullscreen desktop overlay (watch it through your streaming
+client). NOTE: the daemon and the screen overlay cannot run at the same
+time (each needs ~12 GB of VRAM) - the manager stops one before starting
+the other. Warm-up: ~30 s weights upload, up to a minute for the first
+frame - that is loading, not a hang.
 
-Горячие клавиши слоя/прокси (в игре): CTRL+ALT+X пауза/продолжить
-обработку, CTRL+ALT+Q выключить слой.
+Language: English by default; Settings tab -> Language -> Russian.
 
-АНТИЧИТ: не включай в онлайн-играх (PUBG, CS2, GTA Online) - внедрение
-DLL могут посчитать читом.
+In-game layer/proxy hotkeys: CTRL+ALT+X pause/resume processing,
+CTRL+ALT+Q disable the layer.
 
-Логи - в нижней панели. Конфиг: %LOCALAPPDATA%\\DLSS5Manager\\config.json
+ANTI-CHEAT: do not enable in online games (PUBG, CS2, GTA Online) - DLL
+injection can be read as a cheat.
+
+Logs are in the bottom pane. Config: %LOCALAPPDATA%\\DLSS5Manager\\config.json
+
+----
+Коротко по-русски: запуск - M13.cmd, дальше вкладка «Игры»: выбери
+карточку, «Включить DLSS 5», «Играть». В игре CTRL+ALT+G - панель с
+ползунком силы и заморозкой кадра. Русский язык включается на вкладке
+Settings -> Language. Античит: в онлайн-играх не включать.
 """
 
 
@@ -152,11 +163,31 @@ def main():
         shutil.copy2(WEIGHTS_SRC, w_dst)
     assert sha1(WEIGHTS_SRC) == sha1(w_dst), "weights hash mismatch"
 
-    with open(os.path.join(DEST, "M13.cmd"), "w", newline="\r\n") as f:
-        f.write('@echo off\r\n'
-                'start "DLSS5 Manager" /min '
-                '"C:\\Users\\AI\\AppData\\Local\\Programs\\Python\\'
-                'Python312\\pythonw.exe" "%~dp0m13\\m13.pyw"\r\n')
+    with open(os.path.join(DEST, "M13.cmd"), "w", newline="") as f:
+        f.write(
+            "@echo off\r\n"
+            "rem Find a pythonw.exe on ANY machine: the py launcher first,\r\n"
+            "rem then PATH, then the standard per-user installs.\r\n"
+            "set \"PYW=\"\r\n"
+            "where pyw.exe >nul 2>nul && set \"PYW=pyw.exe\"\r\n"
+            "if not defined PYW (\r\n"
+            "  where pythonw.exe >nul 2>nul && set \"PYW=pythonw.exe\"\r\n"
+            ")\r\n"
+            "if not defined PYW (\r\n"
+            "  for %%V in (313 312 311 310) do (\r\n"
+            "    if exist \"%LOCALAPPDATA%\\Programs\\Python\\Python%%V\\"
+            "pythonw.exe\" set \"PYW=%LOCALAPPDATA%\\Programs\\Python\\"
+            "Python%%V\\pythonw.exe\"\r\n"
+            "  )\r\n"
+            ")\r\n"
+            "if not defined PYW (\r\n"
+            "  echo Python 3.10+ not found. Install it from "
+            "https://www.python.org/ and run again.\r\n"
+            "  pause\r\n"
+            "  exit /b 1\r\n"
+            ")\r\n"
+            "start \"DLSS5 Manager\" /min cmd /c \"\"%PYW%\" "
+            "\"%~dp0m13\\m13.pyw\" 2> \"%~dp0logs\\manager_err.log\"\"\r\n")
     with open(os.path.join(DEST, "README.txt"), "w", newline="\r\n",
               encoding="utf-8") as f:
         f.write(README.replace("\n", "\r\n"))
