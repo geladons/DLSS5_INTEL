@@ -46,7 +46,7 @@ the neural path is validated bit-exactly against PyTorch goldens.
 Every frame below is an unretouched full-screen capture of **GTA IV** running
 through the whole live pipeline (DX9 → DXVK → Vulkan layer → TCP daemon →
 71-block DLSSNR chain on the GPU → back into the swapchain), streamed over
-Sunshine/Moonlight.
+Sunshine/Moonlight. Effect intensity on all shots: **gain 1.6**.
 
 **▶ [Open the interactive comparison slider](docs/compare.html)**
 (drag the divider left/right; best experienced with GitHub Pages enabled —

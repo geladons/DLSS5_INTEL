@@ -9,8 +9,11 @@ host quirks).
 ## Ground rules
 
 1. **Never commit weights or binaries.** `*.safetensors`, `*.dll`, `*.exe`,
-   `reference/`, `work/`, `build/`, `out/` are gitignored — keep it that way.
-   No credentials, ever.
+   `reference/`, `build/`, `out/` are gitignored — keep it that way.
+   One deliberate exception: `work/_ref_test/` holds the golden-generation
+   harness (`dump_torch.py` and friends) — it is part of the validation rig
+   and depends on the local reference tree, so it stays tracked. Everything
+   else under `work/` stays out. No credentials, ever.
 2. **No NVIDIA code.** Clean-room our own implementation; reference code in
    `reference/` is read-only study material and never ships.
 3. **One logical change per PR**, small reviewable diffs.
