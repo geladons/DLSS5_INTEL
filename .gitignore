@@ -23,3 +23,10 @@ _rel_tmp/
 
 # local VS BuildTools registration backups (machine-specific)
 _vsbt_backup/
+
+# runtime screenshots / dumps / compiled shaders (regenerated locally)
+dlss5/m11-layer/dumps/
+dlss5/m12-dxgi/evidence/
+dlss5/m13/_ui_shot.png
+*.spv
+*.spvasm
