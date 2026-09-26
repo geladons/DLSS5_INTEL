@@ -1,9 +1,11 @@
 # DEV_STATE.md - where we are (updated 2026-09-25 ~12:00 by Kimi)
 
-## Post-v6 (2026-09-25 ~19:00) - OWNER LIVE TEST: RDR2 (Vulkan) works
-Owner played RDR2 with the implicit layer enabled and reports it works
-in-game. This closes the v3-era "RDR2 vulkan path untested in-game" note
-for RDR2. README status table updated (EN+RU).
+## Post-v6 (2026-09-25 ~19:00) - OWNER LIVE TEST: RDR2 (Vulkan) works, rough
+Owner played RDR2 with the implicit layer enabled: processing works
+in-game, but the experience is rough (owner verdict: works poorly) - a
+known polish item, not a blocker. This closes the v3-era "RDR2 vulkan
+path untested in-game" note. README status row updated (EN+RU): green
+downgraded to yellow with "polish welcome".
 
 ## M13 v6 (2026-09-25 ~12:00) - overlay mouse capture hardening, second
 ## knob (effect mix/blend), live screen-mode retune, no-console launcher
