@@ -27,7 +27,7 @@ expect today:
 
 | Area | Status |
 |---|---|
-| Vulkan games (implicit layer) | ✅ Works — validated end-to-end (vkcube, RDR2-style path) |
+| Vulkan games (implicit layer) | ✅ Works — validated end-to-end on vkcube; untested in real Vulkan titles yet |
 | DX9 / DX10 / DX11 games (via DXVK → Vulkan) | ✅ Works — validated live on GTA IV (DX9, 32-bit) |
 | DX12 games (own `dxgi.dll` proxy) | ✅ Works mechanically — validated on windowed DX12 titles |
 | Auto-deploy of the right DLLs per game | ✅ Works — API auto-detection, per-mode DLL set, one UAC prompt for Program Files games |
