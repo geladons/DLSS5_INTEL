@@ -3,12 +3,13 @@
 # move the CONSOLE window via SetWindowPos. ASCII only.
 param()
 $ErrorActionPreference = 'Stop'
-$ui  = 'C:\Users\<owner>\.kimi_openclaw\workspace\skills\win-desktop-control\scripts\ui.ps1'
-$exe = 'C:\Users\<owner>\Desktop\DLSS5_INTEL\dlss5\m8b-live\build\Release\m8blive.exe'
-$wd  = 'C:\Users\<owner>\Desktop\DLSS5_INTEL\dlss5\m8b-live\build\Release'
-$outdir = 'C:\Users\<owner>\Desktop\DLSS5_INTEL\docs'
-$alog   = 'C:\Users\<owner>\Desktop\DLSS5_INTEL\dlss5\m8b-live\out\m8b_A.log'
-$aerr   = 'C:\Users\<owner>\Desktop\DLSS5_INTEL\dlss5\m8b-live\out\m8b_A.err'
+$repo = (Resolve-Path "$PSScriptRoot\..\..").Path
+$ui  = Join-Path $env:USERPROFILE '.kimi_openclaw\workspace\skills\win-desktop-control\scripts\ui.ps1'
+$exe = Join-Path $repo 'dlss5\m8b-live\build\Release\m8blive.exe'
+$wd  = Join-Path $repo 'dlss5\m8b-live\build\Release'
+$outdir = Join-Path $repo 'docs'
+$alog   = Join-Path $repo 'dlss5\m8b-live\out\m8b_A.log'
+$aerr   = Join-Path $repo 'dlss5\m8b-live\out\m8b_A.err'
 if (Test-Path $alog) { Remove-Item $alog -Force }
 if (Test-Path $aerr) { Remove-Item $aerr -Force }
 

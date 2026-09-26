@@ -20,3 +20,6 @@ __pycache__/
 # Релизная сборка / локальный скретч
 release/out/
 _rel_tmp/
+
+# local VS BuildTools registration backups (machine-specific)
+_vsbt_backup/
