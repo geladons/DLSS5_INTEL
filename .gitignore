@@ -16,3 +16,7 @@ out/
 build-nmake/
 __pycache__/
 *.pyc
+
+# Релизная сборка / локальный скретч
+release/out/
+_rel_tmp/
