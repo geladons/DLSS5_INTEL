@@ -123,9 +123,10 @@ Full details, module map and the performance breakdown:
 
 ## Quick start (release bundle)
 
-1. Download the release bundle from
-   [Releases](../../releases) (or build it from this repo with
-   [`release/assemble-release.cmd`](release/assemble-release.cmd)).
+1. Download **`DLSS5-Demo-Bundle-v0.1-demo.zip`** from the
+   [v0.1-demo release](../../releases/tag/v0.1-demo) and unpack it
+   (or build the bundle yourself from this repo — see
+   [docs/BUILDING.md](docs/BUILDING.md)).
 2. Place the weights file into the bundle's `weights\` folder —
    see [docs/weights-format.md](docs/weights-format.md) for the exact file
    name and format.

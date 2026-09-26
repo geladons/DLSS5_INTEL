@@ -20,13 +20,20 @@ placeholder pointing to [docs/weights-format.md](../docs/weights-format.md).
 2. Smoke-test the bundle on the bench VM: `DLSS5 Manager.vbs` → autosetup
    green (weights present locally) → daemon up → vkcube demo
    (`runtime\m11d` + layer) → one game enable/launch roundtrip.
-3. Zip the folder → attach to a
+3. Zip the folder as `DLSS5-Demo-Bundle-<tag>.zip` → attach to a
    [GitHub Release](../../releases) tagged `v0.1-demo`, description from
-   [CHANGELOG.md](../CHANGELOG.md).
+   [CHANGELOG.md](../CHANGELOG.md). Status: ✅ published (see
+   [v0.1-demo](../../releases/tag/v0.1-demo)).
 4. Enable GitHub Pages (`Settings → Pages → docs/`) so
    [docs/compare.html](../docs/compare.html) works as the interactive
    before/after slider linked from the README.
 5. Never attach or link weights anywhere.
+
+Full toolchain / build-from-source guide for contributors:
+[docs/BUILDING.md](../docs/BUILDING.md). Quick start for the downloaded
+bundle: unpack, put the weights into `weights\`, launch
+`DLSS5 Manager.vbs` — details in `README.txt` inside the bundle and in
+the [main README](../README.md#quick-start-release-bundle).
 
 ## What is in the bundle
 

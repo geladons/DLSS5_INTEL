@@ -24,12 +24,14 @@ host quirks).
 
 ## Building
 
-Windows, Vulkan SDK, CMake, VS Build Tools 2019+:
+Full guide (toolchain, every module, bundle assembly, troubleshooting):
+[docs/BUILDING.md](docs/BUILDING.md). Quick version — Windows, Vulkan SDK,
+CMake, VS Build Tools 2019+, then from the repo root:
 
 ```cmd
 cd dlss5\m8b-live && build.cmd        :: live screen/window app
-cmd //c dlss5\m11d\build.cmd          :: frame daemon
-cmd //c dlss5\m11-layer\build.cmd     :: Vulkan layer (x64 + x86)
+cd ..\m11d          && build.cmd      :: frame daemon
+cd ..\m11-layer     && build.cmd      :: Vulkan layer (x64 + x86)
 ```
 
 Each module writes `_build.log` — check it for errors. The VS-generator
