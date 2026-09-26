@@ -1,0 +1,3 @@
+blank_issues_enabled: false
+# Weights/legal and anti-cheat questions are answered in docs/weights-format.md
+# and SECURITY.md — linked from the README, so no external contact links here.
