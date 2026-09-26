@@ -4,7 +4,7 @@ rem M7 graph prototype (rounding unit kernel + global block 31) build+run.
 rem cmd batch: immune to the exec wrapper's PowerShell $-mangling.
 rem Usage: build.cmd [--no-run]
 
-set "REPO=C:\Users\AI\Desktop\DLSS5_INTEL"
+set "REPO=%~dp0\..\.."
 set "SRC=%REPO%\dlss5\m7-graph-proto"
 set "BUILD=%SRC%\build"
 set "LOG=%REPO%\docs\m7-proto.log"

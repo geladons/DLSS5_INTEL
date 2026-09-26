@@ -6,7 +6,7 @@ rem chosen.txt beside probe.exe, which we feed back into cmake -D defines.
 rem NOTE: inside the FOR /L block all config vars MUST use !VAR! (delayed
 rem expansion); %VAR% would be expanded once at block-parse time.
 
-set "REPO=C:\Users\AI\Desktop\DLSS5_INTEL"
+set "REPO=%~dp0\..\.."
 set "SRC=%REPO%\dlss5\m0-coopmat-probe"
 set "BUILD=%SRC%\build"
 set "LOG=%REPO%\docs\m0-coopmat-probe.log"

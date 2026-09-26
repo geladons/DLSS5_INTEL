@@ -1,8 +1,9 @@
 @echo off
 setlocal
+set "REPO=%~dp0\..\..\.."
 rem M12 test app build (same VS-discovery fallback as the proxy itself).
 
-set "SRC=C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m12-dxgi\test"
+set "SRC=%REPO%\dlss5\m12-dxgi\test"
 set "BUILD=%SRC%\build"
 set "BUILDNM=%SRC%\build-nmake"
 set "CMAKE=C:\Program Files\CMake\bin\cmake.exe"

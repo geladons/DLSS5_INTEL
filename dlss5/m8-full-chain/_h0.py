@@ -1,10 +1,12 @@
+from pathlib import Path
+_REPO = Path(__file__).resolve().parents[2]
 import sys, os
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import golden as G
 
-W = G.load_weights(r"C:\Users\AI\Desktop\DLSS5_INTEL\work\mlxw\dlssnr-logical.safetensors")
-out = r"C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m8-full-chain\build\Release\out\\"
+W = G.load_weights(r"" + str(_REPO) + r"\work\mlxw\dlssnr-logical.safetensors")
+out = r"" + str(_REPO) + r"\dlss5\m8-full-chain\build\Release\out\\"
 p = "block5.layer0"
 Gg = 2
 x = np.fromfile(out + "gpu_b4ds.f16", dtype=np.float16).astype(np.float32).reshape(288, 64)

@@ -1,11 +1,13 @@
 # Detached GTA IV launcher with the m11 layer capture env set.
 # Usage: python _gta4_start.py <mode>   mode: live1 | live4 | uimask
+from pathlib import Path
+_REPO = Path(__file__).resolve().parents[2]
 import os
 import subprocess
 import sys
 
 GAME_DIR = r"D:\downdloads\Grand Theft Auto IV"
-DUMPS = r"C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m11-layer\dumps"
+DUMPS = r"" + str(_REPO) + r"\dlss5\m11-layer\dumps"
 LOG = os.path.join(DUMPS, "gp_cap.bin")
 OUT = os.path.join(DUMPS, "gp_out.bin")
 

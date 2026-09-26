@@ -4,7 +4,7 @@ rem M9-UNET: configure + build only. cmd batch - immune to the exec wrapper's
 rem PowerShell $-mangling. VS generator first, NMake fallback (broken COM
 rem instance discovery on this host - see m8b-live/build.cmd note).
 
-set "REPO=C:\Users\AI\Desktop\DLSS5_INTEL"
+set "REPO=%~dp0\..\.."
 set "SRC=%REPO%\dlss5\m9-unet"
 set "BUILD=%SRC%\build"
 set "BUILDNM=%SRC%\build-nmake"

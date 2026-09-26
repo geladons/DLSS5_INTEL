@@ -1,6 +1,7 @@
 @echo off
 setlocal
-cd /d C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m8-full-chain\build\Release
+set "REPO=%~dp0\..\.."
+cd /d %REPO%\dlss5\m8-full-chain\build\Release
 echo === to -1 (adapter only) ===
 m8proto.exe --to -1
 echo EXIT=%errorlevel%

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """sensitivity.py - how much does the global family amplify GEMM ordering noise?
 Golden-fp32 vs golden-with-float64-accumulated GEMMs: per-block pub bitmatch."""
+from pathlib import Path
+_REPO = Path(__file__).resolve().parents[2]
 import math
 import sys
 import numpy as np
@@ -43,7 +45,7 @@ def stage64(W, x, idx):
 
 def main():
     W = load_weights(sys.argv[1] if len(sys.argv) > 1 else
-                     r"C:\Users\AI\Desktop\DLSS5_INTEL\work\mlxw\dlssnr-logical.safetensors")
+                     r"" + str(_REPO) + r"\work\mlxw\dlssnr-logical.safetensors")
     # shared input: golden chain up to b30
     import cmp_b31
     xin = cmp_b31.run_to_b30(W)

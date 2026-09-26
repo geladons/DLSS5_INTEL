@@ -1,10 +1,11 @@
 @echo off
 setlocal
+set "REPO=%~dp0\..\.."
 rem M12 proxy self-test: stage proxy-as-dxgi.dll next to the test exe,
 rem run it detached, then inspect run\test.log and %TEMP%\m12_dxgi.log.
 rem Assumes m11d is already listening on 127.0.0.1:47990.
 
-set "SRC=C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m12-dxgi"
+set "SRC=%REPO%\dlss5\m12-dxgi"
 set "RUN=%SRC%\test\run"
 set "EXE=%SRC%\test\build\Release\m12_test.exe"
 if not exist "%EXE%" set "EXE=%SRC%\test\build-nmake\m12_test.exe"

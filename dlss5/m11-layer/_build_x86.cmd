@@ -5,12 +5,13 @@ rem processes, and a 32-bit process only sees Wow6432Node implicit layers).
 rem No libvulkan needed: the layer resolves everything via the loader chain
 rem (same as the x64 CMake build). Output: x86\nr_layer_win32.dll.
 setlocal
+set "REPO=%~dp0\..\.."
 call "C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvars32.bat" >nul
 if errorlevel 1 (
     echo [FAIL] vcvars32.bat
     exit /b 1
 )
-set SRC=C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m11-layer
+set SRC=%REPO%\dlss5\m11-layer
 set OUT=%SRC%\x86
 if not exist %OUT% mkdir %OUT%
 cl /nologo /std:c11 /O2 /I"C:\VulkanSDK\1.4.357.0\Include" ^

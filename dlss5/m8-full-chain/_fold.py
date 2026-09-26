@@ -1,9 +1,11 @@
+from pathlib import Path
+_REPO = Path(__file__).resolve().parents[2]
 import sys, os
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import golden as G
 
-W = G.load_weights(r"C:\Users\AI\Desktop\DLSS5_INTEL\work\mlxw\dlssnr-logical.safetensors")
+W = G.load_weights(r"" + str(_REPO) + r"\work\mlxw\dlssnr-logical.safetensors")
 p = "block5.layer0"
 exp = W[p + ".ffn_expand_weight"].reshape(-1)   # fp32 from loader (was f16)
 Gg = 2

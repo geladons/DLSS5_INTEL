@@ -1,6 +1,6 @@
 # ============================================================================
 # m13._build_production - assemble a self-contained production bundle the
-# owner can run from anywhere (default: C:\Users\AI\Desktop\production).
+# owner can run from anywhere (default: %USERPROFILE%\Desktop\production).
 #
 #   python _build_production.py [dest_dir]
 #

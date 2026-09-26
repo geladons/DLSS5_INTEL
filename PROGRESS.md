@@ -1,7 +1,7 @@
 ﻿# DLSS5_INTEL — Progress Log
 
 Project: Intel Arc port of DLSS 5-style neural rendering, whole-desktop
-(NeuralScreen analog). Root: `C:\Users\AI\Desktop\DLSS5_INTEL`
+(NeuralScreen analog). Root: `C:\Users\<owner>\Desktop\DLSS5_INTEL`
 
 ## Done (2026-09-19)
 

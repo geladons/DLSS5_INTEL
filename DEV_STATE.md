@@ -78,7 +78,7 @@ Fixes:
    first-class sources with proper display names; store container folders
    (Epic Games, GOG Galaxy) skipped in the drive walk. Machine-specific
    ROOT_SKIP entry removed. _build_production.py M13.cmd no longer
-   hardcodes C:\Users\AI\...\Python312: pyw launcher -> pythonw on PATH ->
+   hardcodes C:\Users\<owner>\...\Python312: pyw launcher -> pythonw on PATH ->
    %LOCALAPPDATA%\Programs\Python\Python31x, plus a clear "install Python"
    message; stderr of the manager lands in logs\manager_err.log. README
    is English-first with a short Russian block.
@@ -257,7 +257,7 @@ titles are borderless so topmost works; true exclusive fullscreen would
 need the layer to draw it instead), physical CTRL+ALT+G press.
 
 ## M13 SHIPPED (2026-09-23 ~20:35-21:10) - the manager app
-PRODUCTION BUNDLE (owner self-test 2026-09-23 ~22:10): C:\Users\AI\Desktop\
+PRODUCTION BUNDLE (owner self-test 2026-09-23 ~22:10): C:\Users\<owner>\Desktop\
 production - fully self-contained (manager py files, m11d.exe+spv, m8blive
 +spv, x86/x64 layer dlls + manifests with library_path PATCHED to the bundle,
 DXVK x32 d3d9.dll ONLY, m12_dxgi.dll, weights\dlssnr-logical.safetensors

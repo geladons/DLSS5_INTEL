@@ -95,7 +95,7 @@ dlss5\m8b-live\build.cmd                # configure + build (+ shaders)
 dlss5\m8b-live\runm8b.cmd --frames 200  # live overlay (log -> docs\m8b-live.log)
 build\Release\m8blive.exe --frames 40 --novideo   # headless verify
 ```
-Launcher: C:\Users\AI\Desktop\RUN-DEMO.cmd (m8blive.exe) / RUN-DEMO-M4.cmd (m4).
+Launcher: C:\Users\<owner>\Desktop\RUN-DEMO.cmd (m8blive.exe) / RUN-DEMO-M4.cmd (m4).
 
 
 ## DARKNESS ROOT CAUSE + FIX (2026-09-20, final)

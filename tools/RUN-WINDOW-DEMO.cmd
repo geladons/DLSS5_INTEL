@@ -1,4 +1,5 @@
 @echo off
+set "REPO=%~dp0\.."
 REM ============================================================
 REM  DLSS5_INTEL - WINDOW MODE DEMO (M8b, real DLSS 5 graph)
 REM  Processes ONLY the chosen window; the overlay covers just
@@ -21,6 +22,6 @@ if "%~1"=="" (
   pause
   exit /b 1
 )
-cd /d C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m8b-live\build\Release
+cd /d %REPO%\dlss5\m8b-live\build\Release
 m8blive.exe --frames 1000000 --window "%~1" --gain 1.0 --colorpass 1 --echo-free 0
 pause

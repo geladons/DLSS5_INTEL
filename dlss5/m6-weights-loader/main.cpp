@@ -397,8 +397,34 @@ static std::string shapeStr(const Tensor &t) {
     return s;
 }
 
+static bool fileExists(const char *p) {
+    DWORD a = GetFileAttributesA(p);
+    return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+// Locate the weights file: default is relative to the current working
+// directory (repo root, as the run scripts arrange). If it is not there,
+// walk up from the exe location looking for work\mlxw\ so the loader also
+// works when launched from anywhere inside the repo tree.
+static std::string defaultWeightsPath() {
+    const char *rel = "work\\mlxw\\dlssnr-logical.safetensors";
+    if (fileExists(rel)) return rel;
+    char exePath[MAX_PATH];
+    if (GetModuleFileNameA(NULL, exePath, MAX_PATH)) {
+        std::string dir(exePath);
+        for (int up = 0; up < 8; ++up) {
+            size_t pos = dir.find_last_of("\\/");
+            if (pos == std::string::npos) break;
+            dir = dir.substr(0, pos);
+            std::string alt = dir + "\\" + rel;
+            if (fileExists(alt.c_str())) return alt;
+        }
+    }
+    return rel; // keep the relative default so the error message is stable
+}
+
 int main(int argc, char **argv) {
-    std::string file = R"(C:\Users\AI\Desktop\DLSS5_INTEL\work\mlxw\dlssnr-logical.safetensors)";
+    std::string file = defaultWeightsPath();
     bool doVerify = true; // default on; flag accepted for explicitness
     bool doStats = true;
     for (int i = 1; i < argc; ++i) {

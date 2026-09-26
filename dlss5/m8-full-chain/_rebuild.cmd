@@ -1,6 +1,7 @@
 @echo off
 setlocal
-set "SRC=C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m8-full-chain"
+set "REPO=%~dp0\..\.."
+set "SRC=%REPO%\dlss5\m8-full-chain"
 set "BUILD=%SRC%\build"
 set "CMAKE=C:\Program Files\CMake\bin\cmake.exe"
 set "VULKAN_SDK=C:\VulkanSDK\1.4.357.0"

@@ -4291,7 +4291,7 @@ safetensors: 649 tensors, data base 64976
 pack: 649 tensors (278.03 MiB)
 pack offsets cross-checked vs docs/pack-layout.txt: OK
 arena: 4413.64 MB scratch after weights; one device buffer, total 4691.7 MB
-[VK-FAIL] vkAllocateMemory(c.dev, &mai, nullptr, &b.mem) -> -2 at C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m8b-live\main.cpp:895
+[VK-FAIL] vkAllocateMemory(c.dev, &mai, nullptr, &b.mem) -> -2 at C:\Users\<owner>\Desktop\DLSS5_INTEL\dlss5\m8b-live\main.cpp:895
 exit code: 1 (ended 22.09.2026 15:20:57,06) 
  
 === M8B-LIVE run: m8blive.exe --frames 45 --window anime --wiggle-idle 1 
@@ -5311,7 +5311,7 @@ arena: 11397.03 MB scratch after weights; total 11675.1 MB
 weight upload: 11675.1 MB in 29718.5 ms (0.38 GB/s incl. preprocessing)
 [chain] weights resident, setup 36647 ms
 [chain] 14 pipelines up (10 kernels + featpack/headpack + pool2/upmerge), 4 BDA chunk bases, chunk0 0xffffb8078e340000
-[VK-FAIL] vkQueueSubmit(c.queue, 1, &si, fence) -> -4 at C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m8b-live\main.cpp:1753
+[VK-FAIL] vkQueueSubmit(c.queue, 1, &si, fence) -> -4 at C:\Users\<owner>\Desktop\DLSS5_INTEL\dlss5\m8b-live\main.cpp:1753
 exit code: 1 (ended 25/09/2026 11:04:36.97) 
  
 === M8B-LIVE run: m8blive.exe --frames 45 --wiggle-idle 1 

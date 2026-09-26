@@ -4,7 +4,7 @@ rem M2 D3D11->Vulkan interop: configure, build, run. Single orchestration point
 rem (cmd batch - immune to the exec wrapper's PowerShell $-mangling). All output
 rem (build + run console) lands in docs\m2-interop.log.
 
-set "REPO=C:\Users\AI\Desktop\DLSS5_INTEL"
+set "REPO=%~dp0\..\.."
 set "SRC=%REPO%\dlss5\m2-dxgi-vulkan-passthrough"
 set "BUILD=%SRC%\build"
 set "LOG=%REPO%\docs\m2-interop.log"

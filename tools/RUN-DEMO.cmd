@@ -1,4 +1,5 @@
 @echo off
+set "REPO=%~dp0\.."
 REM ============================================================
 REM  DLSS5_INTEL - LIVE DEMO (M8b: real DLSS 5 graph, 71 blocks)
 REM  Your desktop, processed in real time by the full DLSSNR
@@ -19,6 +20,6 @@ REM  windows open BEHIND it. Press CTRL+ALT+X to hide it and
 REM  use the desktop normally; press again to resume.
 REM  Close this window or press Ctrl+C to stop.
 REM ============================================================
-cd /d C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m8b-live\build\Release
+cd /d %REPO%\dlss5\m8b-live\build\Release
 m8blive.exe --frames 1000000 --echo-free 0
 pause

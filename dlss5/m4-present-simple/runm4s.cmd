@@ -4,7 +4,7 @@ rem M4-SIMPLE run wrapper: appends a run (args passed through %*) to
 rem docs\m4-simple.log. Run from anywhere; exe runs in its Release dir
 rem (shaders live next to the exe).
 
-set "REPO=C:\Users\AI\Desktop\DLSS5_INTEL"
+set "REPO=%~dp0\..\.."
 set "BUILD=%REPO%\dlss5\m4-present-simple\build"
 set "LOG=%REPO%\docs\m4-simple.log"
 

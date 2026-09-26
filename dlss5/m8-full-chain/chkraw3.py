@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from pathlib import Path
+_REPO = Path(__file__).resolve().parents[2]
 import hashlib
 import sys
 
@@ -6,7 +8,7 @@ import numpy as np
 
 import golden as G
 
-st = r"C:\Users\AI\Desktop\DLSS5_INTEL\work\mlxw\dlssnr-logical.safetensors"
+st = r"" + str(_REPO) + r"\work\mlxw\dlssnr-logical.safetensors"
 od = r"build\Release\out"
 xb = open(od + "\\x.bin", "rb").read()
 print("x.bin sha1", hashlib.sha1(xb).hexdigest())

@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """quant.py — M7b run3: honest outlier forensics after the layout fix."""
+from pathlib import Path
+_REPO = Path(__file__).resolve().parents[2]
 import sys
 import numpy as np
 
-sys.path.insert(0, r"C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto")
+sys.path.insert(0, r"" + str(_REPO) + r"\dlss5\m7-graph-proto")
 from golden import (cosine_publish, e4m3, half_rounded, load_weights, softmax,
                     TOK, CH, HEADS, HDIM)
 import math
 
-OUT = r"C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\Release\out"
-ST = r"C:\Users\AI\Desktop\DLSS5_INTEL\work\mlxw\dlssnr-logical.safetensors"
+OUT = r"" + str(_REPO) + r"\dlss5\m7-graph-proto\build\Release\out"
+ST = r"" + str(_REPO) + r"\work\mlxw\dlssnr-logical.safetensors"
 
 W = load_weights(ST)
 attn_scale = W["block31.layer2.attn_scale"]

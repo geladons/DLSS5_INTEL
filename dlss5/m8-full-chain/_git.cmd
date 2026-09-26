@@ -1,5 +1,6 @@
 @echo off
-cd /d C:\Users\AI\Desktop\DLSS5_INTEL
+set "REPO=%~dp0\..\.."
+cd /d %REPO%
 "C:\Program Files\Git\cmd\git.exe" log --oneline -3
 echo ---DIFF STAT---
 "C:\Program Files\Git\cmd\git.exe" diff --stat HEAD -- dlss5/m8-full-chain

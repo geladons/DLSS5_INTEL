@@ -4,7 +4,7 @@ rem M4-SIMPLE: configure + build only. Run orchestration is separate
 rem (runm4s.cmd) so multiple runs append to docs\m4-simple.log.
 rem cmd batch - immune to the exec wrapper's PowerShell $-mangling.
 
-set "REPO=C:\Users\AI\Desktop\DLSS5_INTEL"
+set "REPO=%~dp0\..\.."
 set "SRC=%REPO%\dlss5\m4-present-simple"
 set "BUILD=%SRC%\build"
 set "CMAKE=C:\Program Files\CMake\bin\cmake.exe"

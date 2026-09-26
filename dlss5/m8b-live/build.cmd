@@ -11,7 +11,7 @@ rem FALLBACK: NMake Makefiles generator + vcvars64 (filesystem-based, no COM).
 rem The canonical VS generator is still tried first; the fallback keeps
 rem builds working until the COM registration is repaired.
 
-set "REPO=C:\Users\AI\Desktop\DLSS5_INTEL"
+set "REPO=%~dp0\..\.."
 set "SRC=%REPO%\dlss5\m8b-live"
 set "BUILD=%SRC%\build"
 set "BUILDNM=%SRC%\build-nmake"

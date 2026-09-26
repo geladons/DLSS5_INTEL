@@ -3,12 +3,14 @@
 # Checks: STATUS/SETGAIN roundtrip, and that a gain change takes effect on
 # the NEXT frame WITHOUT a daemon restart (same frame in at gain 2.0 vs 1.0
 # must produce different outputs).
+from pathlib import Path
+_REPO = Path(__file__).resolve().parents[2]
 import socket
 import struct
 import sys
 import time
 
-sys.path.insert(0, r"C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m13")
+sys.path.insert(0, r"" + str(_REPO) + r"\dlss5\m13")
 from daemonctl import M11dClient, MAGIC_CTRL
 
 HOST, PORT = "127.0.0.1", 47990

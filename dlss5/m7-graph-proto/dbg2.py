@@ -1,5 +1,7 @@
+from pathlib import Path
+_REPO = Path(__file__).resolve().parents[2]
 import numpy as np
-d = r"C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\Release\out\\"
+d = r"" + str(_REPO) + r"\dlss5\m7-graph-proto\build\Release\out\\"
 TOK, CH = 288, 1024
 x = np.fromfile(d + "x.bin", dtype=np.float32).reshape(TOK, CH)
 branch = np.fromfile(d + "gpu_branch.bin", dtype=np.float32).reshape(TOK, CH)
@@ -23,7 +25,7 @@ def load(path):
         a = np.frombuffer(raw, dtype=np.float16 if e["dtype"] == "F16" else np.float32).astype(np.float32)
         out[name] = a.reshape(e["shape"])
     return out
-W = load(r"C:\Users\AI\Desktop\DLSS5_INTEL\work\mlxw\dlssnr-logical.safetensors")
+W = load(r"" + str(_REPO) + r"\work\mlxw\dlssnr-logical.safetensors")
 w1 = W["block31.layer1.weight"]
 cos = W["block31.layer1.ffn_cos_skip"]
 

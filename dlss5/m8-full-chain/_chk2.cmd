@@ -1,5 +1,6 @@
 @echo off
-cd /d C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m8-full-chain\build\Release
+set "REPO=%~dp0\..\.."
+cd /d %REPO%\dlss5\m8-full-chain\build\Release
 for %%F in (out\_sp2_1.txt out\_sp2_2.txt out\_sp2_3.txt) do (
   echo === %%F ===
   findstr /c:"VK error" /c:"GPU-side complete" %%F

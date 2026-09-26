@@ -1,5 +1,7 @@
+from pathlib import Path
+_REPO = Path(__file__).resolve().parents[2]
 import json, struct
-f = open(r"C:\Users\AI\Desktop\DLSS5_INTEL\work\mlxw\dlssnr-logical.safetensors", "rb")
+f = open(r"" + str(_REPO) + r"\work\mlxw\dlssnr-logical.safetensors", "rb")
 hlen = struct.unpack("<Q", f.read(8))[0]
 h = json.loads(f.read(hlen))
 for k in h:

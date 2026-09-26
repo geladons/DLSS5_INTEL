@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """quant2.py — verify >1-e4m3-step flips are confined to the subnormal region."""
+from pathlib import Path
+_REPO = Path(__file__).resolve().parents[2]
 import math
 import sys
 
 import numpy as np
 
-sys.path.insert(0, r"C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto")
+sys.path.insert(0, r"" + str(_REPO) + r"\dlss5\m7-graph-proto")
 from golden import (cosine_publish, e4m3, gate_activation, half_rounded,
                     load_weights, softmax, TOK, CH, HEADS, HDIM)
 
-OUT = r"C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\Release\out"
-ST = r"C:\Users\AI\Desktop\DLSS5_INTEL\work\mlxw\dlssnr-logical.safetensors"
+OUT = r"" + str(_REPO) + r"\dlss5\m7-graph-proto\build\Release\out"
+ST = r"" + str(_REPO) + r"\work\mlxw\dlssnr-logical.safetensors"
 
 W = load_weights(ST)
 x = np.fromfile(OUT + r"\x.bin", dtype=np.float32).reshape(TOK, CH)

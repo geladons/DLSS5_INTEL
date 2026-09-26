@@ -1,12 +1,13 @@
 # cmp_m9.py — compare m9-unet GPU boundary dumps vs torch golden (dump_torch.py).
+_REPO = Path(__file__).resolve().parents[2]
 import json
 import pathlib
 import sys
 
 import numpy as np
 
-ROOT = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else pathlib.Path("C:/Users/AI/Desktop/DLSS5_INTEL/work/_ref_test")
-GPU = pathlib.Path("C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m9-unet/build/Release/out")
+ROOT = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else pathlib.Path("" + str(_REPO) + "/work/_ref_test")
+GPU = pathlib.Path("" + str(_REPO) + "/dlss5/m9-unet/build/Release/out")
 
 
 def e4m3(x):

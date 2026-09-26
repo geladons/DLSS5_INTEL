@@ -1,6 +1,7 @@
 @echo off
 setlocal
-cd /d C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m8-full-chain\shaders
+set "REPO=%~dp0\..\.."
+cd /d %REPO%\dlss5\m8-full-chain\shaders
 findstr /n "uint(Half" gemm.comp
 findstr /n "uint(Half" gather_residual.comp
 findstr /n "uint(Half" cosine.comp

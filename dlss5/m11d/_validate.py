@@ -1,8 +1,10 @@
 # Validation vs torch goldens per HANDOFF_M10 (internal numpy, NOT cmp_live.py).
 # Usage: python _validate.py <out_dir_with_live_dumps>
+from pathlib import Path
+_REPO = Path(__file__).resolve().parents[2]
 import sys, numpy as np, os
 
-root = r"C:\Users\AI\Desktop\DLSS5_INTEL"
+root = r"" + str(_REPO) + r""
 out = sys.argv[1] if len(sys.argv) > 1 else os.path.join(root, r"dlss5\m11d\build-nmake\out")
 cmp_ = os.path.join(root, r"work\_m9b_cmp")
 

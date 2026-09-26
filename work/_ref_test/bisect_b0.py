@@ -1,4 +1,5 @@
 # bisect_b0.py — reference intermediates for block 0 at 512x320 (torch CPU).
+_REPO = Path(__file__).resolve().parents[2]
 import pathlib
 
 import numpy as np
@@ -7,7 +8,7 @@ from safetensors import safe_open
 
 import mlxdlss.model as M
 
-ROOT = pathlib.Path("C:/Users/AI/Desktop/DLSS5_INTEL/work/_ref_test")
+ROOT = pathlib.Path("" + str(_REPO) + "/work/_ref_test")
 W = ROOT.parent / "mlxw" / "dlssnr-logical.safetensors"
 
 feats = torch.from_numpy(np.fromfile(ROOT / "golden_features.bin", dtype=np.float32).reshape(1, 320, 512, 16))

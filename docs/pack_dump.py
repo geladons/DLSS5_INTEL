@@ -1,6 +1,8 @@
+from pathlib import Path
+_REPO = Path(__file__).resolve().parents[1]
 import json, struct
 
-p = r"C:\Users\AI\Desktop\DLSS5_INTEL\work\mlxw\dlssnr-logical.safetensors"
+p = r"" + str(_REPO) + r"\work\mlxw\dlssnr-logical.safetensors"
 with open(p, "rb") as f:
     hlen = struct.unpack("<Q", f.read(8))[0]
     hdr = json.loads(f.read(hlen))

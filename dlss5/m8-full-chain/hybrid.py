@@ -2,6 +2,8 @@
 """hybrid.py - golden decoder fed with the GPU's ACTUAL b38 dump.
 If decoder/head then match the GPU dumps ~100%, all their divergence is
 inherited from the global family's chaotic amplification, not decoder math."""
+from pathlib import Path
+_REPO = Path(__file__).resolve().parents[2]
 import sys
 import numpy as np
 
@@ -15,7 +17,7 @@ OUT = "build/Release/out/"
 
 def main():
     W = load_weights(sys.argv[1] if len(sys.argv) > 1 else
-                     r"C:\Users\AI\Desktop\DLSS5_INTEL\work\mlxw\dlssnr-logical.safetensors")
+                     r"" + str(_REPO) + r"\work\mlxw\dlssnr-logical.safetensors")
     # bit-exact upstream (stem/enc/bottleneck verified 100%): recompute skips
     b30, xin = cmp_b31.run_to_b30(W)   # b30 (288,512) split_skip; xin = bridge out (288,1024)
     # rebuild skips + frs exactly as run_full_chain does

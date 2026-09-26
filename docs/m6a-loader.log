@@ -7,19 +7,19 @@ CMake suite maintained and supported by Kitware (kitware.com/cmake).
 -- Selecting Windows SDK version 10.0.19041.0 to target Windows 10.0.22631.
 -- Configuring done (0.0s)
 -- Generating done (0.1s)
--- Build files have been written to: C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m6-weights-loader/build
+-- Build files have been written to: C:/Users/<owner>/Desktop/DLSS5_INTEL/dlss5/m6-weights-loader/build
 >> cmake build 
 Microsoft (R) Build Engine version 16.11.6+a918ceb31 for .NET Framework
 Copyright (C) Microsoft Corporation. All rights reserved.
 
   1>Checking Build System
-  Building Custom Rule C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m6-weights-loader/CMakeLists.txt
+  Building Custom Rule C:/Users/<owner>/Desktop/DLSS5_INTEL/dlss5/m6-weights-loader/CMakeLists.txt
   main.cpp
-  m6loader.vcxproj -> C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m6-weights-loader\build\Release\m6loader.exe
-  Building Custom Rule C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m6-weights-loader/CMakeLists.txt
+  m6loader.vcxproj -> C:\Users\<owner>\Desktop\DLSS5_INTEL\dlss5\m6-weights-loader\build\Release\m6loader.exe
+  Building Custom Rule C:/Users/<owner>/Desktop/DLSS5_INTEL/dlss5/m6-weights-loader/CMakeLists.txt
 >> run m6loader (verify + stats) 
 === M6a safetensors weights loader (Arc Pro B50) ===
-file: C:\Users\AI\Desktop\DLSS5_INTEL\work\mlxw\dlssnr-logical.safetensors
+file: C:\Users\<owner>\Desktop\DLSS5_INTEL\work\mlxw\dlssnr-logical.safetensors
 file load: 291576650 bytes read in 381.22 ms
 metadata.format = dlssnr-logical-v18
 metadata.decoded_tensor_count = 649 (matches header)

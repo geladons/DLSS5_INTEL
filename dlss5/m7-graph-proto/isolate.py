@@ -2,17 +2,19 @@
 """isolate.py — M7b run3: feed GPU-dumped proj through golden's cosine_publish,
 compare bitwise vs GPU-dumped q16/k16/v16 in BOTH memory orders. Splits blame:
 cosine.comp vs proj layout vs compare layout."""
+from pathlib import Path
+_REPO = Path(__file__).resolve().parents[2]
 import math
 import sys
 
 import numpy as np
 
-sys.path.insert(0, r"C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto")
+sys.path.insert(0, r"" + str(_REPO) + r"\dlss5\m7-graph-proto")
 from golden import cosine_publish, e4m3, half_rounded, load_weights
 
 TOK, CH, HEADS, HDIM = 288, 1024, 32, 32
-OUT = r"C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\Release\out"
-ST = r"C:\Users\AI\Desktop\DLSS5_INTEL\work\mlxw\dlssnr-logical.safetensors"
+OUT = r"" + str(_REPO) + r"\dlss5\m7-graph-proto\build\Release\out"
+ST = r"" + str(_REPO) + r"\work\mlxw\dlssnr-logical.safetensors"
 
 W = load_weights(ST)
 attn_scale = W["block31.layer2.attn_scale"]

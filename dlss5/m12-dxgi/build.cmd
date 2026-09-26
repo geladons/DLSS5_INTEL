@@ -3,7 +3,7 @@ setlocal
 rem M12-DXGI: configure + build the DXGI present proxy.
 rem Same VS-discovery fallback as m11-layer (COM discovery is broken here).
 
-set "REPO=C:\Users\AI\Desktop\DLSS5_INTEL"
+set "REPO=%~dp0\..\.."
 set "SRC=%REPO%\dlss5\m12-dxgi"
 set "BUILD=%SRC%\build"
 set "BUILDNM=%SRC%\build-nmake"

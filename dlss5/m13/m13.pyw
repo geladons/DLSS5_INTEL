@@ -1,5 +1,5 @@
 # DLSS 5 Manager entry point - run with pythonw (no console window):
-#   "C:\Users\AI\AppData\Local\Programs\Python\Python312\pythonw.exe" m13.pyw
+#   "%USERPROFILE%\AppData\Local\Programs\Python\Python312\pythonw.exe" m13.pyw
 # or via "DLSS5 Manager.vbs" / M13.cmd next to this file.
 import os
 import sys

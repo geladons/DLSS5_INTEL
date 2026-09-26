@@ -1,6 +1,8 @@
+from pathlib import Path
+_REPO = Path(__file__).resolve().parents[2]
 import numpy as np
 import struct, json
-d = r"C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m7-graph-proto\build\Release\out\\"
+d = r"" + str(_REPO) + r"\dlss5\m7-graph-proto\build\Release\out\\"
 TOK, CH, HEADS, HDIM = 288, 1024, 32, 32
 proj_g = np.fromfile(d + "gpu_proj.bin", dtype=np.float32).reshape(TOK, 3 * CH)
 q16_g = np.fromfile(d + "gpu_q16.f16", dtype=np.float16).reshape(TOK, CH)
@@ -17,7 +19,7 @@ def load(path):
         a = np.frombuffer(raw, dtype=np.float16 if e["dtype"]=="F16" else np.float32).astype(np.float32)
         out[name] = a.reshape(e["shape"])
     return out
-W = load(r"C:\Users\AI\Desktop\DLSS5_INTEL\work\mlxw\dlssnr-logical.safetensors")
+W = load(r"" + str(_REPO) + r"\work\mlxw\dlssnr-logical.safetensors")
 import math
 qscale = W["block31.layer2.attn_scale"] * np.float32(math.sqrt(32))
 

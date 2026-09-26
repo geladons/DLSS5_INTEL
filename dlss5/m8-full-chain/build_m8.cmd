@@ -3,7 +3,7 @@ setlocal enabledelayedexpansion
 rem M8a full-chain build+run. cmd batch: immune to exec wrapper $-mangling.
 rem Usage: build_m8.cmd [--no-run]
 
-set "REPO=C:\Users\AI\Desktop\DLSS5_INTEL"
+set "REPO=%~dp0\..\.."
 set "SRC=%REPO%\dlss5\m8-full-chain"
 set "BUILD=%SRC%\build"
 set "LOG=%REPO%\docs\m8-full-chain.log"

@@ -1,11 +1,12 @@
 # compose_m9.py — compose gpu head to PNG, compare with reference output.
+_REPO = Path(__file__).resolve().parents[2]
 import pathlib
 
 import numpy as np
 from PIL import Image
 
-ROOT = pathlib.Path("C:/Users/AI/Desktop/DLSS5_INTEL/work/_ref_test")
-GPU = pathlib.Path("C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m9-unet/build/Release/out")
+ROOT = pathlib.Path("" + str(_REPO) + "/work/_ref_test")
+GPU = pathlib.Path("" + str(_REPO) + "/dlss5/m9-unet/build/Release/out")
 
 src = np.asarray(Image.open(ROOT / "photo_512.png").convert("RGB"), dtype=np.float32) / 255.0
 

@@ -1,6 +1,7 @@
 @echo off
 setlocal
-cd /d C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m8-full-chain\build\Release
+set "REPO=%~dp0\..\.."
+cd /d %REPO%\dlss5\m8-full-chain\build\Release
 for %%N in (1 2 3 4 5 6) do (
   echo === maxdisp %%N ===
   m8proto.exe --to 0 --maxdisp %%N > out\_bd_%%N.txt 2>&1

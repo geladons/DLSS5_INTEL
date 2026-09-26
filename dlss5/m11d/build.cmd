@@ -3,7 +3,7 @@ setlocal
 rem M11D: configure + build the DLSSNR frame daemon (+ dlss5/chain module).
 rem Same VS-discovery fallback as m8b-live (COM discovery is broken here).
 
-set "REPO=C:\Users\AI\Desktop\DLSS5_INTEL"
+set "REPO=%~dp0\..\.."
 set "SRC=%REPO%\dlss5\m11d"
 set "BUILD=%SRC%\build"
 set "BUILDNM=%SRC%\build-nmake"

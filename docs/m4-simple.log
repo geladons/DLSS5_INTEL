@@ -1,7 +1,7 @@
  
 === M4-SIMPLE run: m4simple.exe --frames 300 --nowiggle 
 started 19.09.2026 20:26:41,57 
-[VK-FAIL] vkAllocateDescriptorSets(c.dev, &ai, setBlit.data()) -> -1000069000 at C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m4-present-simple\main.cpp:771
+[VK-FAIL] vkAllocateDescriptorSets(c.dev, &ai, setBlit.data()) -> -1000069000 at C:\Users\<owner>\Desktop\DLSS5_INTEL\dlss5\m4-present-simple\main.cpp:771
 === M4-SIMPLE: live processed-desktop overlay (CPU bridge; zero-copy DEFERRED to M5) ===
 frame target: 2560x1440 B8G8R8A8, render_scale=0.55, frames=300, wiggle=0
 
@@ -21,7 +21,7 @@ exit code: 1 (ended 19.09.2026 20:26:42,67)
  
 === M4-SIMPLE run: m4simple.exe --frames 300 --nowiggle 
 started 19.09.2026 20:27:08,93 
-[VK-FAIL] vkAllocateDescriptorSets(c.dev, &ai, setBlit.data()) -> -1000069000 at C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m4-present-simple\main.cpp:771
+[VK-FAIL] vkAllocateDescriptorSets(c.dev, &ai, setBlit.data()) -> -1000069000 at C:\Users\<owner>\Desktop\DLSS5_INTEL\dlss5\m4-present-simple\main.cpp:771
 === M4-SIMPLE: live processed-desktop overlay (CPU bridge; zero-copy DEFERRED to M5) ===
 frame target: 2560x1440 B8G8R8A8, render_scale=0.55, frames=300, wiggle=0
 
@@ -41,7 +41,7 @@ exit code: 1 (ended 19.09.2026 20:27:09,53)
  
 === M4-SIMPLE run: m4simple.exe --frames 300 --nowiggle 
 started 19.09.2026 20:28:21,19 
-[VK-FAIL] vkAllocateDescriptorSets(c.dev, &ai, setBlit.data()) -> -1000069000 at C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m4-present-simple\main.cpp:771
+[VK-FAIL] vkAllocateDescriptorSets(c.dev, &ai, setBlit.data()) -> -1000069000 at C:\Users\<owner>\Desktop\DLSS5_INTEL\dlss5\m4-present-simple\main.cpp:771
 === M4-SIMPLE: live processed-desktop overlay (CPU bridge; zero-copy DEFERRED to M5) ===
 frame target: 2560x1440 B8G8R8A8, render_scale=0.55, frames=300, wiggle=0
 
@@ -61,7 +61,7 @@ exit code: 1 (ended 19.09.2026 20:28:21,78)
  
 === M4-SIMPLE run: m4simple.exe --frames 300 --nowiggle 
 started 19.09.2026 20:29:22,38 
-[VK-FAIL] vkAllocateDescriptorSets(c.dev, &ai, setBlit.data()) -> -1000069000 at C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m4-present-simple\main.cpp:771
+[VK-FAIL] vkAllocateDescriptorSets(c.dev, &ai, setBlit.data()) -> -1000069000 at C:\Users\<owner>\Desktop\DLSS5_INTEL\dlss5\m4-present-simple\main.cpp:771
 === M4-SIMPLE: live processed-desktop overlay (CPU bridge; zero-copy DEFERRED to M5) ===
 frame target: 2560x1440 B8G8R8A8, render_scale=0.55, frames=300, wiggle=0
 

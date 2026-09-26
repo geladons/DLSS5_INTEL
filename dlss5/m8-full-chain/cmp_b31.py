@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """cmp_b31.py - stage-by-stage golden vs GPU dbg31_* dump compare for block 31."""
+from pathlib import Path
+_REPO = Path(__file__).resolve().parents[2]
 import math
 import sys
 import numpy as np
@@ -102,7 +104,7 @@ def run_to_b30(W):
 
 def main():
     W = load_weights(sys.argv[1] if len(sys.argv) > 1 else
-                     r"C:\Users\AI\Desktop\DLSS5_INTEL\work\mlxw\dlssnr-logical.safetensors")
+                     r"" + str(_REPO) + r"\work\mlxw\dlssnr-logical.safetensors")
     b30, xin = cmp_b31.run_to_b30(W)
     xin = xin.astype(np.float32)
     print("in     ", end="")

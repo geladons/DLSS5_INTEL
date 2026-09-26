@@ -4,7 +4,7 @@ rem M6a safetensors weights loader build+run orchestrator (cmd batch: immune
 rem to the exec wrapper's PowerShell $-mangling). Builds m6loader and runs it
 rem against the extracted DLSS 5 weights, logging everything.
 
-set "REPO=C:\Users\AI\Desktop\DLSS5_INTEL"
+set "REPO=%~dp0\..\.."
 set "SRC=%REPO%\dlss5\m6-weights-loader"
 set "BUILD=%SRC%\build"
 set "LOG=%REPO%\docs\m6a-loader.log"

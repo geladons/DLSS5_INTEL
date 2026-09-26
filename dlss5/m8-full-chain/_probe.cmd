@@ -1,5 +1,6 @@
 @echo off
-cd /d C:\Users\AI\Desktop\DLSS5_INTEL
+set "REPO=%~dp0\..\.."
+cd /d %REPO%
 "C:\Program Files\Git\cmd\git.exe" log --oneline -5
 echo ---STATUS---
 "C:\Program Files\Git\cmd\git.exe" status --short

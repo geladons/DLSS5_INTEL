@@ -8,18 +8,18 @@ CMake suite maintained and supported by Kitware (kitware.com/cmake).
 -- Selecting Windows SDK version 10.0.19041.0 to target Windows 10.0.22631.
 -- Configuring done (0.0s)
 -- Generating done (0.1s)
--- Build files have been written to: C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m1-frame-capture/build
+-- Build files have been written to: C:/Users/<owner>/Desktop/DLSS5_INTEL/dlss5/m1-frame-capture/build
 >> cmake build 
 Microsoft (R) Build Engine version 16.11.6+a918ceb31 for .NET Framework
 Copyright (C) Microsoft Corporation. All rights reserved.
 
-C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\MSBuild\Microsoft\VC\v160\Microsoft.CppBuild.targets(499,5): warning MSB8004: Output Directory does not end with a trailing slash.  This build instance will add the slash as it is required to allow proper evaluation of the Output Directory. [C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m1-frame-capture\build\ZERO_CHECK.vcxproj]
+C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\MSBuild\Microsoft\VC\v160\Microsoft.CppBuild.targets(499,5): warning MSB8004: Output Directory does not end with a trailing slash.  This build instance will add the slash as it is required to allow proper evaluation of the Output Directory. [C:\Users\<owner>\Desktop\DLSS5_INTEL\dlss5\m1-frame-capture\build\ZERO_CHECK.vcxproj]
   1>Checking Build System
-  Building Custom Rule C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m1-frame-capture/CMakeLists.txt
+  Building Custom Rule C:/Users/<owner>/Desktop/DLSS5_INTEL/dlss5/m1-frame-capture/CMakeLists.txt
   main.cpp
-  m1dda.vcxproj -> C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m1-frame-capture\build\Release\m1dda.exe
-C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\MSBuild\Microsoft\VC\v160\Microsoft.CppBuild.targets(499,5): warning MSB8004: Output Directory does not end with a trailing slash.  This build instance will add the slash as it is required to allow proper evaluation of the Output Directory. [C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m1-frame-capture\build\ALL_BUILD.vcxproj]
-  Building Custom Rule C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m1-frame-capture/CMakeLists.txt
+  m1dda.vcxproj -> C:\Users\<owner>\Desktop\DLSS5_INTEL\dlss5\m1-frame-capture\build\Release\m1dda.exe
+C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\MSBuild\Microsoft\VC\v160\Microsoft.CppBuild.targets(499,5): warning MSB8004: Output Directory does not end with a trailing slash.  This build instance will add the slash as it is required to allow proper evaluation of the Output Directory. [C:\Users\<owner>\Desktop\DLSS5_INTEL\dlss5\m1-frame-capture\build\ALL_BUILD.vcxproj]
+  Building Custom Rule C:/Users/<owner>/Desktop/DLSS5_INTEL/dlss5/m1-frame-capture/CMakeLists.txt
 >> run capture 
 === M1: DXGI Desktop Duplication frame capture ===
 args: frames=300 snapshot_interval=60 timeout_ms=500 outdir=out wiggle=1

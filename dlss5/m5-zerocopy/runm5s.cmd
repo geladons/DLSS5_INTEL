@@ -7,7 +7,7 @@ rem usage: runm5s.cmd "<label>" <args...>
 rem (start /b keeps handle inheritance for >> redirection; per-run stdout and
 rem  stderr go to separate files; binary stdout is unbuffered via setvbuf)
 
-set "REPO=C:\Users\AI\Desktop\DLSS5_INTEL"
+set "REPO=%~dp0\..\.."
 set "EXE=%REPO%\dlss5\m5-zerocopy\build\Release\m5zerocopy.exe"
 set "OUTDIR=%REPO%\dlss5\m5-zerocopy"
 set "DOCS=%REPO%\docs"

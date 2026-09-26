@@ -5,8 +5,9 @@ rem processes that the 32-bit m11 implicit layer feeds to m11d).
 rem DXVK binaries are NOT committed to git; run this to re-create
 rem dlss5\m11-layer\dxvk\x32 + x64. Requires curl + tar (Win10+).
 setlocal
+set "REPO=%~dp0\..\.."
 set VER=3.1.1
-set DIR=C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m11-layer\dxvk
+set DIR=%REPO%\dlss5\m11-layer\dxvk
 if not exist %DIR% mkdir %DIR%
 curl -sL -o %DIR%\dxvk-%VER%.tar.gz https://github.com/doitsujin/dxvk/releases/download/v%VER%/dxvk-%VER%.tar.gz
 if errorlevel 1 (echo [FAIL] curl & exit /b 1)

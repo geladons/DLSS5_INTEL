@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
+from pathlib import Path
+_REPO = Path(__file__).resolve().parents[2]
 import sys
 import numpy as np
 import golden as G
 
-st = r"C:\Users\AI\Desktop\DLSS5_INTEL\work\mlxw\dlssnr-logical.safetensors"
+st = r"" + str(_REPO) + r"\work\mlxw\dlssnr-logical.safetensors"
 od = r"build\Release\out"
 W = G.load_weights(st)
 x = np.fromfile(od + "\\x.bin", dtype=np.float32).reshape(-1, 16)

@@ -17,15 +17,15 @@ ARB_GL_gl_spirv version 100
 -- Selecting Windows SDK version 10.0.19041.0 to target Windows 10.0.22631.
 -- Configuring done (0.0s)
 -- Generating done (0.2s)
--- Build files have been written to: C:/Users/AI/Desktop/DLSS5_INTEL/dlss5/m2-dxgi-vulkan-passthrough/build
+-- Build files have been written to: C:/Users/<owner>/Desktop/DLSS5_INTEL/dlss5/m2-dxgi-vulkan-passthrough/build
 >> cmake build 
 Microsoft (R) Build Engine version 16.11.6+a918ceb31 for .NET Framework
 Copyright (C) Microsoft Corporation. All rights reserved.
 
-C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\MSBuild\Microsoft\VC\v160\Microsoft.CppBuild.targets(499,5): warning MSB8004: Output Directory does not end with a trailing slash.  This build instance will add the slash as it is required to allow proper evaluation of the Output Directory. [C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m2-dxgi-vulkan-passthrough\build\ZERO_CHECK.vcxproj]
-C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\MSBuild\Microsoft\VC\v160\Microsoft.CppBuild.targets(499,5): warning MSB8004: Output Directory does not end with a trailing slash.  This build instance will add the slash as it is required to allow proper evaluation of the Output Directory. [C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m2-dxgi-vulkan-passthrough\build\m2_shader.vcxproj]
-  m2interop.vcxproj -> C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m2-dxgi-vulkan-passthrough\build\Release\m2interop.exe
-C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\MSBuild\Microsoft\VC\v160\Microsoft.CppBuild.targets(499,5): warning MSB8004: Output Directory does not end with a trailing slash.  This build instance will add the slash as it is required to allow proper evaluation of the Output Directory. [C:\Users\AI\Desktop\DLSS5_INTEL\dlss5\m2-dxgi-vulkan-passthrough\build\ALL_BUILD.vcxproj]
+C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\MSBuild\Microsoft\VC\v160\Microsoft.CppBuild.targets(499,5): warning MSB8004: Output Directory does not end with a trailing slash.  This build instance will add the slash as it is required to allow proper evaluation of the Output Directory. [C:\Users\<owner>\Desktop\DLSS5_INTEL\dlss5\m2-dxgi-vulkan-passthrough\build\ZERO_CHECK.vcxproj]
+C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\MSBuild\Microsoft\VC\v160\Microsoft.CppBuild.targets(499,5): warning MSB8004: Output Directory does not end with a trailing slash.  This build instance will add the slash as it is required to allow proper evaluation of the Output Directory. [C:\Users\<owner>\Desktop\DLSS5_INTEL\dlss5\m2-dxgi-vulkan-passthrough\build\m2_shader.vcxproj]
+  m2interop.vcxproj -> C:\Users\<owner>\Desktop\DLSS5_INTEL\dlss5\m2-dxgi-vulkan-passthrough\build\Release\m2interop.exe
+C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\MSBuild\Microsoft\VC\v160\Microsoft.CppBuild.targets(499,5): warning MSB8004: Output Directory does not end with a trailing slash.  This build instance will add the slash as it is required to allow proper evaluation of the Output Directory. [C:\Users\<owner>\Desktop\DLSS5_INTEL\dlss5\m2-dxgi-vulkan-passthrough\build\ALL_BUILD.vcxproj]
 >> run interop 
 === M2: D3D11(DDA) -> Vulkan external-memory interop ===
 frame target: 2560x1440 B8G8R8A8, transform: INVERT rgb

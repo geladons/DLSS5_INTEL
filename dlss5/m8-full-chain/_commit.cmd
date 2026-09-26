@@ -1,5 +1,6 @@
 @echo off
-cd /d C:\Users\AI\Desktop\DLSS5_INTEL
+set "REPO=%~dp0\..\.."
+cd /d %REPO%
 del dlss5\m8-full-chain\_fix.py 2>nul
 del dlss5\m8-full-chain\_runswz.py 2>nul
 "C:\Program Files\Git\cmd\git.exe" add docs/m8-full-chain.md docs/m8-golden.log -f dlss5/m8-full-chain/golden.py

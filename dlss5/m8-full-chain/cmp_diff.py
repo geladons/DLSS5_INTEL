@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from pathlib import Path
+_REPO = Path(__file__).resolve().parents[2]
 import sys
 
 import numpy as np
@@ -8,7 +10,7 @@ import golden as G
 G.FRAG_SWIZZLE = np.arange(4096, dtype=np.intp)
 
 od = r"build\Release\out"
-st = r"C:\Users\AI\Desktop\DLSS5_INTEL\work\mlxw\dlssnr-logical.safetensors"
+st = r"" + str(_REPO) + r"\work\mlxw\dlssnr-logical.safetensors"
 W = G.load_weights(st)
 fc = W["block2.layer0.ffn_cos_skip"].reshape(-1).astype(np.float32)
 g34 = np.fromfile(od + "\\g4_34.bin", dtype=np.float32).reshape(288, 32)
