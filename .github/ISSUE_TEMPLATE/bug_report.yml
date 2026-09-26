@@ -1,0 +1,92 @@
+name: Bug report
+description: Something is not working (game mode, screen mode, manager, daemon, build)
+title: "[BUG] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report! This project is a research demo —
+        the more precise the report, the faster we can reproduce.
+        **Do not report issues about online/anti-cheat games** — injection into
+        them is out of scope by policy (see SECURITY.md).
+  - type: input
+    id: version
+    attributes:
+      label: Build / version
+      description: Release bundle date, or git commit hash if built from source.
+      placeholder: "e.g. release bundle 2026-09-25, or commit 1edcff3"
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Mode
+      description: Which processing path were you using?
+      options:
+        - Vulkan game (implicit layer)
+        - DX9/10/11 game (DXVK path)
+        - DX12 game (dxgi proxy)
+        - Screen mode (whole desktop)
+        - Window mode
+        - Manager app itself
+        - Build / tooling
+    validations:
+      required: true
+  - type: input
+    id: game
+    attributes:
+      label: Game / app and API
+      placeholder: "e.g. GTA IV Complete Edition (DX9, 32-bit), or vkcube (Vulkan)"
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: GPU, driver, VRAM, OS, how the desktop is used (local / streamed).
+      placeholder: |
+        GPU: Intel Arc Pro B50 16 GB
+        Driver: 101.8805
+        OS: Windows 11 23H2
+        Display: local / Sunshine-Moonlight stream 2560x1440
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        Relevant excerpts (last ~50 lines are usually enough):
+        - manager: `logs\manager_err.log`, daemon: `logs\m11d.log`, screen mode: `logs\m8b-live.log`
+        - layer/proxy: `%TEMP%\m12_dxgi.log` and the game folder
+        - for build issues: `_build.log` of the failing module
+      render: shell
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start the manager via DLSS5 Manager.vbs
+        2. ...
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I am not running an online/anti-cheat game
+          required: true
+        - label: I attached (or described where to find) the relevant logs
+          required: true
