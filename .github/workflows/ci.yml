@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Python syntax check (all tracked .py / .pyw)
+        run: |
+          git ls-files -z '*.py' '*.pyw' | xargs -0 python -m py_compile
+
+      - name: .cmd files must be ASCII (host launcher quirk)
+        run: |
+          if git ls-files -z '*.cmd' | xargs -0 grep -lP '[^\x00-\x7F]'; then
+            echo "::error::non-ASCII bytes found in .cmd files"
+            exit 1
+          fi
+
+      - name: Issue templates parse as YAML
+        run: |
+          python - <<'EOF'
+          import yaml, glob
+          for f in glob.glob('.github/ISSUE_TEMPLATE/*.yml'):
+              yaml.safe_load(open(f, encoding='utf-8'))
+              print('OK', f)
+          EOF
+
+      - name: No absolute user paths in tracked files
+        run: |
+          if git ls-files -z | xargs -0 grep -lE 'Users[/\\\\]AI'; then
+            echo "::error::local absolute paths found"
+            exit 1
+          fi
