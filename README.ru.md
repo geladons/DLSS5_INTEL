@@ -17,6 +17,8 @@ Vulkan-слой, для DirectX 9/10/11 — через DXVK + тот же сло
 
 [English README](README.md)
 
+![DLSS 5 neural rendering live on Intel Arc — GTA IV before/after, gain 1.6](docs/social-preview.png)
+
 ---
 
 ## Текущий статус — честная демо-сборка
@@ -46,18 +48,18 @@ Vulkan-слой, для DirectX 9/10/11 — через DXVK + тот же сло
 весь живой конвейер (DX9 → DXVK → Vulkan-слой → TCP-даемон → 71-блочный чейн
 DLSSNR на GPU → обратно в свопчейн), со стримом через Sunshine/Moonlight.
 
-**▶ [Открыть интерактивный слайдер сравнения](docs/compare.html)**
-(таскайте разделитель влево/вправо; лучше всего с включённым GitHub Pages —
-`Settings → Pages → docs/`)
+**▶ [Открыть интерактивный слайдер сравнения](https://geladons.github.io/DLSS5_INTEL/compare.html)**
+(таскайте разделитель влево/вправо — полное качество, все 7 пар. Анимированные
+превью ниже проигрывают протяжку сами.)
 
-| | |
-|---|---|
-| ![Меню GTA IV — до](docs/screenshots/1b.jpg) | ![Меню GTA IV — после](docs/screenshots/1a.jpg) |
-| *1 — Главное меню, до* | *1 — Главное меню, после* |
-| ![Загрузка GTA IV — до](docs/screenshots/3b.jpg) | ![Загрузка GTA IV — после](docs/screenshots/3a.jpg) |
-| *3 — Интро загрузки, до* | *3 — Интро загрузки, после* |
-| ![Геймплей GTA IV — до](docs/screenshots/6b.jpg) | ![Геймплей GTA IV — после](docs/screenshots/6a.jpg) |
-| *6 — Игровой процесс (убежище), до* | *6 — Игровой процесс (убежище), после* |
+| |
+|---|
+| ![Меню GTA IV — протяжка до/после](docs/screenshots/wipe1.gif) |
+| *1 — Главное меню (анимированная протяжка)* |
+| ![Интро загрузки — протяжка до/после](docs/screenshots/wipe3.gif) |
+| *3 — Интро загрузки (пара «вау» — ч/б-арт оживает в цвете)* |
+| ![Геймплей — протяжка до/после](docs/screenshots/wipe6.gif) |
+| *6 — Игровой процесс (убежище)* |
 
 Все 7 пар (меню, 4 загрузочных экрана, 2 игровых) — в
 [docs/screenshots](docs/screenshots) и на странице слайдера.

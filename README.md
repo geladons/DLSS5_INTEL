@@ -18,6 +18,8 @@ window through DDA capture and a click-through Vulkan overlay.
 
 [Русская версия README](README.ru.md)
 
+![DLSS 5 neural rendering live on Intel Arc — GTA IV before/after, gain 1.6](docs/social-preview.png)
+
 ---
 
 ## Current status — honest demo build
@@ -48,10 +50,9 @@ through the whole live pipeline (DX9 → DXVK → Vulkan layer → TCP daemon �
 71-block DLSSNR chain on the GPU → back into the swapchain), streamed over
 Sunshine/Moonlight. Effect intensity on all shots: **gain 1.6**.
 
-**▶ [Open the interactive comparison slider](docs/compare.html)**
-(drag the divider left/right — full quality, all 7 pairs; best experienced
-with GitHub Pages enabled — `Settings → Pages → docs/`.
-The animated previews below replay the wipe automatically.)
+**▶ [Open the interactive comparison slider](https://geladons.github.io/DLSS5_INTEL/compare.html)**
+(drag the divider left/right — full quality, all 7 pairs. The animated
+previews below replay the wipe automatically.)
 
 | |
 |---|
