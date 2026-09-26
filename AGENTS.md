@@ -1,5 +1,10 @@
 # AGENTS.md - DLSS5_INTEL working rules
 
+> This file is the operating manual for AI coding agents (and automation)
+> working in this repository. Humans: start at README.md; CONTRIBUTING.md
+> covers the rules that matter for people. The repo is public-facing — never
+> commit secrets, weights, binaries or machine-specific paths.
+
 Project: real DLSS 5 (71-block DLSSNR graph) running LIVE on the desktop of an
 Intel Arc Pro B50 (Vulkan, DDA capture, click-through overlay). Dev VM
 DESKTOP-285INKS (Win 11), GPU passed through. Owner plays games via Sunshine
