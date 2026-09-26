@@ -27,12 +27,12 @@ expect today:
 
 | Area | Status |
 |---|---|
-| Vulkan games (implicit layer) | 🟡 Works in-game (owner-tested on RDR2), but rough — polish welcome |
+| Vulkan games (implicit layer) | ✅ Works — validated end-to-end on vkcube, live-tested on RDR2 (Vulkan) |
 | DX9 / DX10 / DX11 games (via DXVK → Vulkan) | ✅ Works — validated live on GTA IV (DX9, 32-bit) |
 | DX12 games (own `dxgi.dll` proxy) | ✅ Works mechanically — validated on windowed DX12 titles |
 | Auto-deploy of the right DLLs per game | ✅ Works — API auto-detection, per-mode DLL set, one UAC prompt for Program Files games |
 | Auto game discovery | ✅ Works — Steam / Epic / GOG manifests + full-drive scan, PE-based API detection (finds real games, not every `.exe`) |
-| In-game overlay (sliders on a frozen frame) | 🟡 Partial — opens with `CTRL+ALT+G`, mouse capture/release fights with some games; exclusive fullscreen may minimize the game |
+| In-game overlay (sliders on a frozen frame) | 🟡 Works poorly overall — usable, but rough in every game/mode (may be aggravated by the Sunshine stream setup); mouse capture/release fights with games; exclusive fullscreen may minimize the game |
 | Screen / window mode (whole desktop) | 🟡 Works, but slow and rough — fine for streaming demos, not for daily use |
 | **FPS** | ❌ **Not playable — a slideshow.** The chain is ~135 ms/frame at 500×500 and ~0.9–1.1 s/frame at 1080p-class resolutions (GEMM-bound). Screen mode at 1440p takes tens of seconds for the first frame |
 | Pause / resume | ✅ `CTRL+ALT+X` — full game FPS while paused |
