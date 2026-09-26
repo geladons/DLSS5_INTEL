@@ -49,17 +49,18 @@ through the whole live pipeline (DX9 → DXVK → Vulkan layer → TCP daemon �
 Sunshine/Moonlight. Effect intensity on all shots: **gain 1.6**.
 
 **▶ [Open the interactive comparison slider](docs/compare.html)**
-(drag the divider left/right; best experienced with GitHub Pages enabled —
-`Settings → Pages → docs/`)
+(drag the divider left/right — full quality, all 7 pairs; best experienced
+with GitHub Pages enabled — `Settings → Pages → docs/`.
+The animated previews below replay the wipe automatically.)
 
-| | |
-|---|---|
-| ![GTA IV main menu — before](docs/screenshots/1b.jpg) | ![GTA IV main menu — after](docs/screenshots/1a.jpg) |
-| *1 — Main menu, before* | *1 — Main menu, after* |
-| ![GTA IV loading — before](docs/screenshots/3b.jpg) | ![GTA IV loading — after](docs/screenshots/3a.jpg) |
-| *3 — Loading intro, before* | *3 — Loading intro, after* |
-| ![GTA IV gameplay — before](docs/screenshots/6b.jpg) | ![GTA IV gameplay — after](docs/screenshots/6a.jpg) |
-| *6 — In-game (safehouse), before* | *6 — In-game (safehouse), after* |
+| |
+|---|
+| ![Main menu — before/after wipe](docs/screenshots/wipe1.gif) |
+| *1 — Main menu (animated wipe; before is on the right half of the sweep)* |
+| ![Loading intro — before/after wipe](docs/screenshots/wipe3.gif) |
+| *3 — Loading intro (the "wow" pair — b/w art comes alive in color)* |
+| ![In-game — before/after wipe](docs/screenshots/wipe6.gif) |
+| *6 — In-game, safehouse interior* |
 
 All 7 pairs (menu, 4 loading screens, 2 in-game) are in
 [docs/screenshots](docs/screenshots) and in the slider page.
