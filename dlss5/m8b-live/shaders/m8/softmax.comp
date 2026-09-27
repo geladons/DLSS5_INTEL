@@ -43,18 +43,14 @@ layout(push_constant, scalar) uniform Push {
     uint nReal;      // M9: global blocks — real (unpadded) tokens per row; 0 = n
 } pc;
 
-void weights_at(uint base, uint i, out float w0, out float w1) {
+void weights_at(uint base, uint i, uint biasBase, out float w0, out float w1) {
     if (pc.nReal != 0u && i >= pc.nReal) { w0 = 0.0; w1 = 0.0; return; }
     vec2 affine;
     for (uint j = 0u; j < 2u; j++) {
         float logit = pc.a.v[base + i + j];
         if (pc.bias != 0u) {
-            // window attention: row = ((w*hcount + h)*64 + tq); col = tk.
-            uint row = base / pc.n;         // (base = row * n)
-            uint h = (row >> 6u) % pc.hcount;
-            uint tq = row & 63u;
             uint tk = i + j;
-            uint bb = float16BitsToUint16(HalfBuf(pc.bias).v[h * 4096u + tq * 64u + tk]);
+            uint bb = float16BitsToUint16(HalfBuf(pc.bias).v[biasBase + tk]);
             logit += f16_widen(bb);
         }
         if (pc.p0 != 0.0) logit = clamp(logit, -pc.p0, pc.p0);
@@ -73,16 +69,41 @@ void main() {
     if (row >= pc.m) return;
     uint base = row * pc.n;
 
+    uint biasBase = 0u;
+    if (pc.bias != 0u) {
+        uint h = (row >> 6u) % pc.hcount;
+        uint tq = row & 63u;
+        biasBase = h * 4096u + tq * 64u;
+    }
+
+    if (pc.n == 64u) {
+        vec2 w_cache[32];
+        float total = 0.0;
+        for (uint i = 0u; i < 32u; ++i) {
+            weights_at(base, i * 2u, biasBase, w_cache[i].x, w_cache[i].y);
+            total += w_cache[i].x;
+            total += w_cache[i].y;
+        }
+        float reciprocal = half_round(1.0 / half_round(total));
+        for (uint i = 0u; i < 32u; ++i) {
+            precise float p0 = w_cache[i].x * reciprocal;
+            precise float p1 = w_cache[i].y * reciprocal;
+            pc.c.v[base + i * 2u]      = float16_t(e4m3(half_round(p0)));
+            pc.c.v[base + i * 2u + 1u] = float16_t(e4m3(half_round(p1)));
+        }
+        return;
+    }
+
     float total = 0.0;
     float w0, w1;
     for (uint i = 0u; i < pc.n; i += 2u) {
-        weights_at(base, i, w0, w1);
+        weights_at(base, i, biasBase, w0, w1);
         total += w0;          // fp32 accumulation, as numpy's sum(dtype=float16)
         total += w1;
     }
     float reciprocal = half_round(1.0 / half_round(total));
     for (uint i = 0u; i < pc.n; i += 2u) {
-        weights_at(base, i, w0, w1);
+        weights_at(base, i, biasBase, w0, w1);
         precise float p0 = w0 * reciprocal;
         precise float p1 = w1 * reciprocal;
         pc.c.v[base + i]      = float16_t(e4m3(half_round(p0)));

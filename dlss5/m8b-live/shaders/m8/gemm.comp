@@ -53,7 +53,7 @@ layout(push_constant, scalar) uniform Push {
 
 const uint TM = 8, TN = 16, TK = 16;
 #ifndef GEMM_RN
-const uint RM = 2, RN = 2;   // default 16x32 tile per subgroup
+const uint RM = 4, RN = 2;   // default 32x32 tile per subgroup
 #else
 const uint RM = 2, RN = uint(GEMM_RN);   // M8a head variant: GEMM_RN=1 -> 16x16 tile
 #endif
@@ -166,8 +166,9 @@ void main() {
     if (epilogue == 0u && !narrow) {
         for (uint i = 0u; i < RM; i++)
             for (uint j = 0u; j < RN; j++)
-                coopMatStore(acc[i][j], pc.c.v, co + (row + i * TM) * ldc + col + j * TN,
-                             ldc, gl_CooperativeMatrixLayoutRowMajor);
+                if (row + i * TM < pc.m)
+                    coopMatStore(acc[i][j], pc.c.v, co + (row + i * TM) * ldc + col + j * TN,
+                                 ldc, gl_CooperativeMatrixLayoutRowMajor);
         return;
     }
 
@@ -180,15 +181,18 @@ void main() {
                              gl_CooperativeMatrixLayoutRowMajor);
                 continue;
             }
-            coopMatStore(acc[i][j], pc.c.v, co + (row + i * TM) * ldc + col + j * TN,
-                         ldc, gl_CooperativeMatrixLayoutRowMajor);
+            if (row + i * TM < pc.m)
+                coopMatStore(acc[i][j], pc.c.v, co + (row + i * TM) * ldc + col + j * TN,
+                             ldc, gl_CooperativeMatrixLayoutRowMajor);
         }
     if (!narrow) return;
 
     subgroupMemoryBarrierShared();
     subgroupBarrier();
     for (uint e = gl_LocalInvocationID.x * 4u; e < BM * BN; e += 32u * 4u) {
-        uint at = co + (row + e / BN) * ldc + col + e % BN;
+        uint r = row + e / BN;
+        if (r >= pc.m) continue;
+        uint at = co + r * ldc + col + e % BN;
         if ((at & 3u) == 0u && (uint(uint64_t(pc.c)) & 7u) == 0u) {
             Half4Buf(uint64_t(pc.c)).v4[at >> 2] =
                 f16vec4(float(stage[e]), float(stage[e + 1u]),
