@@ -19,6 +19,7 @@ if not errorlevel 1 (
     "%CMAKE%" --build "%BUILD%" --config Release >> "%SRC%\_build.log" 2>&1
     if errorlevel 1 ( set FINAL=1 & goto :done )
     if not exist "%BUILD%\Release\m11d.exe" ( set FINAL=1 & goto :done )
+    copy /y "%BUILD%\*.spv" "%BUILD%\Release\" >nul
     set FINAL=0
     goto :done
 )
