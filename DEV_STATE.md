@@ -1,4 +1,17 @@
-# DEV_STATE.md - where we are (updated 2026-09-25 ~12:00 by Kimi)
+# DEV_STATE.md - where we are (updated 2026-09-27 by Antigravity)
+
+## Stage 2 Optimization: GEMM & Compute Kernels (2026-09-27 IN PROGRESS)
+Architectural overhaul and kernel optimization on Intel Arc Pro B50 (Vulkan 71-block DLSSNR graph):
+- Baseline (native 1080p, scale 1.00): 1062.2 ms GPU (0.93 FPS), 6590 MB VRAM.
+- Commit 247e169: Render scaling support (0.50 scale) -> 283.0 ms GPU (3.40 FPS), 1945 MB VRAM (3.75x speedup).
+- Commit 8310f99: Staged AMD FSR 1.0 EASU + RCAS spatial upscaler compute shaders.
+- Commit ee9cd68: Softmax window weight caching (w_cache[32] eliminates ~70M redundant calls/reads per frame, smaxw dropped from 52 ms to 27 ms, -47.4%). Vectorized cosine window. 32x32 GEMM tile. GPU time -> 257.1 ms (3.58 FPS).
+- Commit 430206d: 128-bit 4-wide vectorization of partition, transpose_we, upmerge (upm -49.4%, part -21.6%, trans -18.5%). GPU time -> 250.8 ms (3.70 FPS).
+- Commit 5eebf61: Kernel fusion of Q/K/V in cosine_win (eliminates 124 kernel launches per frame, cosw dropped from 43 ms to 31 ms). GPU time -> 242.9 ms (3.74-4.18 FPS).
+- Commit 02a0718: Specialized static K-loop unrolling for K=16, 32, 64 in gemm.comp (removes dynamic while-loop branches for 222 dispatches). Native 1080p GPU time dropped from 736 ms to 634 ms (~102 ms saved at native).
+- Ultra Performance test: scale 0.33 (640x384 internal grid) yields 125.5 ms GPU (7.08 FPS, 8.5x speedup over baseline).
+- Active Task: Fusing Residual Add (dEw) into GEMM epilogue to eliminate elementwise kernel and ~230 pipeline barriers.
+- Validation: 100% BIT-EXACT PASS vs PyTorch goldens across all commits (head ch0: 0.008265, ch1: 0.007924, ch2: 0.008648, featV OK).
 
 ## Post-v6 (2026-09-25 ~19:00) - OWNER LIVE TEST: RDR2 (Vulkan) works
 Owner played RDR2 with the implicit layer enabled: the Vulkan processing
