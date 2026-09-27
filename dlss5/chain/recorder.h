@@ -25,7 +25,17 @@ struct GemmPush {
 
 struct CosPush { uint64_t a, c, d; uint32_t m, flags; };
 
-struct CosWinPush { uint64_t a, c, d; uint32_t m, flags, C, hcount; };
+struct CosWinPush {
+    uint64_t a;          // proj fp32 [W*64, 3C]
+    uint64_t q;          // out Q f16 [W, H, 64, 32]
+    uint64_t k;          // out K f16 [W, H, 64, 32]
+    uint64_t v;          // out V f16 [W, H, 64, 32]
+    uint64_t d;          // per-head fp32 scale (for Q)
+    uint32_t m;          // vector count = W*64*H
+    uint32_t C;          // channel count = H*32
+    uint32_t hcount;     // H (heads)
+    uint32_t pad;
+};
 
 #pragma pack(pop)  // SMaxPush: scalar layout aligns uint64 `bias` to 8 (offset 32);
                    // pack(1) would place it at 28 -> shader reads garbage nonzero
@@ -100,8 +110,8 @@ private:
                  uint64_t h, const Stage& s, uint32_t C, uint32_t padTop, uint32_t padLeft,
                  uint32_t wp8, bool pub, bool b16);
     void dTrans(VkCommandBuffer cb, uint64_t a, uint64_t c2, uint32_t Ww, uint32_t H);
-    void dCosW(VkCommandBuffer cb, uint64_t a, uint64_t c2, uint64_t sc,
-               uint32_t Ww, uint32_t H, uint32_t C, uint32_t kind);
+    void dCosW(VkCommandBuffer cb, uint64_t a, uint64_t q, uint64_t k, uint64_t v,
+               uint64_t sc, uint32_t Ww, uint32_t H, uint32_t C);
     void dCosG(VkCommandBuffer cb, uint64_t a, uint64_t c2, uint64_t sc, uint32_t kind);
     void dSmaxW(VkCommandBuffer cb, uint64_t a, uint64_t c2, uint32_t Ww, uint32_t H,
                 uint64_t bias);

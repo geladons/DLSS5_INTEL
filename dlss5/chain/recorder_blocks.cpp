@@ -35,10 +35,9 @@ void ChainRecorder::recordWindowAttn(VkCommandBuffer cb, int famIdx, int idx, co
     dGemm(cb, famIdx, A(ar_->off.oWIN), A(woff(qkvN)), A(ar_->off.oPROJW), 64, 3 * C, C, Ww,
           64 * C, 0, 64 * 3 * C, gflags(EPI_NONE, false), C, 3 * C, 3 * C);
     bar(cb);
-    // M10: Q/K/V read the same oPROJW and write disjoint slots -> one bar.
-    dCosW(cb, A(ar_->off.oPROJW), A(ar_->off.oQW), A(woff(scN)), Ww, H, C, 0);
-    dCosW(cb, A(ar_->off.oPROJW), A(ar_->off.oKW), A(woff(scN)), Ww, H, C, 1);
-    dCosW(cb, A(ar_->off.oPROJW), A(ar_->off.oVW), A(woff(scN)), Ww, H, C, 2);
+    // M10: fused Q/K/V dispatch reads oPROJW once and writes oQW, oKW, oVW.
+    dCosW(cb, A(ar_->off.oPROJW), A(ar_->off.oQW), A(ar_->off.oKW), A(ar_->off.oVW),
+          A(woff(scN)), Ww, H, C);
     bar(cb);
     dGemm(cb, famIdx, A(ar_->off.oQW), A(ar_->off.oKW), A(ar_->off.oSCW), 64, 64, 32, Ww * H,
           64 * 32, 64 * 32, 64 * 64, gflags(EPI_NONE, false) | F_TRANSPOSE, 32, 32, 64);

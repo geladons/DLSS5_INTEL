@@ -1,17 +1,13 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 /*
- * cosine_win — M8a windowed Q/K cosine publish + V plain E4M3 publish.
+ * cosine_win -- windowed Q/K/V fused publish (Q/K cosine normalized + V plain E4M3 publish).
  *
  * Same math as the M7-validated cosine.comp (SS A.5 fragment tree, fp16 islands), but
- * the proj input is WINDOW-order fp32 [W*64, 3C] and the output is [W, H, 64, 32] f16
- * (window-major, head-minor, then local token, then head_dim) so the per-(window,head)
- * scores/ctx GEMMs batch over W*H with uniform strides.
+ * the proj input is WINDOW-order fp32 [W*64, 3C] and the outputs are [W, H, 64, 32] f16
+ * (window-major, head-minor, then local token, then head_dim) for Q, K, and V.
+ * Fused into a single unified kernel to eliminate 124 dispatches per frame.
  *
- * kind (flags & 0xFF): 0 = Q (normalize, per-head scale attn_scale as stored — NO
- *                          sqrt(32), that is global-only per SS A.6.2, e4m3)
- *                      1 = K (normalize, e4m3)
- *                      2 = V (plain e4m3, SS A.6 step 2)
  * One invocation per (window-token, head) 32-channel vector; m = W*64*H.
  */
 #extension GL_EXT_buffer_reference : require
@@ -32,11 +28,12 @@ layout(buffer_reference, scalar, buffer_reference_align = 8)  buffer Half4Buf  {
 
 layout(push_constant, scalar) uniform Push {
     FloatBuf a;      // proj fp32 [W*64, 3C]
-    HalfBuf  c;      // out f16 [W, H, 64, 32]
-    FloatBuf d;      // per-head fp32 scale (Q only)
+    HalfBuf  q;      // out Q f16 [W, H, 64, 32]
+    HalfBuf  k;      // out K f16 [W, H, 64, 32]
+    HalfBuf  v;      // out V f16 [W, H, 64, 32]
+    FloatBuf d;      // per-head fp32 scale (for Q)
     uint m;          // vector count = W*64*H
-    uint flags;      // kind in bits 0-1
-    uint C;          // channel count = H*32 (row stride of a)
+    uint C;          // channel count = H*32
     uint hcount;     // H (heads)
 } pc;
 
@@ -46,29 +43,7 @@ float hmul(float l, float r) { precise float t = l * r; return half_round(t); }
 float hadd(float l, float r) { precise float t = l + r; return half_round(t); }
 float hfma(float l, float r, float acc) { precise float t = l * r + acc; return half_round(t); }
 
-void main() {
-    uint v = gl_GlobalInvocationID.x;
-    if (v >= pc.m) return;
-    uint kind = pc.flags & 0xFFu;
-    uint wt = v / pc.hcount;        // w*64 + t  (window-local token)
-    uint head = v % pc.hcount;
-    uint rd = wt * (3u * pc.C) + kind * pc.C + head * 32u;
-    uint w = wt / 64u, t = wt % 64u;
-    uint outBase = ((w * pc.hcount + head) * 64u + t) * 32u;
-
-    if (kind == 2u) {
-        for (uint k = 0u; k < 8u; k++) {
-            vec4 in4 = Float4Buf(uint64_t(pc.a)).v4[(rd >> 2) + k];
-            Half4Buf(uint64_t(pc.c)).v4[(outBase >> 2) + k] = f16vec4(
-                float16_t(e4m3(in4.x)),
-                float16_t(e4m3(in4.y)),
-                float16_t(e4m3(in4.z)),
-                float16_t(e4m3(in4.w))
-            );
-        }
-        return;
-    }
-
+void normalizeAndWrite(uint rd, uint outBase, uint64_t dstBuf, float scale, bool hasScale) {
     float h[32];
     for (uint k = 0u; k < 8u; k++) {
         vec4 in4 = Float4Buf(uint64_t(pc.a)).v4[(rd >> 2) + k];
@@ -94,16 +69,46 @@ void main() {
 
     float norm = max(hadd(one[0][0], one[0][1]), half_round(COSINE_NORM_FLOOR));
     float reciprocal = half_round(inversesqrt(norm));
-    float scale = 1.0;
-    if (kind == 0u) scale = half_round(pc.d.v[head]);
+
     for (uint k = 0u; k < 8u; k++) {
         f16vec4 out4;
         for (uint j = 0u; j < 4u; j++) {
             uint i = k * 4u + j;
             float value = hmul(h[i], reciprocal);
-            if (kind == 0u) value = hmul(value, scale);
+            if (hasScale) value = hmul(value, scale);
             out4[j] = float16_t(e4m3(value));
         }
-        Half4Buf(uint64_t(pc.c)).v4[(outBase >> 2) + k] = out4;
+        Half4Buf(dstBuf).v4[(outBase >> 2) + k] = out4;
     }
+}
+
+void main() {
+    uint vIdx = gl_GlobalInvocationID.x;
+    if (vIdx >= pc.m) return;
+
+    uint wt = vIdx / pc.hcount;
+    uint head = vIdx % pc.hcount;
+    uint w = wt / 64u, t = wt % 64u;
+    uint outBase = ((w * pc.hcount + head) * 64u + t) * 32u;
+
+    // Process V
+    uint rdV = wt * (3u * pc.C) + 2u * pc.C + head * 32u;
+    for (uint k = 0u; k < 8u; k++) {
+        vec4 in4 = Float4Buf(uint64_t(pc.a)).v4[(rdV >> 2) + k];
+        Half4Buf(uint64_t(pc.v)).v4[(outBase >> 2) + k] = f16vec4(
+            float16_t(e4m3(in4.x)),
+            float16_t(e4m3(in4.y)),
+            float16_t(e4m3(in4.z)),
+            float16_t(e4m3(in4.w))
+        );
+    }
+
+    // Process Q
+    uint rdQ = wt * (3u * pc.C) + 0u * pc.C + head * 32u;
+    float scale = half_round(pc.d.v[head]);
+    normalizeAndWrite(rdQ, outBase, uint64_t(pc.q), scale, true);
+
+    // Process K
+    uint rdK = wt * (3u * pc.C) + 1u * pc.C + head * 32u;
+    normalizeAndWrite(rdK, outBase, uint64_t(pc.k), 1.0, false);
 }

@@ -140,10 +140,10 @@ void ChainRecorder::dTrans(VkCommandBuffer cb, uint64_t a, uint64_t c2, uint32_t
     pm(cb, "trans", "", 0, Ww, 0, Ww * 64, 1, 1);
 }
 
-void ChainRecorder::dCosW(VkCommandBuffer cb, uint64_t a, uint64_t c2, uint64_t sc,
-                          uint32_t Ww, uint32_t H, uint32_t C, uint32_t kind) {
+void ChainRecorder::dCosW(VkCommandBuffer cb, uint64_t a, uint64_t q, uint64_t k, uint64_t v,
+                          uint64_t sc, uint32_t Ww, uint32_t H, uint32_t C) {
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pCosW.pipe);
-    CosWinPush p{a, c2, sc, Ww * 64 * H, kind, C, H};
+    CosWinPush p{a, q, k, v, sc, Ww * 64 * H, C, H, 0};
     vkCmdPushConstants(cb, pCosW.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
     vkCmdDispatch(cb, (Ww * 64 * H + 31) / 32, 1, 1);
     pm(cb, "cosw", "", 0, C, 0, (Ww * 64 * H + 31) / 32, 1, 1);
