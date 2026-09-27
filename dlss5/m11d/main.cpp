@@ -136,6 +136,7 @@ int main(int argc, char** argv) {
     int port = 47990;
     float gain = 1.0f;
     float blend = 1.0f;
+    float scale = 1.0f;
     bool dump = false;
     std::string selftest;
     std::string benchProf;
@@ -147,6 +148,7 @@ int main(int argc, char** argv) {
         if (a == "--port" && i + 1 < argc) port = std::atoi(argv[++i]);
         else if (a == "--gain" && i + 1 < argc) gain = (float)std::atof(argv[++i]);
         else if (a == "--blend" && i + 1 < argc) blend = (float)std::atof(argv[++i]);
+        else if (a == "--scale" && i + 1 < argc) scale = (float)std::atof(argv[++i]);
         else if (a == "--weights" && i + 1 < argc) weights = argv[++i];
         else if (a == "--dump") dump = true;
         else if (a == "--selftest" && i + 1 < argc) selftest = argv[++i];
@@ -160,7 +162,7 @@ int main(int argc, char** argv) {
         }
         else if (a == "--prof" && i + 1 < argc) benchProf = argv[++i];
         else {
-            std::fprintf(stderr, "usage: m11d [--port N] [--gain F] [--blend F] [--weights PATH] [--dump] "
+            std::fprintf(stderr, "usage: m11d [--port N] [--gain F] [--blend F] [--scale F] [--weights PATH] [--dump] "
                                  "[--selftest file.bmp] [--bench N WxH [--prof out.csv]]\n");
             return 1;
         }
@@ -172,7 +174,7 @@ int main(int argc, char** argv) {
     if (blend < 0.0f) blend = 0.0f;
     if (blend > 1.0f) blend = 1.0f;
     std::printf("=== M11D: DLSSNR daemon (real 71-block DLSS 5 U-Net) ===\n");
-    std::printf("weights: %s\ngain: %.2f blend: %.2f\n", weights.c_str(), (double)gain, (double)blend);
+    std::printf("weights: %s\ngain: %.2f blend: %.2f scale: %.2f\n", weights.c_str(), (double)gain, (double)blend, (double)scale);
 
     d5c::ChainEngine engine;
     uint32_t curW = 0, curH = 0;
@@ -190,6 +192,7 @@ int main(int argc, char** argv) {
         cfg.shaderDir = ".\\";            // spv staged next to the exe
         cfg.headGain = gain;
         cfg.headBlend = blend;
+        cfg.renderScale = scale;
         cfg.debugDumps = dump;
         cfg.dumpDir = "out";
         cfg.vkCfg.appName = "m11d";

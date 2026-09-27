@@ -28,6 +28,7 @@ struct EngineConfig {
     std::string shaderDir;                             // dir with *.spv (trailing slash)
     float headGain = 1.0f;                             // vendor residual scale (--gain)
     float headBlend = 1.0f;                            // vendor mix factor (--blend, M13 knob #2)
+    float renderScale = 1.0f;
     VkContextConfig vkCfg{};                           // device selection (headless default)
     bool debugDumps = false;                           // dump live_*.bin on frame index 1
     std::string dumpDir = "out";                       // dump destination
@@ -58,6 +59,7 @@ public:
 
     uint32_t netW() const { return netW_; }
     uint32_t netH() const { return netH_; }
+    float renderScale() const { return cfg_.renderScale; }
     const Stage* stages() const { return st_; }
 
 private:
@@ -94,6 +96,10 @@ private:
 
     VkPipeline pipeDecode_ = VK_NULL_HANDLE, pipeFeatures_ = VK_NULL_HANDLE,
                pipeCompose_ = VK_NULL_HANDLE, pipeEncode_ = VK_NULL_HANDLE;
+    VkPipeline pipeRescale_ = VK_NULL_HANDLE;
+    VkBuffer bufNetRgb_ = VK_NULL_HANDLE, bufFinLow_ = VK_NULL_HANDLE;
+    VkDeviceMemory memNetRgb_ = VK_NULL_HANDLE, memFinLow_ = VK_NULL_HANDLE;
+    VkDescriptorSet setDown_ = VK_NULL_HANDLE, setUp_ = VK_NULL_HANDLE;
 
     VkDeviceMemory memImgIn_ = VK_NULL_HANDLE, memUpload_ = VK_NULL_HANDLE,
                    memRgb_ = VK_NULL_HANDLE, memMax_ = VK_NULL_HANDLE,

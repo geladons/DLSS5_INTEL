@@ -31,18 +31,21 @@ layout(std430, set = 0, binding = 1) buffer B1 { float b1[]; };
 layout(std430, set = 0, binding = 2) buffer B2 { float b2[]; };
 layout(std430, set = 0, binding = 4) buffer B4 { float b4[]; };
 layout(std430, set = 0, binding = 5) buffer B5 { float b5[]; };
+layout(std430, set = 0, binding = 6) buffer B6 { float b6[]; };
 layout(push_constant) uniform Push { ivec4 a; ivec4 b; vec4 c; vec4 d; } pc;
 
 float rd(uint buf, uint i) {
     if (buf == 1u) return b1[i];
     if (buf == 2u) return b2[i];
     if (buf == 4u) return b4[i];
+    if (buf == 6u) return b6[i];
     return b5[i];
 }
 void wr(uint buf, uint i, float v) {
     if (buf == 1u) b1[i] = v;
     else if (buf == 2u) b2[i] = v;
     else if (buf == 4u) b4[i] = v;
+    else if (buf == 6u) b6[i] = v;
     else b5[i] = v;
 }
 

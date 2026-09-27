@@ -5,6 +5,7 @@
 #include "fp16.h"
 
 #include <chrono>
+#include <cmath>
 #include <direct.h>
 
 namespace d5c {
@@ -98,8 +99,12 @@ bool ChainEngine::init(const EngineConfig& cfg) {
 
     // ---- geometry: vendor-aligned extent (mult 64, min 320, aligned UP) ----
     auto align64up = [](uint32_t v) { return (std::max(320u, v) + 63u) & ~63u; };
-    netW_ = align64up(regionW_);
-    netH_ = align64up(regionH_);
+    if (cfg_.renderScale < 0.33f) cfg_.renderScale = 0.33f;
+    if (cfg_.renderScale > 1.0f) cfg_.renderScale = 1.0f;
+    uint32_t targetW = (uint32_t)round(regionW_ * cfg_.renderScale);
+    uint32_t targetH = (uint32_t)round(regionH_ * cfg_.renderScale);
+    netW_ = align64up(targetW);
+    netH_ = align64up(targetH);
     st_[0] = {netH_, netW_, 0};
     st_[1] = {netH_ / 2, netW_ / 2, 0};
     st_[2] = {netH_ / 4, netW_ / 4, 0};
@@ -206,7 +211,12 @@ bool ChainEngine::createFrontEnd() {
     pipeFeatures_ = makePipe("features");
     pipeCompose_ = makePipe("compose");
     pipeEncode_ = makePipe("encode");
-    std::printf("[VK] 4 transport pipelines up (decode/features/compose/encode; absolute mode)\n");
+    if (cfg_.renderScale < 1.0f) {
+        pipeRescale_ = makePipe("rescale");
+        std::printf("[VK] 5 transport pipelines up (decode/rescale/features/compose/encode; absolute mode)\n");
+    } else {
+        std::printf("[VK] 4 transport pipelines up (decode/features/compose/encode; absolute mode)\n");
+    }
 
     // buffers (m8b parity: same bindings, dummy sizes where the M9b absolute
     // path never reads them)
@@ -215,7 +225,9 @@ bool ChainEngine::createFrontEnd() {
     bufMax_ = CreateBuf(c, 4096 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                         &memMax_);
-    const uint64_t Tfloats = 4096;   // legacy binding-2 scratch
+    const uint64_t Tfloats = (cfg_.renderScale < 1.0f)
+        ? std::max((uint64_t)regionW_ * netH_ * 3, (uint64_t)netW_ * regionH_ * 3)
+        : 4096;
     bufT_ = CreateBuf(c, Tfloats * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memT_);
     bufFin_ = CreateBuf(c, (uint64_t)regionW_ * regionH_ * 3 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
@@ -244,6 +256,13 @@ bool ChainEngine::createFrontEnd() {
     bufHp_ = CreateBuf(c, 65536, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memHp_);
 
+    if (cfg_.renderScale < 1.0f) {
+        bufNetRgb_ = CreateBuf(c, (uint64_t)netW_ * netH_ * 3 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memNetRgb_);
+        bufFinLow_ = CreateBuf(c, (uint64_t)netW_ * netH_ * 3 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memFinLow_);
+    }
+
     imgFinal_ = CreateImage2D(c, W_, H_, VK_FORMAT_B8G8R8A8_UNORM,
                               VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &memImgFinal_);
     viewFinal_ = CreateView(c, imgFinal_, VK_FORMAT_B8G8R8A8_UNORM);
@@ -253,50 +272,90 @@ bool ChainEngine::createFrontEnd() {
         VkDescriptorPoolSize ps[2] = {{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 64},
                                       {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 64}};
         VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-        dpci.maxSets = 4;
+        dpci.maxSets = 8;
         dpci.poolSizeCount = 2; dpci.pPoolSizes = ps;
         D5C_VK_RET(vkCreateDescriptorPool(c.dev, &dpci, nullptr, &dpool_));
         VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
         ai.descriptorPool = dpool_; ai.descriptorSetCount = 1; ai.pSetLayouts = &dsLayout_;
         D5C_VK_RET(vkAllocateDescriptorSets(c.dev, &ai, &setFinal_));
+        if (cfg_.renderScale < 1.0f) {
+            D5C_VK_RET(vkAllocateDescriptorSets(c.dev, &ai, &setDown_));
+            D5C_VK_RET(vkAllocateDescriptorSets(c.dev, &ai, &setUp_));
+        }
     }
-    auto writeBuf = [&](uint32_t bind, VkBuffer buf, VkDeviceSize sz) {
+    auto writeBuf = [&](VkDescriptorSet ds, uint32_t bind, VkBuffer buf, VkDeviceSize sz) {
         VkDescriptorBufferInfo bi{buf, 0, sz};
         VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        w.dstSet = setFinal_; w.dstBinding = bind; w.descriptorCount = 1;
+        w.dstSet = ds; w.dstBinding = bind; w.descriptorCount = 1;
         w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w.pBufferInfo = &bi;
         vkUpdateDescriptorSets(c.dev, 1, &w, 0, nullptr);
     };
-    auto writeBufRange = [&](uint32_t bind, VkBuffer buf, VkDeviceSize off, VkDeviceSize sz) {
+    auto writeBufRange = [&](VkDescriptorSet ds, uint32_t bind, VkBuffer buf, VkDeviceSize off, VkDeviceSize sz) {
         VkDescriptorBufferInfo bi{buf, off, sz};
         VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        w.dstSet = setFinal_; w.dstBinding = bind; w.descriptorCount = 1;
+        w.dstSet = ds; w.dstBinding = bind; w.descriptorCount = 1;
         w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w.pBufferInfo = &bi;
         vkUpdateDescriptorSets(c.dev, 1, &w, 0, nullptr);
     };
-    auto writeImg = [&](uint32_t bind, VkImageView v) {
+    auto writeImg = [&](VkDescriptorSet ds, uint32_t bind, VkImageView v) {
         VkDescriptorImageInfo ii{VK_NULL_HANDLE, v, VK_IMAGE_LAYOUT_GENERAL};
         VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        w.dstSet = setFinal_; w.dstBinding = bind; w.descriptorCount = 1;
+        w.dstSet = ds; w.dstBinding = bind; w.descriptorCount = 1;
         w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; w.pImageInfo = &ii;
         vkUpdateDescriptorSets(c.dev, 1, &w, 0, nullptr);
     };
-    writeImg(0, imgInView_);
-    writeBuf(1, bufRgb_, (uint64_t)W_ * H_ * 3 * 4);
-    writeBuf(2, bufT_, Tfloats * 4);
-    writeBufRange(3, arena_.bufOf(O.oFeatV), arena_.localOff(O.oFeatV), (uint64_t)st_[0].TOK * 16 * 4);
-    writeBufRange(4, arena_.bufOf(O.oHEAD), arena_.localOff(O.oHEAD), (uint64_t)st_[0].TOK * 16 * 4);
-    writeBufRange(5, arena_.bufOf(O.oHEAD), arena_.localOff(O.oHEAD), (uint64_t)st_[0].TOK * 16 * 4);
-    writeBuf(6, bufFin_, (uint64_t)regionW_ * regionH_ * 3 * 4);
-    writeBuf(7, bufNr_, (uint64_t)regionW_ * regionH_ * 3 * 4);
-    writeBuf(8, bufMax_, 4096 * 4);
-    writeImg(9, viewFinal_);
-    writeBuf(10, bufLastPresented_, (uint64_t)W_ * H_ * 4);
-    writeBuf(11, bufFbStats_, 8);
-    writeBuf(12, bufHp_, 65536);
-    writeBuf(13, bufHist_, (uint64_t)st_[0].TOK * 3 * 4);
-    writeBufRange(14, arena_.bufOf(O.oHEAD), arena_.localOff(O.oHEAD), (uint64_t)st_[0].TOK * 16 * 4);
-    writeBufRange(15, arena_.bufOf(O.oHeadDC), arena_.localOff(O.oHeadDC), 1024);
+
+    if (cfg_.renderScale == 1.0f) {
+        writeImg(setFinal_, 0, imgInView_);
+        writeBuf(setFinal_, 1, bufRgb_, (uint64_t)W_ * H_ * 3 * 4);
+        writeBuf(setFinal_, 2, bufT_, Tfloats * 4);
+        writeBufRange(setFinal_, 3, arena_.bufOf(O.oFeatV), arena_.localOff(O.oFeatV), (uint64_t)st_[0].TOK * 16 * 4);
+        writeBufRange(setFinal_, 4, arena_.bufOf(O.oHEAD), arena_.localOff(O.oHEAD), (uint64_t)st_[0].TOK * 16 * 4);
+        writeBufRange(setFinal_, 5, arena_.bufOf(O.oHEAD), arena_.localOff(O.oHEAD), (uint64_t)st_[0].TOK * 16 * 4);
+        writeBuf(setFinal_, 6, bufFin_, (uint64_t)regionW_ * regionH_ * 3 * 4);
+        writeBuf(setFinal_, 7, bufNr_, (uint64_t)regionW_ * regionH_ * 3 * 4);
+        writeBuf(setFinal_, 8, bufMax_, 4096 * 4);
+        writeImg(setFinal_, 9, viewFinal_);
+        writeBuf(setFinal_, 10, bufLastPresented_, (uint64_t)W_ * H_ * 4);
+        writeBuf(setFinal_, 11, bufFbStats_, 8);
+        writeBuf(setFinal_, 12, bufHp_, 65536);
+        writeBuf(setFinal_, 13, bufHist_, (uint64_t)st_[0].TOK * 3 * 4);
+        writeBufRange(setFinal_, 14, arena_.bufOf(O.oHEAD), arena_.localOff(O.oHEAD), (uint64_t)st_[0].TOK * 16 * 4);
+        writeBufRange(setFinal_, 15, arena_.bufOf(O.oHeadDC), arena_.localOff(O.oHeadDC), 1024);
+    } else {
+        writeImg(setFinal_, 0, imgInView_);
+        writeBuf(setFinal_, 1, bufNetRgb_, (uint64_t)netW_ * netH_ * 3 * 4);
+        writeBuf(setFinal_, 2, bufT_, Tfloats * 4);
+        writeBufRange(setFinal_, 3, arena_.bufOf(O.oFeatV), arena_.localOff(O.oFeatV), (uint64_t)st_[0].TOK * 16 * 4);
+        writeBufRange(setFinal_, 4, arena_.bufOf(O.oHEAD), arena_.localOff(O.oHEAD), (uint64_t)st_[0].TOK * 16 * 4);
+        writeBufRange(setFinal_, 5, arena_.bufOf(O.oHEAD), arena_.localOff(O.oHEAD), (uint64_t)st_[0].TOK * 16 * 4);
+        writeBuf(setFinal_, 6, bufFinLow_, (uint64_t)netW_ * netH_ * 3 * 4);
+        writeBuf(setFinal_, 7, bufNr_, (uint64_t)regionW_ * regionH_ * 3 * 4);
+        writeBuf(setFinal_, 8, bufMax_, 4096 * 4);
+        writeImg(setFinal_, 9, viewFinal_);
+        writeBuf(setFinal_, 10, bufLastPresented_, (uint64_t)W_ * H_ * 4);
+        writeBuf(setFinal_, 11, bufFbStats_, 8);
+        writeBuf(setFinal_, 12, bufHp_, 65536);
+        writeBuf(setFinal_, 13, bufHist_, (uint64_t)st_[0].TOK * 3 * 4);
+        writeBufRange(setFinal_, 14, arena_.bufOf(O.oHEAD), arena_.localOff(O.oHEAD), (uint64_t)st_[0].TOK * 16 * 4);
+        writeBufRange(setFinal_, 15, arena_.bufOf(O.oHeadDC), arena_.localOff(O.oHeadDC), 1024);
+
+        writeImg(setDown_, 0, imgInView_);
+        writeBuf(setDown_, 1, bufRgb_, (uint64_t)W_ * H_ * 3 * 4);
+        writeBuf(setDown_, 2, bufT_, Tfloats * 4);
+        writeBuf(setDown_, 4, bufNetRgb_, (uint64_t)netW_ * netH_ * 3 * 4);
+        writeBuf(setDown_, 8, bufMax_, 4096 * 4);
+
+        writeImg(setUp_, 0, imgInView_);
+        writeBuf(setUp_, 1, bufRgb_, (uint64_t)W_ * H_ * 3 * 4);
+        writeBuf(setUp_, 2, bufT_, Tfloats * 4);
+        writeBuf(setUp_, 4, bufFinLow_, (uint64_t)netW_ * netH_ * 3 * 4);
+        writeBuf(setUp_, 5, bufFin_, (uint64_t)regionW_ * regionH_ * 3 * 4);
+        writeBuf(setUp_, 6, bufFin_, (uint64_t)regionW_ * regionH_ * 3 * 4);
+        writeBuf(setUp_, 8, bufMax_, 4096 * 4);
+        writeImg(setUp_, 9, viewFinal_);
+        writeBuf(setUp_, 10, bufLastPresented_, (uint64_t)W_ * H_ * 4);
+    }
     std::printf("[mem] front-end up: canvas %ux%u, region %ux%u at (%u,%u), extent %ux%u\n",
                 W_, H_, regionW_, regionH_, cfg_.regionLeft, cfg_.regionTop, netW_, netH_);
     return true;
@@ -349,69 +408,212 @@ void ChainEngine::recordFrame(long frameIndex) {
     auto push = [&](const Push& p) {
         vkCmdPushConstants(cmd_, pipeLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(Push), &p);
     };
-    {   // decode: BGRA -> float RGB (absolute mode; driver-reversed rgba8 read)
-        vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeDecode_);
-        vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLayout_, 0, 1,
-                                &setFinal_, 0, nullptr);
-        vkCmdDispatch(cmd_, (W_ + 15) / 16, (H_ + 15) / 16, 1);
-        if (prof_.enabled()) prof_.mark(cmd_, "decode", "", 0, 0, 0, (W_ + 15) / 16, (H_ + 15) / 16, 1);
-        barrierAll();
-        vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 0);
-        // features at the full vendor extent (temporal OFF: channels 7-9 take
-        // the vendor first-frame layout every frame)
-        vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeFeatures_);
-        Push p{};
-        p.a[0] = (int32_t)netW_; p.a[1] = (int32_t)netH_;
-        p.a[2] = (int32_t)regionW_; p.a[3] = (int32_t)regionH_;
-        p.b[0] = (int32_t)(frameIndex & 0x7fffffff);
-        p.b[1] = (int32_t)rl; p.b[2] = (int32_t)rt; p.b[3] = (int32_t)W_;
-        p.c[0] = 0.0f; p.c[1] = 1.0f; p.c[2] = 1.0f;
-        p.d[0] = 0.0f; p.d[1] = 0.0f; p.d[2] = 0.0f; p.d[3] = 0.0f;
-        push(p);
-        vkCmdDispatch(cmd_, ((uint64_t)netW_ * netH_ + 255) / 256, 1, 1);
-        if (prof_.enabled()) prof_.mark(cmd_, "features", "", 0, 16, 0,
-                                        (uint32_t)(((uint64_t)netW_ * netH_ + 255) / 256), 1, 1);
-        barrierAll();
-        vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 1);
-    }
-    {   // featpack: features fp32 [TOK0,16] -> chain input f16 (oX16)
-        vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, rec_.featpackPipe().pipe);
-        PackPush fp{arena_.A(arena_.off.oFeatV), arena_.A(arena_.off.oX16), st_[0].TOK * 16};
-        vkCmdPushConstants(cmd_, rec_.featpackPipe().layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
-                           sizeof(fp), &fp);
-        vkCmdDispatch(cmd_, (st_[0].TOK * 16 + 255) / 256, 1, 1);
-        if (prof_.enabled()) prof_.mark(cmd_, "featpack", "", 0, 16, 0,
-                                        (st_[0].TOK * 16 + 255) / 256, 1, 1);
-        barrierAll();
-        vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 2);
-        // full 71-block DLSSNR U-Net chain (~1400 dispatches)
-        rec_.recordChain(cmd_);
-        vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 3);
-        vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 4);
-    }
-    {   // compose (vendor compose_head on the raw head, absolute mode) + encode
-        Push p{};
-        vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeCompose_);
-        p.a[0] = (int32_t)W_; p.a[1] = (int32_t)rt; p.a[2] = (int32_t)rl; p.a[3] = (int32_t)netW_;
-        p.b[0] = (int32_t)regionW_; p.b[1] = (int32_t)regionH_;
-        p.c[0] = 12.0f / 255.0f;      // legacy accumulate clamp (unused in absolute mode)
-        p.c[1] = 0.0f;                // absolute mode (no accumulate)
-        p.c[2] = cfg_.headGain;       // vendor residual scale
-        p.c[3] = cfg_.headBlend;      // vendor mix factor (M13 knob #2)
-        push(p);
-        vkCmdDispatch(cmd_, ((uint64_t)regionW_ * regionH_ + 255) / 256, 1, 1);
-        if (prof_.enabled()) prof_.mark(cmd_, "compose", "", 0, 0, 0,
-                                        (uint32_t)(((uint64_t)regionW_ * regionH_ + 255) / 256), 1, 1);
-        barrierAll();
-        vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeEncode_);
-        p.a[0] = (int32_t)W_; p.a[1] = (int32_t)H_; p.a[2] = (int32_t)rl; p.a[3] = (int32_t)rt;
-        p.b[0] = (int32_t)regionW_; p.b[1] = (int32_t)regionH_; p.b[2] = 0;
-        p.b[3] = 0;                   // absolute (direct color)
-        push(p);
-        vkCmdDispatch(cmd_, (W_ + 15) / 16, (H_ + 15) / 16, 1);
-        if (prof_.enabled()) prof_.mark(cmd_, "encode", "", 0, 0, 0, (W_ + 15) / 16, (H_ + 15) / 16, 1);
-        barrierAll();
-        vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 5);
+    if (cfg_.renderScale == 1.0f) {
+        {   // decode: BGRA -> float RGB (absolute mode; driver-reversed rgba8 read)
+            vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeDecode_);
+            vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLayout_, 0, 1,
+                                    &setFinal_, 0, nullptr);
+            vkCmdDispatch(cmd_, (W_ + 15) / 16, (H_ + 15) / 16, 1);
+            if (prof_.enabled()) prof_.mark(cmd_, "decode", "", 0, 0, 0, (W_ + 15) / 16, (H_ + 15) / 16, 1);
+            barrierAll();
+            vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 0);
+            // features at the full vendor extent (temporal OFF: channels 7-9 take
+            // the vendor first-frame layout every frame)
+            vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeFeatures_);
+            Push p{};
+            p.a[0] = (int32_t)netW_; p.a[1] = (int32_t)netH_;
+            p.a[2] = (int32_t)regionW_; p.a[3] = (int32_t)regionH_;
+            p.b[0] = (int32_t)(frameIndex & 0x7fffffff);
+            p.b[1] = (int32_t)rl; p.b[2] = (int32_t)rt; p.b[3] = (int32_t)W_;
+            p.c[0] = 0.0f; p.c[1] = 1.0f; p.c[2] = 1.0f;
+            p.d[0] = 0.0f; p.d[1] = 0.0f; p.d[2] = 0.0f; p.d[3] = 0.0f;
+            push(p);
+            vkCmdDispatch(cmd_, ((uint64_t)netW_ * netH_ + 255) / 256, 1, 1);
+            if (prof_.enabled()) prof_.mark(cmd_, "features", "", 0, 16, 0,
+                                            (uint32_t)(((uint64_t)netW_ * netH_ + 255) / 256), 1, 1);
+            barrierAll();
+            vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 1);
+        }
+        {   // featpack: features fp32 [TOK0,16] -> chain input f16 (oX16)
+            vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, rec_.featpackPipe().pipe);
+            PackPush fp{arena_.A(arena_.off.oFeatV), arena_.A(arena_.off.oX16), st_[0].TOK * 16};
+            vkCmdPushConstants(cmd_, rec_.featpackPipe().layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                               sizeof(fp), &fp);
+            vkCmdDispatch(cmd_, (st_[0].TOK * 16 + 255) / 256, 1, 1);
+            if (prof_.enabled()) prof_.mark(cmd_, "featpack", "", 0, 16, 0,
+                                            (st_[0].TOK * 16 + 255) / 256, 1, 1);
+            barrierAll();
+            vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 2);
+            // full 71-block DLSSNR U-Net chain (~1400 dispatches)
+            rec_.recordChain(cmd_);
+            vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 3);
+            vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 4);
+        }
+        {   // compose (vendor compose_head on the raw head, absolute mode) + encode
+            Push p{};
+            vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeCompose_);
+            p.a[0] = (int32_t)W_; p.a[1] = (int32_t)rt; p.a[2] = (int32_t)rl; p.a[3] = (int32_t)netW_;
+            p.b[0] = (int32_t)regionW_; p.b[1] = (int32_t)regionH_;
+            p.c[0] = 12.0f / 255.0f;      // legacy accumulate clamp (unused in absolute mode)
+            p.c[1] = 0.0f;                // absolute mode (no accumulate)
+            p.c[2] = cfg_.headGain;       // vendor residual scale
+            p.c[3] = cfg_.headBlend;      // vendor mix factor (M13 knob #2)
+            push(p);
+            vkCmdDispatch(cmd_, ((uint64_t)regionW_ * regionH_ + 255) / 256, 1, 1);
+            if (prof_.enabled()) prof_.mark(cmd_, "compose", "", 0, 0, 0,
+                                            (uint32_t)(((uint64_t)regionW_ * regionH_ + 255) / 256), 1, 1);
+            barrierAll();
+            vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeEncode_);
+            p.a[0] = (int32_t)W_; p.a[1] = (int32_t)H_; p.a[2] = (int32_t)rl; p.a[3] = (int32_t)rt;
+            p.b[0] = (int32_t)regionW_; p.b[1] = (int32_t)regionH_; p.b[2] = 0;
+            p.b[3] = 0;                   // absolute (direct color)
+            push(p);
+            vkCmdDispatch(cmd_, (W_ + 15) / 16, (H_ + 15) / 16, 1);
+            if (prof_.enabled()) prof_.mark(cmd_, "encode", "", 0, 0, 0, (W_ + 15) / 16, (H_ + 15) / 16, 1);
+            barrierAll();
+            vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 5);
+        }
+    } else {
+        {   // decode: BGRA -> float RGB into bufRgb_
+            vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeDecode_);
+            vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLayout_, 0, 1,
+                                    &setDown_, 0, nullptr);
+            vkCmdDispatch(cmd_, (W_ + 15) / 16, (H_ + 15) / 16, 1);
+            if (prof_.enabled()) prof_.mark(cmd_, "decode", "", 0, 0, 0, (W_ + 15) / 16, (H_ + 15) / 16, 1);
+            barrierAll();
+
+            // Downscale: 2 passes of pipeRescale_
+            vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeRescale_);
+            // V pass: axis 0, bufRgb_(1) -> bufT_(2)
+            Push p{};
+            p.a[0] = (int32_t)W_;
+            p.a[1] = (int32_t)(rt * W_ + rl);
+            p.a[2] = (int32_t)regionH_;
+            p.a[3] = (int32_t)regionW_;
+            p.b[0] = (int32_t)netH_;
+            p.b[1] = (int32_t)regionW_;
+            p.b[2] = 0; // V axis
+            p.b[3] = 3; // channels
+            p.d[0] = 1.0f; // src buf 1 (bufRgb_)
+            p.d[1] = 2.0f; // dst buf 2 (bufT_)
+            push(p);
+            vkCmdDispatch(cmd_, (regionW_ + 15) / 16, (netH_ + 15) / 16, 1);
+            if (prof_.enabled()) prof_.mark(cmd_, "rescale_down_v", "", 0, 0, 0, (regionW_ + 15) / 16, (netH_ + 15) / 16, 1);
+            barrierAll();
+
+            // H pass: axis 1, bufT_(2) -> bufNetRgb_(4)
+            p.a[0] = (int32_t)regionW_;
+            p.a[1] = 0;
+            p.a[2] = (int32_t)regionW_;
+            p.a[3] = (int32_t)netH_;
+            p.b[0] = (int32_t)netW_;
+            p.b[1] = (int32_t)netW_;
+            p.b[2] = 1; // H axis
+            p.b[3] = 3; // channels
+            p.d[0] = 2.0f; // src buf 2 (bufT_)
+            p.d[1] = 4.0f; // dst buf 4 (bufNetRgb_)
+            push(p);
+            vkCmdDispatch(cmd_, (netW_ + 15) / 16, (netH_ + 15) / 16, 1);
+            if (prof_.enabled()) prof_.mark(cmd_, "rescale_down_h", "", 0, 0, 0, (netW_ + 15) / 16, (netH_ + 15) / 16, 1);
+            barrierAll();
+            vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 0);
+
+            // features at net dimensions on bufNetRgb_
+            vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeFeatures_);
+            vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLayout_, 0, 1,
+                                    &setFinal_, 0, nullptr);
+            p = Push{};
+            p.a[0] = (int32_t)netW_; p.a[1] = (int32_t)netH_;
+            p.a[2] = (int32_t)netW_; p.a[3] = (int32_t)netH_;
+            p.b[0] = (int32_t)(frameIndex & 0x7fffffff);
+            p.b[1] = 0; p.b[2] = 0; p.b[3] = (int32_t)netW_;
+            p.c[0] = 0.0f; p.c[1] = 1.0f; p.c[2] = 1.0f;
+            p.d[0] = 0.0f; p.d[1] = 0.0f; p.d[2] = 0.0f; p.d[3] = 0.0f;
+            push(p);
+            vkCmdDispatch(cmd_, ((uint64_t)netW_ * netH_ + 255) / 256, 1, 1);
+            if (prof_.enabled()) prof_.mark(cmd_, "features", "", 0, 16, 0,
+                                            (uint32_t)(((uint64_t)netW_ * netH_ + 255) / 256), 1, 1);
+            barrierAll();
+            vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 1);
+        }
+        {   // featpack: features fp32 [TOK0,16] -> chain input f16 (oX16)
+            vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, rec_.featpackPipe().pipe);
+            PackPush fp{arena_.A(arena_.off.oFeatV), arena_.A(arena_.off.oX16), st_[0].TOK * 16};
+            vkCmdPushConstants(cmd_, rec_.featpackPipe().layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                               sizeof(fp), &fp);
+            vkCmdDispatch(cmd_, (st_[0].TOK * 16 + 255) / 256, 1, 1);
+            if (prof_.enabled()) prof_.mark(cmd_, "featpack", "", 0, 16, 0,
+                                            (st_[0].TOK * 16 + 255) / 256, 1, 1);
+            barrierAll();
+            vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 2);
+            // full 71-block DLSSNR U-Net chain
+            rec_.recordChain(cmd_);
+            vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 3);
+            vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 4);
+        }
+        {   // compose on (netW_, netH_) with output into bufFinLow_
+            Push p{};
+            vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeCompose_);
+            p.a[0] = (int32_t)netW_; p.a[1] = 0; p.a[2] = 0; p.a[3] = (int32_t)netW_;
+            p.b[0] = (int32_t)netW_; p.b[1] = (int32_t)netH_;
+            p.c[0] = 12.0f / 255.0f;
+            p.c[1] = 0.0f;
+            p.c[2] = cfg_.headGain;
+            p.c[3] = cfg_.headBlend;
+            push(p);
+            vkCmdDispatch(cmd_, ((uint64_t)netW_ * netH_ + 255) / 256, 1, 1);
+            if (prof_.enabled()) prof_.mark(cmd_, "compose", "", 0, 0, 0,
+                                            (uint32_t)(((uint64_t)netW_ * netH_ + 255) / 256), 1, 1);
+            barrierAll();
+
+            // Upscale: 2 passes of pipeRescale_
+            vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeRescale_);
+            vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLayout_, 0, 1,
+                                    &setUp_, 0, nullptr);
+            // V pass: axis 0, bufFinLow_(4) -> bufT_(2)
+            p = Push{};
+            p.a[0] = (int32_t)netW_;
+            p.a[1] = 0;
+            p.a[2] = (int32_t)netH_;
+            p.a[3] = (int32_t)netW_;
+            p.b[0] = (int32_t)regionH_;
+            p.b[1] = (int32_t)netW_;
+            p.b[2] = 0; // V axis
+            p.b[3] = 3; // channels
+            p.d[0] = 4.0f; // src buf 4 (bufFinLow_)
+            p.d[1] = 2.0f; // dst buf 2 (bufT_)
+            push(p);
+            vkCmdDispatch(cmd_, (netW_ + 15) / 16, (regionH_ + 15) / 16, 1);
+            if (prof_.enabled()) prof_.mark(cmd_, "rescale_up_v", "", 0, 0, 0, (netW_ + 15) / 16, (regionH_ + 15) / 16, 1);
+            barrierAll();
+
+            // H pass: axis 1, bufT_(2) -> bufFin_(6)
+            p.a[0] = (int32_t)netW_;
+            p.a[1] = 0;
+            p.a[2] = (int32_t)netW_;
+            p.a[3] = (int32_t)regionH_;
+            p.b[0] = (int32_t)regionW_;
+            p.b[1] = (int32_t)regionW_;
+            p.b[2] = 1; // H axis
+            p.b[3] = 3; // channels
+            p.d[0] = 2.0f; // src buf 2 (bufT_)
+            p.d[1] = 6.0f; // dst buf 6 (bufFin_)
+            push(p);
+            vkCmdDispatch(cmd_, (regionW_ + 15) / 16, (regionH_ + 15) / 16, 1);
+            if (prof_.enabled()) prof_.mark(cmd_, "rescale_up_h", "", 0, 0, 0, (regionW_ + 15) / 16, (regionH_ + 15) / 16, 1);
+            barrierAll();
+
+            // Encode: bufFin_(6) + bufRgb_(1) -> viewFinal_(9)
+            vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeEncode_);
+            p.a[0] = (int32_t)W_; p.a[1] = (int32_t)H_; p.a[2] = (int32_t)rl; p.a[3] = (int32_t)rt;
+            p.b[0] = (int32_t)regionW_; p.b[1] = (int32_t)regionH_; p.b[2] = 0;
+            p.b[3] = 0;                   // absolute (direct color)
+            push(p);
+            vkCmdDispatch(cmd_, (W_ + 15) / 16, (H_ + 15) / 16, 1);
+            if (prof_.enabled()) prof_.mark(cmd_, "encode", "", 0, 0, 0, (W_ + 15) / 16, (H_ + 15) / 16, 1);
+            barrierAll();
+            vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 5);
+        }
     }
     if (cfg_.debugDumps && frameIndex == 1) recordDebugCopies();
     {   // readback: imgFinal -> bufRbFinal (host-coherent)
@@ -542,17 +744,30 @@ void ChainEngine::shutdown() {
     if (rbFinalPtr_) vkUnmapMemory(c.dev, memRbFinal_);
     uploadPtr_ = nullptr; rbFinalPtr_ = nullptr;
     rec_.destroy(c);
-    for (VkPipeline p : {pipeDecode_, pipeFeatures_, pipeCompose_, pipeEncode_})
+    for (VkPipeline p : {pipeDecode_, pipeFeatures_, pipeCompose_, pipeEncode_, pipeRescale_})
         if (p) vkDestroyPipeline(c.dev, p, nullptr);
+    pipeDecode_ = pipeFeatures_ = pipeCompose_ = pipeEncode_ = pipeRescale_ = VK_NULL_HANDLE;
     if (pipeLayout_) vkDestroyPipelineLayout(c.dev, pipeLayout_, nullptr);
+    pipeLayout_ = VK_NULL_HANDLE;
     if (dpool_) vkDestroyDescriptorPool(c.dev, dpool_, nullptr);
+    dpool_ = VK_NULL_HANDLE;
+    setFinal_ = setDown_ = setUp_ = VK_NULL_HANDLE;
     if (dsLayout_) vkDestroyDescriptorSetLayout(c.dev, dsLayout_, nullptr);
+    dsLayout_ = VK_NULL_HANDLE;
     for (VkBuffer b : {bufRgb_, bufMax_, bufT_, bufFin_, bufNr_, bufRbFinal_, bufDbg_,
-                       bufUpload_, bufLastPresented_, bufFbStats_, bufHp_, bufHist_})
+                       bufUpload_, bufLastPresented_, bufFbStats_, bufHp_, bufHist_,
+                       bufNetRgb_, bufFinLow_})
         if (b) vkDestroyBuffer(c.dev, b, nullptr);
+    bufRgb_ = bufMax_ = bufT_ = bufFin_ = bufNr_ = bufRbFinal_ = bufDbg_ =
+        bufUpload_ = bufLastPresented_ = bufFbStats_ = bufHp_ = bufHist_ =
+        bufNetRgb_ = bufFinLow_ = VK_NULL_HANDLE;
     for (VkDeviceMemory m : {memRgb_, memMax_, memT_, memFin_, memNr_, memRbFinal_, memDbg_,
-                             memImgFinal_, memImgIn_, memUpload_, memLastP_, memFbStats_, memHp_, memHist_})
+                             memImgFinal_, memImgIn_, memUpload_, memLastP_, memFbStats_, memHp_, memHist_,
+                             memNetRgb_, memFinLow_})
         if (m) vkFreeMemory(c.dev, m, nullptr);
+    memRgb_ = memMax_ = memT_ = memFin_ = memNr_ = memRbFinal_ = memDbg_ =
+        memImgFinal_ = memImgIn_ = memUpload_ = memLastP_ = memFbStats_ = memHp_ = memHist_ =
+        memNetRgb_ = memFinLow_ = VK_NULL_HANDLE;
     if (imgInView_) vkDestroyImageView(c.dev, imgInView_, nullptr);
     if (viewFinal_) vkDestroyImageView(c.dev, viewFinal_, nullptr);
     if (imgIn_) vkDestroyImage(c.dev, imgIn_, nullptr);
