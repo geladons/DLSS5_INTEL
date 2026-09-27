@@ -1,0 +1,12 @@
+# DLSS 5 Intel Arc Optimization Progress Log
+Started: 2026-09-27
+Hardware: Intel Arc Pro B50 (Vulkan 1.4, Windows 11 VM)
+
+[2026-09-27 13:12] Stage 1 COMPLETE: Render scaling 0.50 merged (commit 247e169). VRAM reduced 6.6 GB -> 1.9 GB. GPU time 1062 ms -> 283 ms (3.40 FPS, 3.75x speedup).
+[2026-09-27 13:13] Stage 1 SPATIAL: AMD FSR 1.0 EASU + RCAS shaders committed (commit 8310f99).
+[2026-09-27 13:32] Stage 2.1 ATTN/GEMM: Softmax window weight caching (w_cache[32]), vectorized cosine window, 32x32 GEMM tile merged (commit ee9cd68). smaxw -47.4%, cosw -19.5%. GPU time -> 257.1 ms (3.58 FPS). Validation PASS.
+[2026-09-27 13:42] Stage 2.2 TENSORS: 4-wide vectorization of partition, transpose_we, upmerge merged (commit 430206d). upm -49.4%, part -21.6%, trans -18.5%. GPU time -> 250.8 ms (3.70 FPS). Validation PASS.
+[2026-09-27 13:49] Stage 2.2 FUSION: Fused Q/K/V in cosine_win merged (commit 5eebf61). Eliminated 124 kernel launches per frame. cosw dropped to 31.35 ms (-27.2%). GPU time -> 242.9 ms (3.74-4.18 FPS). Validation PASS.
+[2026-09-27 14:10] Stage 2.3 UNROLL: Specialized static K-loop unrolling for K=16, 32, 64 in gemm.comp merged (commit 02a0718). Native 1080p GPU time dropped from 736 ms to 634 ms (~102 ms saved at native). Validation PASS.
+[2026-09-27 14:11] SCALE EXPLORATION: Tested scale 0.33 (640x384 internal grid) -> 125.5 ms GPU (7.08 FPS, 8.5x speedup over baseline). 600x400 scale 0.50 -> 68.4 ms GPU (12.71 FPS).
+[2026-09-27 14:35] Stage 2.4 IN PROGRESS: Fusing Residual Add (dEw) into GEMM epilogue to eliminate elementwise kernel and ~230 memory barriers.
