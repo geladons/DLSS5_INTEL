@@ -27,8 +27,10 @@
 
 layout(local_size_x = 256) in;
 
-layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf { float v[]; };
-layout(buffer_reference, scalar, buffer_reference_align = 16) buffer HalfBuf  { float16_t v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf  { float     v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer HalfBuf   { float16_t v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer Float4Buf { vec4      v4[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 8)  buffer Half4Buf  { f16vec4   v4[]; };
 
 layout(push_constant, scalar) uniform Push {
     uint64_t a;      // low-scale input (fp32 kind0 / f16 kind1)
@@ -48,18 +50,60 @@ void main() {
     if (t >= pc.Ht * pc.Wt) return;
     uint y = t / pc.Wt, x = t % pc.Wt;
     uint lowRow = (y / 2u) * pc.Wl + (x / 2u);
-    for (uint ch = 0u; ch < pc.C; ++ch) {
-        float bv = f16_widen(uint(float16BitsToUint16(HalfBuf(pc.b).v[t * pc.C + ch])));
-        float sv = FloatBuf(pc.d).v[ch];
-        if (pc.kind == 0u) {
-            precise float r = FloatBuf(pc.a).v[lowRow * pc.C + ch] + bv * sv;
-            FloatBuf(pc.c).v[t * pc.C + ch] = r;
-            HalfBuf(pc.h).v[t * pc.C + ch] = float16_t(e4m3(r));
-        } else {
-            float av = f16_widen(uint(float16BitsToUint16(HalfBuf(pc.a).v[lowRow * pc.C + ch])));
-            float cv = FloatBuf(pc.e).v[ch];
-            precise float r = av * sv + bv * cv;
-            FloatBuf(pc.c).v[t * pc.C + ch] = r;
+    uint C4 = pc.C / 4u;
+    uint t4 = t * C4;
+    uint lowRow4 = lowRow * C4;
+
+    if (pc.kind == 0u) {
+        for (uint ch4 = 0u; ch4 < C4; ++ch4) {
+            f16vec4 b_raw = Half4Buf(pc.b).v4[t4 + ch4];
+            vec4 bv = vec4(
+                f16_widen(uint(float16BitsToUint16(b_raw.x))),
+                f16_widen(uint(float16BitsToUint16(b_raw.y))),
+                f16_widen(uint(float16BitsToUint16(b_raw.z))),
+                f16_widen(uint(float16BitsToUint16(b_raw.w)))
+            );
+            vec4 sv = Float4Buf(pc.d).v4[ch4];
+            vec4 av = Float4Buf(pc.a).v4[lowRow4 + ch4];
+
+            precise float r0 = av.x + bv.x * sv.x;
+            precise float r1 = av.y + bv.y * sv.y;
+            precise float r2 = av.z + bv.z * sv.z;
+            precise float r3 = av.w + bv.w * sv.w;
+
+            Float4Buf(pc.c).v4[t4 + ch4] = vec4(r0, r1, r2, r3);
+            Half4Buf(pc.h).v4[t4 + ch4] = f16vec4(
+                float16_t(e4m3(r0)),
+                float16_t(e4m3(r1)),
+                float16_t(e4m3(r2)),
+                float16_t(e4m3(r3))
+            );
+        }
+    } else {
+        for (uint ch4 = 0u; ch4 < C4; ++ch4) {
+            f16vec4 b_raw = Half4Buf(pc.b).v4[t4 + ch4];
+            vec4 bv = vec4(
+                f16_widen(uint(float16BitsToUint16(b_raw.x))),
+                f16_widen(uint(float16BitsToUint16(b_raw.y))),
+                f16_widen(uint(float16BitsToUint16(b_raw.z))),
+                f16_widen(uint(float16BitsToUint16(b_raw.w)))
+            );
+            vec4 sv = Float4Buf(pc.d).v4[ch4];
+            f16vec4 a_raw = Half4Buf(pc.a).v4[lowRow4 + ch4];
+            vec4 av = vec4(
+                f16_widen(uint(float16BitsToUint16(a_raw.x))),
+                f16_widen(uint(float16BitsToUint16(a_raw.y))),
+                f16_widen(uint(float16BitsToUint16(a_raw.z))),
+                f16_widen(uint(float16BitsToUint16(a_raw.w)))
+            );
+            vec4 cv = Float4Buf(pc.e).v4[ch4];
+
+            precise float r0 = av.x * sv.x + bv.x * cv.x;
+            precise float r1 = av.y * sv.y + bv.y * cv.y;
+            precise float r2 = av.z * sv.z + bv.z * cv.z;
+            precise float r3 = av.w * sv.w + bv.w * cv.w;
+
+            Float4Buf(pc.c).v4[t4 + ch4] = vec4(r0, r1, r2, r3);
         }
     }
 }

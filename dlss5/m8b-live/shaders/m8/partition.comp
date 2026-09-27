@@ -21,8 +21,10 @@
 
 layout(local_size_x = 32) in;
 
-layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf { float v[]; };
-layout(buffer_reference, scalar, buffer_reference_align = 16) buffer HalfBuf  { float16_t v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf  { float     v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer HalfBuf   { float16_t v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer Float4Buf { vec4      v4[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 8)  buffer Half4Buf  { f16vec4   v4[]; };
 
 layout(push_constant, scalar) uniform Push {
     uint64_t a;      // in: fp32 image [Himg*Wimg*C] or f16 (flags bit0)
@@ -43,19 +45,37 @@ void main() {
     int y = int(wy * 8u + ly) - int(pc.padTop);
     int x = int(wx * 8u + lx) - int(pc.padLeft);
     bool valid = y >= 0 && y < int(pc.Himg) && x >= 0 && x < int(pc.Wimg);
-    uint dst = wi * pc.C;
+    uint C4 = pc.C / 4u;
+    uint dst4 = wi * C4;
     if ((pc.flags & 1u) != 0u) {
-        float16_t z16 = float16_t(0.0);
-        for (uint ch = 0u; ch < pc.C; ++ch) {
-            float16_t val = z16;
-            if (valid) val = HalfBuf(pc.a).v[(uint(y) * pc.Wimg + uint(x)) * pc.C + ch];
-            HalfBuf(pc.c).v[dst + ch] = val;
+        if (valid) {
+            uint src4 = (uint(y) * pc.Wimg + uint(x)) * C4;
+            for (uint ch4 = 0u; ch4 < C4; ++ch4) {
+                Half4Buf(pc.c).v4[dst4 + ch4] = Half4Buf(pc.a).v4[src4 + ch4];
+            }
+        } else {
+            f16vec4 z16 = f16vec4(float16_t(0.0));
+            for (uint ch4 = 0u; ch4 < C4; ++ch4) {
+                Half4Buf(pc.c).v4[dst4 + ch4] = z16;
+            }
         }
     } else {
-        for (uint ch = 0u; ch < pc.C; ++ch) {
-            float val = 0.0;
-            if (valid) val = half_round(FloatBuf(pc.a).v[(uint(y) * pc.Wimg + uint(x)) * pc.C + ch]);
-            HalfBuf(pc.c).v[dst + ch] = float16_t(val);
+        if (valid) {
+            uint src4 = (uint(y) * pc.Wimg + uint(x)) * C4;
+            for (uint ch4 = 0u; ch4 < C4; ++ch4) {
+                vec4 val4 = Float4Buf(pc.a).v4[src4 + ch4];
+                Half4Buf(pc.c).v4[dst4 + ch4] = f16vec4(
+                    float16_t(half_round(val4.x)),
+                    float16_t(half_round(val4.y)),
+                    float16_t(half_round(val4.z)),
+                    float16_t(half_round(val4.w))
+                );
+            }
+        } else {
+            f16vec4 z16 = f16vec4(float16_t(0.0));
+            for (uint ch4 = 0u; ch4 < C4; ++ch4) {
+                Half4Buf(pc.c).v4[dst4 + ch4] = z16;
+            }
         }
     }
 }

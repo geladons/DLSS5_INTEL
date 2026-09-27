@@ -19,8 +19,10 @@
 
 layout(local_size_x = 32) in;
 
-layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf { float v[]; };
-layout(buffer_reference, scalar, buffer_reference_align = 16) buffer HalfBuf  { float16_t v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf  { float     v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer HalfBuf   { float16_t v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer Float4Buf { vec4      v4[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 8)  buffer Half4Buf  { f16vec4   v4[]; };
 
 layout(push_constant, scalar) uniform Push {
     FloatBuf a;      // merged fp32 [W, H, 64, 32]
@@ -34,9 +36,16 @@ void main() {
     uint w = wi / 64u, t = wi % 64u;
     uint C = pc.hcount * 32u;
     for (uint hd = 0u; hd < pc.hcount; ++hd) {
-        uint rd = ((w * pc.hcount + hd) * 64u + t) * 32u;
-        uint wr = wi * C + hd * 32u;
-        for (uint d = 0u; d < 32u; ++d)
-            pc.c.v[wr + d] = float16_t(e4m3(pc.a.v[rd + d]));
+        uint rd4 = (((w * pc.hcount + hd) * 64u + t) * 32u) >> 2u;
+        uint wr4 = (wi * C + hd * 32u) >> 2u;
+        for (uint k = 0u; k < 8u; ++k) {
+            vec4 in4 = Float4Buf(uint64_t(pc.a)).v4[rd4 + k];
+            Half4Buf(uint64_t(pc.c)).v4[wr4 + k] = f16vec4(
+                float16_t(e4m3(in4.x)),
+                float16_t(e4m3(in4.y)),
+                float16_t(e4m3(in4.z)),
+                float16_t(e4m3(in4.w))
+            );
+        }
     }
 }
