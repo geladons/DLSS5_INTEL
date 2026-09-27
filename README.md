@@ -174,13 +174,43 @@ All live testing was done on a virtual machine:
 Demo recordings and screenshots: GTA IV (DX9) — menu, loading screens,
 in-game interiors.
 
-## Credits
+## Credits & Attribution
 
-- **Author & project owner:** this repository's owner
-- **Code, research, testing and all the routine work:** the AI agents
-  **Kimi K2.8** and **Kimi K3** (Moonshot AI), working as a pair-programming
-  team under human direction — most of the codebase, the validation rig and
-  the documentation were written and verified by them
+### Upstream & Derived Code
+The Vulkan present-capture layer is ported from
+[dlss-nr-on-intel](https://github.com/UzbekUnknown/dlss-nr-on-intel) by
+**UzbekUnknown** (Apache-2.0 — attribution in the derived file headers):
+
+- `dlss5/m11-layer/nr_layer_win.c` — Windows port of `src/layer/nr_layer.c`
+- `publish.glsl` (under `dlss5/`) — byte-verbatim copy of `src/gpu/publish.glsl`
+- `golden.py` (in `m7-graph-proto` / `m8-full-chain`) — reference semantics
+  based on `src/ref/nr_model.py`
+
+All other code in this repository is original.
+
+### Design References & Inspiration
+Architectural concepts and pipeline designs referenced during research
+(fixed set, unchanged since the
+[initial commit](https://github.com/geladons/DLSS5_INTEL/commit/26494ded65)):
+
+| Project | Author | Inspired Concept |
+|---|---|---|
+| [NeuralScreen](https://github.com/perseval-BLR/NeuralScreen) | perseval-BLR | Desktop capture → overlay architecture behind screen mode |
+| [DLSS5-Swapper](https://github.com/rakanki911/DLSS5-Swapper) | rakanki911 | Profile backups, per-game profiles, and diagnostics |
+| [DLSS5-Autopilot](https://github.com/Kizzuwatnaa/DLSS5-Autopilot) | Kizzuwatnaa | Multi-store manifest discovery (Steam / Epic / GOG) |
+| [DLSS-5-MANAGER](https://github.com/NODIX-TECH/DLSS-5-MANAGER) | NODIX-TECH | UI/UX layout and config management workflow |
+
+No code was copied from the projects above.
+
+### Third-Party Dependencies
+- **[DXVK](https://github.com/doitsujin/dxvk)** — D3D9–11 to Vulkan
+  translation (fetched at build time, © DXVK authors, zlib license).
+
+### Development
+- **Architecture & Maintainer:** Project owner
+- **AI Pair-Programming:** Code generation, test harnesses, and documentation
+  assisted by **Kimi K2.8** and **Kimi K3** (Moonshot AI), under human direction.
+
 
 ## Contributing
 
