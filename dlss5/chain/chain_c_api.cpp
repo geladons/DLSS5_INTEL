@@ -135,6 +135,28 @@ public:
         return 0;
     }
 
+    int interpolateFrame(uint32_t w, uint32_t h, const void* f0, const void* f1,
+                         void* out, float factor) {
+        if (!ensure(w, h)) {
+            return -1;
+        }
+        d5c::FrameStats stats{};
+        bool ok = engine_.interpolateFrame(w, h, f0, f1, out, factor, &stats);
+        return ok ? 0 : -1;
+    }
+
+    void setFrameGen(int enable) {
+        frameGenEnabled_ = enable;
+    }
+
+    int getFrameGen() const {
+        return frameGenEnabled_;
+    }
+
+    float getFrameGenGpuMs() const {
+        return static_cast<float>(engine_.lastFrameGenGpuMs());
+    }
+
     void setScale(float s) {
         if (s <= 0.0f) return;
         scale_ = s;
@@ -227,6 +249,7 @@ private:
     uint32_t curW_ = 0;
     uint32_t curH_ = 0;
     bool initialized_ = false;
+    int frameGenEnabled_ = 0;
     std::vector<uint8_t> alphaBuf_;
 };
 
@@ -291,6 +314,49 @@ DLSS5_API void dlss5_set_blend(void* handle, float blend) {
         auto* ctx = static_cast<EngineContext*>(handle);
         ctx->setBlend(blend);
     } catch (...) {
+    }
+}
+
+DLSS5_API int dlss5_interpolate_frame(void* handle, uint32_t w, uint32_t h,
+                                      const void* frame0_bgra, const void* frame1_bgra,
+                                      void* out_interp_bgra, float factor) {
+    if (!handle || !frame1_bgra || !out_interp_bgra || !w || !h) {
+        return -1;
+    }
+    try {
+        auto* ctx = static_cast<EngineContext*>(handle);
+        return ctx->interpolateFrame(w, h, frame0_bgra, frame1_bgra, out_interp_bgra, factor);
+    } catch (...) {
+        return -1;
+    }
+}
+
+DLSS5_API void dlss5_set_framegen(void* handle, int enable) {
+    if (!handle) return;
+    try {
+        auto* ctx = static_cast<EngineContext*>(handle);
+        ctx->setFrameGen(enable);
+    } catch (...) {
+    }
+}
+
+DLSS5_API int dlss5_get_framegen(void* handle) {
+    if (!handle) return 0;
+    try {
+        auto* ctx = static_cast<EngineContext*>(handle);
+        return ctx->getFrameGen();
+    } catch (...) {
+        return 0;
+    }
+}
+
+DLSS5_API float dlss5_get_framegen_gpu_ms(void* handle) {
+    if (!handle) return 0.0f;
+    try {
+        auto* ctx = static_cast<EngineContext*>(handle);
+        return ctx->getFrameGenGpuMs();
+    } catch (...) {
+        return 0.0f;
     }
 }
 

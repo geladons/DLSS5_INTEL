@@ -48,6 +48,9 @@ public:
     // uses frameIndex=1.
     bool processFrame(const uint8_t* bgraIn, uint8_t* bgraOut, long frameIndex,
                       FrameStats* stats = nullptr);
+    bool interpolateFrame(uint32_t w, uint32_t h, const void* f0, const void* f1,
+                          void* out, float factor = 0.5f, FrameStats* stats = nullptr);
+    double lastFrameGenGpuMs() const { return lastFrameGenGpuMs_; }
     void shutdown();
 
     // M13 control channel: live parameter update. cfg_.headGain is consumed
@@ -96,23 +99,26 @@ private:
 
     VkPipeline pipeDecode_ = VK_NULL_HANDLE, pipeFeatures_ = VK_NULL_HANDLE,
                pipeCompose_ = VK_NULL_HANDLE, pipeEncode_ = VK_NULL_HANDLE;
-    VkPipeline pipeRescale_ = VK_NULL_HANDLE;
+    VkPipeline pipeRescale_ = VK_NULL_HANDLE, pipeFrameGen_ = VK_NULL_HANDLE;
     VkBuffer bufNetRgb_ = VK_NULL_HANDLE, bufFinLow_ = VK_NULL_HANDLE;
     VkDeviceMemory memNetRgb_ = VK_NULL_HANDLE, memFinLow_ = VK_NULL_HANDLE;
-    VkDescriptorSet setDown_ = VK_NULL_HANDLE, setUp_ = VK_NULL_HANDLE;
+    VkDescriptorSet setDown_ = VK_NULL_HANDLE, setUp_ = VK_NULL_HANDLE, setFrameGen_ = VK_NULL_HANDLE;
 
     VkDeviceMemory memImgIn_ = VK_NULL_HANDLE, memUpload_ = VK_NULL_HANDLE,
                    memRgb_ = VK_NULL_HANDLE, memMax_ = VK_NULL_HANDLE,
                    memT_ = VK_NULL_HANDLE, memFin_ = VK_NULL_HANDLE, memNr_ = VK_NULL_HANDLE,
                    memHist_ = VK_NULL_HANDLE, memRbFinal_ = VK_NULL_HANDLE,
                    memDbg_ = VK_NULL_HANDLE, memImgFinal_ = VK_NULL_HANDLE,
-                   memLastP_ = VK_NULL_HANDLE, memFbStats_ = VK_NULL_HANDLE, memHp_ = VK_NULL_HANDLE;
+                   memLastP_ = VK_NULL_HANDLE, memFbStats_ = VK_NULL_HANDLE, memHp_ = VK_NULL_HANDLE,
+                   memPrevFrame_ = VK_NULL_HANDLE, memCurrFrame_ = VK_NULL_HANDLE, memInterpOut_ = VK_NULL_HANDLE;
     VkImage imgIn_ = VK_NULL_HANDLE, imgFinal_ = VK_NULL_HANDLE;
     VkImageView imgInView_ = VK_NULL_HANDLE, viewFinal_ = VK_NULL_HANDLE;
     VkBuffer bufUpload_ = VK_NULL_HANDLE, bufRgb_ = VK_NULL_HANDLE, bufMax_ = VK_NULL_HANDLE,
              bufT_ = VK_NULL_HANDLE, bufFin_ = VK_NULL_HANDLE, bufNr_ = VK_NULL_HANDLE,
              bufHist_ = VK_NULL_HANDLE, bufRbFinal_ = VK_NULL_HANDLE, bufDbg_ = VK_NULL_HANDLE,
-             bufLastPresented_ = VK_NULL_HANDLE, bufFbStats_ = VK_NULL_HANDLE, bufHp_ = VK_NULL_HANDLE;
+             bufLastPresented_ = VK_NULL_HANDLE, bufFbStats_ = VK_NULL_HANDLE, bufHp_ = VK_NULL_HANDLE,
+             bufPrevFrame_ = VK_NULL_HANDLE, bufCurrFrame_ = VK_NULL_HANDLE, bufInterpOut_ = VK_NULL_HANDLE;
+    double lastFrameGenGpuMs_ = 0.0;
     void* uploadPtr_ = nullptr;
     void* rbFinalPtr_ = nullptr;             // persistently mapped readback
 

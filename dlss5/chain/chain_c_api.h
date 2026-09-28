@@ -55,6 +55,15 @@ DLSS5_API void dlss5_set_scale(void* handle, float scale);
 DLSS5_API void dlss5_set_gain(void* handle, float gain);
 DLSS5_API void dlss5_set_blend(void* handle, float blend);
 
+// Frame Generation (FSR 3.1 / Optical Flow Interpolation):
+// Interpolate an intermediate frame between frame0 and frame1 using GPU optical flow.
+DLSS5_API int dlss5_interpolate_frame(void* handle, uint32_t w, uint32_t h,
+                                      const void* frame0_bgra, const void* frame1_bgra,
+                                      void* out_interp_bgra, float factor);
+DLSS5_API void dlss5_set_framegen(void* handle, int enable);
+DLSS5_API int dlss5_get_framegen(void* handle);
+DLSS5_API float dlss5_get_framegen_gpu_ms(void* handle);
+
 // Function pointer types for dynamic loading via LoadLibraryA / GetProcAddress:
 typedef void* (*PFN_dlss5_create)(const char* weights_path, const char* shader_dir,
                                   float scale, float gain, float blend);
@@ -65,6 +74,12 @@ typedef int (*PFN_dlss5_process_frame)(void* handle, uint32_t w, uint32_t h,
 typedef void (*PFN_dlss5_set_scale)(void* handle, float scale);
 typedef void (*PFN_dlss5_set_gain)(void* handle, float gain);
 typedef void (*PFN_dlss5_set_blend)(void* handle, float blend);
+typedef int (*PFN_dlss5_interpolate_frame)(void* handle, uint32_t w, uint32_t h,
+                                           const void* frame0_bgra, const void* frame1_bgra,
+                                           void* out_interp_bgra, float factor);
+typedef void (*PFN_dlss5_set_framegen)(void* handle, int enable);
+typedef int (*PFN_dlss5_get_framegen)(void* handle);
+typedef float (*PFN_dlss5_get_framegen_gpu_ms)(void* handle);
 
 #ifdef __cplusplus
 }

@@ -5,3 +5,7 @@ EXPORTS
     dlss5_set_scale
     dlss5_set_gain
     dlss5_set_blend
+    dlss5_interpolate_frame
+    dlss5_set_framegen
+    dlss5_get_framegen
+    dlss5_get_framegen_gpu_ms

@@ -169,10 +169,11 @@ bool ChainEngine::createFrontEnd() {
     imgIn_ = CreateImage2D(c, W_, H_, VK_FORMAT_B8G8R8A8_UNORM,
                            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, &memImgIn_);
     imgInView_ = CreateView(c, imgIn_, VK_FORMAT_B8G8R8A8_UNORM);
-    bufUpload_ = CreateBuf(c, (uint64_t)W_ * H_ * 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+    const uint64_t uploadBytes = (uint64_t)W_ * H_ * 4 * 2;
+    bufUpload_ = CreateBuf(c, uploadBytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                            &memUpload_);
-    D5C_VK_RET(vkMapMemory(c.dev, memUpload_, 0, (uint64_t)W_ * H_ * 4, 0, &uploadPtr_));
+    D5C_VK_RET(vkMapMemory(c.dev, memUpload_, 0, uploadBytes, 0, &uploadPtr_));
 
     // shared 16-binding descriptor layout (identical to m8b: the same
     // transport shaders are used; legacy bindings stay bound to dummies)
@@ -211,11 +212,12 @@ bool ChainEngine::createFrontEnd() {
     pipeFeatures_ = makePipe("features");
     pipeCompose_ = makePipe("compose");
     pipeEncode_ = makePipe("encode");
+    pipeFrameGen_ = makePipe("framegen");
     if (cfg_.renderScale < 1.0f) {
         pipeRescale_ = makePipe("rescale");
-        std::printf("[VK] 5 transport pipelines up (decode/rescale/features/compose/encode; absolute mode)\n");
+        std::printf("[VK] 6 pipelines up (decode/rescale/features/compose/encode/framegen; absolute mode)\n");
     } else {
-        std::printf("[VK] 4 transport pipelines up (decode/features/compose/encode; absolute mode)\n");
+        std::printf("[VK] 5 pipelines up (decode/features/compose/encode/framegen; absolute mode)\n");
     }
 
     // buffers (m8b parity: same bindings, dummy sizes where the M9b absolute
@@ -256,6 +258,16 @@ bool ChainEngine::createFrontEnd() {
     bufHp_ = CreateBuf(c, 65536, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memHp_);
 
+    bufPrevFrame_ = CreateBuf(c, (uint64_t)W_ * H_ * 4,
+                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memPrevFrame_);
+    bufCurrFrame_ = CreateBuf(c, (uint64_t)W_ * H_ * 4,
+                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memCurrFrame_);
+    bufInterpOut_ = CreateBuf(c, (uint64_t)W_ * H_ * 4,
+                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memInterpOut_);
+
     if (cfg_.renderScale < 1.0f) {
         bufNetRgb_ = CreateBuf(c, (uint64_t)netW_ * netH_ * 3 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memNetRgb_);
@@ -278,6 +290,7 @@ bool ChainEngine::createFrontEnd() {
         VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
         ai.descriptorPool = dpool_; ai.descriptorSetCount = 1; ai.pSetLayouts = &dsLayout_;
         D5C_VK_RET(vkAllocateDescriptorSets(c.dev, &ai, &setFinal_));
+        D5C_VK_RET(vkAllocateDescriptorSets(c.dev, &ai, &setFrameGen_));
         if (cfg_.renderScale < 1.0f) {
             D5C_VK_RET(vkAllocateDescriptorSets(c.dev, &ai, &setDown_));
             D5C_VK_RET(vkAllocateDescriptorSets(c.dev, &ai, &setUp_));
@@ -356,6 +369,11 @@ bool ChainEngine::createFrontEnd() {
         writeImg(setUp_, 9, viewFinal_);
         writeBuf(setUp_, 10, bufLastPresented_, (uint64_t)W_ * H_ * 4);
     }
+
+    writeBuf(setFrameGen_, 1, bufPrevFrame_, (uint64_t)W_ * H_ * 4);
+    writeBuf(setFrameGen_, 2, bufCurrFrame_, (uint64_t)W_ * H_ * 4);
+    writeBuf(setFrameGen_, 3, bufInterpOut_, (uint64_t)W_ * H_ * 4);
+
     std::printf("[mem] front-end up: canvas %ux%u, region %ux%u at (%u,%u), extent %ux%u\n",
                 W_, H_, regionW_, regionH_, cfg_.regionLeft, cfg_.regionTop, netW_, netH_);
     return true;
@@ -630,6 +648,9 @@ void ChainEngine::recordFrame(long frameIndex) {
         rgn.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         rgn.imageExtent = {W_, H_, 1};
         vkCmdCopyImageToBuffer(cmd_, imgFinal_, VK_IMAGE_LAYOUT_GENERAL, bufRbFinal_, 1, &rgn);
+        if (bufPrevFrame_) {
+            vkCmdCopyImageToBuffer(cmd_, imgFinal_, VK_IMAGE_LAYOUT_GENERAL, bufPrevFrame_, 1, &rgn);
+        }
         VkMemoryBarrier hb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         hb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; hb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
         vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -735,6 +756,147 @@ bool ChainEngine::processFrame(const uint8_t* bgraIn, uint8_t* bgraOut, long fra
     return true;
 }
 
+// -------------------------------------------------------- interpolate -----
+bool ChainEngine::interpolateFrame(uint32_t w, uint32_t h, const void* f0, const void* f1,
+                                   void* out, float factor, FrameStats* stats) {
+    if (!w || !h || !f1 || !out) return false;
+    if (w != W_ || h != H_) return false;
+    if (!pipeFrameGen_) return false;
+
+    const VkCtx& c = vkc_.vk;
+    auto t0 = std::chrono::steady_clock::now();
+
+    const size_t frameBytes = (size_t)W_ * H_ * 4;
+    uint8_t* up0 = static_cast<uint8_t*>(uploadPtr_);
+    uint8_t* up1 = up0 + frameBytes;
+
+    if (f0) {
+        std::memcpy(up0, f0, frameBytes);
+    }
+    std::memcpy(up1, f1, frameBytes);
+
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    D5C_VK_RET(vkBeginCommandBuffer(cmd_, &bi));
+
+    vkCmdResetQueryPool(cmd_, tsPool_, 0, 2);
+
+    // Staging upload -> device local buffers
+    if (f0) {
+        VkBufferCopy cp0{0, 0, (VkDeviceSize)frameBytes};
+        vkCmdCopyBuffer(cmd_, bufUpload_, bufPrevFrame_, 1, &cp0);
+    }
+    VkBufferCopy cp1{(VkDeviceSize)frameBytes, 0, (VkDeviceSize)frameBytes};
+    vkCmdCopyBuffer(cmd_, bufUpload_, bufCurrFrame_, 1, &cp1);
+
+    // Memory barriers: transfer write -> compute shader read
+    VkBufferMemoryBarrier upBarriers[2]{};
+    uint32_t barrierCount = 0;
+    if (f0) {
+        upBarriers[barrierCount].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        upBarriers[barrierCount].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        upBarriers[barrierCount].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        upBarriers[barrierCount].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        upBarriers[barrierCount].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        upBarriers[barrierCount].buffer = bufPrevFrame_;
+        upBarriers[barrierCount].offset = 0;
+        upBarriers[barrierCount].size = VK_WHOLE_SIZE;
+        barrierCount++;
+    }
+    upBarriers[barrierCount].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    upBarriers[barrierCount].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    upBarriers[barrierCount].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    upBarriers[barrierCount].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    upBarriers[barrierCount].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    upBarriers[barrierCount].buffer = bufCurrFrame_;
+    upBarriers[barrierCount].offset = 0;
+    upBarriers[barrierCount].size = VK_WHOLE_SIZE;
+    barrierCount++;
+
+    vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         0, 0, nullptr, barrierCount, upBarriers, 0, nullptr);
+
+    // Dispatch FrameGen compute pass
+    vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 0);
+
+    Push p{};
+    p.a[0] = static_cast<int32_t>(W_);
+    p.a[1] = static_cast<int32_t>(H_);
+    p.a[2] = 8; // search radius
+    p.a[3] = 2; // search step
+    p.c[0] = factor;
+    p.c[1] = 0.20f; // occlusion threshold
+
+    vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeFrameGen_);
+    vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLayout_, 0, 1,
+                            &setFrameGen_, 0, nullptr);
+    vkCmdPushConstants(cmd_, pipeLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(Push), &p);
+
+    vkCmdDispatch(cmd_, (W_ + 15) / 16, (H_ + 15) / 16, 1);
+
+    vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 1);
+
+    // Barrier: compute shader write -> transfer read
+    VkBufferMemoryBarrier outBarrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+    outBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    outBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    outBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    outBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    outBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    outBarrier.buffer = bufInterpOut_;
+    outBarrier.offset = 0;
+    outBarrier.size = VK_WHOLE_SIZE;
+    vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, nullptr, 1, &outBarrier, 0, nullptr);
+
+    // Copy interpolated buffer -> host readback buffer
+    VkBufferCopy cpOut{0, 0, (VkDeviceSize)frameBytes};
+    vkCmdCopyBuffer(cmd_, bufInterpOut_, bufRbFinal_, 1, &cpOut);
+
+    // Keep bufPrevFrame_ updated with bufCurrFrame_
+    VkBufferCopy cpPrev{0, 0, (VkDeviceSize)frameBytes};
+    vkCmdCopyBuffer(cmd_, bufCurrFrame_, bufPrevFrame_, 1, &cpPrev);
+
+    // Barrier: transfer write -> host read
+    VkMemoryBarrier hb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    hb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    hb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    hb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &hb, 0, nullptr, 0, nullptr);
+
+    D5C_VK_RET(vkEndCommandBuffer(cmd_));
+
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd_;
+    D5C_VK_RET(vkQueueSubmit(c.queue, 1, &si, fence_));
+    D5C_VK_RET(vkWaitForFences(c.dev, 1, &fence_, VK_TRUE, UINT64_MAX));
+    vkResetFences(c.dev, 1, &fence_);
+
+    std::memcpy(out, rbFinalPtr_, frameBytes);
+
+    uint64_t ts[2]{};
+    VkResult qr = vkGetQueryPoolResults(c.dev, tsPool_, 0, 2, sizeof(ts), ts,
+                                        sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+    if (qr == VK_SUCCESS) {
+        lastFrameGenGpuMs_ = static_cast<double>(ts[1] - ts[0]) * static_cast<double>(tsPeriodNs_) / 1e6;
+        if (stats) {
+            stats->gpuTotalMs = lastFrameGenGpuMs_;
+        }
+    }
+
+    if (stats) {
+        stats->wallMs = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - t0).count();
+    }
+
+    return true;
+}
+
 // ----------------------------------------------------------- teardown -----
 void ChainEngine::shutdown() {
     if (!vkc_.vk.dev) return;
@@ -744,30 +906,30 @@ void ChainEngine::shutdown() {
     if (rbFinalPtr_) vkUnmapMemory(c.dev, memRbFinal_);
     uploadPtr_ = nullptr; rbFinalPtr_ = nullptr;
     rec_.destroy(c);
-    for (VkPipeline p : {pipeDecode_, pipeFeatures_, pipeCompose_, pipeEncode_, pipeRescale_})
+    for (VkPipeline p : {pipeDecode_, pipeFeatures_, pipeCompose_, pipeEncode_, pipeRescale_, pipeFrameGen_})
         if (p) vkDestroyPipeline(c.dev, p, nullptr);
-    pipeDecode_ = pipeFeatures_ = pipeCompose_ = pipeEncode_ = pipeRescale_ = VK_NULL_HANDLE;
+    pipeDecode_ = pipeFeatures_ = pipeCompose_ = pipeEncode_ = pipeRescale_ = pipeFrameGen_ = VK_NULL_HANDLE;
     if (pipeLayout_) vkDestroyPipelineLayout(c.dev, pipeLayout_, nullptr);
     pipeLayout_ = VK_NULL_HANDLE;
     if (dpool_) vkDestroyDescriptorPool(c.dev, dpool_, nullptr);
     dpool_ = VK_NULL_HANDLE;
-    setFinal_ = setDown_ = setUp_ = VK_NULL_HANDLE;
+    setFinal_ = setDown_ = setUp_ = setFrameGen_ = VK_NULL_HANDLE;
     if (dsLayout_) vkDestroyDescriptorSetLayout(c.dev, dsLayout_, nullptr);
     dsLayout_ = VK_NULL_HANDLE;
     for (VkBuffer b : {bufRgb_, bufMax_, bufT_, bufFin_, bufNr_, bufRbFinal_, bufDbg_,
                        bufUpload_, bufLastPresented_, bufFbStats_, bufHp_, bufHist_,
-                       bufNetRgb_, bufFinLow_})
+                       bufNetRgb_, bufFinLow_, bufPrevFrame_, bufCurrFrame_, bufInterpOut_})
         if (b) vkDestroyBuffer(c.dev, b, nullptr);
     bufRgb_ = bufMax_ = bufT_ = bufFin_ = bufNr_ = bufRbFinal_ = bufDbg_ =
         bufUpload_ = bufLastPresented_ = bufFbStats_ = bufHp_ = bufHist_ =
-        bufNetRgb_ = bufFinLow_ = VK_NULL_HANDLE;
+        bufNetRgb_ = bufFinLow_ = bufPrevFrame_ = bufCurrFrame_ = bufInterpOut_ = VK_NULL_HANDLE;
     for (VkDeviceMemory m : {memRgb_, memMax_, memT_, memFin_, memNr_, memRbFinal_, memDbg_,
                              memImgFinal_, memImgIn_, memUpload_, memLastP_, memFbStats_, memHp_, memHist_,
-                             memNetRgb_, memFinLow_})
+                             memNetRgb_, memFinLow_, memPrevFrame_, memCurrFrame_, memInterpOut_})
         if (m) vkFreeMemory(c.dev, m, nullptr);
     memRgb_ = memMax_ = memT_ = memFin_ = memNr_ = memRbFinal_ = memDbg_ =
         memImgFinal_ = memImgIn_ = memUpload_ = memLastP_ = memFbStats_ = memHp_ = memHist_ =
-        memNetRgb_ = memFinLow_ = VK_NULL_HANDLE;
+        memNetRgb_ = memFinLow_ = memPrevFrame_ = memCurrFrame_ = memInterpOut_ = VK_NULL_HANDLE;
     if (imgInView_) vkDestroyImageView(c.dev, imgInView_, nullptr);
     if (viewFinal_) vkDestroyImageView(c.dev, viewFinal_, nullptr);
     if (imgIn_) vkDestroyImage(c.dev, imgIn_, nullptr);
