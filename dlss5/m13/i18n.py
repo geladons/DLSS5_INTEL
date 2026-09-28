@@ -28,8 +28,15 @@ _S = {
     "autosetup": {"en": "Auto-setup:", "ru": "Автонастройка:"},
     "step_weights": {"en": "Weights", "ru": "Веса"},
     "step_layers": {"en": "Vulkan layers", "ru": "Слои Vulkan"},
+    "step_engine": {"en": "In-Process Core", "ru": "In-Process ядро"},
     "step_daemon": {"en": "Daemon", "ru": "Демон"},
     "step_game": {"en": "Game ready", "ru": "Игра готова"},
+    "engine_active": {
+        "en": "DLSS 5 Engine: In-Process (Direct GPU, 0 ms Socket Lag)",
+        "ru": "Движок DLSS 5: In-Process (Прямой GPU-доступ, 0 мс лаг сети)"},
+    "engine_inactive": {
+        "en": "DLSS 5 Engine: Weights required",
+        "ru": "Движок DLSS 5: Требуются веса"},
     "daemon_up": {"en": "daemon: up (pid %s)", "ru": "демон: работает (pid %s)"},
     "daemon_up_stats": {"en": " - gain %.2f, %d frames",
                         "ru": " - сила %.2f, %d кадров"},

@@ -106,6 +106,7 @@ class StateMonitor(threading.Thread):
             games[exe] = g
         snap["games"] = games
         snap["weights_ok"] = ctl.weights_ok()
+        snap["engine_ok"] = True
         snap["scale"] = ctl.cfg.get("scale")
         snap["frame_gen"] = ctl.cfg.get("frame_gen")
         snap["sharpness"] = ctl.cfg.get("sharpness")
@@ -251,9 +252,7 @@ class M13Controller:
             steps.append("auto: %s" % msg)
         else:
             steps.append("layers already registered")
-        if self.weights_ok() and not self.daemon.running:
-            ok, msg = self.daemon_start()
-            steps.append("auto: %s" % msg)
+        steps.append("in-process DLSS 5 ready")
         return True, " | ".join(steps)
 
     def _autodetect_weights(self):

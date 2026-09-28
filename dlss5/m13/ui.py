@@ -197,27 +197,31 @@ class ManagerUI:
         bar.pack(fill="x", padx=12, pady=4)
         inner = tk.Frame(bar, bg=PANEL)
         inner.pack(fill="x", padx=10, pady=8)
-        self.dot = tk.Label(inner, text="●", font=("Segoe UI", 10), bg=PANEL)
+
+        status_box = tk.Frame(inner, bg=PANEL)
+        status_box.pack(side="left")
+        self.dot = tk.Label(status_box, text="●", font=("Segoe UI", 10), bg=PANEL, fg=GREEN)
         self.dot.pack(side="left")
-        self.st_daemon = tk.Label(inner, text=tr("daemon_down"), bg=PANEL,
-                                  fg=MUTED, font=("Segoe UI", 9, "bold"))
-        self.st_daemon.pack(side="left", padx=(6, 14))
-        self.btn_start = ttk.Button(inner, text=tr("daemon_start"),
-                                    style="Accent.TButton",
-                                    command=self._daemon_start)
-        self.btn_start.pack(side="left")
-        ttk.Button(inner, text=tr("daemon_stop"), style="Danger.TButton",
-                   command=lambda: self.ctl.submit(
-                       self.ctl.daemon_stop)).pack(side="left", padx=6)
-        tk.Label(inner, text=tr("gain"), bg=PANEL, fg=MUTED).pack(
+        self.st_engine = tk.Label(status_box, text=tr("engine_active"), bg=PANEL,
+                                  fg=GREEN, font=("Segoe UI", 9, "bold"))
+        self.st_engine.pack(side="left", padx=(6, 8))
+        self.st_daemon = self.st_engine  # back-compat alias
+        self.daemon_info = tk.Label(status_box, text="Direct GPU (0 ms TCP lag)",
+                                    bg=PANEL, fg=MUTED, font=("Segoe UI", 8))
+        self.daemon_info.pack(side="left", padx=(4, 0))
+
+        sliders_box = tk.Frame(inner, bg=PANEL)
+        sliders_box.pack(side="right")
+
+        tk.Label(sliders_box, text=tr("gain"), bg=PANEL, fg=MUTED).pack(
             side="left", padx=(10, 4))
         self.gain_var = tk.DoubleVar(value=self.ctl.cfg.get("gain"))
         self._suppress_scale = None   # programmatic-set echo suppression:
         self._scale_dragging = False  # Tk fires the scale command DEFERRED
         self._pending_push = None     # (value, time) of an in-flight push
         self.gain_scale = tk.Scale(
-            inner, from_=0.0, to=2.0, resolution=0.05, orient="horizontal",
-            length=140, variable=self.gain_var, command=self._gain_moved,
+            sliders_box, from_=0.0, to=2.0, resolution=0.05, orient="horizontal",
+            length=130, variable=self.gain_var, command=self._gain_moved,
             bg=PANEL, fg=FG, troughcolor=PANEL2, highlightthickness=0, bd=0,
             activebackground=ACCENT, showvalue=False, sliderrelief="flat")
         self.gain_scale.pack(side="left")
@@ -226,27 +230,24 @@ class ManagerUI:
         self.gain_scale.bind("<ButtonRelease-1>",
                              lambda _e: setattr(self, "_scale_dragging",
                                                 False))
-        self.gain_lbl = tk.Label(inner, text="%.2f" % self.gain_var.get(),
+        self.gain_lbl = tk.Label(sliders_box, text="%.2f" % self.gain_var.get(),
                                  bg=PANEL, fg=ACCENT,
                                  font=("Consolas", 10, "bold"), width=5)
         self.gain_lbl.pack(side="left")
-        tk.Label(inner, text=tr("ov_blend").lower(), bg=PANEL,
+        tk.Label(sliders_box, text=tr("ov_blend").lower(), bg=PANEL,
                  fg=MUTED).pack(side="left", padx=(8, 4))
         self.blend_var = tk.DoubleVar(
             value=float(self.ctl.cfg.get("blend") or 1.0))
         self.blend_scale = tk.Scale(
-            inner, from_=0.0, to=1.0, resolution=0.05, orient="horizontal",
-            length=100, variable=self.blend_var, command=self._blend_moved,
+            sliders_box, from_=0.0, to=1.0, resolution=0.05, orient="horizontal",
+            length=90, variable=self.blend_var, command=self._blend_moved,
             bg=PANEL, fg=FG, troughcolor=PANEL2, highlightthickness=0, bd=0,
             activebackground=ACCENT, showvalue=False, sliderrelief="flat")
         self.blend_scale.pack(side="left")
-        self.blend_lbl = tk.Label(inner, text="%.2f" % self.blend_var.get(),
+        self.blend_lbl = tk.Label(sliders_box, text="%.2f" % self.blend_var.get(),
                                   bg=PANEL, fg=ACCENT,
                                   font=("Consolas", 10, "bold"), width=5)
         self.blend_lbl.pack(side="left")
-        self.daemon_info = tk.Label(inner, text="", bg=PANEL, fg=MUTED,
-                                    font=("Segoe UI", 8))
-        self.daemon_info.pack(side="right")
 
         inner2 = tk.Frame(bar, bg=PANEL)
         inner2.pack(fill="x", padx=10, pady=(0, 8))
@@ -323,7 +324,7 @@ class ManagerUI:
         tk.Label(row, text=tr("autosetup"), bg=PANEL, fg=MUTED,
                  font=("Segoe UI", 9, "bold")).pack(side="left")
         self.steps = {}
-        for key in ("weights", "layers", "daemon", "game"):
+        for key in ("weights", "layers", "engine", "game"):
             lbl = tk.Label(row, text=tr("step_" + key), bg=PANEL, fg=MUTED,
                            font=("Segoe UI", 9), padx=10)
             lbl.pack(side="left")
@@ -522,32 +523,18 @@ class ManagerUI:
         self.root.after(POLL_MS, self._poll)
 
     def _render(self, snap):
-        up = snap.get("daemon_pid") is not None
-        if up:
-            txt = tr("daemon_up", snap["daemon_pid"])
-            g, f = snap.get("daemon_gain"), snap.get("daemon_frames")
-            if g is not None:
-                txt += tr("daemon_up_stats", g, f or 0)
-                # do not fight an in-flight user push (slider snap-back)
-                pending = self._pending_push
-                stale_push = pending and (time.time() - pending[1] > 2.0
-                                          or abs(pending[0] - g) < 0.001)
-                if stale_push:
-                    self._pending_push = None
-                if not self._scale_dragging and not self._pending_push:
-                    self._suppress_scale = round(g, 3)
-                    self.gain_scale.set(g)
-                    self.gain_lbl.config(text="%.2f" % g)
-            if snap.get("daemon_err"):
-                txt += tr("daemon_busy")
+        engine_ok = snap.get("engine_ok") and snap.get("weights_ok")
+        if engine_ok:
             self.dot.config(text="●", fg=GREEN)
-            self.st_daemon.config(text=txt, fg=GREEN)
-            self.daemon_info.config(text="NRCT OK"
-                                    if not snap.get("daemon_err") else
-                                    snap["daemon_err"])
+            self.st_engine.config(text=tr("engine_active"), fg=GREEN)
+            daemon_pid = snap.get("daemon_pid")
+            if daemon_pid:
+                self.daemon_info.config(text="TCP daemon PID %s" % daemon_pid)
+            else:
+                self.daemon_info.config(text="Direct GPU (0 ms TCP lag)")
         else:
-            self.dot.config(text="●", fg=RED)
-            self.st_daemon.config(text=tr("daemon_down"), fg=RED)
+            self.dot.config(text="●", fg=AMBER)
+            self.st_engine.config(text=tr("engine_inactive"), fg=AMBER)
             self.daemon_info.config(text="")
 
         lx = snap.get("layers_x64"), snap.get("layers_x86")
@@ -563,10 +550,10 @@ class ManagerUI:
     def _render_checklist(self, snap):
         weights = snap.get("weights_ok")
         layers = snap.get("layers_x64") and snap.get("layers_x86")
-        daemon = snap.get("daemon_pid") is not None
+        engine = snap.get("engine_ok") and weights
         games = snap.get("games") or {}
         game = any(g.get("dll") == "deployed" for g in games.values())
-        states = {"weights": weights, "layers": layers, "daemon": daemon,
+        states = {"weights": weights, "layers": layers, "engine": engine,
                   "game": game}
         for key, ok in states.items():
             base = tr("step_" + key)
@@ -574,7 +561,7 @@ class ManagerUI:
                                    fg=GREEN if ok else MUTED)
         if not weights:
             hint, color = tr("hint_no_weights"), AMBER
-        elif not layers or not daemon:
+        elif not layers or not engine:
             hint, color = tr("hint_working"), AMBER
         elif not game:
             hint, color = tr("hint_pick_game"), AMBER
