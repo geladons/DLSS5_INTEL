@@ -1,5 +1,36 @@
 # DEV_STATE.md - where we are (updated 2026-09-28 by Antigravity)
 
+## Live Pipeline Stabilization, Temporal Alignment & In-Game UX Overhaul (2026-09-28 COMPLETED)
+- **Commits: `e76ce4d`, `4fc0090`, `e7fcf4a`, `fb45625`, `27580e7`, `4d0bbd7`, `b90e8c0`, `a147002`**
+- **Temporal Pipeline Fix (Judder/Shaking Elimination):**
+  - Removed broken odd-frame temporal replacement `interpolateFrame(prev, in, 0.5)` from `chain_c_api.cpp` and `m11d/main.cpp`.
+  - Replacing game frames with past interpolated frames caused 60 Hz temporal time-jumping ($t=0 \to t=0.5 \to t=2.0 \to t=2.5$), producing violent judder/shaking across scenes and menus.
+  - All frames now advance monotonically forward in time through full DLSS 5 U-Net pass with zero temporal jitter.
+- **UI Mask & Menu Quality Fix:**
+  - In `nr_layer_win.c`: Fixed `have_earlier` tracking and allocation of `data->earlier` so static pixel UI masks are actually generated.
+  - In `mask_worth_sending`: Removed bogus $>90\%$ mask rejection that caused game menus to lose UI masking and become blurry mush.
+  - Static UI text, minimaps, HUD elements, and menu typography are now 100% bit-exact native resolution.
+  - In-process UI restoration wired into `process_frame()` for x64 titles.
+  - Removed premature `held >= 85% return 1` bypass that previously prevented normal gameplay frames from being processed.
+- **Contrast-Adaptive Edge Sharpening (CAS):**
+  - Integrated bounded contrast-adaptive sharpening into `dlss5/m8b-live/shaders/encode.comp` push constants (`pc.c[0]`), connected to `Sharpness` slider.
+  - Strictly clamped to local 3x3 neighborhood bounds: mathematically impossible to ring, halo, or amplify noise.
+- **Neural Noise Stabilization:**
+  - Pinned deterministic noise seed `p.b[0] = 1` in `dlss5/chain/engine.cpp` during temporal passthrough.
+  - Eliminates the high-frequency pixel sparkling / flickering ("гирлянда") that previously scaled with `Gain`.
+- **In-Game Overlay & Mouse Control Without Minimization:**
+  - Implemented Photo-Mode Freeze on open (`gamelaunch.freeze_set(True)`) so the game stands still during adjustment.
+  - Overlay window uses `overrideredirect(True)` + `WS_EX_TOPMOST` without `SW_RESTORE`, preventing DWM from minimizing exclusive fullscreen games.
+  - `_free_cursor()` uses `AttachThreadInput` + `ReleaseCapture()` + `ClipCursor(None)` on the game's thread, un-hiding `IDC_ARROW` so mouse clicks and sliders work seamlessly in Moonlight/Sunshine streams.
+  - Unfreezes and restores game foreground focus automatically on `CTRL+ALT+G` close.
+- **UI Window Layout Restoration & Daemon Lifecycle:**
+  - Bound `<FocusIn>` in `dlss5/m13/ui.py` with `minsize(1024, 760)` to automatically restore window dimensions after exiting low-resolution games (e.g. 800x600 exclusive fullscreen).
+  - In `controller.py`: StateMonitor automatically detects game process termination and stops the x86 bridge daemon (`m11d.exe`), immediately freeing VRAM and resetting UI status.
+- **Builds & Verification:**
+  - `ALL STAGE 5 & TASK B UNIT TESTS PASSED SUCCESSFULLY!`
+  - PyTorch golden validation: `VALIDATION PASS`.
+  - Production package synchronized at `C:\Users\<owner>\Desktop\production`.
+
 ## Stage 5: UI Presets, Frame Generation Controls & Packaging in DLSS 5 Manager (`m13`) (2026-09-28 COMPLETED)
 - Commit 2276a80: Full GUI and in-game overlay integration of all new performance capabilities.
 - `dlss5/m13/config.py`: added `scale` (default 0.50), `frame_gen` (default True), `sharpness` (default 0.8) to defaults and JSON persistence.

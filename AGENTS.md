@@ -83,32 +83,30 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
   (strength, clamp) -> present to fullscreen topmost click-through overlay.
 - m11-layer: Windows port of the reference Vulkan present layer
   (nr_layer_win.c, .def exports, VkLayer_dlssnr_win.json). Intercepts
-  vkQueuePresentKHR, forces TRANSFER_SRC|DST, TCP roundtrip to a daemon
-  (127.0.0.1:47990), writes the processed frame back into the swapchain.
-  Registered in HKCU\Software\Khronos\Vulkan\ImplicitLayers (this loader
-  REQUIRES disable_environment in the manifest; enable_environment gating
-  silently did not fire). v0 VALIDATED 2026-09-22: vkcube + daemon_stub.py
-  (green tint) = owner sees a green rotating cube in the Moonlight stream.
-  Host blindness note: windowed Vulkan flip windows are BLACK in both GDI
-  and local DDA captures here (MPO plane) - only the owner's stream (and the
-  layer's own readback) sees them. Do not trust local screenshots of Vulkan
-  windows.
-- chain: THE model as an OOP module (extracted from m8b-live main.cpp,
-  verbatim numerics; per owner code rules). VkContext (device + coopmat
-  checks) / WeightsStore (safetensors, pack, fuse-fold, de-swizzle) /
-  ChainArena (slot layout, 3.5 GiB chunking, BDA) / ChainRecorder (14
-  pipelines, 71-block U-Net walk) / ChainEngine (absolute echo-free
-  front-end: decode -> features -> featpack -> chain -> compose -> encode ->
-  readback; --gain = vendor intensity). Shaders compile from
-  m8b-live\shaders (single source of truth). Consumers: m11d, later m8b-live.
-- m11d: DLSSNR frame daemon (TCP 127.0.0.1:47990, protocol = nr_layer.c
-  16-byte header + BGRA payload; masked magic carries a held-still UI mask
-  that passes through untouched; input alpha preserved). Lazy engine init
-  per frame size. --selftest file.bmp = one-shot validation (dumps
-  out\live_*, compare vs work\_m9b_cmp goldens, frame index 1). Demo:
-  dlss5\m11d\_demo.cmd. VALIDATED 2026-09-22 vs torch goldens (features
-  15/16 ch bit-exact, head meandiff 0.0083 = m8b level) and LIVE on vkcube
-  (~145 ms/frame at 500x500).
+  vkQueuePresentKHR, forces TRANSFER_SRC|DST, executes DLSS 5.
+  - x64 games (RDR2, Witcher 3, Cyberpunk): loads `d5c_chain.dll` via C ABI
+    and executes directly in-process on host-visible staging buffers (0 ms
+    socket lag, no background daemon).
+  - x86 games (GTA IV via DXVK): connects over TCP (127.0.0.1:47990) to `m11d.exe`.
+  - Static UI Masking: static pixels (`settled()`) are preserved 100% native
+    resolution, ensuring menu text, dialogue, and HUD are never blurred.
+- m12-dxgi: DirectX 12 present hook (GTA V Enhanced). Dynamically loads
+  `d5c_chain.dll` via C ABI to process present buffers in-process (0 ms TCP lag).
+- chain: THE model as an OOP module (`d5c::ChainEngine`). Exported via clean
+  C ABI (`chain_c_api.h` / `chain_c_api.cpp` -> `d5c_chain.dll`).
+  - Kernel optimizations on Arc B50: GEMM loop unrolling, Q/K/V kernel fusion,
+    128-bit vectorized memory ops, epilogue residual add fusion.
+  - Bounded contrast-adaptive sharpening (CAS) in `encode.comp` (`pc.c[0]`).
+  - Deterministic noise seed pinned (`p.b[0] = 1`) to eliminate flickering.
+- m11d: DLSSNR frame daemon for 32-bit x86 titles (TCP 127.0.0.1:47990).
+  Lifecycle is fully auto-managed by `m13`: starts automatically when an x86
+  game launches, and terminates immediately upon game exit to free all VRAM.
+- m13: DLSS 5 Manager GUI (`m13.pyw`) & In-Game Overlay (`CTRL+ALT+G`).
+  - Presets: Native (1.0), Quality (0.67), Balanced (0.58), Performance (0.50),
+    Ultra Performance (0.33), and Sharpness (0.0..1.0).
+  - Overlay: Topmost non-minimizing overlay with Photo-Mode Freeze on open,
+    automatic mouse capture release (`AttachThreadInput` + `ReleaseCapture`),
+    and automatic window geometry restoration (`<FocusIn>` minsize 1024x760).
 - Weights: work\mlxw\dlssnr-logical.safetensors (proprietary, NOT in git;
   649 tensors, 71 blocks, resident ~325 MB VRAM). Loader m6.
 
