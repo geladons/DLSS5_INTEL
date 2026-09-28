@@ -3,6 +3,7 @@
 
 #include "m12_client.h"
 #include "m12_log.h"
+#include "chain_c_api.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -42,7 +43,263 @@ void dump_bgra_bmp(const char *path, const std::vector<BYTE> &bgra, UINT w, UINT
     CloseHandle(f);
 }
 
+// ----------------------------------------------------------------------------
+// In-process DLSS 5 engine integration (Stage 3.2: TCP elimination)
+// ----------------------------------------------------------------------------
+static HMODULE g_chain_dll = NULL;
+static void *g_engine = NULL;
+static PFN_dlss5_create pfn_dlss5_create = NULL;
+static PFN_dlss5_destroy pfn_dlss5_destroy = NULL;
+static PFN_dlss5_process_frame pfn_dlss5_process_frame = NULL;
+static PFN_dlss5_set_scale pfn_dlss5_set_scale = NULL;
+static PFN_dlss5_set_gain pfn_dlss5_set_gain = NULL;
+static PFN_dlss5_set_blend pfn_dlss5_set_blend = NULL;
+static int g_inprocess_attempted = 0;
+static int g_inprocess_active = 0;
+static LONG g_proc_count = 0;
+static CRITICAL_SECTION g_inproc_cs;
+static LONG g_inproc_cs_init = 0;
+
+static void ensure_inprocess_cs()
+{
+    if (InterlockedCompareExchange(&g_inproc_cs_init, 1, 0) == 0) {
+        InitializeCriticalSection(&g_inproc_cs);
+    }
+}
+
+static void ensure_inprocess()
+{
+    ensure_inprocess_cs();
+    EnterCriticalSection(&g_inproc_cs);
+    if (g_inprocess_attempted) {
+        LeaveCriticalSection(&g_inproc_cs);
+        return;
+    }
+    g_inprocess_attempted = 1;
+
+    const char *inproc_env = getenv("M12_INPROCESS");
+    if (!inproc_env) inproc_env = getenv("NR_LAYER_INPROCESS");
+    if (inproc_env && (inproc_env[0] == '0' || !strcmp(inproc_env, "false") || !strcmp(inproc_env, "OFF"))) {
+        m12_logf("[m12_dxgi] in-process mode disabled via M12_INPROCESS=0");
+        LeaveCriticalSection(&g_inproc_cs);
+        return;
+    }
+
+    HMODULE hDll = NULL;
+    const char *custom_dll = getenv("M12_CHAIN_DLL");
+    if (!custom_dll) custom_dll = getenv("NR_LAYER_CHAIN_DLL");
+    if (custom_dll && custom_dll[0]) {
+        hDll = LoadLibraryA(custom_dll);
+        if (hDll) {
+            m12_logf("[m12_dxgi] loaded d5c_chain.dll from env: %s", custom_dll);
+        }
+    }
+
+    char mod_path[MAX_PATH] = {0};
+    HMODULE hThis = NULL;
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCSTR)ensure_inprocess, &hThis) && hThis) {
+        if (GetModuleFileNameA(hThis, mod_path, sizeof(mod_path))) {
+            char *slash = strrchr(mod_path, '\\');
+            if (!slash) slash = strrchr(mod_path, '/');
+            if (slash) {
+                *(slash + 1) = '\0';
+            }
+        }
+    }
+
+    if (!hDll && mod_path[0]) {
+        char candidate[MAX_PATH];
+        _snprintf_s(candidate, sizeof(candidate), _TRUNCATE, "%sd5c_chain.dll", mod_path);
+        if (GetFileAttributesA(candidate) != INVALID_FILE_ATTRIBUTES) {
+            hDll = LoadLibraryA(candidate);
+            if (hDll) {
+                m12_logf("[m12_dxgi] loaded d5c_chain.dll from module dir: %s", candidate);
+            }
+        }
+    }
+
+    if (!hDll) {
+        const char *candidates[] = {
+            "dlss5\\chain\\build\\Release\\d5c_chain.dll",
+            "dlss5\\m11d\\build\\Release\\d5c_chain.dll",
+            "dlss5\\m11-layer\\build\\Release\\d5c_chain.dll",
+            "dlss5\\m12-dxgi\\build\\Release\\d5c_chain.dll",
+            "..\\..\\chain\\build\\Release\\d5c_chain.dll",
+            "..\\..\\m11d\\build\\Release\\d5c_chain.dll",
+            "..\\..\\m11-layer\\build\\Release\\d5c_chain.dll",
+            "..\\..\\build\\Release\\d5c_chain.dll",
+            "..\\..\\..\\dlss5\\chain\\build\\Release\\d5c_chain.dll",
+            "..\\..\\..\\dlss5\\m11d\\build\\Release\\d5c_chain.dll",
+            "..\\..\\..\\dlss5\\m11-layer\\build\\Release\\d5c_chain.dll",
+            "..\\..\\..\\dlss5\\m12-dxgi\\build\\Release\\d5c_chain.dll"
+        };
+        for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+            if (GetFileAttributesA(candidates[i]) != INVALID_FILE_ATTRIBUTES) {
+                hDll = LoadLibraryA(candidates[i]);
+                if (hDll) {
+                    m12_logf("[m12_dxgi] loaded d5c_chain.dll from candidate: %s", candidates[i]);
+                    break;
+                }
+            }
+            if (mod_path[0]) {
+                char rel_cand[MAX_PATH];
+                _snprintf_s(rel_cand, sizeof(rel_cand), _TRUNCATE, "%s%s", mod_path, candidates[i]);
+                if (GetFileAttributesA(rel_cand) != INVALID_FILE_ATTRIBUTES) {
+                    hDll = LoadLibraryA(rel_cand);
+                    if (hDll) {
+                        m12_logf("[m12_dxgi] loaded d5c_chain.dll from module-relative: %s", rel_cand);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if (!hDll) {
+        hDll = LoadLibraryA("d5c_chain.dll");
+        if (hDll) {
+            m12_logf("[m12_dxgi] loaded d5c_chain.dll from standard search");
+        }
+    }
+
+    if (!hDll) {
+        m12_logf("[m12_dxgi] d5c_chain.dll not found; falling back to TCP socket");
+        LeaveCriticalSection(&g_inproc_cs);
+        return;
+    }
+
+    pfn_dlss5_create = (PFN_dlss5_create)GetProcAddress(hDll, "dlss5_create");
+    pfn_dlss5_destroy = (PFN_dlss5_destroy)GetProcAddress(hDll, "dlss5_destroy");
+    pfn_dlss5_process_frame = (PFN_dlss5_process_frame)GetProcAddress(hDll, "dlss5_process_frame");
+    pfn_dlss5_set_scale = (PFN_dlss5_set_scale)GetProcAddress(hDll, "dlss5_set_scale");
+    pfn_dlss5_set_gain = (PFN_dlss5_set_gain)GetProcAddress(hDll, "dlss5_set_gain");
+    pfn_dlss5_set_blend = (PFN_dlss5_set_blend)GetProcAddress(hDll, "dlss5_set_blend");
+
+    if (!pfn_dlss5_create || !pfn_dlss5_destroy || !pfn_dlss5_process_frame) {
+        m12_logf("[m12_dxgi] d5c_chain.dll missing exports; falling back to TCP");
+        FreeLibrary(hDll);
+        LeaveCriticalSection(&g_inproc_cs);
+        return;
+    }
+
+    g_chain_dll = hDll;
+
+    const char *weights = getenv("M12_WEIGHTS");
+    if (!weights) weights = getenv("DLSS5_WEIGHTS_PATH");
+    if (!weights) weights = getenv("NR_LAYER_WEIGHTS");
+
+    const char *shaders = getenv("M12_SHADERS");
+    if (!shaders) shaders = getenv("DLSS5_SHADER_DIR");
+    if (!shaders) shaders = getenv("NR_LAYER_SHADERS");
+
+    const char *scale_s = getenv("M12_SCALE");
+    if (!scale_s) scale_s = getenv("NR_LAYER_SCALE");
+
+    const char *gain_s = getenv("M12_GAIN");
+    if (!gain_s) gain_s = getenv("NR_LAYER_GAIN");
+
+    const char *blend_s = getenv("M12_BLEND");
+    if (!blend_s) blend_s = getenv("NR_LAYER_BLEND");
+
+    float scale = scale_s ? (float)atof(scale_s) : 1.0f;
+    float gain = gain_s ? (float)atof(gain_s) : 1.0f;
+    float blend = blend_s ? (float)atof(blend_s) : 1.0f;
+
+    char weights_buf[MAX_PATH] = {0};
+    if (!weights) {
+        const char *cand_w[] = {
+            "work\\mlxw\\dlssnr-logical.safetensors",
+            "..\\..\\work\\mlxw\\dlssnr-logical.safetensors",
+            "..\\..\\..\\work\\mlxw\\dlssnr-logical.safetensors",
+            "..\\..\\..\\..\\work\\mlxw\\dlssnr-logical.safetensors"
+        };
+        for (size_t i = 0; i < sizeof(cand_w) / sizeof(cand_w[0]); i++) {
+            if (GetFileAttributesA(cand_w[i]) != INVALID_FILE_ATTRIBUTES) {
+                weights = cand_w[i];
+                break;
+            }
+            if (mod_path[0]) {
+                char probe[MAX_PATH];
+                _snprintf_s(probe, sizeof(probe), _TRUNCATE, "%s%s", mod_path, cand_w[i]);
+                if (GetFileAttributesA(probe) != INVALID_FILE_ATTRIBUTES) {
+                    _snprintf_s(weights_buf, sizeof(weights_buf), _TRUNCATE, "%s%s", mod_path, cand_w[i]);
+                    weights = weights_buf;
+                    break;
+                }
+            }
+        }
+    }
+
+    char shaders_buf[MAX_PATH] = {0};
+    if (!shaders) {
+        const char *cand_sdirs[] = {
+            ".\\",
+            "dlss5\\m11d\\build\\Release\\",
+            "dlss5\\chain\\build\\Release\\",
+            "dlss5\\m8b-live\\shaders\\",
+            "..\\..\\m11d\\build\\Release\\",
+            "..\\..\\chain\\build\\Release\\",
+            "..\\..\\..\\dlss5\\m11d\\build\\Release\\"
+        };
+        for (size_t i = 0; i < sizeof(cand_sdirs) / sizeof(cand_sdirs[0]); i++) {
+            char probe[MAX_PATH];
+            _snprintf_s(probe, sizeof(probe), _TRUNCATE, "%sgemm.spv", cand_sdirs[i]);
+            if (GetFileAttributesA(probe) != INVALID_FILE_ATTRIBUTES) {
+                shaders = cand_sdirs[i];
+                break;
+            }
+            if (mod_path[0]) {
+                _snprintf_s(probe, sizeof(probe), _TRUNCATE, "%s%sgemm.spv", mod_path, cand_sdirs[i]);
+                if (GetFileAttributesA(probe) != INVALID_FILE_ATTRIBUTES) {
+                    _snprintf_s(shaders_buf, sizeof(shaders_buf), _TRUNCATE, "%s%s", mod_path, cand_sdirs[i]);
+                    shaders = shaders_buf;
+                    break;
+                }
+            }
+        }
+    }
+
+    g_engine = pfn_dlss5_create(weights, shaders, scale, gain, blend);
+    if (!g_engine) {
+        m12_logf("[m12_dxgi] dlss5_create failed; falling back to TCP");
+        FreeLibrary(g_chain_dll);
+        g_chain_dll = NULL;
+        LeaveCriticalSection(&g_inproc_cs);
+        return;
+    }
+
+    g_inprocess_active = 1;
+    m12_logf("[m12_dxgi] in-process DLSS 5 active (TCP bypassed, scale=%.2f gain=%.2f blend=%.2f)",
+             scale, gain, blend);
+    LeaveCriticalSection(&g_inproc_cs);
+}
+
 }  // namespace
+
+void m12_dx12_shutdown_inprocess()
+{
+    ensure_inprocess_cs();
+    EnterCriticalSection(&g_inproc_cs);
+    if (g_engine && pfn_dlss5_destroy) {
+        pfn_dlss5_destroy(g_engine);
+        g_engine = NULL;
+    }
+    if (g_chain_dll) {
+        FreeLibrary(g_chain_dll);
+        g_chain_dll = NULL;
+    }
+    pfn_dlss5_create = NULL;
+    pfn_dlss5_destroy = NULL;
+    pfn_dlss5_process_frame = NULL;
+    pfn_dlss5_set_scale = NULL;
+    pfn_dlss5_set_gain = NULL;
+    pfn_dlss5_set_blend = NULL;
+    g_inprocess_active = 0;
+    g_inprocess_attempted = 0;
+    LeaveCriticalSection(&g_inproc_cs);
+}
 
 M12Dx12Processor::M12Dx12Processor(IDXGISwapChain *sc, ID3D12CommandQueue *queue,
                                    UINT w, UINT h, DXGI_FORMAT fmt, int live_every)
@@ -77,6 +334,8 @@ M12Dx12Processor::M12Dx12Processor(IDXGISwapChain *sc, ID3D12CommandQueue *queue
     hr = device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence_));
     if (SUCCEEDED(hr))
         fence_event_ = CreateEvent(NULL, FALSE, FALSE, NULL);
+    InterlockedIncrement(&g_proc_count);
+    ensure_inprocess();
     m12_logf("processor attached: %ux%u fmt %d rb-swap %d live every %d", w, h,
              (int)fmt, needs_rbswap_ ? 1 : 0, live_every_);
 }
@@ -84,6 +343,10 @@ M12Dx12Processor::M12Dx12Processor(IDXGISwapChain *sc, ID3D12CommandQueue *queue
 M12Dx12Processor::~M12Dx12Processor()
 {
     if (fence_event_) CloseHandle(fence_event_);
+    if (InterlockedDecrement(&g_proc_count) <= 0) {
+        g_proc_count = 0;
+        m12_dx12_shutdown_inprocess();
+    }
 }
 
 D3D12_RESOURCE_BARRIER M12Dx12Processor::transition(ID3D12Resource *res,
@@ -245,11 +508,36 @@ bool M12Dx12Processor::grabRaw(ID3D12Resource *bb)
     return true;
 }
 
-// raw_ -> daemon -> processed_. Re-sending the same raw_ with a new daemon
-// gain is exactly the "live knob on a frozen frame" reprocess.
+// raw_ -> in-process DLSS 5 (or daemon fallback) -> processed_.
+// Re-sending the same raw_ with a new daemon gain is exactly the "live knob on a frozen frame" reprocess.
 bool M12Dx12Processor::sendRaw()
 {
     if (raw_.empty()) return false;
+    ensure_inprocess();
+
+    if (g_inprocess_active && pfn_dlss5_process_frame && g_engine) {
+        const char *gain_s = getenv("M12_GAIN");
+        if (!gain_s) gain_s = getenv("NR_LAYER_GAIN");
+        if (gain_s && pfn_dlss5_set_gain) {
+            pfn_dlss5_set_gain(g_engine, (float)atof(gain_s));
+        }
+
+        std::vector<BYTE> reply(raw_.size());
+        int r = pfn_dlss5_process_frame(g_engine, width_, height_,
+                                        raw_.data(), reply.data(),
+                                        (long)present_count_);
+        if (r == 0) {
+            processed_.swap(reply);
+            have_processed_ = true;
+            m12_logf("[m12_dxgi] in-process processed %ux%u (frame %llu)",
+                     width_, height_, present_count_);
+            dump_processed();
+            return true;
+        } else {
+            m12_logf("[m12_dxgi] in-process dlss5_process_frame failed (%d); falling back to TCP", r);
+        }
+    }
+
     const uint32_t header[4] = {0x304E524Eu, width_, height_, 44u};
     std::vector<BYTE> reply(raw_.size());
     if (m12_exchange(header, raw_.data(), raw_.size(), reply.data(),

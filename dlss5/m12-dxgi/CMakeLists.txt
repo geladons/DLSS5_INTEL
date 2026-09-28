@@ -17,6 +17,8 @@ add_library(m12_dxgi SHARED
     m12_dxgi.def
 )
 
+target_include_directories(m12_dxgi PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../chain)
+
 # dxguid.lib carries the COM IIDs as static data; no DXGI/D3D12 import libs
 # are linked on purpose (importing dxgi.dll from a dll named dxgi would
 # recurse at load time - every COM entry point is reached via vtables).

@@ -17,6 +17,10 @@ if not errorlevel 1 (
     "%CMAKE%" --build "%BUILD%" --config Release
     if errorlevel 1 ( set FINAL=1 & goto :done )
     if not exist "%BUILD%\Release\m12_dxgi.dll" ( set FINAL=1 & goto :done )
+    for %%D in ("%REPO%\dlss5\chain\build\Release" "%REPO%\dlss5\m11d\build\Release" "%REPO%\dlss5\m11-layer\build\Release") do (
+        if exist "%%~D\d5c_chain.dll" copy /y "%%~D\d5c_chain.dll" "%BUILD%\Release\" >nul
+        if exist "%%~D\*.spv" copy /y "%%~D\*.spv" "%BUILD%\Release\" >nul
+    )
     set FINAL=0
     goto :done
 )
@@ -31,6 +35,10 @@ if errorlevel 1 ( set FINAL=1 & goto :done )
 if not exist "%BUILDNM%\m12_dxgi.dll" ( set FINAL=1 & goto :done )
 if not exist "%BUILD%\Release" mkdir "%BUILD%\Release"
 copy /y "%BUILDNM%\m12_dxgi.dll" "%BUILD%\Release\" >nul
+for %%D in ("%REPO%\dlss5\chain\build\Release" "%REPO%\dlss5\m11d\build\Release" "%REPO%\dlss5\m11-layer\build\Release") do (
+    if exist "%%~D\d5c_chain.dll" copy /y "%%~D\d5c_chain.dll" "%BUILD%\Release\" >nul
+    if exist "%%~D\*.spv" copy /y "%%~D\*.spv" "%BUILD%\Release\" >nul
+)
 set FINAL=0
 
 :done

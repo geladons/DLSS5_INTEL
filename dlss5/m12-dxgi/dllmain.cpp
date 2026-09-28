@@ -1,5 +1,6 @@
 // dllmain.cpp - entry point of the m12 dxgi proxy.
 #include "m12_hook.h"
+#include "m12_dx12.h"
 #include "m12_log.h"
 
 #include <windows.h>
@@ -29,6 +30,9 @@ BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID)
         boot_marker("logf returned\n");
         m12_hook_init();
         boot_marker("hook init done\n");
+    } else if (reason == DLL_PROCESS_DETACH) {
+        m12_dx12_shutdown_inprocess();
+        m12_logf("dllmain process detach");
     }
     return TRUE;
 }

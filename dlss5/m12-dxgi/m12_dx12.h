@@ -74,3 +74,6 @@ private:
     FILETIME reproc_stamp_ = {}; // last seen m13_reproc.flag mtime
     bool reproc_seen_ = false;
 };
+
+// Shutdown in-process DLSS 5 engine and unload d5c_chain.dll
+void m12_dx12_shutdown_inprocess();

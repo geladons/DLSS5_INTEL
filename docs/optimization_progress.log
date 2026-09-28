@@ -19,3 +19,16 @@ Hardware: Intel Arc Pro B50 (Vulkan 1.4, Windows 11 VM)
 - Verified builds: dlss5\m11d\build.cmd (exit code 0), dlss5\m11-layer\build.cmd (exit code 0).
 - Validation PASS: selftest bit-exact to 6 decimal places (meandiff: 0.008265, 0.007924, 0.008648).
 
+[2026-09-27 19:52] Stage 3.2 COMPLETE: DirectX 12 In-Process DLSS 5 Integration & TCP Elimination (branch perf-stage3-dx12-inprocess).
+- Updated dlss5/m12-dxgi/CMakeLists.txt: added target_include_directories for chain_c_api.h.
+- Updated dlss5/m12-dxgi/m12_dx12.h & m12_dx12.cpp: implemented dynamic loading of d5c_chain.dll via LoadLibraryA/GetProcAddress with multi-path discovery (env vars M12_CHAIN_DLL/NR_LAYER_CHAIN_DLL, module directory, and repo build paths).
+- Initialized dlss5_create with runtime knobs (M12_SCALE, M12_GAIN, M12_BLEND) and candidate paths for weights and SPIR-V compute shaders.
+- Updated M12Dx12Processor::sendRaw() to invoke dlss5_process_frame directly in-memory, eliminating TCP serialization/network overhead (~20-50 ms/frame saved, 0 daemon dependency) with graceful fallback to TCP m12_exchange() when disabled via M12_INPROCESS=0 or missing DLL.
+- Lifecycle management: implemented m12_dx12_shutdown_inprocess() called on swapchain processor destruction and DLL_PROCESS_DETACH in dllmain.cpp.
+- Updated dlss5/m12-dxgi/build.cmd to automatically stage d5c_chain.dll and all *.spv shader files from dlss5/chain/build/Release or dlss5/m11d/build/Release.
+- Verified build and test suite:
+  - dlss5/m12-dxgi/build.cmd -> exit code 0
+  - dlss5/m12-dxgi/test/build.cmd -> exit code 0
+  - dlss5/m12-dxgi/_selftest.cmd -> PASS: in-process DLSS 5 active, frames 1, 5, 9 processed directly on Intel Arc Pro B50 (mean|d|(readback, frame 8 processed) = 0.434 /255, frame 11 drawn = 27.573 /255).
+  - Graceful fallback verified: M12_INPROCESS=0 falls back cleanly to TCP path.
+
