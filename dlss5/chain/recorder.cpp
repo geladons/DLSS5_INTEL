@@ -88,10 +88,11 @@ void ChainRecorder::bar(VkCommandBuffer cb) {
 void ChainRecorder::dGemm(VkCommandBuffer cb, int fam, uint64_t a, uint64_t b, uint64_t c2,
                           uint32_t m, uint32_t n, uint32_t k, uint32_t batch,
                           uint32_t sa, uint32_t sb, uint32_t sc,
-                          uint32_t flags, uint32_t lda, uint32_t ldb, uint32_t ldc) {
+                          uint32_t flags, uint32_t lda, uint32_t ldb, uint32_t ldc,
+                          uint64_t res, uint64_t skip) {
     (void)fam;
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pGemm.pipe);
-    GemmPush p{a, b, c2, m, n, k, batch, sa, sb, sc, flags, lda, ldb, ldc};
+    GemmPush p{a, b, c2, m, n, k, batch, sa, sb, sc, flags, lda, ldb, ldc, 0, res, skip};
     vkCmdPushConstants(cb, pGemm.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
     vkCmdDispatch(cb, n / 32, (m + 31) / 32, batch);
     pm(cb, "gemm", "blk", m, n, k, n / 32, (m + 31) / 32, batch);

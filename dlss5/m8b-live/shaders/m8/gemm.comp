@@ -29,12 +29,16 @@
 #extension GL_EXT_buffer_reference2 : require
 #extension GL_EXT_scalar_block_layout : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #extension GL_KHR_memory_scope_semantics : require
 #extension GL_KHR_cooperative_matrix : require
 #extension GL_KHR_shader_subgroup_basic : require
 
 #include "publish.glsl"
+
+const uint EPI_RESIDUAL_FP32 = 5u;
+const uint EPI_RESIDUAL_F16  = 6u;
 
 layout(local_size_x = 32) in;
 
@@ -49,6 +53,9 @@ layout(push_constant, scalar) uniform Push {
     uint sa, sb, sc; // per-batch element strides
     uint flags;
     uint lda, ldb, ldc;  // row strides; 0 = dense default (k / n / n)
+    uint pad;
+    uint64_t res;
+    uint64_t skip;
 } pc;
 
 const uint TM = 8, TN = 16, TK = 16;
@@ -305,6 +312,31 @@ void main() {
                 if (row + i * TM < pc.m)
                     coopMatStore(acc[i][j], pc.c.v, co + (row + i * TM) * ldc + col + j * TN,
                                  ldc, gl_CooperativeMatrixLayoutRowMajor);
+        return;
+    }
+
+    if (epilogue == EPI_RESIDUAL_FP32 || epilogue == EPI_RESIDUAL_F16) {
+        for (uint i = 0u; i < RM; i++)
+            for (uint j = 0u; j < RN; j++)
+                coopMatStore(acc[i][j], stage, i * TM * BN + j * TN, BN,
+                             gl_CooperativeMatrixLayoutRowMajor);
+
+        subgroupMemoryBarrierShared();
+        subgroupBarrier();
+
+        for (uint e = gl_LocalInvocationID.x; e < BM * BN; e += 32u) {
+            uint r = row + e / BN;
+            uint c = col + e % BN;
+            if (r >= pc.m || c >= pc.n) continue;
+            uint ch = c % pc.n;
+            uint idx = co + r * ldc + c;
+            float resVal = (epilogue == EPI_RESIDUAL_F16)
+                ? f16_widen(uint(float16BitsToUint16(HalfBuf(pc.res).v[idx])))
+                : FloatBuf(pc.res).v[idx];
+            float skipVal = FloatBuf(pc.skip).v[ch];
+            float acc_val = stage[e] + resVal * skipVal;
+            pc.c.v[idx] = acc_val;
+        }
         return;
     }
 

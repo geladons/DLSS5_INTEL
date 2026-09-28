@@ -21,6 +21,9 @@ struct GemmPush {
     uint32_t sa, sb, sc;
     uint32_t flags;
     uint32_t lda, ldb, ldc;
+    uint32_t pad;
+    uint64_t res;
+    uint64_t skip;
 };
 
 struct CosPush { uint64_t a, c, d; uint32_t m, flags; };
@@ -62,7 +65,8 @@ struct PackPush { uint64_t src, dst; uint32_t n; };
 struct HeadPush { uint64_t src, dst, dc; uint32_t ntok; float gain; uint32_t mode; uint32_t cols; };
 #pragma pack(pop)
 
-enum { EPI_NONE = 0, EPI_E4M3 = 1, EPI_GATE = 2, EPI_GATE_E4M3 = 3, EPI_HALF = 4 };
+enum { EPI_NONE = 0, EPI_E4M3 = 1, EPI_GATE = 2, EPI_GATE_E4M3 = 3, EPI_HALF = 4,
+       EPI_RESIDUAL_FP32 = 5, EPI_RESIDUAL_F16 = 6 };
 enum { F_NARROW = 0x1000, F_TRANSPOSE = 1 };
 
 struct ChainPipe {
@@ -101,7 +105,8 @@ private:
     void dGemm(VkCommandBuffer cb, int fam, uint64_t a, uint64_t b, uint64_t c2,
                uint32_t m, uint32_t n, uint32_t k, uint32_t batch,
                uint32_t sa, uint32_t sb, uint32_t sc,
-               uint32_t flags, uint32_t lda, uint32_t ldb, uint32_t ldc);
+               uint32_t flags, uint32_t lda, uint32_t ldb, uint32_t ldc,
+               uint64_t res = 0, uint64_t skip = 0);
     void dEw(VkCommandBuffer cb, uint64_t a, uint64_t b, uint64_t c2, uint64_t d,
              uint64_t h, uint32_t n, uint32_t kind, uint32_t ch);
     void dPart(VkCommandBuffer cb, uint64_t a, uint64_t c2, const Stage& s, uint32_t C,

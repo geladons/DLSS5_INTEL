@@ -70,15 +70,10 @@ void ChainRecorder::recordWindowBlock(VkCommandBuffer cb, int famIdx, int idx, c
         dGemm(cb, famIdx, A(x16), A(woff(tn("block%d.layer0.weight1", idx))), A(O.oG3),
               TOKS, 4 * C, C, 1, 0, 0, 0, gflags(EPI_GATE_E4M3, true), C, 4 * C, 4 * C);
         bar(cb);
+        uint32_t epi = cur.is16 ? EPI_RESIDUAL_F16 : EPI_RESIDUAL_FP32;
         dGemm(cb, famIdx, A(O.oG3), A(woff(tn("block%d.layer0.weight2", idx))), A(O.oG4),
-              TOKS, C, 4 * C, 1, 0, 0, 0, gflags(EPI_NONE, false), 4 * C, C, C);
-        bar(cb);
-        if (cur.is16)
-            dEw(cb, A(O.oG4), A(cur.off), A(O.oG4), A(vec(tn("block%d.layer0.ffn_cos_skip", idx))), 0,
-                TOKS * C, 4, C);
-        else
-            dEw(cb, A(O.oG4), A(cur.off), A(O.oG4), A(vec(tn("block%d.layer0.ffn_cos_skip", idx))), 0,
-                TOKS * C, 1, C);
+              TOKS, C, 4 * C, 1, 0, 0, 0, gflags(epi, false), 4 * C, C, C,
+              A(cur.off), A(vec(tn("block%d.layer0.ffn_cos_skip", idx))));
         bar(cb);
         recordWindowAttn(cb, famIdx, idx, s, C, H, fam, oy, ox, O.oG4, false, rawOff, pubOff, publish);
     } else if (fam == 1) {
@@ -113,11 +108,10 @@ void ChainRecorder::recordWindowBlock(VkCommandBuffer cb, int famIdx, int idx, c
         bar(cb);
         dEw(cb, A(O.oG4), 0, 0, 0, A(O.oG2), TOKS * C, 3, 0);
         bar(cb);
+        uint32_t epi = cur.is16 ? EPI_RESIDUAL_F16 : EPI_RESIDUAL_FP32;
         dGemm(cb, famIdx, A(O.oG2), A(woff(tn("block%d.layer1.weight3", idx))), A(O.oG3),
-              TOKS, C, C, 1, 0, 0, 0, gflags(EPI_NONE, false), C, C, C);
-        bar(cb);
-        dEw(cb, A(O.oG3), A(cur.off), A(O.oG3), A(vec(tn("block%d.layer1.ffn_cos_skip", idx))),
-            0, TOKS * C, 4, C);
+              TOKS, C, C, 1, 0, 0, 0, gflags(epi, false), C, C, C,
+              A(cur.off), A(vec(tn("block%d.layer1.ffn_cos_skip", idx))));
         bar(cb);
         recordWindowAttn(cb, famIdx, idx, s, C, H, fam, oy, ox, O.oG3, false, rawOff, pubOff, publish);
     }
@@ -161,11 +155,10 @@ void ChainRecorder::recordGlobal(VkCommandBuffer cb, int famIdx, int idx, Cur& c
     dGemm(cb, famIdx, A(cur.off), A(woff(tn("block%d.layer0.weight", idx))), A(O.oHG),
           TOKG, 4096, 1024, 1, 0, 0, 0, gflags(EPI_GATE_E4M3, true), 1024, 4096, 4096);
     bar(cb);
+    uint32_t epi = cur.is16 ? EPI_RESIDUAL_F16 : EPI_RESIDUAL_FP32;
     dGemm(cb, famIdx, A(O.oHG), A(woff(tn("block%d.layer1.weight", idx))), A(O.oG3),
-          TOKG, 1024, 4096, 1, 0, 0, 0, gflags(EPI_NONE, false), 4096, 1024, 1024);
-    bar(cb);
-    dEw(cb, A(O.oG3), A(cur.off), A(O.oG3), A(vec(tn("block%d.layer1.ffn_cos_skip", idx))),
-        0, TOKG * 1024, 4, 1024);
+          TOKG, 1024, 4096, 1, 0, 0, 0, gflags(epi, false), 4096, 1024, 1024,
+          A(cur.off), A(vec(tn("block%d.layer1.ffn_cos_skip", idx))));
     bar(cb);
     dEw(cb, A(O.oG3), 0, 0, 0, A(O.oG2), TOKG * 1024, 2, 0);
     bar(cb);
@@ -394,7 +387,7 @@ void ChainRecorder::recordChain(VkCommandBuffer cb) {
         bar(cb);
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pGemm1.pipe);
         GemmPush p{A(O.oG2), A(O.oHeadW), A(O.oHEAD), st_[0].TOK, 16, 32, 1, 0, 0, 0,
-                   gflags(EPI_NONE, false), 32, 16, 16};
+                   gflags(EPI_NONE, false), 32, 16, 16, 0, 0, 0};
         vkCmdPushConstants(cb, pGemm1.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
         vkCmdDispatch(cb, 1, st_[0].TOK / 16, 1);
         pm(cb, "gemm1", "head", st_[0].TOK, 16, 32, 1, st_[0].TOK / 16, 1);
