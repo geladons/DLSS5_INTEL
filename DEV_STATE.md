@@ -1,5 +1,11 @@
 # DEV_STATE.md - where we are (updated 2026-09-28 by Antigravity)
 
+## Stage 3.2: DirectX 12 In-Process Integration & TCP Elimination (2026-09-28 COMPLETED)
+- Commit 5b4ec05: `dlss5/m12-dxgi` (`m12_dx12.cpp`, `dllmain.cpp`, `m12_dx12.h`, `CMakeLists.txt`, `build.cmd`, `_selftest.cmd`) updated to dynamically load `d5c_chain.dll` via the C ABI.
+- DirectX 12 present hook executes `dlss5_process_frame` directly in-process on frame textures, completely eliminating TCP socket 127.0.0.1:47990 latency (20-50 ms network overhead) and removing daemon dependency for all DX12 titles (e.g. GTA V Enhanced).
+- Automatic staging of `d5c_chain.dll` and *.spv shaders next to `m12_dxgi.dll` in `build.cmd` and `_selftest.cmd`.
+- Self-test verified on Intel Arc Pro B50: Frames 1, 5, 9 processed in-process in 249-264 ms with 0 ms TCP lag. Seamless fallback to TCP preserved if `M12_INPROCESS=0`.
+
 ## Stage 3.1: In-Process Engine Integration & TCP Elimination (2026-09-28 COMPLETED)
 - Commit c4a377d: dlss5/chain C ABI (`dlss5_create`, `dlss5_destroy`, `dlss5_process_frame`, `dlss5_set_scale`, `dlss5_set_gain`, `dlss5_set_blend`) implemented in `dlss5/chain/chain_c_api.cpp` / `chain_dll.cpp` and exported via `d5c_chain.def` as `d5c_chain.dll`.
 - `dlss5/m11-layer/nr_layer_win.c` updated to dynamically load `d5c_chain.dll` and execute `dlss5_process_frame` directly in-process on Vulkan host-visible staging buffers, completely bypassing loopback TCP socket 127.0.0.1:47990 and eliminating 20-50 ms Winsock networking latency.
