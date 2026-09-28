@@ -41,6 +41,7 @@ _PROD = {
     "layer_x86":  ("runtime", "layer", "x86", "VkLayer_dlssnr_win32.json"),
     "weights":    ("weights",),
     "logs":       ("logs",),
+}
 _DEV = {
     "m11d_exe":   ("dlss5", "m11d", "build", "Release", "m11d.exe")
                   if os.path.exists(os.path.join(REPO, "dlss5", "m11d", "build", "Release", "m11d.exe"))
