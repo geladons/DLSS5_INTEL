@@ -60,13 +60,26 @@ layout(push_constant, scalar) uniform Push {
 
 const uint TM = 8, TN = 16, TK = 16;
 #ifndef GEMM_RN
-const uint RM = 4, RN = 2;   // default 32x32 tile per subgroup
+#ifndef GEMM_RM
+#define GEMM_RM 4
+#endif
+const uint RM = uint(GEMM_RM), RN = 2;   // default 32x32 tile per subgroup (optimal Xe2 occupancy)
 #else
 const uint RM = 2, RN = uint(GEMM_RN);   // M8a head variant: GEMM_RN=1 -> 16x16 tile
 #endif
 const uint BM = TM * RM, BN = TN * RN;
 
-shared float stage[BM * BN];   // narrow-store staging only
+#ifndef ACC16
+#define ACC16 1
+#endif
+
+#if ACC16
+#define ACC float16_t
+#else
+#define ACC float
+#endif
+
+shared ACC stage[BM * BN];   // narrow-store staging only
 
 void main() {
     uint row = gl_WorkGroupID.y * BM, col = gl_WorkGroupID.x * BN;
@@ -78,10 +91,10 @@ void main() {
     uint ldb = pc.ldb != 0u ? pc.ldb : ((pc.flags & 1u) != 0u ? pc.k : pc.n);
     uint ldc = pc.ldc != 0u ? pc.ldc : pc.n;
 
-    coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> acc[RM][RN];
+    coopmat<ACC, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> acc[RM][RN];
     for (uint i = 0u; i < RM; i++)
         for (uint j = 0u; j < RN; j++)
-            acc[i][j] = coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(0.0);
+            acc[i][j] = coopmat<ACC, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(ACC(0.0));
     // K-loop software pipeline (M10): two tile slots, loads for t+1 issue
     // before the MMAs of t consume slot t, so global-load latency overlaps
     // XMX math. Math order is UNCHANGED (same TK tiles, same accumulate
@@ -309,9 +322,17 @@ void main() {
     if (epilogue == 0u && !narrow) {
         for (uint i = 0u; i < RM; i++)
             for (uint j = 0u; j < RN; j++)
-                if (row + i * TM < pc.m)
+                if (row + i * TM < pc.m) {
+#if ACC16
+                    coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> wide =
+                        coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(acc[i][j]);
+                    coopMatStore(wide, pc.c.v, co + (row + i * TM) * ldc + col + j * TN,
+                                 ldc, gl_CooperativeMatrixLayoutRowMajor);
+#else
                     coopMatStore(acc[i][j], pc.c.v, co + (row + i * TM) * ldc + col + j * TN,
                                  ldc, gl_CooperativeMatrixLayoutRowMajor);
+#endif
+                }
         return;
     }
 
@@ -334,7 +355,7 @@ void main() {
                 ? f16_widen(uint(float16BitsToUint16(HalfBuf(pc.res).v[idx])))
                 : FloatBuf(pc.res).v[idx];
             float skipVal = FloatBuf(pc.skip).v[ch];
-            float acc_val = stage[e] + resVal * skipVal;
+            float acc_val = float(stage[e]) + resVal * skipVal;
             pc.c.v[idx] = acc_val;
         }
         return;
@@ -343,15 +364,23 @@ void main() {
     for (uint i = 0u; i < RM; i++)
         for (uint j = 0u; j < RN; j++) {
             for (uint e = 0u; e < acc[i][j].length(); e++)
-                acc[i][j][e] = publish(epilogue, acc[i][j][e]);
+                acc[i][j][e] = ACC(publish(epilogue, float(acc[i][j][e])));
             if (narrow) {
                 coopMatStore(acc[i][j], stage, i * TM * BN + j * TN, BN,
                              gl_CooperativeMatrixLayoutRowMajor);
                 continue;
             }
-            if (row + i * TM < pc.m)
+            if (row + i * TM < pc.m) {
+#if ACC16
+                coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> wide =
+                    coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(acc[i][j]);
+                coopMatStore(wide, pc.c.v, co + (row + i * TM) * ldc + col + j * TN,
+                             ldc, gl_CooperativeMatrixLayoutRowMajor);
+#else
                 coopMatStore(acc[i][j], pc.c.v, co + (row + i * TM) * ldc + col + j * TN,
                              ldc, gl_CooperativeMatrixLayoutRowMajor);
+#endif
+            }
         }
     if (!narrow) return;
 

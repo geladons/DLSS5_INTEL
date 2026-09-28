@@ -93,14 +93,48 @@ bool VkContext::checkCoopmat() {
     std::vector<VkCooperativeMatrixPropertiesKHR> cfgs(ncfg,
         VkCooperativeMatrixPropertiesKHR{VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR, nullptr});
     D5C_VK_RET(fpEnum(vk.pd, &ncfg, cfgs.data()));
-    bool ok816 = false;
-    for (auto& cm : cfgs)
+    // Print ALL cooperative matrix configurations for capability analysis
+    auto compName = [](VkComponentTypeKHR t) -> const char* {
+        switch (t) {
+            case VK_COMPONENT_TYPE_FLOAT16_KHR: return "f16";
+            case VK_COMPONENT_TYPE_FLOAT32_KHR: return "f32";
+            case VK_COMPONENT_TYPE_FLOAT64_KHR: return "f64";
+            case VK_COMPONENT_TYPE_SINT8_KHR:   return "i8";
+            case VK_COMPONENT_TYPE_SINT16_KHR:  return "i16";
+            case VK_COMPONENT_TYPE_SINT32_KHR:  return "i32";
+            case VK_COMPONENT_TYPE_SINT64_KHR:  return "i64";
+            case VK_COMPONENT_TYPE_UINT8_KHR:   return "u8";
+            case VK_COMPONENT_TYPE_UINT16_KHR:  return "u16";
+            case VK_COMPONENT_TYPE_UINT32_KHR:  return "u32";
+            case VK_COMPONENT_TYPE_UINT64_KHR:  return "u64";
+            default: return "???";
+        }
+    };
+    std::printf("[VK] %u cooperative matrix configs enumerated:\n", ncfg);
+    bool ok816 = false, ok816f16acc = false, ok816i8 = false;
+    for (uint32_t i = 0; i < ncfg; ++i) {
+        auto& cm = cfgs[i];
+        std::printf("  [%u] %ux%ux%u  A=%s B=%s C=%s sat=%d scope=%u\n",
+                    i, cm.MSize, cm.NSize, cm.KSize,
+                    compName(cm.AType), compName(cm.BType), compName(cm.CType),
+                    (int)cm.saturatingAccumulation, cm.scope);
         if (cm.MSize == 8 && cm.NSize == 16 && cm.KSize == 16 &&
-            cm.AType == VK_COMPONENT_TYPE_FLOAT16_KHR && cm.BType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
-            cm.CType == VK_COMPONENT_TYPE_FLOAT32_KHR)
-            ok816 = true;
+            cm.AType == VK_COMPONENT_TYPE_FLOAT16_KHR && cm.BType == VK_COMPONENT_TYPE_FLOAT16_KHR) {
+            if (cm.CType == VK_COMPONENT_TYPE_FLOAT32_KHR) ok816 = true;
+            if (cm.CType == VK_COMPONENT_TYPE_FLOAT16_KHR) ok816f16acc = true;
+        }
+        if (cm.MSize == 8 && cm.NSize == 16 && cm.KSize == 32 &&
+            cm.AType == VK_COMPONENT_TYPE_SINT8_KHR && cm.BType == VK_COMPONENT_TYPE_SINT8_KHR)
+            ok816i8 = true;
+    }
     if (!ok816) { std::fprintf(stderr, "[FAIL] 8x16x16 f16xf16->f32 coopmat config missing\n"); return false; }
     std::printf("[VK] coopmat 8x16x16 f16xf16->f32: OK\n");
+    if (ok816f16acc)
+        std::printf("[VK] coopmat 8x16x16 f16xf16->f16: AVAILABLE (fp16 accumulate possible)\n");
+    else
+        std::printf("[VK] coopmat f16xf16->f16: NOT available (fp16 accumulate NOT possible)\n");
+    if (ok816i8)
+        std::printf("[VK] coopmat 8x16x32 i8xi8: AVAILABLE (int8 path possible)\n");
     return true;
 }
 

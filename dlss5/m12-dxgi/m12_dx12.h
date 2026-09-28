@@ -34,6 +34,7 @@ private:
     bool grabRaw(ID3D12Resource *bb);   // backbuffer -> raw_ (no daemon)
     bool sendRaw();                     // raw_ -> daemon -> processed_
     bool blitToBackbuffer(ID3D12Resource *bb);
+    bool blitToBackbuffer(ID3D12Resource *bb, std::vector<BYTE> &buf);
     bool waitIdle(DWORD ms);
     bool refreshDesc();
     void dump_processed();
@@ -70,6 +71,7 @@ private:
     bool paused_;                  // pause flag was present on last check
     std::vector<BYTE> processed_;  // last daemon reply, packed w*h*4 BGRA
     std::vector<BYTE> raw_;      // freeze mode: the held UNPROCESSED frame
+    std::vector<BYTE> interp_;   // framegen interpolated frame
     bool raw_held_ = false;
     FILETIME reproc_stamp_ = {}; // last seen m13_reproc.flag mtime
     bool reproc_seen_ = false;

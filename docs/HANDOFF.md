@@ -64,6 +64,7 @@
 | **x86 Vulkan/DX9 Games** (GTA IV via DXVK) | `nr_layer_win32.dll` $\leftrightarrow$ `m11d.exe` | TCP loopback bridge (x86 $\to$ x64 daemon) | Auto-managed daemon lifecycle |
 | **Screen Mode** (Desktop / Window Overlay) | `m8blive.exe` | Standalone direct DDA desktop capture overlay | Direct GPU, No Daemon |
 | **Management GUI & Overlay** | `m13` (`pythonw m13.pyw`) | Tkinter modern dashboard & in-game overlay | Topmost non-minimizing overlay |
+| **Official Performance Benchmarks** | [docs/BENCHMARKS.md](BENCHMARKS.md) | Verified hardware matrix, 15-20 ms reconciliation, 50% preset target | 233.5 ms @ 0.50 scale, 0.39 ms FrameGen |
 
 ---
 

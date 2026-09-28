@@ -54,11 +54,28 @@ static PFN_dlss5_process_frame pfn_dlss5_process_frame = NULL;
 static PFN_dlss5_set_scale pfn_dlss5_set_scale = NULL;
 static PFN_dlss5_set_gain pfn_dlss5_set_gain = NULL;
 static PFN_dlss5_set_blend pfn_dlss5_set_blend = NULL;
+static PFN_dlss5_interpolate_frame pfn_dlss5_interpolate_frame = NULL;
+static PFN_dlss5_set_framegen pfn_dlss5_set_framegen = NULL;
+static PFN_dlss5_get_framegen pfn_dlss5_get_framegen = NULL;
 static int g_inprocess_attempted = 0;
 static int g_inprocess_active = 0;
 static LONG g_proc_count = 0;
 static CRITICAL_SECTION g_inproc_cs;
 static LONG g_inproc_cs_init = 0;
+
+static bool is_framegen_enabled()
+{
+    const char *fg = getenv("M12_FRAMEGEN");
+    if (!fg) fg = getenv("DLSS5_FRAMEGEN");
+    if (fg) {
+        if (fg[0] == '1' || !strcmp(fg, "true") || !strcmp(fg, "on")) return true;
+        if (fg[0] == '0' || !strcmp(fg, "false") || !strcmp(fg, "off")) return false;
+    }
+    if (g_engine && pfn_dlss5_get_framegen) {
+        return pfn_dlss5_get_framegen(g_engine) == 1;
+    }
+    return false;
+}
 
 static void ensure_inprocess_cs()
 {
@@ -176,6 +193,9 @@ static void ensure_inprocess()
     pfn_dlss5_set_scale = (PFN_dlss5_set_scale)GetProcAddress(hDll, "dlss5_set_scale");
     pfn_dlss5_set_gain = (PFN_dlss5_set_gain)GetProcAddress(hDll, "dlss5_set_gain");
     pfn_dlss5_set_blend = (PFN_dlss5_set_blend)GetProcAddress(hDll, "dlss5_set_blend");
+    pfn_dlss5_interpolate_frame = (PFN_dlss5_interpolate_frame)GetProcAddress(hDll, "dlss5_interpolate_frame");
+    pfn_dlss5_set_framegen = (PFN_dlss5_set_framegen)GetProcAddress(hDll, "dlss5_set_framegen");
+    pfn_dlss5_get_framegen = (PFN_dlss5_get_framegen)GetProcAddress(hDll, "dlss5_get_framegen");
 
     if (!pfn_dlss5_create || !pfn_dlss5_destroy || !pfn_dlss5_process_frame) {
         m12_logf("[m12_dxgi] d5c_chain.dll missing exports; falling back to TCP");
@@ -270,6 +290,13 @@ static void ensure_inprocess()
         return;
     }
 
+    const char *fg_env = getenv("M12_FRAMEGEN");
+    if (!fg_env) fg_env = getenv("DLSS5_FRAMEGEN");
+    if (fg_env && pfn_dlss5_set_framegen && g_engine) {
+        int enable = (fg_env[0] == '1' || !strcmp(fg_env, "true") || !strcmp(fg_env, "on")) ? 1 : 0;
+        pfn_dlss5_set_framegen(g_engine, enable);
+    }
+
     g_inprocess_active = 1;
     m12_logf("[m12_dxgi] in-process DLSS 5 active (TCP bypassed, scale=%.2f gain=%.2f blend=%.2f)",
              scale, gain, blend);
@@ -296,6 +323,9 @@ void m12_dx12_shutdown_inprocess()
     pfn_dlss5_set_scale = NULL;
     pfn_dlss5_set_gain = NULL;
     pfn_dlss5_set_blend = NULL;
+    pfn_dlss5_interpolate_frame = NULL;
+    pfn_dlss5_set_framegen = NULL;
+    pfn_dlss5_get_framegen = NULL;
     g_inprocess_active = 0;
     g_inprocess_attempted = 0;
     LeaveCriticalSection(&g_inproc_cs);
@@ -583,17 +613,17 @@ void M12Dx12Processor::log_present_exit(int which)
         m12_logf("present%s #%llu done", which ? "1" : "", present_trace_);
 }
 
-// processed_ -> upload buffer -> backbuffer (leaves bb in PRESENT state).
-bool M12Dx12Processor::blitToBackbuffer(ID3D12Resource *bb)
+// buf -> upload buffer -> backbuffer (leaves bb in PRESENT state).
+bool M12Dx12Processor::blitToBackbuffer(ID3D12Resource *bb, std::vector<BYTE> &buf)
 {
     BYTE *mapped = NULL;
     if (FAILED(upload_->Map(0, NULL, (void **)&mapped))) return false;
-    if (needs_rbswap_) swizzle_rb(processed_.data(), processed_.size());
+    if (needs_rbswap_) swizzle_rb(buf.data(), buf.size());
     for (UINT y = 0; y < height_; y++)
         memcpy(mapped + (std::size_t)y * row_pitch_,
-               processed_.data() + (std::size_t)y * width_ * 4,
+               buf.data() + (std::size_t)y * width_ * 4,
                (std::size_t)width_ * 4);
-    if (needs_rbswap_) swizzle_rb(processed_.data(), processed_.size());
+    if (needs_rbswap_) swizzle_rb(buf.data(), buf.size());
     upload_->Unmap(0, NULL);
 
     if (!waitIdle(15000)) {
@@ -631,6 +661,11 @@ bool M12Dx12Processor::blitToBackbuffer(ID3D12Resource *bb)
     queue_->ExecuteCommandLists(1, lists);
     // No fence wait: the app's real Present right after us orders the queue.
     return true;
+}
+
+bool M12Dx12Processor::blitToBackbuffer(ID3D12Resource *bb)
+{
+    return blitToBackbuffer(bb, processed_);
 }
 
 // %TEMP%\m12_pause.flag: cheap runtime pause switch. While the flag exists
@@ -743,6 +778,34 @@ void M12Dx12Processor::onPresent()
     if (live) {
         last_live_ms_ = now;
         captureToCpu(bb.Get());
+        if (have_processed_) blitToBackbuffer(bb.Get());
+    } else {
+        bool interpolated = false;
+        ensure_inprocess();
+        if (is_framegen_enabled() && g_engine && pfn_dlss5_interpolate_frame && have_processed_ &&
+            processed_.size() == (std::size_t)width_ * height_ * 4) {
+            if (grabRaw(bb.Get()) && !raw_.empty() && raw_.size() == (std::size_t)width_ * height_ * 4) {
+                std::size_t needed = (std::size_t)width_ * height_ * 4;
+                if (interp_.size() < needed) interp_.resize(needed);
+                int r = pfn_dlss5_interpolate_frame(g_engine, width_, height_,
+                                                    processed_.data(), raw_.data(),
+                                                    interp_.data(), 0.5f);
+                if (r == 0) {
+                    static UINT64 s_fg_count = 0;
+                    s_fg_count++;
+                    if (s_fg_count <= 5 || s_fg_count % 60 == 0) {
+                        m12_logf("[m12_dxgi] framegen interpolated %ux%u (frame %llu, fg #%llu)",
+                                 width_, height_, present_count_, s_fg_count);
+                    }
+                    blitToBackbuffer(bb.Get(), interp_);
+                    interpolated = true;
+                } else {
+                    m12_logf("[m12_dxgi] dlss5_interpolate_frame failed (%d); falling back to stale frame", r);
+                }
+            }
+        }
+        if (!interpolated && have_processed_) {
+            blitToBackbuffer(bb.Get());
+        }
     }
-    if (have_processed_) blitToBackbuffer(bb.Get());
 }

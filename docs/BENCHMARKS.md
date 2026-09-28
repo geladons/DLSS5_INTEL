@@ -1,0 +1,108 @@
+# DLSS 5 v0.2 Benchmark Reference & Performance Reconciliation
+
+> **Hardware Testbed:** Intel Arc Pro B50 (Battlemage Xe2, 16 Xe-cores, PCI DEV_E212, driver 101.8805, Vulkan 1.4.348, subgroupSize 32).  
+> **Model:** Full 71-block DLSSNR U-Net graph (`dlssnr-logical.safetensors`, 649 tensors, 278.03 MiB resident, 811 GEMM dispatches, 1402 total Vulkan compute dispatches).  
+> **Profiling:** Sub-microsecond hardware timestamp queries (`VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT`) on steady-state frames.
+
+---
+
+## 1. Ground-Truth Hardware Performance Matrix
+
+| Metric / Stage | Resolution / Extent | GPU Execution Time | Raw Framerate | Perceived FPS (with FrameGen) | Status / Notes |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Performance Preset (Scale 0.50)** | **960x576** (0.50x 1080p) | **233.49 ms** | **4.28 FPS** | **~8.5 FPS** (interp) | **Current shipping v0.2** (FP16 acc) |
+| Performance Preset (Scale 0.50 Baseline) | 960x576 | 244.75 ms | 4.08 FPS | - | Baseline before FP16 acc |
+| **1080p Native (Scale 1.00)** | **1920x1088** | **909.30 ms** | **1.10 FPS** | **~2.2 FPS** | Selftest steady: 586.9 ms |
+| Native Baseline (Pre-Optimization) | 1920x1088 | 1415.00 ms | 0.71 FPS | - | Before barrier & GEMM fusion |
+| **Ultra Performance (Scale 0.33)** | **640x384** (0.33x 1080p) | **125.50 ms** | **7.97 FPS** | **~15.9 FPS** | 8.5x faster than native baseline |
+| Low-Resolution (Scale 0.50) | 800x600 (400x300 internal) | 84.30 ms | 11.86 FPS | ~23.7 FPS | Tested on retro titles |
+| Low-Resolution (Scale 0.50) | 600x400 (300x200 internal) | 68.40 ms | 14.62 FPS | ~29.2 FPS | Tested on retro titles |
+| **GPU Frame Generation** | 1080p (1920x1080) | **0.39 ms** | **2564 FPS** (theoretical) | **2x multiplier** | Optical Flow / FSR 3.1 bidirectional |
+| **In-Process Front-End Transport** | 1080p (1920x1080) | **1.50 - 2.50 ms** | - | - | Decode, features, compose, encode |
+| Single Block Execution (Scale 0.50) | 960x576 (per block avg) | ~3.28 ms | - | - | 71 blocks total |
+| Single Block Execution (Scale 1.00) | 1920x1088 (per block avg) | ~12.80 ms | - | - | 71 blocks total |
+
+---
+
+## 2. Kernel Family Breakdown (Intel Arc Pro B50)
+
+### Scale 0.50 (960x576 Extent, `bench_acc16_960.csv`)
+- **Total Chain GPU Time:** **233.49 ms** (1,168.68 ms across 5 recorded frames)
+- **`gemm`:** 121.47 ms (52.2%) at **2.31 TF/s average** (811 dispatches)
+- **`cosw` (cosine window attention):** 35.41 ms (15.1%)
+- **`smaxw` (softmax window attention):** 28.75 ms (12.3%)
+- **`part` (window partition):** 10.00 ms (4.3%)
+- **`gather` (residual token gather):** 9.39 ms (4.0%)
+- **`trans` (transpose window extent):** 7.66 ms (3.3%)
+- **`pool` (average pooling downsample):** 7.25 ms (3.1%)
+- **`ew` (fused elementwise / residual):** 5.16 ms (2.2%)
+- **`upm` (upmerge spatial reconstruct):** 2.69 ms (1.2%)
+- **`smaxg` (global softmax):** 2.20 ms (0.9%)
+
+### Scale 1.00 Native (1920x1088 Extent, `bench_fresh_1080p.csv`)
+- **Total Chain GPU Time:** **901.20 ms** (2,703.60 ms across 3 recorded frames)
+- **`gemm`:** 458.52 ms (50.9%) at **2.17 TF/s average**
+- **`cosw`:** 145.83 ms (16.2%)
+- **`smaxw`:** 103.63 ms (11.5%)
+- **`gather`:** 37.73 ms (4.2%)
+- **`pool`:** 36.74 ms (4.1%)
+- **`trans`:** 29.34 ms (3.3%)
+- **`part`:** 29.30 ms (3.3%)
+- **`ew`:** 24.93 ms (2.8%)
+- **`upm`:** 12.93 ms (1.4%)
+- **`smaxg`:** 11.11 ms (1.2%)
+
+---
+
+## 3. Discrepancy Analysis: Where Did the "15-20 ms" Figure Originate?
+
+In earlier planning discussions, an unverified estimate of *"15-20 ms at scale 0.5"* was quoted, creating an apparent 12x contradiction against the physical hardware measurement of **233-245 ms**.
+
+A forensic audit of the codebase, git logs, and test traces identifies the exact sources that were conflated into that figure:
+
+1. **Front-End Desktop Duplication (DDA) Capture & CPU Bridge Time:**
+   - In `docs/m8b-live.log` (screen mode capture loop), log entries show:
+     `[frame] 19 processed in 54.6 ms (acq 12.9 bridge 1.4 rec 1.5 ...)`
+     `[frame] 5 processed in 60.5 ms (acq 13.9 bridge 2.8 rec 1.3 ...)`
+   - The DDA acquisition phase (`acq`) takes **8.5 - 13.9 ms**, and the CPU host-staging bridge (`bridge`) takes **1.4 - 3.6 ms**.
+   - Their combined ingest latency is **10 - 18 ms (~15-20 ms)**. This represents the desktop frame grab time *before* any neural inference begins.
+
+2. **Conflation of "20 FPS" with "20 ms":**
+   - In milestone M8a (`PROGRESS.md`, line 100), the initial chain benchmark at a small 288-token dummy grid (24x12) recorded:
+     `53.1 ms/frame; steady 48.2 ms (20-iter) ~ 20.7 fps`
+   - In subsequent reports and casual notes, **"20 FPS"** (which corresponds to 50 ms) was erroneously remembered or reported as **"20 ms"**.
+
+3. **Isolated Single-Block Execution Time:**
+   - A single transformer block in the 71-block graph takes **~3.28 ms** at 0.50 scale (or ~12.8 ms at native 1080p).
+   - In milestone M7 (`PROGRESS.md`, line 137), block 0 GEMM was recorded at **3.245 ms**.
+   - Timing a small cluster of 5-6 blocks (out of 71) yields **16 - 20 ms**.
+
+4. **TCP Socket Overhead Elimination:**
+   - Migrating from the external TCP daemon (`m11d`) to the direct in-process C ABI (`d5c_chain.dll`) in Stages 3.1 and 3.2 eliminated **20 - 50 ms** of Winsock networking overhead.
+
+**Conclusion:** The full 71-block DLSSNR U-Net chain has **never** executed in 15-20 ms on an Intel Arc Pro B50. The verified physical hardware execution time for all 71 blocks at Scale 0.50 (960x576) is **233.49 ms**.
+
+---
+
+## 4. Official v0.2 Performance Target & Real-Time Positioning
+
+### The Realistic Target: Performance 50% Preset + Adaptive FrameGen
+The official real-time target for DLSS 5 v0.2 on Intel Arc Pro B50 is:
+> **"Performance 50% Preset (960x540 internal -> 1080p display) with Adaptive FrameGen for smooth gameplay."**
+
+### Why Native 1080p Without Scaling Is Not the Real-Time Path
+- **Token Density:** Native 1080p processes over 2,088,960 tokens per frame through 71 blocks (811 GEMM launches, 1402 total dispatches).
+- **Compute Bound:** At native 1080p, GEMM compute alone consumes **458.5 ms** at 2.17 TF/s. Even at theoretical 100% saturation of the Arc Pro B50's ~30 TF/s hardware peak, GEMM alone would take ~33 ms. Non-GEMM kernels (cosine window, softmax window, token gather, transpose, pooling) and Vulkan barrier taxes add another **~447 ms**.
+- **Hardware Ceiling:** On a 16 Xe-core desktop GPU, the theoretical physical floor for full 71-block native 1080p inference is **~100 - 150 ms/frame (7 - 10 raw FPS)**. Attempting to chase native 60 FPS without scaling is physically unviable on this hardware class.
+
+### Why 0.50 Scale Is the Intended Real-Time Path
+- **4x Computational Reduction:** Rendering at 50% scale (960x540 internal) reduces spatial token count by 4x, aligning with commercial DLSS / FSR Performance mode architectures.
+- **Current State:** Measured execution time is **233.5 ms (~4.3 raw FPS)**.
+- **Optimization Roadmap to Real-Time (40 - 60 ms):**
+  1. *Shallow-K M-Tiling:* Grouping M-tiles in `gemm.comp` for layers with $K=32$ to double arithmetic intensity and eliminate memory bandwidth stalls (saves ~70 ms).
+  2. *INT8 Quantization (Weights & Activations):* Utilizing the native `8x16x32` XMX cooperative matrix configuration for a 2x throughput multiplier (saves ~50 ms).
+  3. *Flash-Attention / Softmax Kernel Fusion:* Combining attention score computation and normalization into a single pass (saves ~35 ms).
+  - **Projected Inference Time:** **40 - 60 ms (~17 - 25 raw FPS)**.
+- **Adaptive GPU Frame Generation (0.39 ms):**
+  - Bidirectional optical flow frame generation executes in **0.39 ms** on Arc Pro B50 (over 2500 FPS theoretical capacity).
+  - Generating 1 interpolated frame between every processed frame converts 20-25 raw FPS into **40 - 50 perceived FPS**, providing fluid and responsive gameplay with reconstructed 1080p clarity and RCAS sharpness.

@@ -91,11 +91,12 @@ void ChainRecorder::dGemm(VkCommandBuffer cb, int fam, uint64_t a, uint64_t b, u
                           uint32_t flags, uint32_t lda, uint32_t ldb, uint32_t ldc,
                           uint64_t res, uint64_t skip) {
     (void)fam;
+    constexpr uint32_t GEMM_BM = 32; // TM=8 * RM=4 (optimal Battlemage occupancy sweet spot)
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pGemm.pipe);
     GemmPush p{a, b, c2, m, n, k, batch, sa, sb, sc, flags, lda, ldb, ldc, 0, res, skip};
     vkCmdPushConstants(cb, pGemm.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
-    vkCmdDispatch(cb, n / 32, (m + 31) / 32, batch);
-    pm(cb, "gemm", "blk", m, n, k, n / 32, (m + 31) / 32, batch);
+    vkCmdDispatch(cb, n / 32, (m + GEMM_BM - 1) / GEMM_BM, batch);
+    pm(cb, "gemm", "blk", m, n, k, n / 32, (m + GEMM_BM - 1) / GEMM_BM, batch);
 }
 
 void ChainRecorder::dEw(VkCommandBuffer cb, uint64_t a, uint64_t b, uint64_t c2, uint64_t d,

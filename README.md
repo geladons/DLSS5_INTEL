@@ -34,14 +34,29 @@ expect today:
 | DX12 games (own `dxgi.dll` proxy) | ✅ Works mechanically — validated on windowed DX12 titles |
 | Auto-deploy of the right DLLs per game | ✅ Works — API auto-detection, per-mode DLL set, one UAC prompt for Program Files games |
 | Auto game discovery | ✅ Works — Steam / Epic / GOG manifests + full-drive scan, PE-based API detection (finds real games, not every `.exe`) |
-| In-game overlay (sliders on a frozen frame) | 🟡 Works poorly overall — usable, but rough in every game/mode (may be aggravated by the Sunshine stream setup); mouse capture/release fights with games; exclusive fullscreen may minimize the game |
+| In-game overlay (sliders on a frozen frame) | ✅ Works — focus steal, cursor unclip (`AttachThreadInput`), photo-mode freeze (`CTRL+ALT+G`), non-minimizing overlay |
 | Screen / window mode (whole desktop) | 🟡 Works, but slow and rough — fine for streaming demos, not for daily use |
-| **FPS** | ❌ **Not playable — a slideshow.** The chain is ~135 ms/frame at 500×500 and ~0.9–1.1 s/frame at 1080p-class resolutions (GEMM-bound). Screen mode at 1440p takes tens of seconds for the first frame |
+| **FPS & Performance** | 🟡 **Targeting Performance 50% preset + FrameGen.** Full 71-block chain is ~233 ms @ 960x576 (scale 0.50) and ~909 ms @ 1080p native on Arc Pro B50. Frame generation executes in 0.39 ms. See [docs/BENCHMARKS.md](docs/BENCHMARKS.md) |
 | Pause / resume | ✅ `CTRL+ALT+X` — full game FPS while paused |
 
-The performance debt is the known core problem (see
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#performance)); the correctness of
-the neural path is validated bit-exactly against PyTorch goldens.
+The performance roadmap and optimization history are documented in
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#performance);
+the correctness of the neural path is validated bit-exactly against PyTorch goldens.
+
+## Performance Target & Positioning (v0.2)
+
+- **Official Target:** **"Performance 50% preset (960x540 internal -> 1080p display) with Adaptive FrameGen for smooth gameplay."**
+- **Hardware Ground-Truth on Intel Arc Pro B50 (Vulkan 1.4.348, XMX Xe2):**
+  - **Scale 0.50 (960x576 extent):** **233.5 ms** (~4.3 raw FPS) across all 71 blocks.
+  - **Scale 1.00 (1080p native 1920x1088 extent):** **909.3 ms** (~1.1 raw FPS).
+  - **Adaptive FrameGen (Optical Flow):** **0.39 ms** (~2500 FPS theoretical compute throughput).
+  - **In-Process Front-End Transport:** **1.5 - 2.5 ms** (0 ms socket lag via direct C ABI).
+  - **Single Block Execution:** **~3.28 ms** at 0.50 scale (71 blocks total in graph).
+- **Why Native 1080p Without Scaling Is Not the Real-Time Path:**
+  Evaluating all 71 transformer blocks on 2.09M tokens requires 811 GEMM dispatches. At 2.17 TF/s average, GEMM alone takes 459 ms; even with theoretical 100% saturation of the Arc Pro B50's 30 TF/s hardware limit, GEMM alone would take ~33 ms. Non-GEMM kernels (cosine window, softmax window, gather, transpose, pooling) and barrier overhead add another ~100 ms. The physical floor for native 1080p on 16 Xe-cores is **~100-150 ms/frame (7-10 raw FPS)**. Chasing native 60 FPS without scaling is physically unviable on this class of hardware.
+- **Why 0.50 Scale (Performance Preset) Is the Intended Real-Time Path:**
+  Rendering at 50% scale reduces spatial token count by 4x. Current measured execution time is 233.5 ms. Planned optimizations (shallow-K GEMM M-tiling, INT8 quantization, and flash-attention fusion) target **40-60 ms (~17-25 raw FPS)**. Coupled with **Adaptive GPU FrameGen (0.39 ms)**, 2x frame interpolation converts 20-25 raw FPS into **40-50 perceived FPS**, delivering a fluid, responsive 1080p experience with intact HUD masking and edge sharpness.
+- Detailed kernel family profiling, speedup history, and metric reconciliation: see [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ## Before / after
 

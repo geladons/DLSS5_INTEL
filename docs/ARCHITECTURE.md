@@ -148,20 +148,22 @@ pyw/pythonw/PATH/per-user Python) → `M13.cmd` fallback → `m13.pyw` (stderr �
 
 ## Performance
 
-Current numbers on the Arc Pro B50 (GEMM-bound; the shader GEMM reaches
-~0.6–2.9 TF/s of the ~30 TF/s the hardware can do):
+Current verified numbers on the Intel Arc Pro B50 (Vulkan 1.4.348, XMX Xe2):
 
-| Size | Chain time | Result |
-|---|---|---|
-| 500×500 | ~135–145 ms/frame | ~7 fps |
-| 960×540 | ~700 ms/frame | slideshow |
-| 1080p-class | ~0.9–1.1 s/frame | ~0.7–1 fps |
-| 2560×1440 screen mode | tens of seconds for frame 0 | demo-only |
+| Size / Preset | Chain time | Raw FPS | With FrameGen | Result |
+|---|---|---|---|---|
+| **Performance Preset (Scale 0.50, 960x576)** | **233.5 ms** | **4.28 fps** | **~8.5 fps** | **Current v0.2 baseline; target 40-60 ms (playable)** |
+| Ultra Performance (Scale 0.33, 640x384) | 125.5 ms | 7.97 fps | ~15.9 fps | Fast test extent |
+| 500x500 window mode | ~135 ms | ~7 fps | ~14 fps | Retro window mode |
+| **1080p Native (Scale 1.00, 1920x1088)** | **909.3 ms** | **1.10 fps** | **~2.2 fps** | Heavy compute (811 GEMMs; selftest 586.9 ms) |
+| GPU Frame Generation (Optical Flow) | 0.39 ms | 2564 fps (theor.) | 2x multiplier | Bidirectional temporal interpolation |
+
+For full per-kernel hardware breakdowns, speedup history, and historical metric reconciliation, see the official reference document: [docs/BENCHMARKS.md](BENCHMARKS.md).
 
 Known headroom (measured, documented in DEV_STATE.md): barrier tax ~276 ms at
-1080p (addressed), arena layout single sparse buffer (kept), GEMM tuning is
-the big remaining item — see `dlss5/m8b-live/shaders/m8/gemm.comp`. This is
-the #1 open problem; contributions welcome.
+1080p (addressed), shallow-K M-tiling for memory-bound GEMM layers (underway),
+INT8 cooperative matrix quantization (XMX hardware supported), and attention
+kernel fusion. Real-time path focuses on the 0.50 scale Performance preset.
 
 ## Repository map
 

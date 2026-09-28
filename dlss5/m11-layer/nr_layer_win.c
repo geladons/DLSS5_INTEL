@@ -90,6 +90,11 @@ typedef struct device_data {
     int raw_held;
     FILETIME reproc_stamp;       /* last seen NR_LAYER_REPROC mtime */
     int reproc_seen;
+    unsigned char *interp;
+    VkDeviceSize interp_size;
+    unsigned char *prev_processed;
+    VkDeviceSize prev_processed_size;
+    int have_prev_processed;
     PFN_vkGetDeviceProcAddr get_device_proc;
     PFN_vkQueuePresentKHR present;
     PFN_vkCreateSwapchainKHR create_swapchain;
@@ -206,12 +211,29 @@ static PFN_dlss5_set_scale pfn_dlss5_set_scale = NULL;
 static PFN_dlss5_set_gain pfn_dlss5_set_gain = NULL;
 static PFN_dlss5_set_blend pfn_dlss5_set_blend = NULL;
 static PFN_dlss5_set_sharpness pfn_dlss5_set_sharpness = NULL;
+static PFN_dlss5_interpolate_frame pfn_dlss5_interpolate_frame = NULL;
+static PFN_dlss5_set_framegen pfn_dlss5_set_framegen = NULL;
+static PFN_dlss5_get_framegen pfn_dlss5_get_framegen = NULL;
 static int g_inprocess_attempted = 0;
 static int g_inprocess_active = 0;
 static float g_cur_scale = -1.0f;
 static float g_cur_gain = -1.0f;
 static float g_cur_blend = -1.0f;
 static float g_cur_sharpness = -1.0f;
+
+static int is_framegen_enabled(void)
+{
+    const char *fg = getenv("NR_LAYER_FRAMEGEN");
+    if (!fg) fg = getenv("DLSS5_FRAMEGEN");
+    if (fg) {
+        if (fg[0] == '1' || !strcmp(fg, "true") || !strcmp(fg, "on")) return 1;
+        if (fg[0] == '0' || !strcmp(fg, "false") || !strcmp(fg, "off")) return 0;
+    }
+    if (g_engine && pfn_dlss5_get_framegen) {
+        return pfn_dlss5_get_framegen(g_engine) == 1;
+    }
+    return 0;
+}
 
 static void update_live_knobs(void)
 {
@@ -275,6 +297,13 @@ static void update_live_knobs(void)
                 nr_log("[nr_layer] live sharpness updated: %.2f", val);
             }
         }
+    }
+
+    const char *fg_s = getenv("NR_LAYER_FRAMEGEN");
+    if (!fg_s) fg_s = getenv("DLSS5_FRAMEGEN");
+    if (fg_s && pfn_dlss5_set_framegen) {
+        int enable = (fg_s[0] == '1' || !strcmp(fg_s, "true") || !strcmp(fg_s, "on")) ? 1 : 0;
+        pfn_dlss5_set_framegen(g_engine, enable);
     }
 }
 
@@ -345,6 +374,9 @@ static void ensure_inprocess(void)
     pfn_dlss5_set_gain = (PFN_dlss5_set_gain)GetProcAddress(hDll, "dlss5_set_gain");
     pfn_dlss5_set_blend = (PFN_dlss5_set_blend)GetProcAddress(hDll, "dlss5_set_blend");
     pfn_dlss5_set_sharpness = (PFN_dlss5_set_sharpness)GetProcAddress(hDll, "dlss5_set_sharpness");
+    pfn_dlss5_interpolate_frame = (PFN_dlss5_interpolate_frame)GetProcAddress(hDll, "dlss5_interpolate_frame");
+    pfn_dlss5_set_framegen = (PFN_dlss5_set_framegen)GetProcAddress(hDll, "dlss5_set_framegen");
+    pfn_dlss5_get_framegen = (PFN_dlss5_get_framegen)GetProcAddress(hDll, "dlss5_get_framegen");
 
     if (!pfn_dlss5_create || !pfn_dlss5_destroy || !pfn_dlss5_process_frame) {
         nr_log("d5c_chain.dll missing exports; falling back to TCP");
@@ -382,6 +414,13 @@ static void ensure_inprocess(void)
 
     if (pfn_dlss5_set_sharpness) {
         pfn_dlss5_set_sharpness(g_engine, sharpness);
+    }
+
+    const char *fg_env = getenv("NR_LAYER_FRAMEGEN");
+    if (!fg_env) fg_env = getenv("DLSS5_FRAMEGEN");
+    if (fg_env && pfn_dlss5_set_framegen) {
+        int enable = (fg_env[0] == '1' || !strcmp(fg_env, "true") || !strcmp(fg_env, "on")) ? 1 : 0;
+        pfn_dlss5_set_framegen(g_engine, enable);
     }
 
     g_cur_scale = scale;
@@ -793,6 +832,13 @@ static void release_device(device_data *data)
     free(data->earlier);
     free(data->outgoing);
     free(data->raw);
+    free(data->interp);
+    free(data->prev_processed);
+    data->interp = NULL;
+    data->interp_size = 0;
+    data->prev_processed = NULL;
+    data->prev_processed_size = 0;
+    data->have_prev_processed = 0;
 }
 
 VKAPI_ATTR void VKAPI_CALL nr_DestroyDevice(VkDevice device,
@@ -829,6 +875,7 @@ VKAPI_ATTR void VKAPI_CALL nr_DestroySwapchainKHR(VkDevice device, VkSwapchainKH
         if (devices[i].holding && devices[i].holding_chain == swapchain) {
             devices[i].holding = 0;
             devices[i].holding_chain = VK_NULL_HANDLE;
+            devices[i].have_prev_processed = 0;
         }
     unlock();
     if (data && data->destroy_swapchain)
@@ -1415,11 +1462,60 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
             if (process_frame(data, chain, queue, index) == 0) {
                 data->holding = 1;
                 data->holding_chain = chain->swapchain;
+                if (data->prev_processed_size < want) {
+                    unsigned char *grown = (unsigned char *)realloc(data->prev_processed, (size_t)want);
+                    if (grown) {
+                        data->prev_processed = grown;
+                        data->prev_processed_size = want;
+                    }
+                }
+                if (data->prev_processed && data->prev_processed_size >= want && data->result) {
+                    memcpy(data->prev_processed, data->result, (size_t)want);
+                    data->have_prev_processed = 1;
+                }
                 transfer(data, chain, queue, index, 1);
             }
+        } else {
+            /* Adaptive Framegen: interpolate between prev_processed and current native frame */
+            if (is_framegen_enabled() && data->have_prev_processed && data->prev_processed &&
+                data->prev_processed_size == want && g_engine && pfn_dlss5_interpolate_frame) {
+                if (ensure_resources(data, want) == 0 && transfer(data, chain, queue, index, 0) == 0) {
+                    if (data->raw_size < want) {
+                        unsigned char *grown = (unsigned char *)realloc(data->raw, (size_t)want);
+                        if (grown) {
+                            data->raw = grown;
+                            data->raw_size = want;
+                        }
+                    }
+                    if (data->interp_size < want) {
+                        unsigned char *grown = (unsigned char *)realloc(data->interp, (size_t)want);
+                        if (grown) {
+                            data->interp = grown;
+                            data->interp_size = want;
+                        }
+                    }
+                    if (data->raw && data->raw_size >= want && data->interp && data->interp_size >= want) {
+                        memcpy(data->raw, data->mapped, (size_t)want);
+                        data->raw_size = want;
+                        int r = pfn_dlss5_interpolate_frame(g_engine, chain->extent.width, chain->extent.height,
+                                                            data->prev_processed, data->raw,
+                                                            data->interp, 0.5f);
+                        if (r == 0) {
+                            static unsigned long fg_frame_count = 0;
+                            fg_frame_count++;
+                            if (fg_frame_count <= 5 || fg_frame_count % 60 == 0) {
+                                nr_log("[nr_layer] framegen interpolated %ux%u (frame %lu, fg #%lu)",
+                                       chain->extent.width, chain->extent.height, frame_counter, fg_frame_count);
+                            }
+                            memcpy(data->mapped, data->interp, (size_t)want);
+                            transfer(data, chain, queue, index, 1);
+                        } else {
+                            nr_log("[nr_layer] dlss5_interpolate_frame failed (%d); presenting native frame", r);
+                        }
+                    }
+                }
+            }
         }
-        /* If not processed (e.g. skipped or failed), leave the fresh native frame
-         * in the swapchain untouched - NEVER overwrite with a stale previous result. */
     }
     return present_now(data, queue, info);
 }
@@ -1504,6 +1600,18 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
             FreeLibrary(g_chain_dll);
             g_chain_dll = NULL;
         }
+        pfn_dlss5_create = NULL;
+        pfn_dlss5_destroy = NULL;
+        pfn_dlss5_process_frame = NULL;
+        pfn_dlss5_set_scale = NULL;
+        pfn_dlss5_set_gain = NULL;
+        pfn_dlss5_set_blend = NULL;
+        pfn_dlss5_set_sharpness = NULL;
+        pfn_dlss5_interpolate_frame = NULL;
+        pfn_dlss5_set_framegen = NULL;
+        pfn_dlss5_get_framegen = NULL;
+        g_inprocess_active = 0;
+        g_inprocess_attempted = 0;
         if (g_lock_ready) { DeleteCriticalSection(&g_lock); g_lock_ready = 0; }
     }
     return TRUE;
