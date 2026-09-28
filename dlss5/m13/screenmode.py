@@ -22,11 +22,16 @@ M8B_LOG = os.path.join(paths.find("logs"), "m8b-live.log")
 KNOB_FILE = os.path.join(os.environ.get("TEMP", "."), "m13_screen_knobs.txt")
 
 
-def write_knobs(gain, blend):
+def write_knobs(gain, blend, scale=None, framegen=None):
     """Live retune of the running m8blive (polled per processed frame)."""
     try:
         with open(KNOB_FILE, "w") as f:
-            f.write("%.4f %.4f" % (gain, blend))
+            parts = ["%.4f %.4f" % (gain, blend)]
+            if scale is not None:
+                parts.append("%.4f" % float(scale))
+            if framegen is not None:
+                parts.append("%d" % (1 if framegen else 0))
+            f.write(" ".join(parts))
     except OSError:
         pass
 
@@ -39,25 +44,29 @@ class ScreenMode:
     def running(self):
         return self.proc.running
 
-    def start(self, gain=1.0, blend=1.0, extra_args=()):
+    def start(self, gain=1.0, blend=1.0, scale=None, framegen=None, extra_args=()):
         """Fullscreen desktop overlay. NOTE: at 2560x1440 the chain is SLOW
         (weights upload ~30 s, frame 0 ~60-70 s - it is warming up, not
         dead). The UI says so; keep it honest."""
-        write_knobs(gain, blend)
+        write_knobs(gain, blend, scale, framegen)
         args = ["--frames", "1000000", "--echo-free", "0", "--gain",
                 "%.3f" % gain, "--blend", "%.3f" % blend]
+        if scale is not None:
+            args += ["--scale", "%.2f" % float(scale)]
         args += [a for a in extra_args if a]
         return self.proc.start(args)
 
-    def start_window(self, title, gain=1.0, blend=1.0, extra_args=()):
+    def start_window(self, title, gain=1.0, blend=1.0, scale=None, framegen=None, extra_args=()):
         """Window-attached overlay (--window): much smaller extent, so much
         faster than fullscreen - the usable demo path for screen mode."""
         if not title.strip():
             return False, "window title is empty"
-        write_knobs(gain, blend)
+        write_knobs(gain, blend, scale, framegen)
         args = ["--frames", "1000000", "--echo-free", "0", "--gain",
                 "%.3f" % gain, "--blend", "%.3f" % blend,
                 "--window", title.strip()]
+        if scale is not None:
+            args += ["--scale", "%.2f" % float(scale)]
         args += [a for a in extra_args if a]
         return self.proc.start(args)
 

@@ -18,6 +18,9 @@ DEFAULTS = {
     "weights_path": None,        # autodetected from the bundle, else asked
     "gain": 1.0,                 # last used gain, pushed to m11d live
     "blend": 1.0,                # effect mix: 0 = original, 1 = full network
+    "scale": 0.50,               # Preset options: 1.00 Native, 0.67 Quality, 0.58 Balanced, 0.50 Performance, 0.33 Ultra Performance
+    "frame_gen": True,           # Frame Generation enabled by default
+    "sharpness": 0.8,            # FSR RCAS sharpness 0.0 to 1.0
     "language": "en",            # UI language: en (primary) | ru
     "overlay_hotkey": "control+alt+g",   # show/hide the in-game overlay
     "dx9_game": None,            # legacy single-game keys (v1 config)

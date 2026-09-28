@@ -106,6 +106,9 @@ class StateMonitor(threading.Thread):
             games[exe] = g
         snap["games"] = games
         snap["weights_ok"] = ctl.weights_ok()
+        snap["scale"] = ctl.cfg.get("scale")
+        snap["frame_gen"] = ctl.cfg.get("frame_gen")
+        snap["sharpness"] = ctl.cfg.get("sharpness")
         snap["active_mode"] = self._active_mode(snap)
         snap["active_game"] = self._active_game(snap)
         return snap
@@ -174,6 +177,16 @@ class M13Controller:
         self.worker = None          # created by the UI (needs its callback)
         self.launched_exes = set()  # launch targets started BY US this
                                     # session (they carry the layer freeze env)
+
+        # Initialize runtime environment variables from config
+        scale = float(self.cfg.get("scale") or 0.50)
+        s_val = str(scale)
+        os.environ["DLSS5_SCALE"] = s_val
+        os.environ["NR_LAYER_SCALE"] = s_val
+        os.environ["M12_SCALE"] = s_val
+        os.environ["DLSS5_FRAMEGEN"] = "1" if self.cfg.get("frame_gen") else "0"
+        os.environ["DLSS5_SHARPNESS"] = str(float(self.cfg.get("sharpness") or 0.8))
+
         self.monitor.start()
 
     def _migrate_legacy_games(self):
@@ -333,7 +346,9 @@ class M13Controller:
             return True, "gain -> %.3f (live)" % g
         if self.screen.running:
             from .screenmode import write_knobs
-            write_knobs(gain, float(self.cfg.get("blend")))
+            write_knobs(gain, float(self.cfg.get("blend")),
+                        float(self.cfg.get("scale") or 0.50),
+                        bool(self.cfg.get("frame_gen")))
             return True, "gain -> %.3f (live, screen mode)" % gain
         return False, "daemon down - gain saved for next start"
 
@@ -353,9 +368,57 @@ class M13Controller:
             return True, "blend -> %.3f (live)" % blend
         if self.screen.running:
             from .screenmode import write_knobs
-            write_knobs(float(self.cfg.get("gain")), blend)
+            write_knobs(float(self.cfg.get("gain")), blend,
+                        float(self.cfg.get("scale") or 0.50),
+                        bool(self.cfg.get("frame_gen")))
             return True, "blend -> %.3f (live, screen mode)" % blend
         return False, "daemon down - blend saved for next start"
+
+    # ------------------------------------------------------------- scale --
+    def set_scale(self, scale):
+        """Render scale (0.33..1.0). Updates config, sets environment variables
+        DLSS5_SCALE, NR_LAYER_SCALE, M12_SCALE, and bumps reproc if frozen."""
+        scale = max(0.33, min(1.0, float(scale)))
+        self.cfg.set("scale", scale)
+        s_val = str(scale)
+        os.environ["DLSS5_SCALE"] = s_val
+        os.environ["NR_LAYER_SCALE"] = s_val
+        os.environ["M12_SCALE"] = s_val
+        if gamelaunch.freeze_active():
+            gamelaunch.reproc_bump()
+        if self.screen.running:
+            from .screenmode import write_knobs
+            write_knobs(float(self.cfg.get("gain")),
+                        float(self.cfg.get("blend")),
+                        scale,
+                        bool(self.cfg.get("frame_gen")))
+            return True, "scale -> %.2f (live, screen mode)" % scale
+        return True, "scale -> %.2f" % scale
+
+    def set_framegen(self, enable):
+        """Frame Generation toggle. Updates config, sets DLSS5_FRAMEGEN=1/0."""
+        enable = bool(enable)
+        self.cfg.set("frame_gen", enable)
+        os.environ["DLSS5_FRAMEGEN"] = "1" if enable else "0"
+        if gamelaunch.freeze_active():
+            gamelaunch.reproc_bump()
+        if self.screen.running:
+            from .screenmode import write_knobs
+            write_knobs(float(self.cfg.get("gain")),
+                        float(self.cfg.get("blend")),
+                        float(self.cfg.get("scale") or 0.50),
+                        enable)
+            return True, "framegen -> %s (live, screen mode)" % ("ON" if enable else "OFF")
+        return True, "framegen -> %s" % ("ON" if enable else "OFF")
+
+    def set_sharpness(self, val):
+        """FSR RCAS sharpness (0.0..1.0). Updates config, sets DLSS5_SHARPNESS."""
+        val = max(0.0, min(1.0, float(val)))
+        self.cfg.set("sharpness", val)
+        os.environ["DLSS5_SHARPNESS"] = str(val)
+        if gamelaunch.freeze_active():
+            gamelaunch.reproc_bump()
+        return True, "sharpness -> %.2f" % val
 
     # ---------------------------------------------------------- screen mode --
     def screen_start(self, gain=None):
@@ -367,8 +430,12 @@ class M13Controller:
             ok, msg = self.daemon.stop()
             notes.append("daemon stopped first (%s)" % msg)
         extra = (self.cfg.get("screen_args") or "").split()
+        scale = float(self.cfg.get("scale") or 0.50)
+        framegen = bool(self.cfg.get("frame_gen"))
         ok, msg = self.screen.start(gain=g, blend=float(
-            self.cfg.get("blend") or 1.0), extra_args=extra)
+            self.cfg.get("blend") or 1.0),
+            scale=scale, framegen=framegen,
+            extra_args=extra)
         if notes:
             msg = " | ".join(notes + [msg])
         return ok, msg

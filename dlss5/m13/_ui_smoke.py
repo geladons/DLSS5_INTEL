@@ -39,6 +39,7 @@ ui.log("mgr", "overlay live push verified: daemon gain %.3f, %d frames"
 
 # slider path (debounced -> after_idle -> worker); 0.9 avoids the benign
 # "equals last synced value" suppression edge
+ui._suppress_scale = None
 ui.gain_var.set(0.9)
 ui._gain_moved(0.9)
 for _ in range(10):
@@ -57,7 +58,50 @@ print("LAYERS LABEL:", ui.layers_info.cget("text"))
 print("HINT:", ui.hint.cget("text"))
 print("OVERLAY STATUS:", ui.overlay.status.cget("text"))
 
-# leave the daemon at the configured gain
+# Stage 5 controls: scale presets, frame generation, sharpness
+from m13.i18n import scale_to_preset_label, preset_label_to_scale
+
+def pump(count=6, delay=0.1):
+    for _ in range(count):
+        ui.root.update()
+        time.sleep(delay)
+
+ui.scale_var.set(scale_to_preset_label(0.67))
+ui._scale_selected()
+pump()
+assert ui.ctl.cfg.get("scale") == 0.67, "scale preset not updated in cfg"
+assert ui.overlay.scale_var.get() == scale_to_preset_label(0.67), "overlay scale not synced"
+assert os.environ.get("DLSS5_SCALE") == "0.67", "DLSS5_SCALE env not updated"
+assert os.environ.get("NR_LAYER_SCALE") == "0.67", "NR_LAYER_SCALE env not updated"
+assert os.environ.get("M12_SCALE") == "0.67", "M12_SCALE env not updated"
+print("SCALE PRESET TEST: PASS (0.67)")
+
+ui.framegen_var.set(False)
+ui._framegen_toggled()
+pump()
+assert ui.ctl.cfg.get("frame_gen") is False, "frame_gen not False in cfg"
+assert ui.overlay.fg_var.get() is False, "overlay frame_gen not synced"
+assert os.environ.get("DLSS5_FRAMEGEN") == "0", "DLSS5_FRAMEGEN env not 0"
+
+ui.overlay.fg_var.set(True)
+ui.overlay._save_framegen()
+pump()
+assert ui.ctl.cfg.get("frame_gen") is True, "overlay save frame_gen failed"
+assert os.environ.get("DLSS5_FRAMEGEN") == "1", "DLSS5_FRAMEGEN env not 1"
+print("FRAME GENERATION TOGGLE TEST: PASS")
+
+ui.sharpness_var.set(0.95)
+ui._sharpness_moved(0.95)
+pump()
+assert ui.ctl.cfg.get("sharpness") == 0.95, "sharpness not updated in cfg"
+assert abs(float(ui.overlay.sharpness_var.get()) - 0.95) < 1e-4, "overlay sharpness not synced"
+assert os.environ.get("DLSS5_SHARPNESS") == "0.95", "DLSS5_SHARPNESS env not updated"
+print("SHARPNESS SLIDER TEST: PASS (0.95)")
+
+# restore defaults
+ui.ctl.set_scale(0.50)
+ui.ctl.set_framegen(True)
+ui.ctl.set_sharpness(0.8)
 ui.ctl.set_gain(ui.ctl.cfg.get("gain"))
 ui.overlay.hide()
 ui._on_close()

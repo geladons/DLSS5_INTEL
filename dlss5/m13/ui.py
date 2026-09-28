@@ -29,7 +29,8 @@ from tkinter import filedialog, ttk
 from tkinter.scrolledtext import ScrolledText
 
 from .controller import M13Controller
-from .i18n import set_language, tr
+from .i18n import (set_language, tr, scale_preset_labels,
+                   scale_to_preset_label, preset_label_to_scale)
 from .logtail import LogHub
 from .overlay import ControlOverlay, hotkey_label
 from .splash import Splash
@@ -247,6 +248,46 @@ class ManagerUI:
                                     font=("Segoe UI", 8))
         self.daemon_info.pack(side="right")
 
+        inner2 = tk.Frame(bar, bg=PANEL)
+        inner2.pack(fill="x", padx=10, pady=(0, 8))
+
+        tk.Label(inner2, text=tr("scale"), bg=PANEL, fg=MUTED,
+                 font=("Segoe UI", 9, "bold")).pack(side="left", padx=(0, 6))
+        self.scale_var = tk.StringVar(
+            value=scale_to_preset_label(self.ctl.cfg.get("scale")))
+        self.scale_cb = ttk.Combobox(
+            inner2, textvariable=self.scale_var, width=24, state="readonly",
+            values=scale_preset_labels())
+        self.scale_cb.pack(side="left", padx=(0, 14))
+        self.scale_cb.bind("<<ComboboxSelected>>", self._scale_selected)
+
+        self.framegen_var = tk.BooleanVar(
+            value=bool(self.ctl.cfg.get("frame_gen")))
+        self.framegen_chk = ttk.Checkbutton(
+            inner2, text=tr("framegen"), variable=self.framegen_var,
+            command=self._framegen_toggled)
+        self.framegen_chk.pack(side="left", padx=(0, 14))
+
+        tk.Label(inner2, text=tr("sharpness"), bg=PANEL, fg=MUTED,
+                 font=("Segoe UI", 9, "bold")).pack(side="left", padx=(0, 6))
+        self.sharpness_var = tk.DoubleVar(
+            value=float(self.ctl.cfg.get("sharpness") or 0.8))
+        self.sharpness_scale = tk.Scale(
+            inner2, from_=0.0, to=1.0, resolution=0.05, orient="horizontal",
+            length=100, variable=self.sharpness_var, command=self._sharpness_moved,
+            bg=PANEL, fg=FG, troughcolor=PANEL2, highlightthickness=0, bd=0,
+            activebackground=ACCENT, showvalue=False, sliderrelief="flat")
+        self.sharpness_scale.pack(side="left")
+        self.sharpness_lbl = tk.Label(
+            inner2, text="%.2f" % self.sharpness_var.get(),
+            bg=PANEL, fg=ACCENT, font=("Consolas", 10, "bold"), width=5)
+        self.sharpness_lbl.pack(side="left")
+
+        self.fg_hint = tk.Label(
+            inner2, text=tr("framegen_hint"), bg=PANEL, fg=MUTED,
+            font=("Segoe UI", 8))
+        self.fg_hint.pack(side="right")
+
     def _draw_logo(self, color):
         self.logo.delete("all")
         self.logo.create_polygon(15, 2, 28, 15, 15, 28, 2, 15, fill=color,
@@ -448,6 +489,26 @@ class ManagerUI:
         b = round(float(self.blend_var.get()), 3)
         self.blend_lbl.config(text="%.2f" % b)
         self.root.after_idle(lambda: self.ctl.submit(self.ctl.set_blend, b))
+
+    def _scale_selected(self, _e=None):
+        lbl = self.scale_var.get()
+        s = preset_label_to_scale(lbl)
+        self.ctl.submit(self.ctl.set_scale, s)
+        if hasattr(self, "overlay") and self.overlay:
+            self.overlay.sync_scale(s)
+
+    def _framegen_toggled(self):
+        fg = bool(self.framegen_var.get())
+        self.ctl.submit(self.ctl.set_framegen, fg)
+        if hasattr(self, "overlay") and self.overlay:
+            self.overlay.sync_framegen(fg)
+
+    def _sharpness_moved(self, _v):
+        s = round(float(self.sharpness_var.get()), 2)
+        self.sharpness_lbl.config(text="%.2f" % s)
+        self.root.after_idle(lambda: self.ctl.submit(self.ctl.set_sharpness, s))
+        if hasattr(self, "overlay") and self.overlay:
+            self.overlay.sync_sharpness(s)
 
     # -------------------------------------------------------------- poll ---
     def _poll(self):

@@ -14,6 +14,17 @@ _S = {
     "daemon_start": {"en": "Start daemon", "ru": "Запустить демон"},
     "daemon_stop": {"en": "Stop", "ru": "Стоп"},
     "gain": {"en": "gain", "ru": "сила"},
+    "scale": {"en": "Render Scale", "ru": "Масштаб рендеринга"},
+    "scale_native": {"en": "Native (100%)", "ru": "Нативное (100%)"},
+    "scale_quality": {"en": "Quality (67%)", "ru": "Качество (67%)"},
+    "scale_balanced": {"en": "Balanced (58%)", "ru": "Баланс (58%)"},
+    "scale_perf": {"en": "Performance (50%)", "ru": "Производительность (50%)"},
+    "scale_ultra": {"en": "Ultra Performance (33%)", "ru": "Ультра производительность (33%)"},
+    "framegen": {"en": "Frame Generation", "ru": "Генерация кадров (FSR 3.1)"},
+    "framegen_hint": {
+        "en": "Doubles perceived FPS with optical flow interpolation",
+        "ru": "Удваивает FPS с помощью оптического потока"},
+    "sharpness": {"en": "Sharpness", "ru": "Резкость (RCAS)"},
     "autosetup": {"en": "Auto-setup:", "ru": "Автонастройка:"},
     "step_weights": {"en": "Weights", "ru": "Веса"},
     "step_layers": {"en": "Vulkan layers", "ru": "Слои Vulkan"},
@@ -215,3 +226,33 @@ def tr(key, *args):
 
 def splash_lines():
     return SPLASH_LINES.get(_LANG, SPLASH_LINES["en"])
+
+
+SCALE_PRESETS = [
+    (1.00, "scale_native"),
+    (0.67, "scale_quality"),
+    (0.58, "scale_balanced"),
+    (0.50, "scale_perf"),
+    (0.33, "scale_ultra"),
+]
+
+
+def scale_preset_labels():
+    return [tr(key) for _, key in SCALE_PRESETS]
+
+
+def scale_to_preset_label(val):
+    try:
+        fval = float(val)
+    except (ValueError, TypeError):
+        fval = 0.50
+    closest = min(SCALE_PRESETS, key=lambda p: abs(p[0] - fval))
+    return tr(closest[1])
+
+
+def preset_label_to_scale(label):
+    for val, key in SCALE_PRESETS:
+        if tr(key) == label:
+            return val
+    return 0.50
+

@@ -60,3 +60,33 @@ Hardware: Intel Arc Pro B50 (Vulkan 1.4, Windows 11 VM)
   - dlss5/chain/test_framegen.cmd / test_framegen.py -> FRAME GENERATION VALIDATION PASS
   - dlss5/m12-dxgi/_selftest.cmd -> PASS
 
+[2026-09-28 03:30] Stage 5 COMPLETE: UI Presets, Frame Generation Controls, and Packaging in DLSS 5 Manager (branch perf-stage5-ui-presets).
+- Updated dlss5/m13/config.py:
+  - Added "scale": 0.50 (Preset options: 1.00 Native, 0.67 Quality, 0.58 Balanced, 0.50 Performance, 0.33 Ultra Performance).
+  - Added "frame_gen": True (Frame Generation enabled by default).
+  - Added "sharpness": 0.8 (FSR RCAS sharpness 0.0 to 1.0).
+- Updated dlss5/m13/i18n.py:
+  - Added localized strings in English and Russian for scale, scale_native, scale_quality, scale_balanced, scale_perf, scale_ultra, framegen, framegen_hint, sharpness.
+  - Implemented bidirectional preset helper functions: SCALE_PRESETS, scale_preset_labels(), scale_to_preset_label(), preset_label_to_scale().
+- Updated dlss5/m13/controller.py & screenmode.py:
+  - Added set_scale(scale): bounds checking (0.33..1.0), config update, environment propagation (DLSS5_SCALE, NR_LAYER_SCALE, M12_SCALE), freeze reprocessing bump, live retuning via screenmode write_knobs.
+  - Added set_framegen(enable): config update, environment propagation (DLSS5_FRAMEGEN=1/0), freeze reprocessing bump, screenmode live retune.
+  - Added set_sharpness(val): bounds checking (0.0..1.0), config update, environment propagation (DLSS5_SHARPNESS), freeze reprocessing bump.
+  - Initialized DLSS5_SCALE, NR_LAYER_SCALE, M12_SCALE, DLSS5_FRAMEGEN, DLSS5_SHARPNESS in M13Controller.__init__ from config.
+  - Updated screen_start and live knob writes to pass/write scale and framegen alongside gain and blend.
+- Updated dlss5/m13/ui.py:
+  - Added second control row in the main header bar.
+  - Added Scale Preset combobox (Native, Quality, Balanced, Performance, Ultra Performance).
+  - Added Frame Generation checkbutton with hint label.
+  - Added RCAS Sharpness slider (0.00..1.00).
+  - Wired live action callbacks and synchronization with in-game overlay.
+- Updated dlss5/m13/overlay.py:
+  - Expanded in-game overlay panel (CTRL+ALT+G) with Scale preset combobox, Frame Generation toggle, and Sharpness slider.
+  - Added popdown topmost elevation for clean in-game frameless overlay rendering.
+  - Added sync methods and automatic refresh from config on show().
+- Verified test suite:
+  - python dlss5/m13/test_stage5.py -> ALL STAGE 5 UNIT TESTS PASSED SUCCESSFULLY!
+  - python dlss5/m13/_ui_smoke.py -> UI SMOKE: ALL PASS (Scale preset, Frame Generation toggle, Sharpness slider, NRCT live push, snapshot keys all verified against running daemon).
+  - Config serialization/deserialization verified.
+
+

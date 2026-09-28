@@ -27,10 +27,12 @@
 import ctypes
 import time
 import tkinter as tk
+from tkinter import ttk
 
 from .processes import suspend_pid, resume_pid, hwnd_for_pid
 from . import gamelaunch
-from .i18n import tr
+from .i18n import (tr, scale_preset_labels, scale_to_preset_label,
+                   preset_label_to_scale)
 
 VK = {"control": 0x11, "ctrl": 0x11, "alt": 0x12, "shift": 0x10}
 POLL_MS = 120
@@ -179,7 +181,7 @@ def _force_foreground(hwnd):
 class ControlOverlay:
     """Frameless always-on-top control panel floating over the game."""
 
-    WIDTH, HEIGHT = 440, 396
+    WIDTH, HEIGHT = 460, 490
 
     def __init__(self, master, ctl, on_log):
         self.ctl = ctl
@@ -199,6 +201,7 @@ class ControlOverlay:
         self._freeze_flags = False   # primary freeze: layer/proxy flags
         self._pending_push = None    # (value, time) of an in-flight push
         self._after_id_blend = None  # debounce timer for the blend knob
+        self._after_id_sharpness = None  # debounce timer for sharpness
         self._game_hwnd = None       # foreground restore target
         self._focus_mode = False     # we took the foreground this session
         self._build()
@@ -294,6 +297,64 @@ class ControlOverlay:
             activebackground=ACCENT, showvalue=False, sliderrelief="flat")
         self.blend_scale.pack(fill="x", pady=(0, 4))
 
+        # scale preset
+        srow = tk.Frame(body, bg=BG)
+        srow.pack(fill="x", pady=(4, 4))
+        tk.Label(srow, text=tr("scale"), bg=BG, fg=FG,
+                 font=("Segoe UI", 9, "bold")).pack(side="left")
+        self.scale_var = tk.StringVar(
+            value=scale_to_preset_label(self.ctl.cfg.get("scale")))
+        self.scale_cb = ttk.Combobox(
+            srow, textvariable=self.scale_var, state="readonly",
+            values=scale_preset_labels(), width=24)
+        self.scale_cb.pack(side="right")
+        self.scale_cb.bind("<<ComboboxSelected>>", self._scale_selected)
+
+        def _fix_popdown(_e):
+            try:
+                popdown = self.win.tk.eval(
+                    "ttk::combobox::PopdownWindow %s" % self.scale_cb)
+                self.win.tk.eval("wm attributes %s -topmost 1" % popdown)
+            except Exception:
+                pass
+        self.scale_cb.bind("<Button-1>", _fix_popdown, add="+")
+
+        # frame generation toggle
+        fgrow = tk.Frame(body, bg=BG)
+        fgrow.pack(fill="x", pady=(2, 4))
+        self.fg_var = tk.BooleanVar(value=bool(self.ctl.cfg.get("frame_gen")))
+        self.fg_chk = tk.Checkbutton(
+            fgrow, text=tr("framegen"), variable=self.fg_var,
+            command=self._save_framegen, bg=BG, fg=FG, selectcolor=PANEL,
+            activebackground=BG, activeforeground=FG,
+            font=("Segoe UI", 9, "bold"), cursor="hand2")
+        self.fg_chk.pack(side="left")
+        tk.Label(fgrow, text=tr("framegen_hint"), bg=BG, fg=MUTED,
+                 font=("Segoe UI", 7)).pack(side="right")
+
+        # sharpness
+        shrow = tk.Frame(body, bg=BG)
+        shrow.pack(fill="x")
+        tk.Label(shrow, text=tr("sharpness"), bg=BG, fg=FG,
+                 font=("Segoe UI", 9, "bold")).pack(side="left")
+        tk.Button(shrow, text="Reset 0.8", font=("Segoe UI", 7),
+                  bg=PANEL, fg=MUTED, activebackground=PANEL2,
+                  activeforeground=FG, relief="flat", bd=0, padx=6,
+                  cursor="hand2", command=self._reset_sharpness).pack(
+            side="left", padx=(8, 0))
+        self.sharpness_val = tk.Label(
+            shrow, text="%.2f" % float(self.ctl.cfg.get("sharpness") or 0.8),
+            bg=BG, fg=ACCENT, font=("Consolas", 10, "bold"), width=5)
+        self.sharpness_val.pack(side="right")
+        self.sharpness_var = tk.DoubleVar(
+            value=float(self.ctl.cfg.get("sharpness") or 0.8))
+        self.sharpness_scale = tk.Scale(
+            body, from_=0.0, to=1.0, resolution=0.05, orient="horizontal",
+            variable=self.sharpness_var, command=self._debounced_sharpness,
+            bg=BG, fg=FG, troughcolor=PANEL2, highlightthickness=0, bd=0,
+            activebackground=ACCENT, showvalue=False, sliderrelief="flat")
+        self.sharpness_scale.pack(fill="x", pady=(0, 4))
+
         prow = tk.Frame(body, bg=BG)
         prow.pack(fill="x", pady=(0, 4))
         self.ap_var = tk.BooleanVar(
@@ -373,6 +434,45 @@ class ControlOverlay:
     def _reset_blend(self):
         self.blend_var.set(1.0)
         self._debounced_blend(1.0)
+
+    def _scale_selected(self, _e=None):
+        lbl = self.scale_var.get()
+        s = preset_label_to_scale(lbl)
+        self.ctl.submit(self.ctl.set_scale, s)
+        self.on_log("[overlay] scale set to %.2f (%s)" % (s, lbl))
+
+    def _save_framegen(self):
+        fg = bool(self.fg_var.get())
+        self.ctl.submit(self.ctl.set_framegen, fg)
+        self.on_log("[overlay] frame generation %s" % (
+            "enabled" if fg else "disabled"))
+
+    def _debounced_sharpness(self, _val):
+        s = round(float(self.sharpness_var.get()), 2)
+        self.sharpness_val.config(text="%.2f" % s)
+        if self._after_id_sharpness:
+            self.win.after_cancel(self._after_id_sharpness)
+        self._after_id_sharpness = self.win.after(
+            DEBOUNCE_MS, self._push_sharpness)
+
+    def _push_sharpness(self):
+        self._after_id_sharpness = None
+        s = round(float(self.sharpness_var.get()), 2)
+        self.ctl.submit(self.ctl.set_sharpness, s)
+
+    def _reset_sharpness(self):
+        self.sharpness_var.set(0.8)
+        self._debounced_sharpness(0.8)
+
+    def sync_scale(self, s):
+        self.scale_var.set(scale_to_preset_label(s))
+
+    def sync_framegen(self, fg):
+        self.fg_var.set(bool(fg))
+
+    def sync_sharpness(self, s):
+        self.sharpness_var.set(float(s))
+        self.sharpness_val.config(text="%.2f" % float(s))
 
     def _save_autopause(self):
         self.ctl.cfg.set("overlay_autopause", bool(self.ap_var.get()))
@@ -498,6 +598,11 @@ class ControlOverlay:
 
     def show(self):
         self._center()
+        self.scale_var.set(scale_to_preset_label(self.ctl.cfg.get("scale")))
+        self.fg_var.set(bool(self.ctl.cfg.get("frame_gen")))
+        sh = float(self.ctl.cfg.get("sharpness") or 0.8)
+        self.sharpness_var.set(sh)
+        self.sharpness_val.config(text="%.2f" % sh)
         snap = self.ctl.snapshot()
         mode = snap.get("active_mode")
         game_mode = mode in ("dx9", "dx11", "dx12", "vulkan")
