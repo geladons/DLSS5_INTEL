@@ -46,6 +46,7 @@
 #include <io.h>
 #include <vulkan/vulkan.h>
 #include <vulkan/vk_layer.h>
+#include "chain_c_api.h"
 
 #define MAX_SWAPCHAINS 8
 #define MAX_IMAGES 8
@@ -160,6 +161,117 @@ static void nr_log(const char *fmt, ...)
     OutputDebugStringA("[nr_layer] ");
     OutputDebugStringA(buf);
     OutputDebugStringA("\n");
+}
+
+/* ------------------------------------------------------------------ */
+/* In-process DLSS 5 engine integration (Stage 3: TCP elimination).    */
+/* ------------------------------------------------------------------ */
+static HMODULE g_chain_dll = NULL;
+static void *g_engine = NULL;
+static PFN_dlss5_create pfn_dlss5_create = NULL;
+static PFN_dlss5_destroy pfn_dlss5_destroy = NULL;
+static PFN_dlss5_process_frame pfn_dlss5_process_frame = NULL;
+static PFN_dlss5_set_scale pfn_dlss5_set_scale = NULL;
+static PFN_dlss5_set_gain pfn_dlss5_set_gain = NULL;
+static PFN_dlss5_set_blend pfn_dlss5_set_blend = NULL;
+static int g_inprocess_attempted = 0;
+static int g_inprocess_active = 0;
+
+static void ensure_inprocess(void)
+{
+    if (g_inprocess_attempted) return;
+    g_inprocess_attempted = 1;
+
+    const char *inproc_env = getenv("NR_LAYER_INPROCESS");
+    if (inproc_env && !strcmp(inproc_env, "0")) {
+        nr_log("in-process mode disabled via NR_LAYER_INPROCESS=0");
+        return;
+    }
+
+    HMODULE hDll = NULL;
+    const char *custom_dll = getenv("NR_LAYER_CHAIN_DLL");
+    if (custom_dll && custom_dll[0]) {
+        hDll = LoadLibraryA(custom_dll);
+    }
+    if (!hDll) {
+        /* Check directory of this layer DLL */
+        char layer_path[MAX_PATH] = {0};
+        HMODULE hThis = NULL;
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCSTR)ensure_inprocess, &hThis) && hThis) {
+            if (GetModuleFileNameA(hThis, layer_path, sizeof(layer_path))) {
+                char *slash = strrchr(layer_path, '\\');
+                if (!slash) slash = strrchr(layer_path, '/');
+                if (slash) {
+                    *(slash + 1) = '\0';
+                    char candidate[MAX_PATH];
+                    _snprintf(candidate, sizeof(candidate), "%sd5c_chain.dll", layer_path);
+                    hDll = LoadLibraryA(candidate);
+                }
+            }
+        }
+    }
+    if (!hDll) {
+        /* Check build output directory relative to repo if running in tree */
+        const char *candidates[] = {
+            "dlss5\\chain\\build\\Release\\d5c_chain.dll",
+            "dlss5\\m11d\\build\\Release\\d5c_chain.dll",
+            "..\\..\\chain\\build\\Release\\d5c_chain.dll",
+            "..\\..\\m11d\\build\\Release\\d5c_chain.dll"
+        };
+        for (int i = 0; i < 4; i++) {
+            if (_access(candidates[i], 0) == 0) {
+                hDll = LoadLibraryA(candidates[i]);
+                if (hDll) break;
+            }
+        }
+    }
+    if (!hDll) {
+        hDll = LoadLibraryA("d5c_chain.dll");
+    }
+
+    if (!hDll) {
+        nr_log("d5c_chain.dll not found; falling back to TCP socket");
+        return;
+    }
+
+    pfn_dlss5_create = (PFN_dlss5_create)GetProcAddress(hDll, "dlss5_create");
+    pfn_dlss5_destroy = (PFN_dlss5_destroy)GetProcAddress(hDll, "dlss5_destroy");
+    pfn_dlss5_process_frame = (PFN_dlss5_process_frame)GetProcAddress(hDll, "dlss5_process_frame");
+    pfn_dlss5_set_scale = (PFN_dlss5_set_scale)GetProcAddress(hDll, "dlss5_set_scale");
+    pfn_dlss5_set_gain = (PFN_dlss5_set_gain)GetProcAddress(hDll, "dlss5_set_gain");
+    pfn_dlss5_set_blend = (PFN_dlss5_set_blend)GetProcAddress(hDll, "dlss5_set_blend");
+
+    if (!pfn_dlss5_create || !pfn_dlss5_destroy || !pfn_dlss5_process_frame) {
+        nr_log("d5c_chain.dll missing exports; falling back to TCP");
+        FreeLibrary(hDll);
+        return;
+    }
+
+    g_chain_dll = hDll;
+
+    const char *weights = getenv("NR_LAYER_WEIGHTS");
+    const char *shaders = getenv("NR_LAYER_SHADERS");
+    const char *scale_s = getenv("NR_LAYER_SCALE");
+    const char *gain_s = getenv("NR_LAYER_GAIN");
+    const char *blend_s = getenv("NR_LAYER_BLEND");
+
+    float scale = scale_s ? (float)atof(scale_s) : 1.0f;
+    float gain = gain_s ? (float)atof(gain_s) : 1.0f;
+    float blend = blend_s ? (float)atof(blend_s) : 1.0f;
+
+    g_engine = pfn_dlss5_create(weights, shaders, scale, gain, blend);
+    if (!g_engine) {
+        nr_log("dlss5_create failed; falling back to TCP");
+        FreeLibrary(g_chain_dll);
+        g_chain_dll = NULL;
+        return;
+    }
+
+    g_inprocess_active = 1;
+    nr_log("in-process DLSS 5 active (TCP bypassed, scale=%.2f gain=%.2f blend=%.2f)",
+           scale, gain, blend);
 }
 
 /* ------------------------------------------------------------------ */
@@ -419,6 +531,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
         if (ui_mask)
             nr_log("[nr_layer] ui mask on: the first present after the trigger "
                  "is kept to find what held still");
+        ensure_inprocess();
     }
     return r;
 }
@@ -925,6 +1038,24 @@ static int process_frame(device_data *data, swapchain_data *chain,
             fclose(file);
         }
     }
+
+    /* In-process DLSS 5 engine execution: bypass TCP socket entirely */
+    ensure_inprocess();
+    if (g_inprocess_active && pfn_dlss5_process_frame && g_engine) {
+        int r = pfn_dlss5_process_frame(g_engine, chain->extent.width, chain->extent.height,
+                                        data->mapped, data->mapped, (long)frame_counter);
+        if (r == 0) {
+            if (data->result && data->result_size >= needed) {
+                memcpy(data->result, data->mapped, (size_t)needed);
+            }
+            dump_capture(capture_out_path, header, (const unsigned char *)data->mapped, needed);
+            nr_log("[nr_layer] in-process processed %ux%u (frame %lu)",
+                   chain->extent.width, chain->extent.height, frame_counter);
+            return 0;
+        }
+        nr_log("[nr_layer] in-process process_frame returned %d; trying TCP fallback", r);
+    }
+
     /* No daemon configured: capture-only mode (frame passes through). */
     if (!nr_port) return -1;
     if (masked) {
@@ -990,6 +1121,20 @@ static int reproc_changed(device_data *data)
 /* Send the held raw frame to the daemon; reply lands in data->result. */
 static int resend_raw(device_data *data, swapchain_data *chain)
 {
+    ensure_inprocess();
+    if (g_inprocess_active && pfn_dlss5_process_frame && g_engine) {
+        const char *gain_s = getenv("NR_LAYER_GAIN");
+        if (gain_s && pfn_dlss5_set_gain) {
+            pfn_dlss5_set_gain(g_engine, (float)atof(gain_s));
+        }
+        int r = pfn_dlss5_process_frame(g_engine, chain->extent.width, chain->extent.height,
+                                        data->raw, data->result, (long)frame_counter);
+        if (r == 0) {
+            nr_log("[nr_layer] in-process reprocessed held raw frame (live knob turn)");
+            return 0;
+        }
+    }
+
     uint32_t header[4] = { 0x304E524Eu, chain->extent.width,
                            chain->extent.height, (uint32_t)chain->format };
     if (exchange(header, sizeof header, data->raw, (size_t)data->raw_size,
@@ -1231,6 +1376,14 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
         InitializeCriticalSection(&g_lock);
         g_lock_ready = 1;
     } else if (reason == DLL_PROCESS_DETACH) {
+        if (g_engine && pfn_dlss5_destroy) {
+            pfn_dlss5_destroy(g_engine);
+            g_engine = NULL;
+        }
+        if (g_chain_dll) {
+            FreeLibrary(g_chain_dll);
+            g_chain_dll = NULL;
+        }
         if (g_lock_ready) { DeleteCriticalSection(&g_lock); g_lock_ready = 0; }
     }
     return TRUE;

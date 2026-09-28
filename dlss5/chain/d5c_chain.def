@@ -1,0 +1,7 @@
+EXPORTS
+    dlss5_create
+    dlss5_destroy
+    dlss5_process_frame
+    dlss5_set_scale
+    dlss5_set_gain
+    dlss5_set_blend

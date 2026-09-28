@@ -73,12 +73,24 @@ add_library(d5c_chain STATIC
     recorder.cpp
     recorder_blocks.cpp
     prof.cpp
-    engine.cpp)
+    engine.cpp
+    chain_c_api.cpp)
 add_dependencies(d5c_chain d5c_shaders)
 
 target_include_directories(d5c_chain PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} "${VULKAN_SDK}/Include")
 target_link_directories(d5c_chain PUBLIC "${VULKAN_SDK}/Lib")
 target_link_libraries(d5c_chain PUBLIC vulkan-1)
+
+# Shared library target producing d5c_chain.dll exporting the C ABI
+add_library(d5c_chain_dll SHARED chain_dll.cpp d5c_chain.def)
+set_target_properties(d5c_chain_dll PROPERTIES
+    OUTPUT_NAME "d5c_chain"
+    ARCHIVE_OUTPUT_NAME "d5c_chain_import")
+target_include_directories(d5c_chain_dll PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} "${VULKAN_SDK}/Include")
+target_link_directories(d5c_chain_dll PUBLIC "${VULKAN_SDK}/Lib")
+target_link_libraries(d5c_chain_dll PRIVATE d5c_chain vulkan-1)
+add_dependencies(d5c_chain_dll d5c_shaders)
+
 
 # d5c_stage_shaders(<target>): copy the 18 spv next to the consumer exe.
 # The spv dir travels via a global property: CMAKE_CURRENT_BINARY_DIR inside a

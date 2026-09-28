@@ -11,3 +11,11 @@ Hardware: Intel Arc Pro B50 (Vulkan 1.4, Windows 11 VM)
 [2026-09-27 14:11] SCALE EXPLORATION: Tested scale 0.33 (640x384 internal grid) -> 125.5 ms GPU (7.08 FPS, 8.5x speedup over baseline). 600x400 scale 0.50 -> 68.4 ms GPU (12.71 FPS).
 [2026-09-27 14:35] Stage 2.4 PAUSED: Quota limit reached (reset in progress). Branch `master` is clean, all tests passing. Next action when resumed: launch Residual Fusion Engineer to fuse dEw into GEMM epilogue.
 [2026-09-27 19:14] Stage 2.4 COMPLETE: Fused Residual Add (dEw) into GEMM Epilogue (branch perf-stage2-fuse-residual). Added EPI_RESIDUAL_FP32/F16 in gemm.comp with push constant scalar layout alignment (88 bytes). Eliminated 34 dEw kernel dispatches per frame (114 -> 80) and 34 memory barriers. ew GPU time dropped 10.50 ms -> 5.03 ms (-52%). 1080p scale 0.50 GPU time 256.0 ms -> 247.8 ms (3.72 FPS, 8.2 ms saved). Validation PASS bit-exact to 6 decimal places (meandiff: 0.008265, 0.007924, 0.008648).
+[2026-09-27 19:31] Stage 3.1 COMPLETE: In-Process DLSS 5 Engine Integration & TCP Elimination (branch perf-stage3-inprocess).
+- Created clean C ABI dlss5/chain/chain_c_api.h and chain_c_api.cpp exposing dlss5_create, dlss5_destroy, dlss5_process_frame, dlss5_set_scale, dlss5_set_gain, dlss5_set_blend.
+- Updated dlss5/chain/CMakeLists.txt to include chain_c_api.cpp in d5c_chain static library and added d5c_chain_dll target with clean exports via d5c_chain.def.
+- Updated dlss5/m11-layer/nr_layer_win.c with dynamic loading of d5c_chain.dll and in-process execution on host-visible staging buffer, completely eliminating loopback TCP sockets, connect/send/recv overhead, and daemon dependency (with seamless fallback).
+- Preserves native game alpha channel for vendor parity during in-place buffer processing.
+- Verified builds: dlss5\m11d\build.cmd (exit code 0), dlss5\m11-layer\build.cmd (exit code 0).
+- Validation PASS: selftest bit-exact to 6 decimal places (meandiff: 0.008265, 0.007924, 0.008648).
+

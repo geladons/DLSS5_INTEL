@@ -20,6 +20,7 @@ if not errorlevel 1 (
     if errorlevel 1 ( set FINAL=1 & goto :done )
     if not exist "%BUILD%\Release\m11d.exe" ( set FINAL=1 & goto :done )
     copy /y "%BUILD%\*.spv" "%BUILD%\Release\" >nul
+    if exist "%BUILD%\chain\Release\d5c_chain.dll" copy /y "%BUILD%\chain\Release\d5c_chain.dll" "%BUILD%\Release\" >nul
     set FINAL=0
     goto :done
 )
@@ -35,6 +36,7 @@ if not exist "%BUILDNM%\m11d.exe" ( set FINAL=1 & goto :done )
 if not exist "%BUILD%\Release" mkdir "%BUILD%\Release"
 copy /y "%BUILDNM%\m11d.exe" "%BUILD%\Release\" >nul
 copy /y "%BUILDNM%\*.spv" "%BUILD%\Release\" >nul
+if exist "%BUILDNM%\chain\d5c_chain.dll" copy /y "%BUILDNM%\chain\d5c_chain.dll" "%BUILD%\Release\" >nul
 set FINAL=0
 
 :done

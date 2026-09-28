@@ -21,6 +21,8 @@ if not errorlevel 1 (
     if not exist "%BUILD%\Release\nr_layer_win.dll" ( set FINAL=1 & goto :done )
     rem manifest sits next to the dll; library_path is relative to the json
     copy /y "%SRC%\VkLayer_dlssnr_win.json" "%BUILD%\Release\" >nul
+    if exist "%REPO%\dlss5\m11d\build\Release\d5c_chain.dll" copy /y "%REPO%\dlss5\m11d\build\Release\d5c_chain.dll" "%BUILD%\Release\" >nul
+    if exist "%REPO%\dlss5\m11d\build\Release\*.spv" copy /y "%REPO%\dlss5\m11d\build\Release\*.spv" "%BUILD%\Release\" >nul
     set FINAL=0
     goto :done
 )
@@ -36,6 +38,8 @@ if not exist "%BUILDNM%\nr_layer_win.dll" ( set FINAL=1 & goto :done )
 if not exist "%BUILD%\Release" mkdir "%BUILD%\Release"
 copy /y "%BUILDNM%\nr_layer_win.dll" "%BUILD%\Release\" >nul
 copy /y "%SRC%\VkLayer_dlssnr_win.json" "%BUILD%\Release\" >nul
+if exist "%REPO%\dlss5\m11d\build\Release\d5c_chain.dll" copy /y "%REPO%\dlss5\m11d\build\Release\d5c_chain.dll" "%BUILD%\Release\" >nul
+if exist "%REPO%\dlss5\m11d\build\Release\*.spv" copy /y "%REPO%\dlss5\m11d\build\Release\*.spv" "%BUILD%\Release\" >nul
 set FINAL=0
 
 :done
