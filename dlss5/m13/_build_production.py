@@ -91,9 +91,12 @@ MsgBox "Python 3.10+ not found." & vbCrLf & _
 
 LAUNCHER_CMD = (
     "@echo off\r\n"
-    "rem Fallback launcher: hand over to the console-free VBS launcher and\r\n"
-    "rem exit at once (this window flashes for a split second only).\r\n"
-    "start \"\" wscript.exe //nologo \"%~dp0DLSS5 Manager.vbs\"\r\n")
+    "setlocal\r\n"
+    "cd /d \"%~dp0\"\r\n"
+    "set \"PY=%LOCALAPPDATA%\\Programs\\Python\\Python312\\pythonw.exe\"\r\n"
+    "if not exist \"%PY%\" set \"PY=pythonw.exe\"\r\n"
+    "start \"DLSS 5 Manager\" \"%PY%\" \"%~dp0m13\\m13.pyw\"\r\n"
+    "exit /b 0\r\n")
 
 
 README = """DLSS 5 Manager - production bundle
@@ -216,6 +219,8 @@ def main():
     with open(os.path.join(DEST, "DLSS5 Manager.vbs"), "w", newline="") as f:
         f.write(LAUNCHER_VBS.replace("\n", "\r\n"))
     with open(os.path.join(DEST, "M13.cmd"), "w", newline="") as f:
+        f.write(LAUNCHER_CMD)
+    with open(os.path.join(DEST, "DLSS 5 Manager.cmd"), "w", newline="") as f:
         f.write(LAUNCHER_CMD)
     with open(os.path.join(DEST, "README.txt"), "w", newline="\r\n",
               encoding="utf-8") as f:
