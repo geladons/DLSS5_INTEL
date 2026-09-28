@@ -1146,13 +1146,6 @@ static int process_frame(device_data *data, swapchain_data *chain,
         memcpy(data->outgoing, data->mapped, (size_t)needed);
         uint32_t held = settled(data->mapped, data->earlier, pixels,
                                 data->outgoing + needed);
-        if (held >= (uint32_t)((uint64_t)pixels * 85 / 100)) {
-            // Menu / static screen detected: preserve native resolution
-            memcpy(data->earlier, data->mapped, (size_t)needed);
-            data->have_earlier = 1;
-            data->earlier_size = needed;
-            return 1;
-        }
         masked = mask_worth_sending(held, pixels);
         nr_log("[nr_layer] %u%% of the frame held still; ui mask %s",
              100u * held / pixels, masked ? "sent" : "refused");

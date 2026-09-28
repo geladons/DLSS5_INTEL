@@ -117,8 +117,9 @@ def _set_noactivate(hwnd, on=True):
 
 def _free_cursor():
     """Force the OS cursor out of the game's grip: release the clip
-    rectangle, raise the show counter, set a normal arrow."""
+    rectangle, release capture, raise the show counter, set a normal arrow."""
     try:
+        _u32.ReleaseCapture()
         _u32.ClipCursor(None)
         for _ in range(10):
             if _u32.ShowCursor(True) >= 0:
@@ -126,6 +127,24 @@ def _free_cursor():
         arrow = _u32.LoadCursorW(None, IDC_ARROW)
         if arrow:
             _u32.SetCursor(arrow)
+
+        # Also release clipping, capture, and unhide cursor on the foreground game thread
+        fg = _u32.GetForegroundWindow()
+        if fg:
+            fg_tid = _u32.GetWindowThreadProcessId(fg, None)
+            cur_tid = ctypes.windll.kernel32.GetCurrentThreadId()
+            if fg_tid and fg_tid != cur_tid:
+                if _u32.AttachThreadInput(cur_tid, fg_tid, True):
+                    try:
+                        _u32.ReleaseCapture()
+                        _u32.ClipCursor(None)
+                        for _ in range(10):
+                            if _u32.ShowCursor(True) >= 0:
+                                break
+                        if arrow:
+                            _u32.SetCursor(arrow)
+                    finally:
+                        _u32.AttachThreadInput(cur_tid, fg_tid, False)
     except (ValueError, OSError):
         pass
 
@@ -478,7 +497,20 @@ class ControlOverlay:
         self.ctl.cfg.set("overlay_autopause", bool(self.ap_var.get()))
 
     def _save_freeze(self):
-        self.ctl.cfg.set("overlay_freeze", bool(self.fr_var.get()))
+        val = bool(self.fr_var.get())
+        self.ctl.cfg.set("overlay_freeze", val)
+        snap = self.ctl.snapshot()
+        mode = snap.get("active_mode")
+        game_mode = mode in ("dx9", "dx11", "dx12", "vulkan")
+        if val and game_mode:
+            if self.ctl.freeze_supported():
+                gamelaunch.freeze_set(True)
+                self._freeze_flags = True
+                self.freeze_lbl.config(text=tr("ov_freeze_on"), fg=AMBER)
+                self.on_log("[overlay] frame frozen (flags); knob turns reprocess the original")
+        else:
+            self.unfreeze()
+            self.freeze_lbl.config(text="")
 
     # ------------------------------------------------------------ status ---
     def set_status(self, text):

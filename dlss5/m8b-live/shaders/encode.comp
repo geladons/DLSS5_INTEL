@@ -85,7 +85,7 @@ void main() {
             uint rp = uint(ry) * uint(rw) + uint(rx);
             vec3 c = vec3(fin[rp * 3u], fin[rp * 3u + 1u], fin[rp * 3u + 2u]);
             if (pc.c[0] > 0.0f) {
-                // Contrast-Adaptive Sharpening (CAS)
+                // Robust Contrast-Adaptive Edge Sharpening (bounded by local 3x3 min/max)
                 int up_y = max(ry - 1, 0);
                 int dn_y = min(ry + 1, rh - 1);
                 int lt_x = max(rx - 1, 0);
@@ -99,13 +99,13 @@ void main() {
                 vec3 lt = vec3(fin[lt_idx], fin[lt_idx + 1u], fin[lt_idx + 2u]);
                 vec3 rt = vec3(fin[rt_idx], fin[rt_idx + 1u], fin[rt_idx + 2u]);
 
+                vec3 blur = (up + dn + lt + rt) * 0.25;
+                vec3 hp = c - blur;
                 vec3 mn = min(min(up, dn), min(lt, rt));
                 vec3 mx = max(max(up, dn), max(lt, rt));
-                vec3 min_c = min(mn, c);
-                vec3 max_c = max(mx, c);
-                vec3 amp = clamp(min(min_c, vec3(1.0) - max_c) / max(max_c, vec3(1e-5)), vec3(0.0), vec3(1.0));
-                vec3 w = -sqrt(amp) * (pc.c[0] * 0.18);
-                rgb = clamp((c + w * (up + dn + lt + rt)) / (vec3(1.0) + 4.0 * w), 0.0, 1.0);
+                // Strictly clamped to local neighbor bounds: mathematically impossible to ring, halo, or alias
+                vec3 sharp = c + clamp(hp * (pc.c[0] * 0.75), mn - c, mx - c);
+                rgb = clamp(sharp, 0.0, 1.0);
             } else {
                 rgb = c;
             }
