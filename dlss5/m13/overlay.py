@@ -179,7 +179,6 @@ def _force_foreground(hwnd):
         if fg_tid and fg_tid != cur_tid:
             attached = bool(_u32.AttachThreadInput(cur_tid, fg_tid, True))
         try:
-            _u32.ShowWindow(hwnd, SW_RESTORE)
             _u32.BringWindowToTop(hwnd)
             _u32.SetForegroundWindow(hwnd)
             _u32.SetActiveWindow(hwnd)
@@ -204,16 +203,10 @@ class ControlOverlay:
         self.win.attributes("-topmost", True)
         self.win.attributes("-alpha", 0.95)
         self.win.configure(bg=BG, highlightthickness=1,
-                           highlightbackground=ACCENT)
+                           highlightbackground=ACCENT, cursor="arrow")
         self.win.resizable(False, False)
         self.win.protocol("WM_DELETE_WINDOW", self.hide)
         self.win.withdraw()
-        try:
-            self.win.update_idletasks()
-            hwnd = int(self.win.wm_frame(), 16)
-            _set_noactivate(hwnd, True)
-        except (ValueError, tk.TclError):
-            pass
         self._after_id = None
         self._drag = None
         self._frozen_pid = None      # fallback freeze: suspended game pid
@@ -566,18 +559,16 @@ class ControlOverlay:
 
     # ------------------------------------------------------- focus / cursor
     def _take_focus(self):
-        """Maintain WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW styles.
-        Never steal Windows foreground focus from the game so exclusive and
-        borderless fullscreen games never minimize. Release cursor and run
-        keeper loop while visible."""
-        try:
-            hwnd = int(self.win.wm_frame(), 16)
-            _set_noactivate(hwnd, True)
-        except (ValueError, tk.TclError):
-            pass
+        _u32.ReleaseCapture()
+        _u32.ClipCursor(None)
         _free_cursor()
+        self.win.configure(cursor="arrow")
+        self.win.attributes("-topmost", True)
+        self.win.lift()
+        self.win.focus_set()
         self._warp_cursor()
         self._focus_mode = True
+        self.win.after(100, _free_cursor)
         self.win.after(350, _free_cursor)
         self.win.after(700, _free_cursor)
         self._cursor_keeper()
@@ -602,18 +593,10 @@ class ControlOverlay:
         self.win.after(150, self._cursor_keeper)
 
     def _return_focus(self):
-        if not self._focus_mode:
-            return
         self._focus_mode = False
-        try:
-            hwnd = int(self.win.wm_frame(), 16)
-            _set_noactivate(hwnd, True)
-        except (ValueError, tk.TclError, OSError):
-            pass
         if self._game_hwnd:
             try:
                 if _u32.GetForegroundWindow() != self._game_hwnd:
-                    _u32.ShowWindow(self._game_hwnd, SW_RESTORE)
                     _u32.SetForegroundWindow(self._game_hwnd)
             except (ValueError, OSError):
                 pass
@@ -636,58 +619,59 @@ class ControlOverlay:
         snap = self.ctl.snapshot()
         mode = snap.get("active_mode")
         game_mode = mode in ("dx9", "dx11", "dx12", "vulkan")
-        # remember the game window so hide() can hand the foreground back
+
+        # Remember the game window so hide() can hand the foreground back
         pid = self.ctl.active_game_pid()
         if pid:
             self._game_hwnd = hwnd_for_pid(pid)
-        self.win.deiconify()
-        self.win.lift()
-        try:
-            hwnd = int(self.win.wm_frame(), 16)
-            _set_noactivate(hwnd, True)
-        except (ValueError, tk.TclError):
-            hwnd = None
-        if self.ctl.cfg.get("overlay_focus"):
-            self._take_focus()
         else:
-            if hwnd is not None:
-                _set_noactivate(hwnd, True)
-            _free_cursor()
-            self._warp_cursor()
-            self.win.after(350, _free_cursor)
-            self.win.after(700, _free_cursor)
-            self._cursor_keeper()
-        # Photo mode: freeze the frame so knob turns reprocess the original.
-        if self.ctl.cfg.get("overlay_freeze") and game_mode:
-            if self.ctl.freeze_supported():
-                gamelaunch.freeze_set(True)
-                self._freeze_flags = True
-                self.freeze_lbl.config(text=tr("ov_freeze_on"), fg=AMBER)
-                self.on_log("[overlay] frame frozen (flags); knob turns "
-                            "reprocess the original")
-            elif not gamelaunch.freeze_active() and pid:
-                ok, msg = suspend_pid(pid)
-                self._frozen_pid = pid if ok else None
-                self.freeze_lbl.config(text=tr("ov_freeze_suspend"),
-                                       fg=AMBER)
-                self.on_log("[overlay] %s" % msg)
-        elif game_mode:
-            self.freeze_lbl.config(text="")
-        # optional: pause processing the moment the overlay opens (not
-        # combined with the freeze - a frozen frame IS the preview)
-        if self.ap_var.get() and game_mode and not self._freeze_flags \
-                and not gamelaunch.mode_paused(mode):
+            try:
+                fg = _u32.GetForegroundWindow()
+                ov_hwnd = int(self.win.wm_frame(), 16)
+                if fg and fg != ov_hwnd:
+                    self._game_hwnd = fg
+            except Exception:
+                pass
+
+        # Always freeze the game on open as requested (presentation layer stands still)
+        gamelaunch.freeze_set(True)
+        self._freeze_flags = True
+        self.freeze_lbl.config(text=tr("ov_freeze_on"), fg=AMBER)
+        self.on_log("[overlay] frame frozen; mouse focus given to overlay")
+
+        # Free the cursor, release capture on both threads, set arrow cursor
+        _u32.ReleaseCapture()
+        _u32.ClipCursor(None)
+        _free_cursor()
+
+        # Display and focus the overlay without minimizing fullscreen games.
+        # overrideredirect(True) + WS_EX_TOPMOST + focus_set() lets Tkinter
+        # receive mouse clicks, drags, and key events, keeping the cursor visible.
+        self.win.deiconify()
+        self.win.configure(cursor="arrow")
+        self.win.attributes("-topmost", True)
+        self.win.lift()
+        self.win.focus_set()
+        self._focus_mode = True
+
+        self._warp_cursor()
+        self.win.after(100, _free_cursor)
+        self.win.after(350, _free_cursor)
+        self.win.after(700, _free_cursor)
+        self._cursor_keeper()
+
+        if self.ap_var.get() and game_mode and not gamelaunch.mode_paused(mode):
             self.ctl.submit(self.ctl.processing_toggle)
             self.on_log("[overlay] auto-paused (%s)" % mode)
+
         self.win.after(STATUS_MS, self._refresh)
 
     def unfreeze(self):
         """Release any freeze; called on hide AND on manager close."""
+        gamelaunch.freeze_set(False)
         if self._freeze_flags:
-            gamelaunch.freeze_set(False)
             self._freeze_flags = False
-            self.on_log("[overlay] freeze released - game continues with "
-                        "the new settings")
+            self.on_log("[overlay] freeze released - game continues")
         if self._frozen_pid is not None:
             ok, msg = resume_pid(self._frozen_pid)
             self.on_log("[overlay] %s" % msg)

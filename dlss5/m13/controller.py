@@ -45,6 +45,7 @@ class StateMonitor(threading.Thread):
         self._stop_ev = threading.Event()
         self._lock = threading.Lock()
         self._snap = {}
+        self._prev_running_games = set()
 
     def stop(self):
         self._stop_ev.set()
@@ -112,6 +113,30 @@ class StateMonitor(threading.Thread):
         snap["sharpness"] = ctl.cfg.get("sharpness")
         snap["active_mode"] = self._active_mode(snap)
         snap["active_game"] = self._active_game(snap)
+
+        currently_running = {exe for exe, g in games.items() if g.get("running")}
+        exited_games = self._prev_running_games - currently_running
+        if exited_games:
+            has_running_x86 = any(
+                g.get("arch") == "x86"
+                for exe, g in games.items()
+                if g.get("running")
+            )
+            if not has_running_x86 and ctl.daemon.running:
+                msg = "[controller] game exited; stopping x86 background daemon"
+                print(msg, flush=True)
+                if ctl.worker and getattr(ctl.worker, "on_result", None):
+                    try:
+                        ctl.worker.on_result(True, msg)
+                    except Exception:
+                        pass
+                ctl.daemon.stop()
+                snap["daemon_pid"] = None
+                snap["daemon_gain"] = None
+                snap["daemon_frames"] = None
+                snap["daemon_err"] = None
+        self._prev_running_games = currently_running
+
         return snap
 
     @staticmethod

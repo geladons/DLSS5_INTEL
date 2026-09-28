@@ -401,29 +401,7 @@ int main(int argc, char** argv) {
             ++frameCounter;
             auto t0 = std::chrono::steady_clock::now();
 
-            if (frameGen && havePrev && (frameCounter % 2 != 0)) {
-                // Optical flow interpolation on odd frames (0.39 ms GPU)!
-                bool ok = engine.interpolateFrame(w, h, prevProcessedBuf.data(), inBuf.data(), outBuf.data(), 0.5f, &st);
-                double wall = std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - t0).count();
-                if (ok) {
-                    // Apply UI mask and alpha restore
-                    for (size_t i = 0; i < px; ++i) {
-                        if (masked && maskBuf[i]) std::memcpy(&outBuf[i * 4], &inBuf[i * 4], 4);
-                        else outBuf[i * 4 + 3] = inBuf[i * 4 + 3];
-                    }
-                    if (prevProcessedBuf.size() < px * 4) prevProcessedBuf.resize(px * 4);
-                    std::memcpy(prevProcessedBuf.data(), outBuf.data(), px * 4);
-                    if (!writeAll(s, outBuf.data(), px * 4))
-                        std::fprintf(stderr, "[m11d] reply write failed\n");
-                    std::printf("[m11d] frame %ld %ux%u INTERP in %.1f ms (gpu %.2f)\n",
-                                frameCounter, w, h, wall, st.gpuTotalMs);
-                    closesocket(s);
-                    continue;
-                }
-            }
-
-            // Even frame: regular engine.processFrame()
+            // Clean forward processing for every frame via DLSS 5 engine
             bool ok = engine.processFrame(inBuf.data(), outBuf.data(), frameCounter, &st);
             double wall = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - t0).count();

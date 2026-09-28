@@ -253,4 +253,90 @@ assert overlay.WS_EX_NOACTIVATE == 0x08000000, "WS_EX_NOACTIVATE incorrect"
 assert overlay.WS_EX_TOOLWINDOW == 0x00000080, "WS_EX_TOOLWINDOW incorrect"
 print("  overlay style constants verified [PASS]")
 
-print("\nALL STAGE 5 UNIT TESTS PASSED SUCCESSFULLY!")
+print("\n=== 7. Testing Task B: Overlay Mouse Focus & Freeze, UI Restoration, and Daemon Lifecycle ===")
+# 7.1 Test Overlay show/hide freeze lifecycle and cursor configuration
+import tkinter as tk
+tk_root = tk.Tk()
+tk_root.withdraw()
+try:
+    with tempfile.TemporaryDirectory() as td:
+        c = Config(os.path.join(td, "ov_cfg.json"))
+        c_ctl = M13Controller(c)
+        try:
+            ov = overlay.ControlOverlay(tk_root, c_ctl, on_log=lambda m: None)
+            assert ov.win.cget("cursor") == "arrow", "Overlay window cursor != arrow"
+
+            # Test show() triggers freeze_set(True) and focus_set
+            ov.show()
+            assert gamelaunch.freeze_active() is True, "gamelaunch.freeze_active() not True after show()"
+            assert ov._freeze_flags is True, "ov._freeze_flags not True after show()"
+            assert ov._focus_mode is True, "ov._focus_mode not True after show()"
+            print("  overlay.show() triggers freeze_set(True), arrow cursor, and sets focus [PASS]")
+
+            # Test hide() triggers freeze_set(False) and clears focus_mode
+            ov.hide()
+            assert gamelaunch.freeze_active() is False, "gamelaunch.freeze_active() not False after hide()"
+            assert ov._freeze_flags is False, "ov._freeze_flags not False after hide()"
+            assert ov._focus_mode is False, "ov._focus_mode not False after hide()"
+            print("  overlay.hide() unfreezes game and clears focus [PASS]")
+        finally:
+            c_ctl.shutdown()
+finally:
+    tk_root.destroy()
+
+# 7.2 Test StateMonitor auto-stops daemon when running game process terminates
+with tempfile.TemporaryDirectory() as td:
+    dummy_x86 = os.path.join(td, "test_x86.exe")
+    with open(dummy_x86, "w") as f:
+        f.write("dummy")
+    c = Config(os.path.join(td, "daemon_exit_cfg.json"))
+    c.set("games", {
+        dummy_x86: {"mode": "dx9", "arch": "x86", "name": "TestX86"}
+    })
+    c_ctl = M13Controller(c)
+    try:
+        from unittest.mock import PropertyMock
+        with patch.object(type(c_ctl.daemon), "running", new_callable=PropertyMock, return_value=True), \
+             patch.object(c_ctl.daemon, "stop") as mock_dstop:
+            # First pass: game is running (PID 9999)
+            with patch("m13.controller.find_pid", return_value=9999):
+                snap = c_ctl.monitor._collect()
+                assert snap["games"][dummy_x86]["running"] is True
+                mock_dstop.assert_not_called()
+
+            # Second pass: game has terminated (find_pid returns None)
+            with patch("m13.controller.find_pid", return_value=None):
+                snap = c_ctl.monitor._collect()
+                assert snap["games"][dummy_x86]["running"] is False
+                mock_dstop.assert_called_once()
+                assert snap["daemon_pid"] is None, "snap['daemon_pid'] should be None after auto-stop"
+                print("  StateMonitor._collect auto-stops x86 daemon when game exits [PASS]")
+    finally:
+        c_ctl.shutdown()
+
+# 7.3 Test UI restoration method logic
+class DummyUI:
+    def __init__(self):
+        self.root = MagicMock()
+        self.games_tab = MagicMock()
+        self._on_focus_in = ui.ManagerUI._on_focus_in.__get__(self, DummyUI)
+
+from m13 import ui
+dummy_ui = DummyUI()
+# When window dimensions shrunk below minimums (e.g. 800x600 after GTA IV fullscreen)
+dummy_ui.root.winfo_width.return_value = 800
+dummy_ui.root.winfo_height.return_value = 600
+dummy_ui._on_focus_in()
+dummy_ui.root.geometry.assert_called_with("1024x760")
+dummy_ui.root.update_idletasks.assert_called_once()
+dummy_ui.games_tab.cards_fill.assert_called_once()
+print("  ui._on_focus_in detects shrunken window and restores 1024x760 layout [PASS]")
+
+# 7.4 Test Screen Mode strings and clarity
+from m13.i18n import tr
+s_note = tr("screen_note")
+assert "m8blive.exe" in s_note, "screen_note missing m8blive.exe reference"
+assert "m11d.exe" in s_note, "screen_note missing m11d.exe reference"
+print("  screen_note clarity for standalone direct DDA overlay verified [PASS]")
+
+print("\nALL STAGE 5 & TASK B UNIT TESTS PASSED SUCCESSFULLY!")

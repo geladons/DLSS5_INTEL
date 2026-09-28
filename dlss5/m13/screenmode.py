@@ -1,15 +1,17 @@
 # ============================================================================
 # m13.screenmode - the m8b-live overlay (screen mode) lifecycle.
 #
-# Screen mode = fullscreen click-through overlay processing the DDA capture
-# of the desktop. Owner-visible runs MUST pass --echo-free 0 (the owner
-# watches through the Moonlight/Sunshine stream; WDA_EXCLUDEFROMCAPTURE
-# would hide the overlay from them - DEV_STATE.md).
+# Standalone direct DDA overlay (m8blive.exe) capturing and processing
+# desktop frames directly on the GPU via Vulkan.
 #
-# NOTE: m8blive self-restarts its loop when hidden/shown (CTRL+ALT+X) - that
-# is normal, do not fight it. Gain/blend in screen mode are LIVE: m8blive
-# polls KNOB_FILE once per processed frame, so the manager retunes it by
-# rewriting the file - NO restart (a restart costs the ~30 s weights upload).
+# ARCHITECTURE CLARITY:
+# Screen mode is 100% standalone and does NOT use the x86 bridge daemon
+# (m11d.exe) or TCP network loops. It processes frames locally on the GPU.
+# Because m8blive and m11d both reserve dedicated VRAM arenas, starting screen
+# mode automatically stops the x86 daemon to prevent VRAM exhaustion.
+#
+# Owner-visible runs pass --echo-free 0 (owner watches through Moonlight/
+# Sunshine stream; WDA_EXCLUDEFROMCAPTURE would hide the overlay from them).
 # ============================================================================
 import os
 

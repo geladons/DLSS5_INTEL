@@ -76,8 +76,9 @@ class ManagerUI:
             pass
         self.root.title(tr("app_title"))
         self.root.geometry("1024x760")
-        self.root.minsize(900, 640)
+        self.root.minsize(1024, 760)
         self.root.configure(bg=BG)
+        self.root.bind("<FocusIn>", self._on_focus_in)
         self.logq = queue.Queue()
         self.hub = LogHub(self._enqueue_log)
         self._egg_clicks = 0
@@ -337,6 +338,8 @@ class ManagerUI:
     def _tab_screen(self, nb):
         t = ttk.Frame(nb, padding=10)
         nb.add(t, text=tr("tab_screen"))
+        tk.Label(t, text="Direct DDA Vulkan Overlay (m8blive.exe) - Direct GPU Pipeline (No TCP Daemon)",
+                 bg=BG, fg=ACCENT, font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(0, 4))
         ttk.Label(t, text=tr("screen_note"),
                   style="Muted.TLabel", wraplength=900,
                   justify="left").pack(anchor="w")
@@ -593,6 +596,17 @@ class ManagerUI:
 
     def log(self, tag, msg):
         self.logq.put((tag, msg))
+
+    def _on_focus_in(self, event=None):
+        """When returning to desktop from an exclusive fullscreen game (e.g. 800x600),
+        Windows may shrink the UI window. Restore 1024x760 immediately."""
+        if event is not None and event.widget != self.root:
+            return
+        if self.root.winfo_width() < 1000 or self.root.winfo_height() < 740:
+            self.root.geometry("1024x760")
+            self.root.update_idletasks()
+            if hasattr(self, "games_tab") and self.games_tab:
+                self.games_tab.cards_fill()
 
     # ----------------------------------------------------------- startup ---
     def _on_close(self):

@@ -1111,7 +1111,7 @@ static uint32_t settled(const unsigned char *now, const unsigned char *before,
 
 static int mask_worth_sending(uint32_t held, uint32_t pixels)
 {
-    return held < (uint32_t)((uint64_t)pixels * 9 / 10) && held > pixels / 50;
+    return held > (pixels / 100);
 }
 
 /* NR_LAYER_CAPTURE_OUT: dump header+processed result for A/B stills. */
@@ -1184,7 +1184,7 @@ static int process_frame(device_data *data, swapchain_data *chain,
                 const uint32_t *native_px = (const uint32_t *)data->earlier;
                 uint32_t *out_px = (uint32_t *)data->mapped;
                 for (uint32_t i = 0; i < pixels; i++) {
-                    if (mask[i]) {
+                    if (mask[i] != 0) {
                         out_px[i] = native_px[i];
                     }
                 }

@@ -160,23 +160,7 @@ public:
 
         d5c::FrameStats stats{};
 
-        if (frameGenEnabled_ && havePrev_ && (frame_index % 2 != 0)) {
-            // Odd frame: Fast Optical Flow Interpolation (0.39 ms GPU time)!
-            bool ok = engine_.interpolateFrame(w, h, prevProcessed_.data(), inBytes, outBytes, 0.5f, &stats);
-            if (ok) {
-                if (prevProcessed_.size() < px * 4) {
-                    prevProcessed_.resize(px * 4);
-                }
-                std::memcpy(prevProcessed_.data(), outBytes, px * 4);
-                // Restore original game alpha channel
-                for (size_t i = 0; i < px; ++i) {
-                    outBytes[i * 4 + 3] = alphaBuf_[i];
-                }
-                return 0;
-            }
-        }
-
-        // Even frame (or first frame): Full DLSS 5 U-Net pass (~25 ms)
+        // Clean forward processing for every frame via DLSS 5 engine
         bool ok = engine_.processFrame(inBytes, outBytes, frame_index, &stats);
         if (ok) {
             if (prevProcessed_.size() < px * 4) {

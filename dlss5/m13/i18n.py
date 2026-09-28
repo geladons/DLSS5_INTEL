@@ -64,16 +64,17 @@ _S = {
               "and one very patient owner.",
         "ru": "ПАСХАЛКА: нейросеть обучена на 10 000 часах GTA IV и одном "
               "очень терпеливом владельце."},
-    # ---- screen tab -------------------------------------------------------
     "screen_note": {
-        "en": "Fullscreen desktop overlay (watch it through your streaming "
-              "client). NOTE: the daemon and the screen overlay cannot run "
-              "together - each needs ~12 GB of VRAM, few GPUs can hold both. "
-              "Starting one stops the other automatically.",
-        "ru": "Полноэкранный оверлей рабочего стола (смотри через трансляцию "
-              "Moonlight). ВАЖНО: демон и оверлей экрана не живут вместе - "
-              "каждому нужно ~12 ГБ видеопамяти. При запуске одного второй "
-              "останавливается автоматически."},
+        "en": "Standalone direct DDA overlay (m8blive.exe) capturing desktop frames "
+              "directly on the GPU. Does NOT use the x86 bridge daemon (m11d.exe) or "
+              "TCP loopback. NOTE: The daemon and screen overlay cannot run together "
+              "due to VRAM exclusivity (~12 GB each). Starting screen mode automatically "
+              "stops the x86 daemon to free VRAM.",
+        "ru": "Автономный прямой DDA-оверлей (m8blive.exe) с прямым захватом "
+              "кадров рабочего стола через GPU. НЕ использует фоновый x86-демон "
+              "(m11d.exe) или сетевой TCP-сокет. ВАЖНО: Демон и оверлей экрана "
+              "не живут вместе из-за видеопамяти (~12 ГБ каждый). Запуск оверлея "
+              "автоматически останавливает x86-демон для освобождения VRAM."},
     "screen_start": {"en": "Start fullscreen overlay",
                      "ru": "Запустить оверлей экрана"},
     "screen_stop": {"en": "Stop", "ru": "Стоп"},
