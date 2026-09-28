@@ -36,7 +36,7 @@ BACKUP_SUFFIX = ".m13bak"
 MODE_DLLS = {
     "dx9":    ("d3d9.dll",),
     "dx11":   ("d3d11.dll", "dxgi.dll", "d3d10core.dll"),
-    "dx12":   ("dxgi.dll",),
+    "dx12":   ("dxgi.dll", "d5c_chain.dll"),
     "vulkan": (),     # nothing to deploy: the implicit layer self-loads
 }
 
@@ -44,7 +44,10 @@ MODE_DLLS = {
 def mode_dll_source(mode, arch, dll_name):
     """Source path for one dll of a mode. arch: 'x64' | 'x86'."""
     if mode == "dx12":
-        return M12_PROXY
+        if dll_name == "dxgi.dll":
+            return M12_PROXY
+        m12_dir = os.path.dirname(M12_PROXY)
+        return os.path.join(m12_dir, dll_name)
     dxvk_dir = paths.find("dxvk_x64" if arch == "x64" else "dxvk_x32")
     return os.path.join(dxvk_dir, dll_name)
 

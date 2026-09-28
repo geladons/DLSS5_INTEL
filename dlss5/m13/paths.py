@@ -41,9 +41,10 @@ _PROD = {
     "layer_x86":  ("runtime", "layer", "x86", "VkLayer_dlssnr_win32.json"),
     "weights":    ("weights",),
     "logs":       ("logs",),
-}
 _DEV = {
-    "m11d_exe":   ("dlss5", "m11d", "build-nmake", "m11d.exe"),
+    "m11d_exe":   ("dlss5", "m11d", "build", "Release", "m11d.exe")
+                  if os.path.exists(os.path.join(REPO, "dlss5", "m11d", "build", "Release", "m11d.exe"))
+                  else ("dlss5", "m11d", "build-nmake", "m11d.exe"),
     "m8b_exe":    ("dlss5", "m8b-live", "build", "Release", "m8blive.exe"),
     "dxvk_d3d9":  ("dlss5", "m11-layer", "dxvk", "x32", "d3d9.dll"),
     "dxvk_x32":   ("dlss5", "m11-layer", "dxvk", "x32"),

@@ -32,15 +32,19 @@ PKG_FILES = ["__init__.py", "config.py", "daemonctl.py", "deploy.py",
              "screenmode.py", "splash.py", "controller.py", "ui.py",
              "ui_games.py", "m13.pyw", "icon.ico"]
 
+_M11D_DIR = os.path.join(_DLSS5, "m11d", "build", "Release")
+if not os.path.exists(os.path.join(_M11D_DIR, "m11d.exe")):
+    _M11D_DIR = os.path.join(_DLSS5, "m11d", "build-nmake")
+
 # (source, dest-relative, glob-ish file list)
 ARTIFACTS = [
-    (os.path.join(_DLSS5, "m11d", "build-nmake"), ("runtime", "m11d"),
-     ["m11d.exe", "*.spv"]),
+    (_M11D_DIR, ("runtime", "m11d"),
+     ["m11d.exe", "d5c_chain.dll", "*.spv"]),
     (os.path.join(_DLSS5, "m8b-live", "build", "Release"), ("runtime", "m8b"),
      ["m8blive.exe", "*.spv"]),
     (os.path.join(_DLSS5, "m11-layer", "build", "Release"),
      ("runtime", "layer", "x64"),
-     ["nr_layer_win.dll", "VkLayer_dlssnr_win.json"]),
+     ["nr_layer_win.dll", "d5c_chain.dll", "VkLayer_dlssnr_win.json", "*.spv"]),
     (os.path.join(_DLSS5, "m11-layer", "x86"), ("runtime", "layer", "x86"),
      ["nr_layer_win32.dll", "VkLayer_dlssnr_win32.json"]),
     (os.path.join(_DLSS5, "m11-layer", "dxvk", "x32"),
@@ -50,7 +54,7 @@ ARTIFACTS = [
      ("runtime", "dxvk", "x64"),
      ["d3d9.dll", "d3d11.dll", "d3d10core.dll", "dxgi.dll"]),
     (os.path.join(_DLSS5, "m12-dxgi", "build", "Release"),
-     ("runtime", "m12"), ["m12_dxgi.dll"]),
+     ("runtime", "m12"), ["m12_dxgi.dll", "d5c_chain.dll", "*.spv"]),
 ]
 
 LAUNCHER_VBS = r'''' DLSS 5 Manager launcher: starts pythonw with NO console.
