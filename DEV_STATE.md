@@ -1,5 +1,13 @@
 # DEV_STATE.md - where we are (updated 2026-09-28 by Antigravity)
 
+## Stage 5: UI Presets, Frame Generation Controls & Packaging in DLSS 5 Manager (`m13`) (2026-09-28 COMPLETED)
+- Commit 2276a80: Full GUI and in-game overlay integration of all new performance capabilities.
+- `dlss5/m13/config.py`: added `scale` (default 0.50), `frame_gen` (default True), `sharpness` (default 0.8) to defaults and JSON persistence.
+- `dlss5/m13/i18n.py`: full English and Russian localization for scale presets (*Native 1.0, Quality 0.67, Balanced 0.58, Performance 0.50, Ultra Performance 0.33*), Frame Generation toggle, and RCAS Sharpness.
+- `dlss5/m13/controller.py`: added `set_scale()`, `set_framegen()`, `set_sharpness()` with environment variable propagation (`DLSS5_SCALE`, `DLSS5_FRAMEGEN`, `DLSS5_SHARPNESS`, `NR_LAYER_SCALE`, `M12_SCALE`), photo-mode frozen frame reprocessing, and live knob updates in screen mode.
+- `dlss5/m13/ui.py` & `overlay.py`: added Render Scale preset selector, Frame Generation interactive toggle, and RCAS Sharpness slider to both the main manager window and the in-game overlay (`CTRL+ALT+G`).
+- Test suite PASS: `test_stage5.py` ALL PASS, `_ui_smoke.py` ALL PASS against live daemon, Sunshine (PID 7608) untouched.
+
 ## Stage 4: GPU Frame Generation (FSR 3.1 / Optical Flow Interpolation) (2026-09-28 COMPLETED)
 - Specialized compute shader `dlss5/m8b-live/shaders/framegen.comp` (GLSL 450 -> SPIR-V Vulkan 1.3):
   - Fast bidirectional optical flow using hierarchical diamond search + subpixel luminance gradient refinement.
