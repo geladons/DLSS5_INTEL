@@ -2,24 +2,20 @@
 # m13.overlay - in-game control overlay (hotkey, default CTRL+ALT+G).
 # Frameless, always-on-top, semi-transparent panel centered over the screen.
 #
-# MOUSE (owner feedback: "the cursor never appears / clicks do nothing"):
-# while the panel is open it is a NORMAL activatable window (the NOACTIVATE
-# style is dropped and we take the foreground): the game loses focus, which
-# makes games release their hidden/confined cursor themselves (most
-# single-player titles also auto-pause on focus loss), and our clicks work.
-# We additionally ClipCursor(NULL) + ShowCursor to force the cursor out.
-# On hide the foreground goes back to the game window. Exclusive-fullscreen
-# games may MINIMIZE on focus loss - cfg "overlay_focus"=False restores the
-# old click-through behavior (keyboard-only).
+# MOUSE & NOACTIVATE:
+# The overlay window ALWAYS maintains WS_EX_TOPMOST | WS_EX_NOACTIVATE |
+# WS_EX_TOOLWINDOW styles. It never steals Windows foreground focus from the
+# game, so borderless and exclusive-fullscreen games NEVER minimize when the
+# overlay is opened. Clicks, drags, and selections on the overlay work cleanly
+# without activating the window, while _free_cursor() and _cursor_keeper()
+# keep the mouse cursor visible and free of game clipping rectangles.
 #
 # PHOTO MODE: open the overlay -> the frame FREEZES (the layer/proxy holds
 # the raw frame and re-blits its processed result, the game keeps running
-# underneath). Turn the gain knob -> NRCT gain push + reprocess flag bump ->
-# the SAME original frame is reprocessed and the frozen picture updates.
+# underneath). Turn the gain/blend/scale/sharpness knob -> knob push +
+# reprocess flag bump -> the SAME original frame is reprocessed and the frozen
+# picture updates with live results.
 # Close -> the freeze flag drops, the game continues with the new settings.
-# If the active game does not understand the flags (started outside the
-# manager, layer modes only), NtSuspendProcess is the fallback (no live
-# reprocess then).
 #
 # Threading: the overlay never does I/O itself. It renders ctl.snapshot()
 # (monitor thread) and routes every action through ctl.submit() (worker).
@@ -40,6 +36,7 @@ DEBOUNCE_MS = 250
 STATUS_MS = 500
 
 GWL_EXSTYLE = -20
+WS_EX_TOPMOST = 0x00000008
 WS_EX_NOACTIVATE = 0x08000000
 WS_EX_TOOLWINDOW = 0x00000080
 
@@ -109,13 +106,10 @@ class HotkeyPoller:
         tk_widget.after(self.poll_ms, self.poll)
 
 
-def _set_noactivate(hwnd, on):
+def _set_noactivate(hwnd, on=True):
     try:
         style = _u32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
-        if on:
-            style |= WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW
-        else:
-            style &= ~WS_EX_NOACTIVATE
+        style |= WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW
         _u32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style)
     except (ValueError, OSError):
         pass
@@ -195,6 +189,12 @@ class ControlOverlay:
         self.win.resizable(False, False)
         self.win.protocol("WM_DELETE_WINDOW", self.hide)
         self.win.withdraw()
+        try:
+            self.win.update_idletasks()
+            hwnd = int(self.win.wm_frame(), 16)
+            _set_noactivate(hwnd, True)
+        except (ValueError, tk.TclError):
+            pass
         self._after_id = None
         self._drag = None
         self._frozen_pid = None      # fallback freeze: suspended game pid
@@ -534,21 +534,18 @@ class ControlOverlay:
 
     # ------------------------------------------------------- focus / cursor
     def _take_focus(self):
-        """Become a NORMAL activatable window while open: the game loses
-        focus (releasing its cursor grip, often auto-pausing), our mouse
-        works. NOACTIVATE returns on hide. Games re-clip/re-hide the cursor
-        EVERY FRAME, so a keeper loop re-frees it while we are visible."""
+        """Maintain WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW styles.
+        Never steal Windows foreground focus from the game so exclusive and
+        borderless fullscreen games never minimize. Release cursor and run
+        keeper loop while visible."""
         try:
             hwnd = int(self.win.wm_frame(), 16)
+            _set_noactivate(hwnd, True)
         except (ValueError, tk.TclError):
-            return
-        _set_noactivate(hwnd, False)
-        _force_foreground(hwnd)
-        self.win.focus_force()
+            pass
         _free_cursor()
         self._warp_cursor()
         self._focus_mode = True
-        # games re-hide the cursor once on focus loss; assert it again
         self.win.after(350, _free_cursor)
         self.win.after(700, _free_cursor)
         self._cursor_keeper()
@@ -567,7 +564,7 @@ class ControlOverlay:
     def _cursor_keeper(self):
         """While the panel is open, keep the cursor free: FPS games re-apply
         ClipCursor/ShowCursor(false) on every frame, one-shot is not enough."""
-        if not self._focus_mode or not self.win.winfo_viewable():
+        if not self.win.winfo_viewable():
             return
         _free_cursor()
         self.win.after(150, self._cursor_keeper)
@@ -583,8 +580,9 @@ class ControlOverlay:
             pass
         if self._game_hwnd:
             try:
-                _u32.ShowWindow(self._game_hwnd, SW_RESTORE)
-                _u32.SetForegroundWindow(self._game_hwnd)
+                if _u32.GetForegroundWindow() != self._game_hwnd:
+                    _u32.ShowWindow(self._game_hwnd, SW_RESTORE)
+                    _u32.SetForegroundWindow(self._game_hwnd)
             except (ValueError, OSError):
                 pass
             self._game_hwnd = None
@@ -612,10 +610,21 @@ class ControlOverlay:
             self._game_hwnd = hwnd_for_pid(pid)
         self.win.deiconify()
         self.win.lift()
+        try:
+            hwnd = int(self.win.wm_frame(), 16)
+            _set_noactivate(hwnd, True)
+        except (ValueError, tk.TclError):
+            hwnd = None
         if self.ctl.cfg.get("overlay_focus"):
             self._take_focus()
         else:
-            _set_noactivate(int(self.win.wm_frame(), 16), True)
+            if hwnd is not None:
+                _set_noactivate(hwnd, True)
+            _free_cursor()
+            self._warp_cursor()
+            self.win.after(350, _free_cursor)
+            self.win.after(700, _free_cursor)
+            self._cursor_keeper()
         # Photo mode: freeze the frame so knob turns reprocess the original.
         if self.ctl.cfg.get("overlay_freeze") and game_mode:
             if self.ctl.freeze_supported():
@@ -624,13 +633,12 @@ class ControlOverlay:
                 self.freeze_lbl.config(text=tr("ov_freeze_on"), fg=AMBER)
                 self.on_log("[overlay] frame frozen (flags); knob turns "
                             "reprocess the original")
-            else:
-                if pid:
-                    ok, msg = suspend_pid(pid)
-                    self._frozen_pid = pid if ok else None
-                    self.freeze_lbl.config(text=tr("ov_freeze_suspend"),
-                                           fg=AMBER)
-                    self.on_log("[overlay] %s" % msg)
+            elif not gamelaunch.freeze_active() and pid:
+                ok, msg = suspend_pid(pid)
+                self._frozen_pid = pid if ok else None
+                self.freeze_lbl.config(text=tr("ov_freeze_suspend"),
+                                       fg=AMBER)
+                self.on_log("[overlay] %s" % msg)
         elif game_mode:
             self.freeze_lbl.config(text="")
         # optional: pause processing the moment the overlay opens (not

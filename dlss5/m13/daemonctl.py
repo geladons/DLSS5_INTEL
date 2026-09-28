@@ -20,6 +20,7 @@ CMD_SETGAIN = 1
 CMD_STATUS = 2
 CMD_SETBLEND = 3
 CMD_SETSCALE = 4
+CMD_SETFRAMEGEN = 5
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 47990
 
@@ -86,6 +87,10 @@ class M11dClient:
             raise DaemonError("scale %.2f out of range 0.20..1.5" % scale)
         payload = struct.unpack("<I", struct.pack("<f", float(scale)))[0]
         return self._roundtrip(CMD_SETSCALE, payload)
+
+    def set_framegen(self, enable):
+        """Live frame generation toggle; next processed frame."""
+        return self._roundtrip(CMD_SETFRAMEGEN, 1 if enable else 0)
 
     def alive(self):
         """True only when an NRCT-speaking m11d answers (Sunshine doesn't)."""

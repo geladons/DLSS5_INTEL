@@ -31,9 +31,8 @@ DEFAULTS = {
     "screen_args": "",           # extra m8blive args for screen mode
     "overlay_autopause": False,  # pause processing when the overlay opens
     "overlay_freeze": True,      # FREEZE the frame while the overlay is open
-    "overlay_focus": True,       # give the overlay mouse focus (frees the
-                                 # game's cursor; exclusive-fullscreen games
-                                 # may minimize)
+    "overlay_focus": False,      # overlay uses WS_EX_NOACTIVATE without stealing focus;
+                                 # game never minimizes on overlay open
 }
 
 

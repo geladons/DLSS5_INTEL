@@ -139,6 +139,12 @@ int main(int argc, char** argv) {
     float gain = 1.0f;
     float blend = 1.0f;
     float scale = 1.0f;
+    bool frameGen = true;
+    const char* fg_env = std::getenv("DLSS5_FRAMEGEN");
+    if (!fg_env) fg_env = std::getenv("NR_LAYER_FRAMEGEN");
+    if (fg_env) {
+        frameGen = (std::strcmp(fg_env, "0") != 0);
+    }
     bool dump = false;
     std::string selftest;
     std::string benchProf;
@@ -151,6 +157,7 @@ int main(int argc, char** argv) {
         else if (a == "--gain" && i + 1 < argc) gain = (float)std::atof(argv[++i]);
         else if (a == "--blend" && i + 1 < argc) blend = (float)std::atof(argv[++i]);
         else if (a == "--scale" && i + 1 < argc) scale = (float)std::atof(argv[++i]);
+        else if (a == "--framegen" && i + 1 < argc) frameGen = (std::atoi(argv[++i]) != 0);
         else if (a == "--weights" && i + 1 < argc) weights = argv[++i];
         else if (a == "--dump") dump = true;
         else if (a == "--selftest" && i + 1 < argc) selftest = argv[++i];
@@ -164,7 +171,7 @@ int main(int argc, char** argv) {
         }
         else if (a == "--prof" && i + 1 < argc) benchProf = argv[++i];
         else {
-            std::fprintf(stderr, "usage: m11d [--port N] [--gain F] [--blend F] [--scale F] [--weights PATH] [--dump] "
+            std::fprintf(stderr, "usage: m11d [--port N] [--gain F] [--blend F] [--scale F] [--framegen <0|1>] [--weights PATH] [--dump] "
                                  "[--selftest file.bmp] [--bench N WxH [--prof out.csv]]\n");
             return 1;
         }
@@ -176,7 +183,7 @@ int main(int argc, char** argv) {
     if (blend < 0.0f) blend = 0.0f;
     if (blend > 1.0f) blend = 1.0f;
     std::printf("=== M11D: DLSSNR daemon (real 71-block DLSS 5 U-Net) ===\n");
-    std::printf("weights: %s\ngain: %.2f blend: %.2f scale: %.2f\n", weights.c_str(), (double)gain, (double)blend, (double)scale);
+    std::printf("weights: %s\ngain: %.2f blend: %.2f scale: %.2f framegen: %d\n", weights.c_str(), (double)gain, (double)blend, (double)scale, frameGen ? 1 : 0);
 
     d5c::ChainEngine engine;
     uint32_t curW = 0, curH = 0;
@@ -293,6 +300,9 @@ int main(int argc, char** argv) {
     std::printf("[m11d] listening on 127.0.0.1:%d (one connection per frame)\n", port);
 
     std::vector<uint8_t> inBuf, outBuf, maskBuf;
+    std::vector<uint8_t> prevProcessedBuf;
+    bool havePrev = false;
+    uint32_t prevW = 0, prevH = 0;
     for (;;) {
         SOCKET s = accept(ls, nullptr, nullptr);
         if (s == INVALID_SOCKET) continue;
@@ -345,6 +355,11 @@ int main(int argc, char** argv) {
                 } else {
                     std::fprintf(stderr, "[m11d] ctrl: scale %.2f out of range\n", (double)s);
                 }
+            } else if (hdr[1] == 5) {
+                frameGen = (hdr[2] != 0);
+                if (!frameGen) havePrev = false;
+                rep[1] = 1;
+                std::printf("[m11d] ctrl: framegen -> %d\n", frameGen ? 1 : 0);
             } else {
                 std::fprintf(stderr, "[m11d] ctrl: unknown cmd %u\n", hdr[1]);
             }
@@ -377,13 +392,45 @@ int main(int argc, char** argv) {
             std::printf("[m11d] note: VkFormat %u treated as BGRA8\n", fmt);
 
         if (ensureEngine(w, h)) {
+            if (w != prevW || h != prevH) {
+                havePrev = false;
+                prevW = w;
+                prevH = h;
+            }
             d5c::FrameStats st{};
             ++frameCounter;
             auto t0 = std::chrono::steady_clock::now();
+
+            if (frameGen && havePrev && (frameCounter % 2 != 0)) {
+                // Optical flow interpolation on odd frames (0.39 ms GPU)!
+                bool ok = engine.interpolateFrame(w, h, prevProcessedBuf.data(), inBuf.data(), outBuf.data(), 0.5f, &st);
+                double wall = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - t0).count();
+                if (ok) {
+                    // Apply UI mask and alpha restore
+                    for (size_t i = 0; i < px; ++i) {
+                        if (masked && maskBuf[i]) std::memcpy(&outBuf[i * 4], &inBuf[i * 4], 4);
+                        else outBuf[i * 4 + 3] = inBuf[i * 4 + 3];
+                    }
+                    if (prevProcessedBuf.size() < px * 4) prevProcessedBuf.resize(px * 4);
+                    std::memcpy(prevProcessedBuf.data(), outBuf.data(), px * 4);
+                    if (!writeAll(s, outBuf.data(), px * 4))
+                        std::fprintf(stderr, "[m11d] reply write failed\n");
+                    std::printf("[m11d] frame %ld %ux%u INTERP in %.1f ms (gpu %.2f)\n",
+                                frameCounter, w, h, wall, st.gpuTotalMs);
+                    closesocket(s);
+                    continue;
+                }
+            }
+
+            // Even frame: regular engine.processFrame()
             bool ok = engine.processFrame(inBuf.data(), outBuf.data(), frameCounter, &st);
             double wall = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - t0).count();
             if (ok) {
+                if (prevProcessedBuf.size() < px * 4) prevProcessedBuf.resize(px * 4);
+                std::memcpy(prevProcessedBuf.data(), outBuf.data(), px * 4);
+                havePrev = true;
                 // vendor parity (nr_daemon.py:88): alpha stays as the game
                 // left it (encode forces opaque for the overlay use-case);
                 // held-still UI pixels (mask) pass through untouched.

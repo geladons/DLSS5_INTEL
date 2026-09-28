@@ -54,8 +54,18 @@ public:
                   float s, float g, float b)
         : scale_(s > 0.0f ? s : 1.0f),
           gain_(g >= 0.0f ? g : 1.0f),
-          blend_((b >= 0.0f && b <= 1.0f) ? b : 1.0f)
+          blend_((b >= 0.0f && b <= 1.0f) ? b : 1.0f),
+          sharpness_(0.8f)
     {
+        const char* s_env = std::getenv("DLSS5_SHARPNESS");
+        if (!s_env) s_env = std::getenv("NR_LAYER_SHARPNESS");
+        if (s_env) {
+            float val = static_cast<float>(std::atof(s_env));
+            if (val >= 0.0f) sharpness_ = val;
+        }
+        const char* fg_env = std::getenv("DLSS5_FRAMEGEN");
+        if (!fg_env) fg_env = std::getenv("NR_LAYER_FRAMEGEN");
+        frameGenEnabled_ = (fg_env && std::strcmp(fg_env, "0") != 0);
         resolveWeights(weights);
         resolveShaders(shaders);
     }
@@ -74,6 +84,7 @@ public:
                         curW_, curH_, w, h, static_cast<double>(curScale_), static_cast<double>(scale_));
             engine_.shutdown();
             initialized_ = false;
+            havePrev_ = false;
         }
 
         d5c::EngineConfig cfg{};
@@ -84,6 +95,13 @@ public:
         cfg.headGain = gain_;
         cfg.headBlend = blend_;
         cfg.renderScale = scale_;
+        const char* s_env = std::getenv("DLSS5_SHARPNESS");
+        if (!s_env) s_env = std::getenv("NR_LAYER_SHARPNESS");
+        if (s_env) {
+            float val = static_cast<float>(std::atof(s_env));
+            if (val >= 0.0f) sharpness_ = val;
+        }
+        cfg.sharpness = sharpness_;
         cfg.debugDumps = false;
         cfg.dumpDir = "out";
         cfg.vkCfg.appName = "dlss5_inprocess";
@@ -108,6 +126,25 @@ public:
             return -1;
         }
 
+        const char* s_env = std::getenv("DLSS5_SHARPNESS");
+        if (!s_env) s_env = std::getenv("NR_LAYER_SHARPNESS");
+        if (s_env) {
+            float val = static_cast<float>(std::atof(s_env));
+            if (val >= 0.0f && std::abs(val - sharpness_) > 1e-4f) {
+                setSharpness(val);
+            }
+        }
+
+        const char* fg_env = std::getenv("DLSS5_FRAMEGEN");
+        if (!fg_env) fg_env = std::getenv("NR_LAYER_FRAMEGEN");
+        if (fg_env) {
+            frameGenEnabled_ = (std::strcmp(fg_env, "0") != 0);
+        }
+
+        if (w != prevW_ || h != prevH_) {
+            havePrev_ = false;
+        }
+
         const size_t px = static_cast<size_t>(w) * h;
         if (alphaBuf_.size() < px) {
             alphaBuf_.resize(px);
@@ -122,17 +159,41 @@ public:
         }
 
         d5c::FrameStats stats{};
+
+        if (frameGenEnabled_ && havePrev_ && (frame_index % 2 != 0)) {
+            // Odd frame: Fast Optical Flow Interpolation (0.39 ms GPU time)!
+            bool ok = engine_.interpolateFrame(w, h, prevProcessed_.data(), inBytes, outBytes, 0.5f, &stats);
+            if (ok) {
+                if (prevProcessed_.size() < px * 4) {
+                    prevProcessed_.resize(px * 4);
+                }
+                std::memcpy(prevProcessed_.data(), outBytes, px * 4);
+                // Restore original game alpha channel
+                for (size_t i = 0; i < px; ++i) {
+                    outBytes[i * 4 + 3] = alphaBuf_[i];
+                }
+                return 0;
+            }
+        }
+
+        // Even frame (or first frame): Full DLSS 5 U-Net pass (~25 ms)
         bool ok = engine_.processFrame(inBytes, outBytes, frame_index, &stats);
-        if (!ok) {
-            return -1;
+        if (ok) {
+            if (prevProcessed_.size() < px * 4) {
+                prevProcessed_.resize(px * 4);
+            }
+            std::memcpy(prevProcessed_.data(), outBytes, px * 4);
+            havePrev_ = true;
+            prevW_ = w;
+            prevH_ = h;
+            // Restore original game alpha channel
+            for (size_t i = 0; i < px; ++i) {
+                outBytes[i * 4 + 3] = alphaBuf_[i];
+            }
+            return 0;
         }
 
-        // Restore original alpha channel for vendor parity
-        for (size_t i = 0; i < px; ++i) {
-            outBytes[i * 4 + 3] = alphaBuf_[i];
-        }
-
-        return 0;
+        return -1;
     }
 
     int interpolateFrame(uint32_t w, uint32_t h, const void* f0, const void* f1,
@@ -146,11 +207,14 @@ public:
     }
 
     void setFrameGen(int enable) {
-        frameGenEnabled_ = enable;
+        frameGenEnabled_ = (enable != 0);
+        if (!frameGenEnabled_) {
+            havePrev_ = false;
+        }
     }
 
     int getFrameGen() const {
-        return frameGenEnabled_;
+        return frameGenEnabled_ ? 1 : 0;
     }
 
     float getFrameGenGpuMs() const {
@@ -178,10 +242,19 @@ public:
         }
     }
 
+    void setSharpness(float s) {
+        if (s < 0.0f) return;
+        sharpness_ = s;
+        if (initialized_) {
+            engine_.setSharpness(s);
+        }
+    }
+
     void shutdown() {
         if (initialized_) {
             engine_.shutdown();
             initialized_ = false;
+            havePrev_ = false;
         }
     }
 
@@ -245,11 +318,15 @@ private:
     float scale_ = 1.0f;
     float gain_ = 1.0f;
     float blend_ = 1.0f;
+    float sharpness_ = 0.8f;
     float curScale_ = 1.0f;
     uint32_t curW_ = 0;
     uint32_t curH_ = 0;
     bool initialized_ = false;
-    int frameGenEnabled_ = 0;
+    bool frameGenEnabled_ = false;
+    std::vector<uint8_t> prevProcessed_;
+    bool havePrev_ = false;
+    uint32_t prevW_ = 0, prevH_ = 0;
     std::vector<uint8_t> alphaBuf_;
 };
 
@@ -313,6 +390,15 @@ DLSS5_API void dlss5_set_blend(void* handle, float blend) {
     try {
         auto* ctx = static_cast<EngineContext*>(handle);
         ctx->setBlend(blend);
+    } catch (...) {
+    }
+}
+
+DLSS5_API void dlss5_set_sharpness(void* handle, float s) {
+    if (!handle) return;
+    try {
+        auto* ctx = static_cast<EngineContext*>(handle);
+        ctx->setSharpness(s);
     } catch (...) {
     }
 }

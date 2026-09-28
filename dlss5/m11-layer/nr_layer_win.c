@@ -135,11 +135,42 @@ static long nr_port = NR_DEFAULT_PORT;
 static const char *trigger_path;
 static const char *freeze_path;
 static const char *reproc_path;
+static char default_freeze_path[MAX_PATH];
+static char default_reproc_path[MAX_PATH];
 static int ui_mask;
 static int no_patch;            /* NR_LAYER_NOPATCH=1: leave swapchains alone */
 static volatile LONG g_paused;  /* CTRL+ALT+X: passthrough, full fps */
 static volatile LONG g_off;     /* CTRL+ALT+Q: layer off for good */
 static volatile LONG g_hotkeys_started;
+
+static void init_freeze_paths(void)
+{
+    if (default_freeze_path[0] == '\0') {
+        char temp_dir[MAX_PATH];
+        DWORD len = GetTempPathA(sizeof(temp_dir), temp_dir);
+        if (len > 0 && len < sizeof(temp_dir)) {
+            if (temp_dir[len - 1] != '\\' && temp_dir[len - 1] != '/') {
+                snprintf(default_freeze_path, sizeof(default_freeze_path), "%s\\m13_freeze.flag", temp_dir);
+                snprintf(default_reproc_path, sizeof(default_reproc_path), "%s\\m13_reproc.flag", temp_dir);
+            } else {
+                snprintf(default_freeze_path, sizeof(default_freeze_path), "%sm13_freeze.flag", temp_dir);
+                snprintf(default_reproc_path, sizeof(default_reproc_path), "%sm13_reproc.flag", temp_dir);
+            }
+        } else {
+            const char *t = getenv("TEMP");
+            snprintf(default_freeze_path, sizeof(default_freeze_path), "%s\\m13_freeze.flag", t ? t : ".");
+            snprintf(default_reproc_path, sizeof(default_reproc_path), "%s\\m13_reproc.flag", t ? t : ".");
+        }
+    }
+    if (!freeze_path || !freeze_path[0]) {
+        const char *env_f = getenv("NR_LAYER_FREEZE");
+        freeze_path = (env_f && env_f[0]) ? env_f : default_freeze_path;
+    }
+    if (!reproc_path || !reproc_path[0]) {
+        const char *env_r = getenv("NR_LAYER_REPROC");
+        reproc_path = (env_r && env_r[0]) ? env_r : default_reproc_path;
+    }
+}
 
 /* ------------------------------------------------------------------ */
 /* logging                                                             */
@@ -174,11 +205,13 @@ static PFN_dlss5_process_frame pfn_dlss5_process_frame = NULL;
 static PFN_dlss5_set_scale pfn_dlss5_set_scale = NULL;
 static PFN_dlss5_set_gain pfn_dlss5_set_gain = NULL;
 static PFN_dlss5_set_blend pfn_dlss5_set_blend = NULL;
+static PFN_dlss5_set_sharpness pfn_dlss5_set_sharpness = NULL;
 static int g_inprocess_attempted = 0;
 static int g_inprocess_active = 0;
 static float g_cur_scale = -1.0f;
 static float g_cur_gain = -1.0f;
 static float g_cur_blend = -1.0f;
+static float g_cur_sharpness = -1.0f;
 
 static void update_live_knobs(void)
 {
@@ -225,6 +258,21 @@ static void update_live_knobs(void)
             if (pfn_dlss5_set_blend) {
                 pfn_dlss5_set_blend(g_engine, val);
                 nr_log("[nr_layer] live blend updated: %.2f", val);
+            }
+        }
+    }
+
+    const char *sharp_s = getenv("NR_LAYER_SHARPNESS");
+    if (!sharp_s) sharp_s = getenv("DLSS5_SHARPNESS");
+    if (sharp_s) {
+        float val = (float)atof(sharp_s);
+        float diff = val - g_cur_sharpness;
+        if (diff < 0.0f) diff = -diff;
+        if (val >= 0.0f && diff > 1e-4f) {
+            g_cur_sharpness = val;
+            if (pfn_dlss5_set_sharpness) {
+                pfn_dlss5_set_sharpness(g_engine, val);
+                nr_log("[nr_layer] live sharpness updated: %.2f", val);
             }
         }
     }
@@ -296,6 +344,7 @@ static void ensure_inprocess(void)
     pfn_dlss5_set_scale = (PFN_dlss5_set_scale)GetProcAddress(hDll, "dlss5_set_scale");
     pfn_dlss5_set_gain = (PFN_dlss5_set_gain)GetProcAddress(hDll, "dlss5_set_gain");
     pfn_dlss5_set_blend = (PFN_dlss5_set_blend)GetProcAddress(hDll, "dlss5_set_blend");
+    pfn_dlss5_set_sharpness = (PFN_dlss5_set_sharpness)GetProcAddress(hDll, "dlss5_set_sharpness");
 
     if (!pfn_dlss5_create || !pfn_dlss5_destroy || !pfn_dlss5_process_frame) {
         nr_log("d5c_chain.dll missing exports; falling back to TCP");
@@ -315,10 +364,13 @@ static void ensure_inprocess(void)
     if (!gain_s) gain_s = getenv("DLSS5_GAIN");
     const char *blend_s = getenv("NR_LAYER_BLEND");
     if (!blend_s) blend_s = getenv("DLSS5_BLEND");
+    const char *sharp_s = getenv("NR_LAYER_SHARPNESS");
+    if (!sharp_s) sharp_s = getenv("DLSS5_SHARPNESS");
 
     float scale = scale_s ? (float)atof(scale_s) : 1.0f;
     float gain = gain_s ? (float)atof(gain_s) : 1.0f;
     float blend = blend_s ? (float)atof(blend_s) : 1.0f;
+    float sharpness = sharp_s ? (float)atof(sharp_s) : 0.8f;
 
     g_engine = pfn_dlss5_create(weights, shaders, scale, gain, blend);
     if (!g_engine) {
@@ -328,12 +380,17 @@ static void ensure_inprocess(void)
         return;
     }
 
+    if (pfn_dlss5_set_sharpness) {
+        pfn_dlss5_set_sharpness(g_engine, sharpness);
+    }
+
     g_cur_scale = scale;
     g_cur_gain = gain;
     g_cur_blend = blend;
+    g_cur_sharpness = sharpness;
     g_inprocess_active = 1;
-    nr_log("in-process DLSS 5 active (TCP bypassed, scale=%.2f gain=%.2f blend=%.2f)",
-           scale, gain, blend);
+    nr_log("in-process DLSS 5 active (TCP bypassed, scale=%.2f gain=%.2f blend=%.2f sharpness=%.2f)",
+           scale, gain, blend, sharpness);
 }
 
 /* ------------------------------------------------------------------ */
@@ -565,8 +622,9 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
         trigger_path = getenv("NR_LAYER_TRIGGER");
         freeze_path = getenv("NR_LAYER_FREEZE");
         reproc_path = getenv("NR_LAYER_REPROC");
+        init_freeze_paths();
         const char *mask = getenv("NR_LAYER_UI_MASK");
-        ui_mask = mask && strcmp(mask, "0") != 0;
+        ui_mask = (!mask || strcmp(mask, "0") != 0);
         const char *every = getenv("NR_LAYER_EVERY");
         capture_every = every ? strtol(every, NULL, 10) : 0;
         const char *sync = getenv("NR_LAYER_SYNC");
@@ -1044,6 +1102,10 @@ static uint32_t settled(const unsigned char *now, const unsigned char *before,
         mask[i] = moved ? 0u : 0xFFu;
         held += !moved;
     }
+    if (held >= (uint32_t)((uint64_t)pixels * 85 / 100)) {
+        nr_log("[nr_layer] menu / static screen detected (%u%% held still); preserving native resolution",
+               (unsigned)(100ull * held / pixels));
+    }
     return held;
 }
 
@@ -1084,10 +1146,28 @@ static int process_frame(device_data *data, swapchain_data *chain,
         memcpy(data->outgoing, data->mapped, (size_t)needed);
         uint32_t held = settled(data->mapped, data->earlier, pixels,
                                 data->outgoing + needed);
+        if (held >= (uint32_t)((uint64_t)pixels * 85 / 100)) {
+            // Menu / static screen detected: preserve native resolution
+            memcpy(data->earlier, data->mapped, (size_t)needed);
+            data->have_earlier = 1;
+            data->earlier_size = needed;
+            return 1;
+        }
         masked = mask_worth_sending(held, pixels);
         nr_log("[nr_layer] %u%% of the frame held still; ui mask %s",
              100u * held / pixels, masked ? "sent" : "refused");
     }
+
+    /* Save native input into data->earlier before processing */
+    if (data->earlier_size < needed) {
+        unsigned char *grown = (unsigned char *)realloc(data->earlier, (size_t)needed);
+        if (!grown) return -1;
+        data->earlier = grown;
+        data->earlier_size = needed;
+    }
+    memcpy(data->earlier, data->mapped, (size_t)needed);
+    data->have_earlier = 1;
+    data->earlier_size = needed;
 
     uint32_t header[4] = { masked ? 0x314E524Eu : 0x304E524Eu, chain->extent.width,
                            chain->extent.height, (uint32_t)chain->format };
@@ -1106,6 +1186,16 @@ static int process_frame(device_data *data, swapchain_data *chain,
         int r = pfn_dlss5_process_frame(g_engine, chain->extent.width, chain->extent.height,
                                         data->mapped, data->mapped, (long)frame_counter);
         if (r == 0) {
+            if (masked && data->outgoing) {
+                const unsigned char *mask = data->outgoing + needed;
+                const uint32_t *native_px = (const uint32_t *)data->earlier;
+                uint32_t *out_px = (uint32_t *)data->mapped;
+                for (uint32_t i = 0; i < pixels; i++) {
+                    if (mask[i]) {
+                        out_px[i] = native_px[i];
+                    }
+                }
+            }
             if (data->result && data->result_size >= needed) {
                 memcpy(data->result, data->mapped, (size_t)needed);
             }
@@ -1163,6 +1253,7 @@ static VkResult present_now(device_data *data, VkQueue queue,
  * visible on the frozen frame, processed from the untouched original. */
 static int reproc_changed(device_data *data)
 {
+    init_freeze_paths();
     if (!reproc_path) return 0;
     WIN32_FILE_ATTRIBUTE_DATA fa;
     if (!GetFileAttributesExA(reproc_path, GetFileExInfoStandard, &fa)) {
@@ -1184,6 +1275,13 @@ static int resend_raw(device_data *data, swapchain_data *chain)
 {
     ensure_inprocess();
     update_live_knobs();
+    VkDeviceSize needed = (VkDeviceSize)chain->extent.width * chain->extent.height * 4;
+    if (!data->result || data->result_size < needed) {
+        unsigned char *grown = (unsigned char *)realloc(data->result, (size_t)needed);
+        if (!grown) return -1;
+        data->result = grown;
+        data->result_size = needed;
+    }
     if (g_inprocess_active && pfn_dlss5_process_frame && g_engine) {
         int r = pfn_dlss5_process_frame(g_engine, chain->extent.width, chain->extent.height,
                                         data->raw, data->result, (long)frame_counter);
@@ -1277,6 +1375,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
     hotkeys_ensure();
     ensure_inprocess();
     update_live_knobs();
+    init_freeze_paths();
 
     int frozen = freeze_path && _access(freeze_path, 0) == 0;
     if (!frozen) {

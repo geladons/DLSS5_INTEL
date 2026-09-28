@@ -54,6 +54,7 @@ DLSS5_API int dlss5_process_frame(void* handle, uint32_t w, uint32_t h,
 DLSS5_API void dlss5_set_scale(void* handle, float scale);
 DLSS5_API void dlss5_set_gain(void* handle, float gain);
 DLSS5_API void dlss5_set_blend(void* handle, float blend);
+DLSS5_API void dlss5_set_sharpness(void* handle, float sharpness);
 
 // Frame Generation (FSR 3.1 / Optical Flow Interpolation):
 // Interpolate an intermediate frame between frame0 and frame1 using GPU optical flow.
@@ -74,6 +75,7 @@ typedef int (*PFN_dlss5_process_frame)(void* handle, uint32_t w, uint32_t h,
 typedef void (*PFN_dlss5_set_scale)(void* handle, float scale);
 typedef void (*PFN_dlss5_set_gain)(void* handle, float gain);
 typedef void (*PFN_dlss5_set_blend)(void* handle, float blend);
+typedef void (*PFN_dlss5_set_sharpness)(void* handle, float sharpness);
 typedef int (*PFN_dlss5_interpolate_frame)(void* handle, uint32_t w, uint32_t h,
                                            const void* frame0_bgra, const void* frame1_bgra,
                                            void* out_interp_bgra, float factor);

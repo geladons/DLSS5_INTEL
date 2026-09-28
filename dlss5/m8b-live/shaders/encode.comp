@@ -78,8 +78,37 @@ void main() {
         bool inRegion = xy.x >= left && xy.x < left + pc.b.x &&
                         xy.y >= top  && xy.y < top  + pc.b.y;
         if (inRegion) {
-            uint rp = uint(xy.y - top) * uint(pc.b.x) + uint(xy.x - left);
-            rgb = vec3(fin[rp * 3u], fin[rp * 3u + 1u], fin[rp * 3u + 2u]);
+            int rx = xy.x - left;
+            int ry = xy.y - top;
+            int rw = pc.b.x;
+            int rh = pc.b.y;
+            uint rp = uint(ry) * uint(rw) + uint(rx);
+            vec3 c = vec3(fin[rp * 3u], fin[rp * 3u + 1u], fin[rp * 3u + 2u]);
+            if (pc.c[0] > 0.0f) {
+                // Contrast-Adaptive Sharpening (CAS)
+                int up_y = max(ry - 1, 0);
+                int dn_y = min(ry + 1, rh - 1);
+                int lt_x = max(rx - 1, 0);
+                int rt_x = min(rx + 1, rw - 1);
+                uint up_idx = (uint(up_y) * uint(rw) + uint(rx)) * 3u;
+                uint dn_idx = (uint(dn_y) * uint(rw) + uint(rx)) * 3u;
+                uint lt_idx = (uint(ry) * uint(rw) + uint(lt_x)) * 3u;
+                uint rt_idx = (uint(ry) * uint(rw) + uint(rt_x)) * 3u;
+                vec3 up = vec3(fin[up_idx], fin[up_idx + 1u], fin[up_idx + 2u]);
+                vec3 dn = vec3(fin[dn_idx], fin[dn_idx + 1u], fin[dn_idx + 2u]);
+                vec3 lt = vec3(fin[lt_idx], fin[lt_idx + 1u], fin[lt_idx + 2u]);
+                vec3 rt = vec3(fin[rt_idx], fin[rt_idx + 1u], fin[rt_idx + 2u]);
+
+                vec3 mn = min(min(up, dn), min(lt, rt));
+                vec3 mx = max(max(up, dn), max(lt, rt));
+                vec3 min_c = min(mn, c);
+                vec3 max_c = max(mx, c);
+                vec3 amp = clamp(min(min_c, vec3(1.0) - max_c) / max(max_c, vec3(1e-5)), vec3(0.0), vec3(1.0));
+                vec3 w = -sqrt(amp) * (pc.c[0] * 0.18);
+                rgb = clamp((c + w * (up + dn + lt + rt)) / (vec3(1.0) + 4.0 * w), 0.0, 1.0);
+            } else {
+                rgb = c;
+            }
         } else {
             uint np = uint(xy.y) * fullW + uint(xy.x);
             rgb = vec3(nat[np * 3u], nat[np * 3u + 1u], nat[np * 3u + 2u]);

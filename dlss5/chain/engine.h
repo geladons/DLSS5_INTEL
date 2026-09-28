@@ -29,6 +29,7 @@ struct EngineConfig {
     float headGain = 1.0f;                             // vendor residual scale (--gain)
     float headBlend = 1.0f;                            // vendor mix factor (--blend, M13 knob #2)
     float renderScale = 1.0f;
+    float sharpness = 0.8f;
     VkContextConfig vkCfg{};                           // device selection (headless default)
     bool debugDumps = false;                           // dump live_*.bin on frame index 1
     std::string dumpDir = "out";                       // dump destination
@@ -59,6 +60,8 @@ public:
     // re-capture. Daemon-side only (single-threaded accept loop).
     void setHeadGain(float g) { cfg_.headGain = g; }
     void setHeadBlend(float b) { cfg_.headBlend = b; }
+    void setSharpness(float s) { cfg_.sharpness = s; }
+    float sharpness() const { return cfg_.sharpness; }
 
     uint32_t netW() const { return netW_; }
     uint32_t netH() const { return netH_; }

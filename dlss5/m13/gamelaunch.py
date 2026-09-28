@@ -84,9 +84,9 @@ def reproc_bump():
 
 
 # --------------------------------------------------------------------- DX9 --
-def launch_dx9(exe_path, live_every=1, scale=None, gain=None, blend=None):
+def launch_dx9(exe_path, live_every=1, scale=None, gain=None, blend=None, cfg=None, sharpness=None):
     """Launch a DX9 game under DXVK + the m11 layer (managed live mode)."""
-    return launch_game(exe_path, "dx9", scale=scale, gain=gain, blend=blend)
+    return launch_game(exe_path, "dx9", scale=scale, gain=gain, blend=blend, cfg=cfg, sharpness=sharpness)
 
 
 def dx9_paused():
@@ -105,9 +105,9 @@ def dx9_resume():
 
 
 # -------------------------------------------------------------------- DX12 --
-def launch_dx12(exe_path, scale=None, gain=None, blend=None):
+def launch_dx12(exe_path, scale=None, gain=None, blend=None, cfg=None, sharpness=None):
     """Launch a DX12 game with the m12-dxgi proxy active."""
-    return launch_game(exe_path, "dx12", scale=scale, gain=gain, blend=blend)
+    return launch_game(exe_path, "dx12", scale=scale, gain=gain, blend=blend, cfg=cfg, sharpness=sharpness)
 
 
 def dx12_paused():
@@ -128,7 +128,7 @@ def dx12_resume():
 # dx9/dx11/vulkan all ride the m11 Vulkan layer -> they share the trigger
 # flag (for Vulkan games the layer self-loads, no dll deploy). dx12 rides
 # the m12 proxy -> its own pause flag.
-def launch_game(exe_path, mode, scale=None, gain=None, blend=None):
+def launch_game(exe_path, mode, scale=None, gain=None, blend=None, cfg=None, sharpness=None):
     if mode not in ("dx9", "dx11", "vulkan", "dx12"):
         return False, "unknown mode: %s" % mode
 
@@ -145,7 +145,32 @@ def launch_game(exe_path, mode, scale=None, gain=None, blend=None):
         "NR_LAYER_TRIGGER": DX9_TRIGGER,
         "NR_LAYER_FREEZE": FREEZE_FLAG,
         "NR_LAYER_REPROC": REPROC_FLAG,
+        "NR_LAYER_UI_MASK": "1",
     }
+    sharp_val = 0.8
+    if cfg is not None and hasattr(cfg, "get"):
+        sharp_val = cfg.get("sharpness") or 0.8
+    elif isinstance(cfg, dict):
+        sharp_val = cfg.get("sharpness") or 0.8
+    elif sharpness is not None:
+        sharp_val = sharpness
+    env["DLSS5_SHARPNESS"] = str(sharp_val)
+    env["NR_LAYER_SHARPNESS"] = str(sharp_val)
+
+    fg_val = True
+    if cfg is not None and hasattr(cfg, "get"):
+        fg_val = bool(cfg.get("frame_gen"))
+    elif isinstance(cfg, dict):
+        fg_val = bool(cfg.get("frame_gen"))
+    else:
+        fg_env = os.environ.get("DLSS5_FRAMEGEN")
+        if fg_env is not None:
+            fg_val = (fg_env != "0")
+        else:
+            fg_val = True
+    env["DLSS5_FRAMEGEN"] = "1" if fg_val else "0"
+    env["NR_LAYER_FRAMEGEN"] = "1" if fg_val else "0"
+
     if scale is not None:
         s_val = str(scale)
         env["NR_LAYER_SCALE"] = s_val

@@ -316,6 +316,7 @@ class M13Controller:
         args = ["--port", "47990", "--gain", "%.3f" % self.cfg.get("gain"),
                 "--blend", "%.3f" % float(self.cfg.get("blend") or 1.0),
                 "--scale", "%.2f" % float(self.cfg.get("scale") or 0.50),
+                "--framegen", "1" if self.cfg.get("frame_gen") else "0",
                 "--weights", self.cfg.get("weights_path")]
         ok, msg = self.daemon.start(args)
         if notes:
@@ -356,13 +357,18 @@ class M13Controller:
         """Live blend push (vendor mix factor 0..1). Same routing as gain."""
         blend = max(0.0, min(1.0, float(blend)))
         self.cfg.set("blend", blend)
+        b_val = str(blend)
+        os.environ["DLSS5_BLEND"] = b_val
+        os.environ["NR_LAYER_BLEND"] = b_val
+        os.environ["M12_BLEND"] = b_val
+        if gamelaunch.freeze_active():
+            gamelaunch.reproc_bump()
         if self.daemon.running:
             try:
                 self.client.set_blend(blend)
             except DaemonError as e:
                 return False, "blend saved but daemon push failed: %s" % e
             if gamelaunch.freeze_active():
-                gamelaunch.reproc_bump()
                 return True, ("blend -> %.3f (live; frozen frame "
                               "reprocessing)" % blend)
             return True, "blend -> %.3f (live)" % blend
@@ -372,7 +378,10 @@ class M13Controller:
                         float(self.cfg.get("scale") or 0.50),
                         bool(self.cfg.get("frame_gen")))
             return True, "blend -> %.3f (live, screen mode)" % blend
-        return False, "daemon down - blend saved for next start"
+        if gamelaunch.freeze_active():
+            return True, ("blend -> %.3f (live; frozen frame "
+                          "reprocessing)" % blend)
+        return True, "blend -> %.3f" % blend
 
     # ------------------------------------------------------------- scale --
     def set_scale(self, scale):
@@ -408,6 +417,11 @@ class M13Controller:
         os.environ["DLSS5_FRAMEGEN"] = "1" if enable else "0"
         if gamelaunch.freeze_active():
             gamelaunch.reproc_bump()
+        if self.daemon.running:
+            try:
+                self.client.set_framegen(enable)
+            except Exception:
+                pass
         if self.screen.running:
             from .screenmode import write_knobs
             write_knobs(float(self.cfg.get("gain")),
@@ -581,20 +595,11 @@ class M13Controller:
 
     # ------------------------------------------------------- freeze support --
     def freeze_supported(self):
-        """True when the ACTIVE game understands the freeze/reprocess flags:
-        always for DX12 (the proxy reads fixed %TEMP% names); for the Vulkan
-        layer modes only when we launched the game (it carries the env)."""
+        """True when the ACTIVE game understands the freeze/reprocess flags.
+        Supported for all active games in dx9, dx11, dx12, vulkan."""
         snap = self.snapshot()
         mode = snap.get("active_mode")
-        if mode == "dx12":
-            return True
-        if mode not in ("dx9", "dx11", "vulkan"):
-            return False
-        exe = snap.get("active_game")
-        meta = (self.cfg.get("games") or {}).get(exe or "") or {}
-        target = os.path.abspath(self.launch_target(exe, meta)).lower() \
-            if exe else None
-        return bool(target) and target in self.launched_exes
+        return mode in ("dx9", "dx11", "dx12", "vulkan")
 
     # ------------------------------------------------------------ registry --
     def layers_status(self):

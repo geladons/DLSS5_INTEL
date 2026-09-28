@@ -160,7 +160,9 @@ with patch("subprocess.Popen") as mock_popen:
         assert env.get("NR_LAYER_SCALE") == "0.67" and env.get("DLSS5_SCALE") == "0.67" and env.get("M12_SCALE") == "0.67", "Scale env mismatch"
         assert env.get("NR_LAYER_GAIN") == "1.25" and env.get("DLSS5_GAIN") == "1.25" and env.get("M12_GAIN") == "1.25", "Gain env mismatch"
         assert env.get("NR_LAYER_BLEND") == "0.8" and env.get("DLSS5_BLEND") == "0.8" and env.get("M12_BLEND") == "0.8", "Blend env mismatch"
-        print("  gamelaunch.launch_game env propagation (always-injected + scale/gain/blend) [PASS]")
+        assert env.get("NR_LAYER_UI_MASK") == "1", "NR_LAYER_UI_MASK mismatch"
+        assert env.get("DLSS5_SHARPNESS") == "0.8", "DLSS5_SHARPNESS mismatch"
+        print("  gamelaunch.launch_game env propagation (always-injected + scale/gain/blend/ui_mask/sharpness) [PASS]")
 
         # 5.3 Test trigger flag existence for layer modes
         assert os.path.exists(gamelaunch.DX9_TRIGGER), "DX9_TRIGGER flag not set for dx9"
@@ -210,5 +212,45 @@ with tempfile.TemporaryDirectory() as td:
             print("  controller.game_launch x86: TCP daemon fallback (daemon_start called) [PASS]")
     finally:
         ctl.shutdown()
+
+print("\n=== 6. Testing Task 2: Overlay Non-Minimizing & Photo-Mode Freeze ===")
+assert "overlay_focus" in DEFAULTS, "Missing overlay_focus in DEFAULTS"
+assert DEFAULTS["overlay_focus"] is False, "overlay_focus default must be False"
+print("  DEFAULTS['overlay_focus'] == False [PASS]")
+
+# Test freeze_supported for all active modes
+with tempfile.TemporaryDirectory() as td:
+    cfg = Config(os.path.join(td, "freeze_cfg.json"))
+    ctl = M13Controller(cfg)
+    try:
+        for mode in ("dx9", "dx11", "dx12", "vulkan"):
+            with patch.object(ctl, "snapshot", return_value={"active_mode": mode}):
+                assert ctl.freeze_supported() is True, "freeze_supported should be True for %s" % mode
+        for mode in ("screen", None, "unknown"):
+            with patch.object(ctl, "snapshot", return_value={"active_mode": mode}):
+                assert ctl.freeze_supported() is False, "freeze_supported should be False for %s" % mode
+        print("  ctl.freeze_supported() True for dx9/dx11/dx12/vulkan without launched_exes [PASS]")
+
+        # Test set_blend env propagation and reproc bump
+        gamelaunch.freeze_set(True)
+        try:
+            ok, msg = ctl.set_blend(0.65)
+            assert ok, "set_blend failed"
+            assert os.environ.get("DLSS5_BLEND") == "0.65", "DLSS5_BLEND mismatch"
+            assert os.environ.get("NR_LAYER_BLEND") == "0.65", "NR_LAYER_BLEND mismatch"
+            assert os.environ.get("M12_BLEND") == "0.65", "M12_BLEND mismatch"
+            assert "frozen" in msg, "set_blend should indicate frozen frame reprocessing: %s" % msg
+            print("  ctl.set_blend env propagation and reproc bump on freeze [PASS]")
+        finally:
+            gamelaunch.freeze_set(False)
+    finally:
+        ctl.shutdown()
+
+# Test overlay window styles & focus behavior
+from m13 import overlay
+assert overlay.WS_EX_TOPMOST == 0x00000008, "WS_EX_TOPMOST incorrect"
+assert overlay.WS_EX_NOACTIVATE == 0x08000000, "WS_EX_NOACTIVATE incorrect"
+assert overlay.WS_EX_TOOLWINDOW == 0x00000080, "WS_EX_TOOLWINDOW incorrect"
+print("  overlay style constants verified [PASS]")
 
 print("\nALL STAGE 5 UNIT TESTS PASSED SUCCESSFULLY!")
