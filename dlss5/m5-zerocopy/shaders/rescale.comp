@@ -56,7 +56,8 @@ void main() {
     uint ch = uint(pc.b.w);
     float extentIn  = float(pc.a.z);
     float extentOut = float(pc.b.x);
-    float centre = (float(gy) + 0.5) * (extentIn / extentOut) - 0.5;
+    float along = (pc.b.z == 0) ? float(gy) : float(gx);
+    float centre = (along + 0.5) * (extentIn / extentOut) - 0.5;
     float fl = floor(centre);
     int low  = int(clamp(fl, 0.0, extentIn - 1.0));
     int high = int(clamp(fl + 1.0, 0.0, extentIn - 1.0));
