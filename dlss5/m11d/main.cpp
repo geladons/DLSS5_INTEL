@@ -11,6 +11,7 @@
 //                     cmd 1 = SETGAIN (payload = float bits, reply ok+gain)
 //                     cmd 2 = STATUS  (reply ok, gain, frames processed)
 //                     cmd 3 = SETBLEND(payload = float bits 0..1, reply ok+gain)
+//                     cmd 4 = SETSCALE(payload = float bits 0.2..1.5, reply ok+gain)
 //   reply:   frame requests: w*h*4 bytes BGRA (the processed frame)
 //            control requests: 16 bytes {magic, ok, gainBits, frames}
 // One TCP connection per frame (the layer connect()s per exchange).
@@ -36,6 +37,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -181,9 +183,11 @@ int main(int argc, char** argv) {
     long frameCounter = 0;
 
     auto ensureEngine = [&](uint32_t w, uint32_t h) -> bool {
-        if (w == curW && h == curH) return true;
+        if (w == curW && h == curH && std::abs(engine.renderScale() - scale) < 1e-4f)
+            return true;
         if (curW || curH) {
-            std::printf("[m11d] frame size change %ux%u -> %ux%u: engine re-init\n", curW, curH, w, h);
+            std::printf("[m11d] config change (%ux%u -> %ux%u, scale %.2f -> %.2f): engine re-init\n",
+                        curW, curH, w, h, (double)engine.renderScale(), (double)scale);
             engine.shutdown();
         }
         d5c::EngineConfig cfg{};
@@ -328,6 +332,19 @@ int main(int argc, char** argv) {
                 }
             } else if (hdr[1] == 2) {            // STATUS
                 rep[1] = 1;
+            } else if (hdr[1] == 4) {            // SETSCALE: hdr[2] = float bits
+                float s = 0.0f;
+                std::memcpy(&s, &hdr[2], 4);
+                if (s >= 0.20f && s <= 1.5f) {
+                    scale = s;
+                    if (curW && curH) {
+                        ensureEngine(curW, curH);
+                    }
+                    rep[1] = 1;
+                    std::printf("[m11d] ctrl: scale -> %.2f\n", (double)s);
+                } else {
+                    std::fprintf(stderr, "[m11d] ctrl: scale %.2f out of range\n", (double)s);
+                }
             } else {
                 std::fprintf(stderr, "[m11d] ctrl: unknown cmd %u\n", hdr[1]);
             }

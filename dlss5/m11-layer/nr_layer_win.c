@@ -176,6 +176,59 @@ static PFN_dlss5_set_gain pfn_dlss5_set_gain = NULL;
 static PFN_dlss5_set_blend pfn_dlss5_set_blend = NULL;
 static int g_inprocess_attempted = 0;
 static int g_inprocess_active = 0;
+static float g_cur_scale = -1.0f;
+static float g_cur_gain = -1.0f;
+static float g_cur_blend = -1.0f;
+
+static void update_live_knobs(void)
+{
+    if (!g_engine) return;
+
+    const char *scale_s = getenv("NR_LAYER_SCALE");
+    if (!scale_s) scale_s = getenv("DLSS5_SCALE");
+    if (scale_s) {
+        float val = (float)atof(scale_s);
+        float diff = val - g_cur_scale;
+        if (diff < 0.0f) diff = -diff;
+        if (val > 0.0f && diff > 1e-4f) {
+            g_cur_scale = val;
+            if (pfn_dlss5_set_scale) {
+                pfn_dlss5_set_scale(g_engine, val);
+                nr_log("[nr_layer] live scale updated: %.2f", val);
+            }
+        }
+    }
+
+    const char *gain_s = getenv("NR_LAYER_GAIN");
+    if (!gain_s) gain_s = getenv("DLSS5_GAIN");
+    if (gain_s) {
+        float val = (float)atof(gain_s);
+        float diff = val - g_cur_gain;
+        if (diff < 0.0f) diff = -diff;
+        if (val >= 0.0f && diff > 1e-4f) {
+            g_cur_gain = val;
+            if (pfn_dlss5_set_gain) {
+                pfn_dlss5_set_gain(g_engine, val);
+                nr_log("[nr_layer] live gain updated: %.2f", val);
+            }
+        }
+    }
+
+    const char *blend_s = getenv("NR_LAYER_BLEND");
+    if (!blend_s) blend_s = getenv("DLSS5_BLEND");
+    if (blend_s) {
+        float val = (float)atof(blend_s);
+        float diff = val - g_cur_blend;
+        if (diff < 0.0f) diff = -diff;
+        if (val >= 0.0f && val <= 1.0f && diff > 1e-4f) {
+            g_cur_blend = val;
+            if (pfn_dlss5_set_blend) {
+                pfn_dlss5_set_blend(g_engine, val);
+                nr_log("[nr_layer] live blend updated: %.2f", val);
+            }
+        }
+    }
+}
 
 static void ensure_inprocess(void)
 {
@@ -217,10 +270,11 @@ static void ensure_inprocess(void)
         const char *candidates[] = {
             "dlss5\\chain\\build\\Release\\d5c_chain.dll",
             "dlss5\\m11d\\build\\Release\\d5c_chain.dll",
+            "dlss5\\m11-layer\\build\\Release\\d5c_chain.dll",
             "..\\..\\chain\\build\\Release\\d5c_chain.dll",
             "..\\..\\m11d\\build\\Release\\d5c_chain.dll"
         };
-        for (int i = 0; i < 4; i++) {
+        for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
             if (_access(candidates[i], 0) == 0) {
                 hDll = LoadLibraryA(candidates[i]);
                 if (hDll) break;
@@ -252,10 +306,15 @@ static void ensure_inprocess(void)
     g_chain_dll = hDll;
 
     const char *weights = getenv("NR_LAYER_WEIGHTS");
+    if (!weights) weights = getenv("DLSS5_WEIGHTS_PATH");
     const char *shaders = getenv("NR_LAYER_SHADERS");
+    if (!shaders) shaders = getenv("DLSS5_SHADER_DIR");
     const char *scale_s = getenv("NR_LAYER_SCALE");
+    if (!scale_s) scale_s = getenv("DLSS5_SCALE");
     const char *gain_s = getenv("NR_LAYER_GAIN");
+    if (!gain_s) gain_s = getenv("DLSS5_GAIN");
     const char *blend_s = getenv("NR_LAYER_BLEND");
+    if (!blend_s) blend_s = getenv("DLSS5_BLEND");
 
     float scale = scale_s ? (float)atof(scale_s) : 1.0f;
     float gain = gain_s ? (float)atof(gain_s) : 1.0f;
@@ -269,6 +328,9 @@ static void ensure_inprocess(void)
         return;
     }
 
+    g_cur_scale = scale;
+    g_cur_gain = gain;
+    g_cur_blend = blend;
     g_inprocess_active = 1;
     nr_log("in-process DLSS 5 active (TCP bypassed, scale=%.2f gain=%.2f blend=%.2f)",
            scale, gain, blend);
@@ -519,10 +581,9 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
         no_patch = nopatch && strcmp(nopatch, "0") != 0;
         if (no_patch)
             nr_log("[nr_layer] NOPATCH: swapchains left completely alone");
+        hotkeys_ensure();
         if (live_every > 0)
-            hotkeys_ensure();
-            nr_log("[nr_layer] live: every %ld present goes through the network, "
-                 "the frames between hold the last result", live_every);
+            nr_log("[nr_layer] live: every %ld present processed", live_every);
         if (sync_semaphores)
             nr_log("[nr_layer] sync: the present's own semaphores, not a queue idle");
         nr_log("[nr_layer] active; port=%ld trigger=%s capture=%s every=%ld",
@@ -1122,11 +1183,8 @@ static int reproc_changed(device_data *data)
 static int resend_raw(device_data *data, swapchain_data *chain)
 {
     ensure_inprocess();
+    update_live_knobs();
     if (g_inprocess_active && pfn_dlss5_process_frame && g_engine) {
-        const char *gain_s = getenv("NR_LAYER_GAIN");
-        if (gain_s && pfn_dlss5_set_gain) {
-            pfn_dlss5_set_gain(g_engine, (float)atof(gain_s));
-        }
         int r = pfn_dlss5_process_frame(g_engine, chain->extent.width, chain->extent.height,
                                         data->raw, data->result, (long)frame_counter);
         if (r == 0) {
@@ -1204,102 +1262,72 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
         ? info->waitSemaphoreCount : 0;
     data->present_signal = VK_NULL_HANDLE;
 
-    /* Hotkeys: CTRL+ALT+Q = layer off for good. Paused (CTRL+ALT+X) means
-     * plain passthrough: native frames, full fps, the held result survives
-     * so resume continues the slideshow. */
+    /* Hotkeys / status checks:
+     * - g_off: layer disabled via CTRL+ALT+Q -> present native untouched.
+     * - g_paused: toggled by hotkey CTRL+ALT+X -> present native untouched.
+     * - no_patch: swapchains left completely alone -> present native untouched.
+     */
     if (g_off)
         return data->present(queue, info);
-    if (g_paused && live_every > 0)
+    if (g_paused)
+        return data->present(queue, info);
+    if (no_patch)
         return data->present(queue, info);
 
-    /* Live mode: every Nth present through the network, the frames between
-     * re-blit the last result so the picture is steady. */
-    if (live_every > 0) {
-        int on = !trigger_path || _access(trigger_path, 0) == 0;
-        if (!on) data->holding = 0;
-        int frozen = freeze_path && _access(freeze_path, 0) == 0;
-        if (!frozen) {
-            data->raw_held = 0;
-            data->reproc_seen = 0;
-        }
-        for (uint32_t i = 0; on && i < info->swapchainCount; i++) {
-            swapchain_data *chain = find_swapchain(info->pSwapchains[i]);
-            if (!chain || info->pImageIndices[i] >= chain->image_count) continue;
-            uint32_t index = info->pImageIndices[i];
-            VkDeviceSize want = (VkDeviceSize)chain->extent.width
-                              * chain->extent.height * 4;
-            if (frozen) {
-                /* Photo mode: hold the frozen frame; reprocess on demand. */
-                if (!data->raw_held || data->raw_size != want) {
-                    if (freeze_capture(data, chain, queue, index) == 0)
-                        transfer(data, chain, queue, index, 1);
-                } else {
-                    if (reproc_changed(data)
-                        && resend_raw(data, chain) != 0)
-                        nr_log("[nr_layer] reprocess failed; keeping the "
-                               "previous result");
-                    if (data->result_size == want) {
-                        memcpy(data->mapped, data->result,
-                               (size_t)data->result_size);
-                        transfer(data, chain, queue, index, 1);
-                    }
-                }
-                continue;
-            }
-            if (frame_counter % (unsigned long)live_every == 0) {
-                if (process_frame(data, chain, queue, index) == 0) {
-                    data->holding = 1;
-                    data->holding_chain = chain->swapchain;
-                    transfer(data, chain, queue, index, 1);
-                }
-            } else if (data->holding && data->holding_chain == chain->swapchain
-                       && data->result_size == want) {
-                memcpy(data->mapped, data->result, (size_t)data->result_size);
-                transfer(data, chain, queue, index, 1);
-            }
-        }
-        return present_now(data, queue, info);
-    }
+    hotkeys_ensure();
+    ensure_inprocess();
+    update_live_knobs();
 
-    /* Photo mode: a file is the trigger; while it exists the processed frame
-     * is held on screen. */
-    int wanted = trigger_path && _access(trigger_path, 0) == 0;
-    if (!wanted && capture_every > 0)
-        wanted = frame_counter % (unsigned long)capture_every == 0;
+    int frozen = freeze_path && _access(freeze_path, 0) == 0;
+    if (!frozen) {
+        data->raw_held = 0;
+        data->reproc_seen = 0;
+    }
 
     for (uint32_t i = 0; i < info->swapchainCount; i++) {
         swapchain_data *chain = find_swapchain(info->pSwapchains[i]);
         if (!chain || info->pImageIndices[i] >= chain->image_count) continue;
         uint32_t index = info->pImageIndices[i];
-        if (wanted && ui_mask && !data->holding && !data->have_earlier) {
-            VkDeviceSize needed = (VkDeviceSize)chain->extent.width
-                                  * chain->extent.height * 4;
-            if (ensure_resources(data, needed) == 0
-                && transfer(data, chain, queue, index, 0) == 0) {
-                if (data->earlier_size < needed) {
-                    unsigned char *grown = (unsigned char *)realloc(data->earlier,
-                                                                    (size_t)needed);
-                    if (grown) { data->earlier = grown; data->earlier_size = needed; }
+        VkDeviceSize want = (VkDeviceSize)chain->extent.width
+                          * chain->extent.height * 4;
+
+        if (frozen) {
+            /* Photo mode: hold the frozen frame; reprocess on demand. */
+            if (!data->raw_held || data->raw_size != want) {
+                if (freeze_capture(data, chain, queue, index) == 0)
+                    transfer(data, chain, queue, index, 1);
+            } else {
+                if (reproc_changed(data)) {
+                    update_live_knobs();
+                    if (resend_raw(data, chain) != 0)
+                        nr_log("[nr_layer] reprocess failed; keeping the "
+                               "previous result");
                 }
-                if (data->earlier_size >= needed) {
-                    memcpy(data->earlier, data->mapped, (size_t)needed);
-                    data->have_earlier = 1;
+                if (data->result_size == want) {
+                    memcpy(data->mapped, data->result,
+                           (size_t)data->result_size);
+                    transfer(data, chain, queue, index, 1);
                 }
             }
-        } else if (wanted && !data->holding) {
+            continue;
+        }
+
+        /* Live mode processing:
+         * When In-Process DLSS 5 is active (g_inprocess_active) or DLSS 5 is enabled,
+         * EVERY presented frame is processed by default.
+         * If live_every > 1, process every Nth frame, and between frames present
+         * fresh native frames cleanly without overwriting with stale results.
+         */
+        int should_process = (live_every <= 1) || (frame_counter % (unsigned long)live_every == 0);
+        if (should_process) {
             if (process_frame(data, chain, queue, index) == 0) {
                 data->holding = 1;
+                data->holding_chain = chain->swapchain;
                 transfer(data, chain, queue, index, 1);
             }
-        } else if (wanted && data->holding
-                   && data->result_size == (VkDeviceSize)chain->extent.width
-                                            * chain->extent.height * 4) {
-            memcpy(data->mapped, data->result, (size_t)data->result_size);
-            transfer(data, chain, queue, index, 1);
-        } else if (!wanted) {
-            data->holding = 0;
-            data->have_earlier = 0;
         }
+        /* If not processed (e.g. skipped or failed), leave the fresh native frame
+         * in the swapchain untouched - NEVER overwrite with a stale previous result. */
     }
     return present_now(data, queue, info);
 }

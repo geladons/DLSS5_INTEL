@@ -315,6 +315,7 @@ class M13Controller:
             notes.append("screen overlay stopped (%s)" % msg)
         args = ["--port", "47990", "--gain", "%.3f" % self.cfg.get("gain"),
                 "--blend", "%.3f" % float(self.cfg.get("blend") or 1.0),
+                "--scale", "%.2f" % float(self.cfg.get("scale") or 0.50),
                 "--weights", self.cfg.get("weights_path")]
         ok, msg = self.daemon.start(args)
         if notes:
@@ -385,6 +386,12 @@ class M13Controller:
         os.environ["M12_SCALE"] = s_val
         if gamelaunch.freeze_active():
             gamelaunch.reproc_bump()
+        if self.daemon.running:
+            try:
+                self.client.set_scale(scale)
+            except DaemonError as e:
+                return False, "scale saved but daemon push failed: %s" % e
+            return True, "scale -> %.2f (live)" % scale
         if self.screen.running:
             from .screenmode import write_knobs
             write_knobs(float(self.cfg.get("gain")),
@@ -555,12 +562,17 @@ class M13Controller:
             ok, msg = self.game_deploy(exe)     # auto-deploy on launch
             if not ok:
                 return False, msg
-        if not self.daemon.running:
-            ok, msg = self.daemon_start()       # auto-start the chain too
-            if not ok and "already" not in msg:
-                return False, msg
+        if meta.get("arch") == "x86":
+            if not self.daemon.running:
+                ok, msg = self.daemon_start()
+                if not ok and "already" not in msg:
+                    return False, msg
         target = self.launch_target(exe, meta)
-        ok, msg = gamelaunch.launch_game(target, meta["mode"])
+        scale = self.cfg.get("scale")
+        gain = self.cfg.get("gain")
+        blend = self.cfg.get("blend")
+        ok, msg = gamelaunch.launch_game(target, meta["mode"],
+                                         scale=scale, gain=gain, blend=blend)
         if ok:
             self.launched_exes.add(os.path.abspath(target).lower())
             if target.lower() != exe.lower():

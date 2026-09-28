@@ -117,4 +117,98 @@ with tempfile.TemporaryDirectory() as td:
     finally:
         ctl.shutdown()
 
+print("\n=== 5. Testing Game Launching and Arch-Aware Daemon Handling ===")
+import subprocess
+from unittest.mock import patch, MagicMock
+from m13 import gamelaunch
+
+# 5.1 Test gamelaunch._launch flags and stdio
+with patch("subprocess.Popen") as mock_popen:
+    mock_proc = MagicMock()
+    mock_proc.pid = 12345
+    mock_popen.return_value = mock_proc
+
+    with tempfile.TemporaryDirectory() as td:
+        dummy_exe = os.path.join(td, "game.exe")
+        with open(dummy_exe, "w") as f:
+            f.write("dummy")
+
+        ok, msg = gamelaunch.launch_game(dummy_exe, "dx9", scale=0.67, gain=1.25, blend=0.8)
+        assert ok, "launch_game failed: %s" % msg
+        assert "12345" in msg, "PID 12345 not in launch_game message: %s" % msg
+
+        mock_popen.assert_called_once()
+        args, kwargs = mock_popen.call_args
+        assert kwargs.get("creationflags") == subprocess.CREATE_NEW_PROCESS_GROUP, (
+            "creationflags != CREATE_NEW_PROCESS_GROUP: %s" % kwargs.get("creationflags"))
+        assert (kwargs.get("creationflags") & 0x00000008) == 0, "DETACHED_PROCESS flag still present!"
+        assert kwargs.get("stdin") == subprocess.DEVNULL, "stdin != DEVNULL"
+        assert kwargs.get("stdout") == subprocess.DEVNULL, "stdout != DEVNULL"
+        assert kwargs.get("stderr") == subprocess.DEVNULL, "stderr != DEVNULL"
+        assert kwargs.get("close_fds") is True, "close_fds != True"
+        print("  gamelaunch._launch process flags and DEVNULL stdio [PASS]")
+
+        # 5.2 Test environment propagation
+        env = kwargs.get("env")
+        assert env is not None, "env is None"
+        assert env.get("ENABLE_NR_LAYER") == "1", "ENABLE_NR_LAYER mismatch"
+        assert env.get("NR_LAYER_LIVE") == "1", "NR_LAYER_LIVE mismatch"
+        assert env.get("NR_LAYER_TRIGGER") == gamelaunch.DX9_TRIGGER, "NR_LAYER_TRIGGER mismatch"
+        assert env.get("NR_LAYER_FREEZE") == gamelaunch.FREEZE_FLAG, "NR_LAYER_FREEZE mismatch"
+        assert env.get("NR_LAYER_REPROC") == gamelaunch.REPROC_FLAG, "NR_LAYER_REPROC mismatch"
+
+        assert env.get("NR_LAYER_SCALE") == "0.67" and env.get("DLSS5_SCALE") == "0.67" and env.get("M12_SCALE") == "0.67", "Scale env mismatch"
+        assert env.get("NR_LAYER_GAIN") == "1.25" and env.get("DLSS5_GAIN") == "1.25" and env.get("M12_GAIN") == "1.25", "Gain env mismatch"
+        assert env.get("NR_LAYER_BLEND") == "0.8" and env.get("DLSS5_BLEND") == "0.8" and env.get("M12_BLEND") == "0.8", "Blend env mismatch"
+        print("  gamelaunch.launch_game env propagation (always-injected + scale/gain/blend) [PASS]")
+
+        # 5.3 Test trigger flag existence for layer modes
+        assert os.path.exists(gamelaunch.DX9_TRIGGER), "DX9_TRIGGER flag not set for dx9"
+        print("  gamelaunch trigger flag set for layer mode [PASS]")
+
+# 5.4 Test controller.game_launch architecture-aware daemon handling
+with tempfile.TemporaryDirectory() as td:
+    cfg_file = os.path.join(td, "ctl_cfg.json")
+    cfg = Config(cfg_file)
+    cfg.set("scale", 0.58)
+    cfg.set("gain", 1.5)
+    cfg.set("blend", 0.75)
+    ctl = M13Controller(cfg)
+    try:
+        dummy_x64 = os.path.join(td, "game_x64.exe")
+        with open(dummy_x64, "w") as f:
+            f.write("dummy")
+        dummy_x86 = os.path.join(td, "game_x86.exe")
+        with open(dummy_x86, "w") as f:
+            f.write("dummy")
+
+        ctl.cfg.set("games", {
+            dummy_x64: {"mode": "dx11", "arch": "x64", "name": "Game64"},
+            dummy_x86: {"mode": "dx9", "arch": "x86", "name": "Game32"},
+        })
+
+        # Test 64-bit game launch: should NOT call daemon_start
+        with patch.object(ctl, "game_deploy", return_value=(True, "deployed")), \
+             patch.object(ctl, "daemon_start") as mock_dstart, \
+             patch("m13.gamelaunch.launch_game", return_value=(True, "launched pid 111")) as mock_lg:
+
+            ok, msg = ctl.game_launch(dummy_x64)
+            assert ok, "game_launch x64 failed: %s" % msg
+            mock_dstart.assert_not_called()
+            mock_lg.assert_called_once_with(dummy_x64, "dx11", scale=0.58, gain=1.5, blend=0.75)
+            print("  controller.game_launch x64: In-Process (daemon NOT started) + config propagated [PASS]")
+
+        # Test 32-bit game launch: SHOULD call daemon_start when daemon not running
+        with patch.object(ctl, "game_deploy", return_value=(True, "deployed")), \
+             patch.object(ctl, "daemon_start", return_value=(True, "daemon started")) as mock_dstart, \
+             patch("m13.gamelaunch.launch_game", return_value=(True, "launched pid 222")) as mock_lg:
+
+            ok, msg = ctl.game_launch(dummy_x86)
+            assert ok, "game_launch x86 failed: %s" % msg
+            mock_dstart.assert_called_once()
+            mock_lg.assert_called_once_with(dummy_x86, "dx9", scale=0.58, gain=1.5, blend=0.75)
+            print("  controller.game_launch x86: TCP daemon fallback (daemon_start called) [PASS]")
+    finally:
+        ctl.shutdown()
+
 print("\nALL STAGE 5 UNIT TESTS PASSED SUCCESSFULLY!")

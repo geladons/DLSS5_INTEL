@@ -19,6 +19,7 @@ MAGIC_CTRL = 0x5443524E          # "NRCT", little-endian uint32
 CMD_SETGAIN = 1
 CMD_STATUS = 2
 CMD_SETBLEND = 3
+CMD_SETSCALE = 4
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 47990
 
@@ -78,6 +79,13 @@ class M11dClient:
             raise DaemonError("blend %.3f out of range 0..1" % blend)
         payload = struct.unpack("<I", struct.pack("<f", blend))[0]
         return self._roundtrip(CMD_SETBLEND, payload)
+
+    def set_scale(self, scale):
+        """Live scale update (0.25..1.0); triggers engine re-init with new extent."""
+        if not 0.20 <= scale <= 1.5:
+            raise DaemonError("scale %.2f out of range 0.20..1.5" % scale)
+        payload = struct.unpack("<I", struct.pack("<f", float(scale)))[0]
+        return self._roundtrip(CMD_SETSCALE, payload)
 
     def alive(self):
         """True only when an NRCT-speaking m11d answers (Sunshine doesn't)."""
