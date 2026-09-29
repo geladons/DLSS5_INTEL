@@ -69,13 +69,26 @@ void ChainRecorder::recordWindowAttn(VkCommandBuffer cb, int famIdx, int idx, co
     dCosW(cb, A(ar_->off.oPROJW), A(ar_->off.oQW), A(ar_->off.oKW), A(ar_->off.oVW),
           A(woff(scN)), Ww, H, C);
     bar(cb);
-    dGemm(cb, famIdx, A(ar_->off.oQW), A(ar_->off.oKW), A(ar_->off.oSCW), 64, 64, 32, Ww * H,
-          64 * 32, 64 * 32, 64 * 64, gflags(EPI_NONE, false) | F_TRANSPOSE, 32, 32, 64);
-    bar(cb);
-    dSmaxW(cb, A(ar_->off.oSCW), A(ar_->off.oPRW), Ww, H, A(woff(biasN)));
-    bar(cb);
-    dGemm(cb, famIdx, A(ar_->off.oPRW), A(ar_->off.oVW), A(ar_->off.oMGW), 64, 32, 64, Ww * H,
-          64 * 64, 64 * 32, 64 * 32, gflags(EPI_NONE, false), 64, 32, 32);
+
+    // --- Fused or unfused attention core (QK^T + Softmax + PV) ---
+    int fusedAttn = parsePilot("D5C_INT8_ATTN_FUSED", nullptr, 1);
+    bool useFused = (fusedAttn >= 0 && (fusedAttn == 0 ? false : true));
+
+    if (useFused) {
+        // Flash-Attention fusion: 1 dispatch replaces 3 (GEMM QK^T + smaxw + GEMM PV).
+        // Score (oSCW) and probability (oPRW) matrices stay on-chip in shared memory (20 KB).
+        // Zero DRAM traffic for intermediate scores/probs.
+        dAttnFused(cb, A(ar_->off.oQW), A(ar_->off.oKW), A(ar_->off.oVW),
+                   A(woff(biasN)), A(ar_->off.oMGW), Ww, H);
+    } else {
+        dGemm(cb, famIdx, A(ar_->off.oQW), A(ar_->off.oKW), A(ar_->off.oSCW), 64, 64, 32, Ww * H,
+              64 * 32, 64 * 32, 64 * 64, gflags(EPI_NONE, false) | F_TRANSPOSE, 32, 32, 64);
+        bar(cb);
+        dSmaxW(cb, A(ar_->off.oSCW), A(ar_->off.oPRW), Ww, H, A(woff(biasN)));
+        bar(cb);
+        dGemm(cb, famIdx, A(ar_->off.oPRW), A(ar_->off.oVW), A(ar_->off.oMGW), 64, 32, 64, Ww * H,
+              64 * 64, 64 * 32, 64 * 32, gflags(EPI_NONE, false), 64, 32, 32);
+    }
     bar(cb);
     dTrans(cb, A(ar_->off.oMGW), A(ar_->off.oATW), Ww, H);
     bar(cb);

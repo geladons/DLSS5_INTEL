@@ -86,6 +86,16 @@ struct PackPush { uint64_t src, dst; uint32_t n; };
 // headpack two-pass push: mode 0 accumulates per-channel DC, mode 1 writes
 // the calibrated matched residual (see shaders/m8/headpack.comp).
 struct HeadPush { uint64_t src, dst, dc; uint32_t ntok; float gain; uint32_t mode; uint32_t cols; };
+
+struct AttnFusedPush {
+    uint64_t q;        // oQW f16 [Ww*H, 64, 32]
+    uint64_t k;        // oKW f16 [Ww*H, 64, 32]
+    uint64_t v;        // oVW f16 [Ww*H, 64, 32]
+    uint64_t bias;     // attn_bias f16 [H, 64, 64] or 0
+    uint64_t dst;      // oMGW fp32 [Ww*H, 64, 32] output
+    uint32_t Ww;       // number of windows
+    uint32_t H;        // number of heads
+};
 #pragma pack(pop)
 
 enum { EPI_NONE = 0, EPI_E4M3 = 1, EPI_GATE = 2, EPI_GATE_E4M3 = 3, EPI_HALF = 4,
@@ -171,6 +181,8 @@ private:
     void dUpMerge(VkCommandBuffer cb, uint64_t a, uint64_t b, uint64_t c2, uint64_t sin,
                   uint64_t cos, uint64_t h, const Stage& tgt, const Stage& low,
                   uint32_t C, uint32_t kind);
+    void dAttnFused(VkCommandBuffer cb, uint64_t q, uint64_t k, uint64_t v, uint64_t bias,
+                    uint64_t out, uint32_t Ww, uint32_t H);
 
     // block recorders
     struct Cur { VkDeviceSize off; bool is16; uint32_t C; };
@@ -200,7 +212,7 @@ private:
     uint32_t T6P_ = 0;
 
     ChainPipe pGemm, pGemm1, pGemmI8, pQuantAct, pCos, pCosW, pSmax, pEw, pPart, pTrans, pGather,
-              pMerge, pFeatpack, pHeadpack, pPool, pUpM;
+              pMerge, pFeatpack, pHeadpack, pPool, pUpM, pAttnFused;
 
     uint64_t A(VkDeviceSize o) const { return ar_->A(o); }
     uint64_t vec(const std::string& n) const { return ar_->vecOff.at(n); }

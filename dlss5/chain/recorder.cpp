@@ -52,13 +52,14 @@ void ChainRecorder::init(const VkCtx& c, const ChainArena& arena, const WeightsS
     chainMakePipe(c, shaderDir + "headpack.spv", pHeadpack);
     chainMakePipe(c, shaderDir + "pool2.spv", pPool);
     chainMakePipe(c, shaderDir + "upmerge.spv", pUpM);
-    std::printf("[chain] 16 pipelines up (12 kernels + featpack/headpack + pool2/upmerge), %zu BDA chunk bases, chunk0 0x%llx\n",
+    chainMakePipe(c, shaderDir + "attn_fused.spv", pAttnFused);
+    std::printf("[chain] 17 pipelines up (13 kernels + featpack/headpack + pool2/upmerge), %zu BDA chunk bases, chunk0 0x%llx\n",
                 arena.chunks.size(), (unsigned long long)arena.chunks[0].baseA);
 }
 
 void ChainRecorder::destroy(const VkCtx& c) {
     for (ChainPipe* cp : {&pGemm, &pGemm1, &pGemmI8, &pQuantAct, &pCos, &pCosW, &pSmax, &pEw, &pPart, &pTrans,
-                          &pGather, &pMerge, &pFeatpack, &pHeadpack, &pPool, &pUpM}) {
+                          &pGather, &pMerge, &pFeatpack, &pHeadpack, &pPool, &pUpM, &pAttnFused}) {
         vkDestroyPipeline(c.dev, cp->pipe, nullptr);
         vkDestroyPipelineLayout(c.dev, cp->layout, nullptr);
         vkDestroyDescriptorSetLayout(c.dev, cp->dsl, nullptr);
@@ -352,6 +353,23 @@ void ChainRecorder::dUpMerge(VkCommandBuffer cb, uint64_t a, uint64_t b, uint64_
     pmBegin(cb);
     vkCmdDispatch(cb, (tgt.TOK + 255) / 256, 1, 1);
     pmEnd(cb, "upm", "", 0, C, 0, (tgt.TOK + 255) / 256, 1, 1, bytes);
+}
+
+void ChainRecorder::dAttnFused(VkCommandBuffer cb, uint64_t q, uint64_t k, uint64_t v, uint64_t bias,
+                               uint64_t out, uint32_t Ww, uint32_t H) {
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pAttnFused.pipe);
+    AttnFusedPush p{q, k, v, bias, out, Ww, H};
+    vkCmdPushConstants(cb, pAttnFused.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
+
+    // Read: Q f16 [Ww*H, 64, 32] (2B) + K f16 (2B) + V f16 (2B) + bias f16 [H, 64, 64] (2B, optional)
+    // Write: out fp32 [Ww*H, 64, 32] (4B)
+    // DRAM traffic for score (oSCW) and prob (oPRW) matrices is 100% eliminated (0 bytes).
+    uint64_t bytes = (uint64_t)Ww * H * 64 * 32 * (2 + 2 + 2 + 4)
+                   + (bias ? (uint64_t)H * 64 * 64 * 2 : 0);
+
+    pmBegin(cb);
+    vkCmdDispatch(cb, Ww * H * 2, 1, 1);
+    pmEnd(cb, "attn_fused", "", Ww * H * 64, 32, 32, Ww * H * 2, 1, 1, bytes);
 }
 
 } // namespace d5c

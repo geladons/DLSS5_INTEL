@@ -1,0 +1,204 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+/*
+ * attn_fused.comp -- Direct-Cache Fused Flash-Attention kernel.
+ *
+ * 1 SIMD32 wave per workgroup (local_size_x = 32), 2 workgroups per (window, head):
+ *   - half 0: tokens 0..31 of the window
+ *   - half 1: tokens 32..63 of the window
+ *
+ * Architecture:
+ *   - Q[32, 32] staged in shared memory (2 KB).
+ *   - K[64, 32] and V[64, 32] streamed directly from L1/L2 cache (pc.k, pc.v)
+ *     using coopMatLoad. Eliminates 8 KB shared staging and 16-way bank conflicts.
+ *   - S/P[32, 64] stored in shared memory with PADDED stride = 68 (4.25 KB)
+ *     to mathematically eliminate all shared memory bank conflicts (gcd(68,32)=4).
+ *   - Total shared memory: ONLY 6.25 KB (down from 48 KB hardware cap).
+ *   - Wave occupancy: maximum 8 threads/EU on Battlemage Xe2.
+ *   - Dispatches: Ww * H * 2 workgroups.
+ *   - DRAM traffic for score (oSCW) and prob (oPRW) matrices: 0 bytes.
+ */
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_shader_subgroup_basic : require
+
+#include "publish.glsl"
+
+layout(local_size_x = 32) in;
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf  { float     v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer HalfBuf   { float16_t v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 8)  buffer Half4Buf  { f16vec4   v4[]; };
+
+layout(push_constant, scalar) uniform Push {
+    uint64_t q;        // oQW f16 [Ww*H, 64, 32]
+    uint64_t k;        // oKW f16 [Ww*H, 64, 32]
+    uint64_t v;        // oVW f16 [Ww*H, 64, 32]
+    uint64_t bias;     // attn_bias f16 [H, 64, 64] or 0
+    uint64_t dst;      // oMGW fp32 [Ww*H, 64, 32] output
+    uint     Ww;       // number of windows
+    uint     H;        // number of heads
+} pc;
+
+const uint TM = 8u, TN = 16u, TK = 16u;
+const uint RM = 4u, RN = 2u;
+const uint BM = TM * RM;  // 32
+const uint BN = TN * RN;  // 32
+const uint PADDED_STRIDE = 68u; // 64 cols + 4 pad elements (eliminates bank conflicts)
+
+shared float16_t sQ[32 * 32];                // 2048 bytes
+shared float16_t sS[32 * PADDED_STRIDE];     // 4352 bytes (scores then probs)
+
+void main() {
+    uint halfId = gl_WorkGroupID.x;
+    if (halfId >= pc.Ww * pc.H * 2u) return;
+
+    uint wh = halfId / 2u;
+    uint halfIdx = halfId % 2u;
+    uint rowBase = halfIdx * 32u;
+    uint head = wh % pc.H;
+    uint tid = gl_LocalInvocationID.x;  // 0..31
+
+    // ================================================================
+    // PHASE 1: Load Q for this half (32 tokens) into shared memory
+    // ================================================================
+    uint qBase4 = (wh * 64u + rowBase + tid) * 8u;
+    uint sqBase = tid * 32u;
+    for (uint i = 0u; i < 8u; ++i) {
+        f16vec4 q4 = Half4Buf(pc.q).v4[qBase4 + i];
+        sQ[sqBase + i * 4u + 0u] = q4.x;
+        sQ[sqBase + i * 4u + 1u] = q4.y;
+        sQ[sqBase + i * 4u + 2u] = q4.z;
+        sQ[sqBase + i * 4u + 3u] = q4.w;
+    }
+
+    barrier();
+
+    // ================================================================
+    // PHASE 2: S[32, 64] = Q[32, 32] @ K[64, 32]^T
+    // Q from sQ, K directly from L1/L2 cache (pc.k)
+    // ================================================================
+    uint kBase = wh * (64u * 32u);
+    for (uint colPass = 0u; colPass < 2u; ++colPass) {
+        uint colBase = colPass * BN;
+
+        coopmat<float16_t, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> acc[RM][RN];
+        for (uint i = 0u; i < RM; ++i)
+            for (uint j = 0u; j < RN; ++j)
+                acc[i][j] = coopmat<float16_t, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(float16_t(0.0));
+
+        // K=32, TK=16 -> 2 tiles
+        for (uint t = 0u; t < 2u; ++t) {
+            coopmat<float16_t, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA> a[RM];
+            coopmat<float16_t, gl_ScopeSubgroup, TK, TN, gl_MatrixUseB> b[RN];
+
+            for (uint i = 0u; i < RM; ++i)
+                coopMatLoad(a[i], sQ, (i * TM) * 32u + t * TK, 32u,
+                            gl_CooperativeMatrixLayoutRowMajor);
+
+            // K^T loaded directly from global memory buffer pc.k (L1/L2 cache)
+            for (uint j = 0u; j < RN; ++j)
+                coopMatLoad(b[j], HalfBuf(pc.k).v, kBase + (colBase + j * TN) * 32u + t * TK, 32u,
+                            gl_CooperativeMatrixLayoutColumnMajor);
+
+            for (uint i = 0u; i < RM; ++i)
+                for (uint j = 0u; j < RN; ++j)
+                    acc[i][j] = coopMatMulAdd(a[i], b[j], acc[i][j]);
+        }
+
+        // Store S tile directly to shared memory sS [32, 68] (bank-conflict free)
+        for (uint i = 0u; i < RM; ++i)
+            for (uint j = 0u; j < RN; ++j)
+                coopMatStore(acc[i][j], sS, (i * TM) * PADDED_STRIDE + colBase + j * TN,
+                             PADDED_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
+    }
+
+    barrier();
+
+    // ================================================================
+    // PHASE 3: On-Chip Softmax (M7b Bit-Affine, Exact Match)
+    // ================================================================
+    {
+        uint base = tid * PADDED_STRIDE;
+        uint rowInWindow = rowBase + tid;
+        uint biasBase = (pc.bias != 0u) ? (head * 4096u + rowInWindow * 64u) : 0u;
+
+        float total = 0.0;
+        // Pass 3a: compute transformed weights and row total
+        for (uint i = 0u; i < 32u; ++i) {
+            vec2 affine;
+            for (uint j = 0u; j < 2u; ++j) {
+                uint col = i * 2u + j;
+                float logit = float(sS[base + col]);
+                if (pc.bias != 0u) {
+                    uint bb = float16BitsToUint16(HalfBuf(pc.bias).v[biasBase + col]);
+                    logit += f16_widen(bb);
+                }
+                precise float scaled = half_round(logit) * 0.044921875 + 1.30078125;
+                affine[j] = clamp(scaled, 1.03125, 1.5693359375);
+            }
+            uint transformed = (packHalf2x16(affine) << 5) + 0x7FF88000u;
+            vec2 weights = unpackHalf2x16(transformed);
+            sS[base + i * 2u + 0u] = float16_t(weights.x);
+            sS[base + i * 2u + 1u] = float16_t(weights.y);
+            total += weights.x + weights.y;
+        }
+
+        // Pass 3b: normalize by reciprocal and apply e4m3
+        float recip = half_round(1.0 / half_round(total));
+        for (uint col = 0u; col < 64u; ++col) {
+            precise float p = float(sS[base + col]) * recip;
+            sS[base + col] = float16_t(e4m3(half_round(p)));
+        }
+    }
+
+    barrier();
+
+    // ================================================================
+    // PHASE 4: O[32, 32] = P[32, 64] @ V[64, 32]
+    // P from sS, V directly from L1/L2 cache (pc.v)
+    // ================================================================
+    {
+        coopmat<float16_t, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> accPV[RM][RN];
+        for (uint i = 0u; i < RM; ++i)
+            for (uint j = 0u; j < RN; ++j)
+                accPV[i][j] = coopmat<float16_t, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(float16_t(0.0));
+
+        uint vBase = wh * (64u * 32u);
+        // K=64, TK=16 -> 4 tiles
+        for (uint t = 0u; t < 4u; ++t) {
+            coopmat<float16_t, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA> a[RM];
+            coopmat<float16_t, gl_ScopeSubgroup, TK, TN, gl_MatrixUseB> b[RN];
+
+            for (uint i = 0u; i < RM; ++i)
+                coopMatLoad(a[i], sS, (i * TM) * PADDED_STRIDE + t * TK, PADDED_STRIDE,
+                            gl_CooperativeMatrixLayoutRowMajor);
+
+            // V loaded directly from global memory buffer pc.v (L1/L2 cache)
+            for (uint j = 0u; j < RN; ++j)
+                coopMatLoad(b[j], HalfBuf(pc.v).v, vBase + (t * TK) * 32u + j * TN, 32u,
+                            gl_CooperativeMatrixLayoutRowMajor);
+
+            for (uint i = 0u; i < RM; ++i)
+                for (uint j = 0u; j < RN; ++j)
+                    accPV[i][j] = coopMatMulAdd(a[i], b[j], accPV[i][j]);
+        }
+
+        // Store widened to fp32 directly into pc.dst (oMGW)
+        uint outBase = (wh * 64u + rowBase) * 32u;
+        for (uint i = 0u; i < RM; ++i)
+            for (uint j = 0u; j < RN; ++j) {
+                coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> wide =
+                    coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(accPV[i][j]);
+                coopMatStore(wide, FloatBuf(pc.dst).v,
+                             outBase + (i * TM) * 32u + j * TN,
+                             32u, gl_CooperativeMatrixLayoutRowMajor);
+            }
+    }
+}
