@@ -19,6 +19,7 @@
 import ctypes
 import time
 import tkinter as tk
+from ctypes import wintypes
 from tkinter import ttk
 
 from .processes import suspend_pid, resume_pid, hwnd_for_pid
@@ -31,6 +32,7 @@ VK = {"control": 0x11, "ctrl": 0x11, "alt": 0x12, "shift": 0x10}
 POLL_MS = 120
 DEBOUNCE_MS = 250
 STATUS_MS = 500
+CURSOR_KEEP_MS = 32
 
 GWL_EXSTYLE = -20
 WS_EX_TOPMOST = 0x00000008
@@ -622,7 +624,24 @@ class ControlOverlay:
         if not self.win.winfo_viewable():
             return
         _free_cursor()
-        self.win.after(150, self._cursor_keeper)
+        if not self._focus_mode:
+            self._keep_cursor_over_panel()
+        self.win.after(CURSOR_KEEP_MS, self._cursor_keeper)
+
+    def _keep_cursor_over_panel(self):
+        try:
+            point = wintypes.POINT()
+            if not _u32.GetCursorPos(ctypes.byref(point)):
+                return
+            left = self.win.winfo_rootx()
+            top = self.win.winfo_rooty()
+            right = left + self.win.winfo_width()
+            bottom = top + self.win.winfo_height()
+            if not (left <= point.x < right and top <= point.y < bottom):
+                _u32.SetCursorPos(left + min(24, self.win.winfo_width() // 2),
+                                  top + min(40, self.win.winfo_height() // 2))
+        except (tk.TclError, ValueError, OSError):
+            pass
 
     def _return_focus(self):
         restore_focus = self._focus_mode

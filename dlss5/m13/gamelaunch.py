@@ -24,6 +24,7 @@
 import os
 import subprocess
 
+from . import hudmask
 from .phase30 import phase30_env_dict, write_phase30_knobs
 
 DX9_TRIGGER = os.path.join(os.environ.get("TEMP", "."), "m13_dx9_trigger.flag")
@@ -155,6 +156,7 @@ def launch_game(exe_path, mode, scale=None, gain=None, blend=None, cfg=None, sha
             "NR_LAYER_REPROC": REPROC_FLAG,
             "NR_LAYER_UI_MASK": "1",
         })
+        env["NR_LAYER_HUDMASK"] = hudmask.apply(exe_path, cfg)
     elif mode == "dx12":
         _flag_set(M12_PAUSE, False)    # make sure we start un-paused
         # DX12 uses m12_dxgi.dll proxy + in-process d5c_chain.dll.
