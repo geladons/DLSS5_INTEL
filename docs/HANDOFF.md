@@ -1,10 +1,12 @@
-# HANDOFF: DLSS 5 on Intel Arc Pro B50 (Updated 2026-09-29, v0.3 Release)
+# HANDOFF: DLSS 5 on Intel Arc Pro B50 (Updated 2026-09-29, v0.3 Post-Release & Game Hardening)
 
 ## 1. Quick Start & Verification in New Session
 - **Production Bundle (User-Ready):**
   - Path: `C:\Users\<owner>\Desktop\production`
   - Launcher: Run `DLSS5 Manager.vbs` (zero console flash) or `DLSS 5 Manager.cmd`.
   - Content: 113 binaries and assets verified with SHA-1 hashes; INT8 weights (`dlssnr-int8.bin`, 158 MB) packaged alongside FP16 safetensors (`dlssnr-logical.safetensors`, 291 MB); x64/x86 layer manifests patched with absolute paths.
+- **Port Assignment:**
+  - `48990` is the canonical DLSSNR daemon TCP port (moved from 47990 to avoid collision with Sunshine Moonlight host).
 - **Run Bundle Selftest:**
   ```cmd
   cd /d C:\Users\<owner>\Desktop\production\runtime\m11d
@@ -22,7 +24,7 @@
   ```cmd
   python tools\test_m13_imports.py
   ```
-  Must report all 16 package modules `[OK]`.
+  Must report all 18 package modules `[OK]`.
 - **Verify DLL Exports:**
   ```cmd
   python tools\check_pe_exports_pure.py
@@ -33,46 +35,43 @@
 
 ## 2. Solved Issues & Completed Milestones in Current Session
 
-### Stage 14: Flash-Attention Fusion (`attn_fused.comp`, Commit `64e6ef9`)
-- **Architecture:** Replaced 3 separate dispatches ($QK^T$ GEMM + `smaxw` + $PV$ GEMM) with a single compute shader per 64-token window (`attn_fused.comp`).
-- **Direct-Cache Architecture on Xe2:** Staged $Q$ (2 KB) in shared memory, streaming $K$ and $V$ directly from L1/L2 cache via `coopMatLoad` instructions. This reduced shared memory from 96 KB to 6.25 KB, circumventing Intel Arc B50's 48 KB hardware SLM limit and granting maximum thread occupancy (8 threads/EU).
-- **Bank Conflict Elimination:** Stored with padded leading stride $= 68$ elements ($\gcd(68, 32) = 4$), mathematically eliminating 16-way and 32-way shared memory bank conflict serialization.
-- **On-Chip Softmax:** Max-subtract-exp-sum computed on-chip via `subgroupMax`/`subgroupAdd` reductions in Cooperative Matrix registers.
-- **Memory & Dispatch Gains:**
-  - Cut 124 dispatches per frame (186 $\to$ 62 attention dispatches).
-  - DRAM buffers `oSCW` (46 MB) and `oPRW` (23 MB) **100% eliminated**.
-  - Saved **15.12 GB DRAM traffic per frame at 1080p** (-4.13 GB @ 960x576).
-  - Chain selftest time: 741.83 ms $\to$ **622.9 ms (-119 ms saved)**.
-- **Rollback Flag:** `D5C_INT8_ATTN_FUSED=0`.
+### Stage 17: Multi-Engine Game Presentation Fixes & Stability Hardening (Commits `d90e680`, `6505874`, `4063eaf`, `298666a`)
+1. **GTA IV (x86 DX9 / DXVK) Freeze & Flickering:**
+   - *Freeze Cause:* Port collision on `47990` with Sunshine (Moonlight host, PID ~7960). `nr_layer_win32.dll` connected to Sunshine instead of `m11d`, blocking synchronously for 60 seconds inside `vkQueuePresentKHR`.
+   - *Flicker Cause:* Removed 85% static threshold in `nr_layer_win.c` forced constant neural passes on static menus, fluttering threshold (`abs(diff) > 6`) across D3D9 backbuffers.
+   - *Fixes:* Moved daemon & layer to port `48990`; reduced socket timeout `tv` to `1500` ms (fail-fast); increased `settled()` threshold to `12`; restored 85% static menu bypass returning untouched backbuffer at clean 60 FPS; added 10-tick grace period and `gtaiv.exe` process checks before auto-stopping daemon.
+2. **Red Dead Redemption 2 (x64 Vulkan) Crash on Launch:**
+   - *Cause:* `nr_CreateDevice` called `next_instance(NULL, "vkCreateDevice")` with `NULL`. With RDR2 + Rockstar Social Club + Steam overlays, `vkGetInstanceProcAddr(NULL, ...)` returned a NULL pointer, causing an Access Violation `0xC0000005`.
+   - *Fixes:* In `nr_layer_win.c`, lookup uses `layer_instance` first, then `next_instance_proc`, with explicit null checks and logging; intercepted `vkDestroyInstance` to reset dangling instance handles; added compute instance bypass in `nr_CreateInstance`; implemented score-based device selection in `pickDevice()` (`vk_context.cpp`) prioritizing discrete Intel Arc GPUs with `VK_KHR_cooperative_matrix` (+180 score).
+3. **Metro Exodus (DirectX 12) Launch Crash:**
+   - *Cause:* `gamelaunch.py` set `ENABLE_NR_LAYER=1` even for DX12 mode, causing Vulkan layer injection into the game's in-process `d5c_chain.dll` compute context. Additionally, Metro Exodus queried `IDXGIFactory2/4/6` via `QueryInterface`, bypassing unhooked vtables.
+   - *Fixes:* For `mode == "dx12"`, set `ENABLE_NR_LAYER = "0"` in `gamelaunch.py`; implemented dynamic per-entry vtable patching (`patch_entry`) on `QueryInterface` to hook all derived factories (`IDXGIFactory1..7`) in `m12_hook.cpp`; added SEH `__try / __except` wrappers `safe_process_frame` in `m12_dx12.cpp` around in-process compute calls; updated port to `48990`.
+4. **The Witcher 3: Wild Hunt (Next-Gen) Launcher Loop & Processing:**
+   - *Cause:* Next-Gen update has two binaries: `bin\x64\witcher3.exe` (DX11) and `bin\x64_dx12\witcher3.exe` (DX12, default in `launcher-configuration.json`). Scanner picked DX11 and wrapped with `REDprelauncher.exe`; deployer only copied to `bin\x64`. Clicking "Play" in launcher launched `bin\x64_dx12\witcher3.exe` without proxy DLLs.
+   - *Fixes:* In `gamescan.py`, prioritized DX12 binaries over DX11 and set `launch_exe = main.exe` when `REDprelauncher.exe` is detected to bypass the launcher GUI; in `deploy.py`, added dual sister-directory sync (`bin\x64` + `bin\x64_dx12`) deploying appropriate proxy DLLs to both directories.
 
-### Stage 15: Vectorized 128-bit Downsample Pool (`pool2.comp`, Commit `201d5d2`)
-- **Root Cause:** Legacy `pool2.comp` mapped 1 thread per token and looped channels, striding warps by $C$ elements (128-2048 bytes), causing 16x-32x sector waste and 97% cacheline thrashing (10.0 GB/s bandwidth hole).
-- **Vectorized Architecture:** Mapped 1 invocation per `(token, ch4)` slot with 128-bit `vec4`/`f16vec4` coalesced loads and stores.
-- **Performance Gains:**
-  - 1080p Pool Busy Time: **42.45 ms -> 2.53 ms (16.8x speedup! -39.92 ms saved)**.
-  - 960x576 Pool Busy Time: **6.30 ms -> 0.66 ms (9.5x speedup)**.
-  - 1080p Steady-State Chain: **912.9 ms -> 767.5 ms (-145.4 ms saved)**.
-  - 1080p Selftest Chain: **622.9 ms -> 547.0 ms (-75.9 ms saved; total -194.8 ms from baseline)**.
-  - 960x576 Steady-State Chain: **266.8 ms -> 210.2 ms (-56.6 ms saved)**.
-- **Rollback Flag:** `D5C_INT8_POOL_VEC=0`.
-
-### Stage 16: v0.3 Production Release Packaging & Multi-Frontend Validation (Commit `b6db10d`)
-- **Full Clean Rebuild:** Rebuilt all runtime targets:
-  - `d5c_chain.dll` (Core neural module)
-  - `m11d.exe` (Frame daemon & verification)
-  - `nr_layer_win.dll` (Vulkan layer x64)
-  - `m12_dxgi.dll` (DX12 proxy hook)
-  - `m8blive.exe` (Desktop overlay runner)
-  - All SPIR-V kernels (`attn_fused.spv`, `pool2.spv`, `gemm_i8.spv`, etc.) synchronized.
-- **Bundle Packaging (`_build_production.py`):**
-  - Updated to package INT8 weights (`dlssnr-int8.bin`) alongside FP16 safetensors with SHA-1 validation.
-  - Patched Vulkan layer JSON manifests with absolute paths for x86 and x64 loaders.
-- **Verification Gates:**
-  - Production bundle selftest: exit code 0, 45.05 dB PSNR vs FP16 reference, 999.00 dB (100.00% bit-exact, max_diff=0.0) vs Stage 14/15 reference, 0 NaNs/Infs.
-  - PE exports inspected: all Vulkan negotiation, DXGI factories, and C ABI entry points verified.
-  - Production Manager (`m13`): all 16 Python package modules import cleanly.
-  - Desktop capture / screen mode: confirmed graceful error reporting on locked session (`E_ACCESSDENIED`).
-  - Running background tasks: 0 active tasks (task-570 killed cleanly).
+### Stage 18: NVIDIA Phase30 Vendor Tuning, Games List Caching & UI Modernization (Commit `092b35f`)
+1. **Games List Caching & Instant Startup:**
+   - Created modular caching engine `dlss5/m13/gamescache.py` saving state to `%LOCALAPPDATA%\DLSS5Manager\games_cache.json`.
+   - On manager startup, cached games load **instantly with 0 delay**, skipping drive scanning.
+   - Added a visible **"Rescan Games" / "Пересканировать игры"** button in the Games tab header.
+2. **Fixed Overlay "Daemon Crashed" False Alarm:**
+   - Overhauled status reporting in `dlss5/m13/overlay.py`. For direct in-process games (x64 Vulkan/DX12), reports `Direct In-Process (<mode>, 0 ms lag)` in green. Reports `Daemon Active (x86)` only when `m11d.exe` is serving x86 games, and `Standby` when idle.
+3. **NVIDIA Phase30 Vendor Tuning Controls Overhaul:**
+   - Created `dlss5/m13/phase30.py` implementing the 7 vendor parameters:
+     1. `intensity`: 0.0 .. 2.0 (default **1.6** – preserving baseline demo screenshot gain).
+     2. `local_tone`: 0.0 .. 2.0 (default 1.0).
+     3. `local_structure`: 0.0 .. 2.0 (default 1.5).
+     4. `skin_structure`: -1.0 .. 2.0 (default 2.0; -1.0 = follow local structure).
+     5. `auto_mask`: bool (default True).
+     6. `style_index`: 0, 1, 2 (0: Default, 1: Natural, 2: Cinematic).
+     7. `color_strength`: 0.0 .. 2.0 (default 1.0).
+   - Added "Reset to Defaults" button in both Manager Settings and `CTRL+ALT+G` In-Game Overlay.
+   - Full Russian and English translations in `dlss5/m13/i18n.py`.
+   - Config persistence in `dlss5/m13/config.py` supporting global and per-game overrides.
+   - Runtime propagation via environment variables, live JSON knobs (`%TEMP%\m13_phase30_knobs.json`), and TCP daemon commands (6..11).
+4. **Rebuilt Production Bundle:**
+   - Updated `_build_production.py` and regenerated bundle at `C:\Users\<owner>\Desktop\production` with all new modules and recompiled binaries.
 
 ---
 
@@ -81,11 +80,11 @@
 | Subsystem | Binary / Module | Description | Mode |
 | :--- | :--- | :--- | :--- |
 | **x64 Vulkan Games** (RDR2, Witcher 3, Cyberpunk) | `nr_layer_win.dll` + `d5c_chain.dll` | Direct in-process GPU execution via C ABI | 0 ms Socket Lag, No Daemon |
-| **x64 DX12 Games** (GTA V Enhanced) | `m12_dxgi.dll` + `d5c_chain.dll` | Direct in-process GPU execution via C ABI | 0 ms Socket Lag, No Daemon |
-| **x86 Vulkan/DX9 Games** (GTA IV via DXVK) | `nr_layer_win32.dll` $\leftrightarrow$ `m11d.exe` | TCP loopback bridge (x86 $\to$ x64 daemon) | Auto-managed daemon lifecycle |
+| **x64 DX12 Games** (GTA V Enhanced, Metro Exodus) | `m12_dxgi.dll` + `d5c_chain.dll` | Direct in-process GPU execution via C ABI | 0 ms Socket Lag, No Daemon |
+| **x86 Vulkan/DX9 Games** (GTA IV via DXVK) | `nr_layer_win32.dll` $\leftrightarrow$ `m11d.exe` | TCP loopback bridge on port 48990 | Auto-managed daemon lifecycle |
 | **Screen Mode** (Desktop / Window Overlay) | `m8blive.exe` | Standalone direct DDA desktop capture overlay | Direct GPU, No Daemon |
-| **Management GUI & Overlay** | `m13` (`pythonw m13.pyw`) | Tkinter modern dashboard & in-game overlay | Topmost non-minimizing overlay |
-| **Official Performance Benchmarks** | [docs/BENCHMARKS.md](BENCHMARKS.md) | Verified hardware matrix, 15-20 ms reconciliation | 210.2 ms @ 0.50 scale, 547 ms @ 1080p |
+| **Management GUI & Overlay** | `m13` (`pythonw m13.pyw`) | Modern dashboard, Phase30 panel & overlay | Topmost non-minimizing overlay |
+| **Official Performance Benchmarks** | [docs/BENCHMARKS.md](BENCHMARKS.md) | Verified hardware matrix | 210.2 ms @ 0.50 scale, 547 ms @ 1080p |
 
 ---
 
@@ -103,19 +102,23 @@
 ---
 
 ### 5. Host Quirks, Rules & Red Lines (Mandatory)
-1. **Sunshine is Permanent:** Sunshine (PID ~7784 / ~6524) streams this desktop to the owner via Moonlight. **NEVER stop or kill Sunshine.**
+1. **Sunshine is Permanent:** Sunshine (PID ~7784 / ~7960) streams this desktop to the owner via Moonlight. **NEVER stop or kill Sunshine.**
 2. **Local Git Commits Only:** Keep commits local on `master`. Do NOT push to remote repositories. Use `git add -f` for docs/*.md, *.log.
 3. **ASCII-Only in Code and Scripts:** Non-ASCII comments in `.cmd` or `.cpp` can trigger launcher parse bugs on this host.
 4. **Weights Proprietary:** `dlssnr-logical.safetensors` and `dlssnr-int8.bin` must NEVER be committed to git.
 5. **No Foreground Long Commands:** Always launch heavy/looping commands detached or via asynchronous scripts.
+6. **Port 48990:** Never revert DLSSNR daemon to port 47990 (collides with Sunshine).
 
 ---
 
 ### 6. Roadmap & Next Steps for v0.4
-1. **Window Transpose & Partition Vectorization:**
-   - Profiling shows `trans.comp` (29.59 ms @ 1080p) and `part.comp` (27.30 ms @ 1080p) are memory-bound latency holes with scalar or un-coalesced access patterns.
-   - Vectorize memory loads/stores to 128-bit `vec4`/`f16vec4` following the successful `pool2.comp` pattern (potential ~30-40 ms savings at 1080p).
-2. **Quantization of Global Blocks (Blocks 31..38):**
-   - Currently, global attention blocks 31..38 remain in FP16. Evaluate INT8 quantization with global token normalization.
-3. **End-to-End Live Game Validation:**
-   - Test production bundle on live game targets (RDR2, GTA IV, GTA V Enhanced) through Moonlight stream to confirm real-time visual fidelity and HUD preservation.
+1. **Owner Live-Testing:**
+   - Test GTA IV (verify 60 FPS in menu, no freezing, clean transition to in-game).
+   - Test RDR2 (verify stable launch with Vulkan layer and in-game overlay).
+   - Test Metro Exodus (verify stable DX12 launch and proxy presentation).
+   - Test Witcher 3 (verify direct game launch into `bin\x64_dx12` with DLSS processing).
+   - Test Phase30 panel sliders in Manager Settings and `CTRL+ALT+G` overlay.
+2. **Window Transpose & Partition Vectorization:**
+   - Vectorize `trans.comp` (29.6 ms @ 1080p) and `part.comp` (27.3 ms @ 1080p) to 128-bit `vec4`/`f16vec4`.
+3. **Quantization of Global Blocks (Blocks 31..38):**
+   - Evaluate INT8 quantization with global token normalization.
