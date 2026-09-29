@@ -182,13 +182,13 @@ To definitively test this, `ChainProf` was upgraded to record paired hardware ti
 
 ## 6. Stage 14: Flash-Attention Fusion Results (Intel Arc Pro B50)
 
-### A. Architecture & Implementation Summary
-- **Shader:** ttn_fused.comp (1 SIMD32 wave per workgroup, local_size_x = 32).
+#### A. Architecture & Implementation Summary
+- **Shader:** `attn_fused.comp` (1 SIMD32 wave per workgroup, local_size_x = 32).
 - **Tile Decomposition:** Each window-head tile (64 tokens) is partitioned into two independent 32-token halves (tokens 0..31 and tokens 32..63).
-- **On-Chip Score & Prob Matrices:** Intermediate score ( \in \mathbb{R}^{32 \times 64}$) and probability ( \in \mathbb{R}^{32 \times 64}$) matrices are maintained entirely in shared memory. DRAM buffers oSCW (46 MB) and oPRW (23 MB) are 100% eliminated.
-- **Bank Conflict Elimination:** Stored with padded leading stride =68$ ( + 4$ padding elements, $\gcd(68, 32) = 4$), mathematically eliminating 16-way and 32-way shared memory bank conflicts.
-- **Zero GRF Spilling:** Cooperative matrix =4, RN=2$ ( \times 32$ tile) ensures optimal 8 threads/EU wave occupancy with zero register spills to scratch memory.
-- **Rollback Control:** Environment variable D5C_INT8_ATTN_FUSED=0 safely restores the classic 3-dispatch pipeline (dGemm + dSmaxW + dGemm).
+- **On-Chip Score & Prob Matrices:** Intermediate score ($S \in \mathbb{R}^{32 \times 64}$) and probability ($P \in \mathbb{R}^{32 \times 64}$) matrices are maintained entirely in shared memory. DRAM buffers `oSCW` (46 MB) and `oPRW` (23 MB) are 100% eliminated.
+- **Bank Conflict Elimination:** Stored with padded leading stride $= 68$ ($64 + 4$ padding elements, $\gcd(68, 32) = 4$), mathematically eliminating 16-way and 32-way shared memory bank conflicts.
+- **Zero GRF Spilling:** Cooperative matrix $RM=4, RN=2$ ($32 \times 32$ tile) ensures optimal 8 threads/EU wave occupancy with zero register spills to scratch memory.
+- **Rollback Control:** Environment variable `D5C_INT8_ATTN_FUSED=0` safely restores the classic 3-dispatch pipeline (dGemm + dSmaxW + dGemm).
 
 ### B. Before / After Performance Comparison
 
@@ -215,11 +215,11 @@ To definitively test this, `ChainProf` was upgraded to record paired hardware ti
 | :--- | :---: | :---: | :---: | :---: |
 | **gemm_i8** | 20 | 213.56 ms | 4,089.1 MB | 19.2 GB/s |
 | **gemm** (FP16 remaining) | 667 | 211.34 ms | 19,988.5 MB | 94.6 GB/s |
-| **ttn_fused** | 62 | 144.50 ms | 4,277.1 MB | 29.6 GB/s |
+| **attn_fused** | 62 | 144.50 ms | 4,277.1 MB | 29.6 GB/s |
 | **cosw** | 62 | 135.01 ms | 7,692.3 MB | 57.0 GB/s |
 | **pool** (downsample) | 6 | 42.45 ms | 424.1 MB | **10.0 GB/s (latency hole!)** |
 | **gather** (token gather) | 62 | 38.21 ms | 5,212.8 MB | 136.4 GB/s |
-| **	rans** (window transpose) | 62 | 29.59 ms | 2,564.1 MB | 86.7 GB/s |
+| **trans** (window transpose) | 62 | 29.59 ms | 2,564.1 MB | 86.7 GB/s |
 | **part** (window partition) | 62 | 27.30 ms | 2,229.1 MB | 81.7 GB/s |
 | **ew** (elementwise) | 80 | 23.66 ms | 3,482.6 MB | 147.2 GB/s |
 | **smaxg** (global softmax) | 8 | 11.42 ms | 600.0 MB | 52.5 GB/s |

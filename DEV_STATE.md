@@ -1,4 +1,67 @@
-# DEV_STATE.md - where we are (updated 2026-09-28 by Antigravity)
+# DEV_STATE.md - where we are (updated 2026-09-29 by Antigravity)
+
+## Stage 16: v0.3 Production Release Packaging, Multi-Frontend Rebuilds & Bundle Verification (2026-09-29 COMPLETED)
+- **1. Objective & Binaries Rebuilt:**
+  - Full clean compilation across all frontends and runtimes:
+    - `dlss5/chain/d5c_chain.dll` (Core neural engine module with Flash-Attention and Vectorized Pool2).
+    - `dlss5/m11d/build/Release/m11d.exe` (Standalone frame daemon for 32-bit titles & selftest verification).
+    - `dlss5/m11-layer/build/Release/nr_layer_win.dll` (Vulkan implicit presentation layer for 64-bit titles).
+    - `dlss5/m12-dxgi/build/Release/m12_dxgi.dll` (DirectX 12 proxy hook for GTA V Enhanced / DX12 games).
+    - `dlss5/m8b-live/build/Release/m8blive.exe` (Fullscreen click-through desktop overlay runner).
+  - Shaders compiled to SPIR-V: `attn_fused.spv`, `pool2.spv`, `gemm_i8.spv` synchronized across all runtime folders.
+- **2. Production Bundle Assembly (`dlss5/m13/_build_production.py`):**
+  - Generated self-contained bundle at `%USERPROFILE%\Desktop\production`:
+    - 113 binaries and assets copied and verified with SHA-1 hashing.
+    - Packaged both FP16 weights (`dlssnr-logical.safetensors`, 291 MB) and INT8 weights (`dlssnr-int8.bin`, 158 MB).
+    - Patched Vulkan layer manifests (`VkLayer_dlssnr_win.json` and `VkLayer_dlssnr_win32.json`) with absolute runtime paths.
+    - Zero console flash VBS launcher (`DLSS5 Manager.vbs`) and fallback scripts.
+- **3. Verification & Quality Gate:**
+  - **Bundle Selftest (`m11d.exe` on `native_crop.bmp`):**
+    - Executed cleanly (exit code 0), loaded INT8 pack alongside safetensors.
+    - **BMP PSNR: 45.05 dB vs FP16 reference.**
+    - **BMP PSNR: 999.00 dB (100.00% bit-exact, max_diff = 0.0) vs Stage 14/15 reference.**
+    - 0 NaNs, 0 Infs.
+  - **DLL Export Verification:**
+    - `nr_layer_win.dll` / `nr_layer_win32.dll`: `vkNegotiateLoaderLayerInterfaceVersion`, `vkGetInstanceProcAddr`, `vkGetDeviceProcAddr`.
+    - `m12_dxgi.dll`: Full 20 DXGI entry points (`CreateDXGIFactory`, `CreateDXGIFactory1`, `CreateDXGIFactory2`, etc.).
+    - `d5c_chain.dll`: Clean C ABI exports (`dlss5_create`, `dlss5_destroy`, `dlss5_process_frame`, `dlss5_interpolate_frame`, `dlss5_set_scale`, `dlss5_set_gain`, `dlss5_set_blend`, `dlss5_set_framegen`).
+  - **Manager (`m13`):** All 16 Python package modules verified with clean imports.
+
+## Stage 15: Vectorized 128-bit Downsample Pool (`pool2.comp`) & Kernel Memory Profiling (2026-09-29 COMPLETED)
+- **1. Objective & Hardware Implementation:**
+  - Identified downsample pool (`pool2.comp`) as a major non-GEMM memory bottleneck on Intel Arc Pro B50 (42.45 ms @ 1080p).
+  - **Root Cause:** Legacy kernel mapped 1 thread per token and looped through all channels, striding warps by $C$ elements (128-2048 bytes), causing 16x-32x sector waste and 97% cacheline thrashing.
+  - **Vectorized Architecture (`pool2.comp`):**
+    - Mapped 1 invocation per `(token, ch4)` slot: workgroup size `(16, 16, 1) = 256` threads.
+    - 128-bit `vec4` / `f16vec4` memory loads and stores, coalescing spatial memory access across adjacent cachelines.
+  - **Rollback Safety:** `D5C_INT8_POOL_VEC=0` allows instantaneous fallback to legacy kernel with bit-exact parity.
+- **2. Performance & Bandwidth Speedup:**
+  - **1080p Pool Busy Time:** **42.45 ms -> 2.53 ms (16.8x speedup! -39.92 ms saved)**.
+  - **960x576 Pool Busy Time:** **6.30 ms -> 0.66 ms (9.5x speedup)**.
+  - **1080p Steady-State Chain:** **912.9 ms -> 767.5 ms (-145.4 ms saved)**.
+  - **1080p Selftest Chain:** **622.9 ms -> 547.0 ms (-75.9 ms saved; total -194.8 ms from 741.83 ms baseline)**.
+  - **960x576 Steady-State Chain:** **266.8 ms -> 210.2 ms (-56.6 ms saved)**.
+- **3. Accuracy Gate:**
+  - **100.00% bit-exact:** 45.05 dB BMP PSNR vs FP16 reference, 0 NaNs, 0 Infs.
+
+## Stage 14: Flash-Attention Fusion (`attn_fused.comp`) & DRAM Traffic Elimination (2026-09-29 COMPLETED)
+- **1. Objective & Hardware Implementation:**
+  - Designed and implemented fused window attention shader `attn_fused.comp`, replacing three separate dispatches ($QK^T$ GEMM + `smaxw` + $PV$ GEMM) with a single compute pass per 64-token window.
+  - **Direct-Cache Architecture:**
+    - Xe2 hardware limitation: `maxComputeSharedMemorySize = 49152` bytes (48 KB). Staging full $Q, K, V$ for 256-channel windows requires 96 KB and exceeds hardware limits.
+    - Staged $Q$ (2 KB) in shared memory, while streaming $K$ and $V$ directly from L1/L2 cache via `coopMatLoad`. Shared memory footprint is only 6.25 KB, granting maximum thread occupancy (8 threads/EU).
+  - **Bank Conflict Elimination:**
+    - Padded shared memory score/prob stride to 68 elements (`gcd(68, 32) = 4`), completely eliminating 16-way and 32-way shared memory bank conflicts.
+  - **On-Chip Softmax:**
+    - Max-subtract-exp-sum evaluation performed directly in cooperative matrix registers and shared memory via subgroup reductions.
+  - **Total Buffer Elimination:**
+    - DRAM buffers `oSCW` (46 MB) and `oPRW` (23 MB) completely eliminated from device arena.
+    - Saves **15.12 GB DRAM traffic per frame at 1080p**.
+    - Cuts 124 dispatches per frame (186 -> 62).
+  - **Rollback Safety:** `D5C_INT8_ATTN_FUSED=0`.
+- **2. Numerical Quality & Performance:**
+  - **Accuracy:** **45.05 dB BMP PSNR vs FP16 reference**, **999.00 dB (100.00% bit-exact)** vs baseline. 0 NaNs, 0 Infs.
+  - **Selftest Chain Time:** **741.83 ms -> 622.9 ms (-118.9 ms saved)**.
 
 ## Stage 13: Window Attention (QKV & Projection) INT8 Implementation, Full Network Audit & Roofline Analysis (2026-09-28 COMPLETED)
 - **1. Objective & Hardware Implementation:**

@@ -216,6 +216,13 @@ def main():
         shutil.copy2(WEIGHTS_SRC, w_dst)
     assert sha1(WEIGHTS_SRC) == sha1(w_dst), "weights hash mismatch"
 
+    int8_src = os.path.join(_REPO, "work", "mlxw", "dlssnr-int8.bin")
+    if os.path.exists(int8_src):
+        int8_dst = os.path.join(DEST, "weights", "dlssnr-int8.bin")
+        if not os.path.exists(int8_dst):
+            shutil.copy2(int8_src, int8_dst)
+        assert sha1(int8_src) == sha1(int8_dst), "int8 weights hash mismatch"
+
     with open(os.path.join(DEST, "DLSS5 Manager.vbs"), "w", newline="") as f:
         f.write(LAUNCHER_VBS.replace("\n", "\r\n"))
     with open(os.path.join(DEST, "M13.cmd"), "w", newline="") as f:
