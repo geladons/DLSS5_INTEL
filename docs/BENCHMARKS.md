@@ -10,8 +10,10 @@
 
 | Metric / Stage | Resolution / Extent | GPU Execution Time | Raw Framerate | Perceived FPS (with FrameGen) | Status / Notes |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Performance Preset (Scale 0.50)** | **960x576** (0.50x 1080p) | **233.49 ms** | **4.28 FPS** | **~8.5 FPS** (interp) | **Current shipping v0.2** (FP16 acc) |
+| **Performance Preset (v0.3 INT8 Fused W1+W2)** | **960x576** (0.50x 1080p) | **214.38 ms** | **4.66 FPS** | **~9.3 FPS** (interp) | **-19.1 ms, -1.13 GB DRAM** vs v0.2 |
+| **Performance Preset (Scale 0.50)** | **960x576** (0.50x 1080p) | **233.49 ms** | **4.28 FPS** | **~8.5 FPS** (interp) | Shipping v0.2 (FP16 acc) |
 | Performance Preset (Scale 0.50 Baseline) | 960x576 | 244.75 ms | 4.08 FPS | - | Baseline before FP16 acc |
+| **1080p Native (v0.3 INT8 Fused W1+W2)** | **1920x1088** | **741.83 ms** | **1.35 FPS** | **~2.7 FPS** | **-167.5 ms, -4.27 GB DRAM** vs v0.2 |
 | **1080p Native (Scale 1.00)** | **1920x1088** | **909.30 ms** | **1.10 FPS** | **~2.2 FPS** | Selftest steady: 586.9 ms |
 | Native Baseline (Pre-Optimization) | 1920x1088 | 1415.00 ms | 0.71 FPS | - | Before barrier & GEMM fusion |
 | **Ultra Performance (Scale 0.33)** | **640x384** (0.33x 1080p) | **125.50 ms** | **7.97 FPS** | **~15.9 FPS** | 8.5x faster than native baseline |
@@ -51,6 +53,36 @@
 - **`ew`:** 24.93 ms (2.8%)
 - **`upm`:** 12.93 ms (1.4%)
 - **`smaxg`:** 11.11 ms (1.2%)
+
+### v0.3 INT8 Fused W1+W2 Breakdown & Roofline Bandwidth Audit (Intel Arc Pro B50)
+
+#### Scale 0.50 (960x576 Extent, `bench_fused_960.csv`)
+- **Total Chain GPU Busy Time:** **214.38 ms** (-19.11 ms vs v0.2 FP16 baseline)
+- **Total Frame DRAM Traffic:** **18,543.0 MB (18.11 GB)** (-1.13 GB saved vs unfused)
+- **Effective Bandwidth:** **86.5 GB/s** (38.6% of theoretical peak 224 GB/s)
+
+| Kernel Family | Busy Time (ms) | DRAM Traffic (MB) | Effective BW (GB/s) | % of Peak (224 GB/s) |
+| :--- | :---: | :---: | :---: | :---: |
+| **`gemm`** (FP16 remaining) | 66.69 ms | 8,557.3 MB | 128.3 GB/s | 57.3% |
+| **`gemm_i8`** (INT8 W1+W2) | 51.78 ms | 1,135.0 MB | 21.9 GB/s | 9.8% (compute/XMX bound) |
+| **`cosw`** (attn cosine) | 26.48 ms | 2,204.9 MB | 83.3 GB/s | 37.2% |
+| **`smaxw`** (attn softmax) | 25.47 ms | 1,959.9 MB | 76.9 GB/s | 34.4% |
+| **`gather`** (token gather) | 8.95 ms | 1,454.8 MB | 162.5 GB/s | 72.6% |
+| **`part`** (window partition) | 8.72 ms | 628.7 MB | 72.1 GB/s | 32.2% |
+| **`pool`** (downsample) | 6.77 ms | 117.9 MB | 17.4 GB/s | 7.8% (latency hole) |
+| **`trans`** (window transpose) | 6.46 ms | 735.0 MB | 113.7 GB/s | 50.8% |
+| **`ew`** (elementwise) | 4.45 ms | 974.8 MB | 219.2 GB/s | 97.9% (stream saturated) |
+| **`upm`** (upmerge) | 2.61 ms | 245.0 MB | 94.1 GB/s | 42.0% |
+| **`smaxg`** (global softmax) | 1.92 ms | 56.6 MB | 29.6 GB/s | 13.2% |
+| **`qact`** (quantize act W1) | 1.90 ms | 212.6 MB | 112.0 GB/s | 50.0% |
+| Others (transport/front-end) | 2.18 ms | 280.5 MB | - | - |
+| **TOTAL** | **214.38 ms** | **18,543.0 MB** | **86.5 GB/s** | **38.6%** |
+
+#### Scale 1.00 Native (1920x1088 Extent, `bench_fused_1080p.csv`)
+- **Total Chain GPU Busy Time:** **741.83 ms** (-159.37 ms vs fresh baseline, -167.47 ms vs shipping v0.2)
+- **Total Frame DRAM Traffic:** **68,257.8 MB (66.66 GB)** (-4.27 GB saved vs unfused)
+- **Effective Bandwidth:** **92.0 GB/s** (41.1% of theoretical peak 224 GB/s)
+- **Key finding:** Attention kernels (`cosw` 90.11 ms + `smaxw` 73.40 ms + `gather` 31.90 ms = **195.41 ms**) represent 26.3% of 1080p frame time and operate at only 40-43% of peak bandwidth due to materializing intermediate score matrices to DRAM. This establishes Flash-Attention fusion as the primary headline optimization for v0.3.
 
 ---
 
