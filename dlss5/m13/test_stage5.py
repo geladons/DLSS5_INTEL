@@ -374,6 +374,14 @@ with tempfile.TemporaryDirectory() as td:
                 mock_dstop.assert_called_once()
                 assert snap["daemon_pid"] is None, "snap['daemon_pid'] should be None after auto-stop"
                 print("  StateMonitor._collect auto-stops x86 daemon when game exits [PASS]")
+
+        with patch.object(type(c_ctl.daemon), "running", new_callable=PropertyMock, return_value=True), \
+             patch.object(c_ctl.daemon, "stop") as mock_dstop, \
+             patch("m13.controller.find_pid", return_value=None):
+            for _ in range(12):
+                c_ctl.monitor._collect()
+            mock_dstop.assert_not_called()
+            print("  StateMonitor keeps daemon during delayed x86 game startup [PASS]")
     finally:
         c_ctl.shutdown()
 

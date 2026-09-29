@@ -47,6 +47,7 @@ class StateMonitor(threading.Thread):
         self._lock = threading.Lock()
         self._snap = {}
         self._prev_running_games = set()
+        self._x86_seen = False
 
     def stop(self):
         self._stop_ev.set()
@@ -134,6 +135,7 @@ class StateMonitor(threading.Thread):
 
         if has_running_x86:
             self._x86_empty_ticks = 0
+            self._x86_seen = True
         else:
             self._x86_empty_ticks = getattr(self, "_x86_empty_ticks", 0) + 1
 
@@ -141,7 +143,8 @@ class StateMonitor(threading.Thread):
         if exited_games and not currently_running:
             gamelaunch.reset_runtime_flags()
         if exited_games or not has_running_x86:
-            if not has_running_x86 and ctl.daemon.running and self._x86_empty_ticks >= 10:
+            if (not has_running_x86 and self._x86_seen and ctl.daemon.running
+                    and self._x86_empty_ticks >= 10):
                 msg = "[controller] game exited; stopping x86 background daemon"
                 print(msg, flush=True)
                 if ctl.worker and getattr(ctl.worker, "on_result", None):
@@ -154,6 +157,7 @@ class StateMonitor(threading.Thread):
                 snap["daemon_gain"] = None
                 snap["daemon_frames"] = None
                 snap["daemon_err"] = None
+                self._x86_seen = False
         self._prev_running_games = currently_running
 
         return snap

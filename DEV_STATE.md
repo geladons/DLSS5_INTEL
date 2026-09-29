@@ -4,6 +4,7 @@
 - Latest production logs showed the prior temporal mask sending 50-84% of the entire frame as "UI" while moving and switching to full-frame processing at 85% held pixels. At 1366x768, the x86 daemon measured ~370 ms/frame (about 2.7 processed FPS). `manager_err.log` also contains repeated x86 daemon-stop notices.
 - Replaced broad held-pixel passthrough with held pixels only inside proportional HUD/text bands: lower-left minimap, upper-right status, lower-center subtitles, and upper-left objective text. Static-frame classification still uses whole-frame movement, but cached output and mask no longer copy half the stationary world unprocessed.
 - Restored the public `frameIndex`-keyed noise input in both native and scaled inference paths; local code had pinned it to seed 1 for every live frame. Frozen-frame reprocess keeps the same frame index.
+- X86 daemon idle shutdown now starts its grace countdown only after the monitor has observed an x86 game, so delayed game/window startup cannot lose the daemon before the first frame.
 - Current user config had `overlay_focus=True`, which intentionally called `SetForegroundWindow` and explains minimization. Reset it to false, preserving current settings in `%LOCALAPPDATA%\DLSS5Manager\config.json.before_latest_report`.
 - Rebuilt x86 and x64 layers. The spatial HUD mask is compiled but needs an in-game log/image check; this is a positional HUD heuristic, not OCR. x86 inference remains synchronous and the latest measured rate remains slideshow-speed.
 
