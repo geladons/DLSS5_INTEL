@@ -1281,18 +1281,32 @@ static int transfer(device_data *data, swapchain_data *chain, VkQueue queue,
     return 0;
 }
 
-/* Which pixels are the interface: the ones that held still between two
- * presents while the scene moved. Refused when nearly nothing moved (a mask
- * cannot be told from a still scene) or when almost everything did. */
+static int likely_hud_region(uint32_t x, uint32_t y,
+                             uint32_t width, uint32_t height)
+{
+    int minimap = x < width * 16 / 100 && y > height * 68 / 100;
+    int status = x > width * 80 / 100 && y < height * 30 / 100;
+    int subtitles = y > height * 82 / 100 &&
+                    x > width * 14 / 100 && x < width * 86 / 100;
+    int mission_text = x < width * 42 / 100 && y < height * 18 / 100;
+    return minimap || status || subtitles || mission_text;
+}
+
+/* A pixel must be both unchanged and inside a likely fixed HUD region. */
 static uint32_t settled(const unsigned char *now, const unsigned char *before,
-                        uint32_t pixels, unsigned char *mask)
+                        uint32_t width, uint32_t height, uint32_t pixels,
+                        unsigned char *mask, uint32_t *held_hud)
 {
     uint32_t held = 0;
+    *held_hud = 0;
     for (uint32_t i = 0; i < pixels; i++) {
         const unsigned char *a = now + 4 * i, *b = before + 4 * i;
         int moved = abs(a[0] - b[0]) + abs(a[1] - b[1]) + abs(a[2] - b[2]) > 12;
-        mask[i] = moved ? 0u : 0xFFu;
+        uint32_t x = i % width, y = i / width;
+        int keep_native = !moved && likely_hud_region(x, y, width, height);
+        mask[i] = keep_native ? 0xFFu : 0u;
         held += !moved;
+        *held_hud += keep_native;
     }
     return held;
 }
@@ -1332,10 +1346,12 @@ static int process_frame(device_data *data, swapchain_data *chain,
             data->outgoing_size = needed + pixels;
         }
         memcpy(data->outgoing, data->mapped, (size_t)needed);
-        uint32_t held = settled(data->mapped, data->earlier, pixels,
-                                data->outgoing + needed);
+        uint32_t held_hud = 0;
+        uint32_t held = settled(data->mapped, data->earlier,
+                    chain->extent.width, chain->extent.height,
+                                pixels, data->outgoing + needed, &held_hud);
         if (held >= (uint32_t)((uint64_t)pixels * 85 / 100)) {
-            masked = 0;
+            masked = mask_worth_sending(held_hud, pixels);
             if (memcmp(data->mapped, data->earlier, (size_t)needed) == 0 &&
                 data->have_prev_processed && data->prev_processed &&
                 data->prev_processed_size >= needed && data->result &&
@@ -1344,12 +1360,14 @@ static int process_frame(device_data *data, swapchain_data *chain,
                 memcpy(data->result, data->prev_processed, (size_t)needed);
                 return 0;
             }
-            nr_log("[nr_layer] static frame detected (%u%% held still); processing full frame",
-                   (unsigned)(100ull * held / pixels));
+                 nr_log("[nr_layer] static frame detected (%u%% held; %u%% HUD mask)",
+                     (unsigned)(100ull * held / pixels),
+                     (unsigned)(100ull * held_hud / pixels));
         } else {
-            masked = mask_worth_sending(held, pixels);
-            nr_log("[nr_layer] %u%% of the frame held still; ui mask %s",
-                   100u * held / pixels, masked ? "sent" : "refused");
+                 masked = mask_worth_sending(held_hud, pixels);
+                 nr_log("[nr_layer] scene %u%% held; HUD mask %u%% %s",
+                     100u * held / pixels, 100u * held_hud / pixels,
+                     masked ? "sent" : "refused");
         }
     }
 

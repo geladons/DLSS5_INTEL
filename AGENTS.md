@@ -88,8 +88,8 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
     and executes directly in-process on host-visible staging buffers (0 ms
     socket lag, no background daemon).
   - x86 games (GTA IV via DXVK): connects over TCP (127.0.0.1:48990) to `m11d.exe`.
-  - Moving-scene UI Masking: held pixels are preserved when the scene is moving;
-    static menus are processed as a whole and exact repeats reuse the last result.
+  - HUD masking is limited to unchanged pixels in bounded minimap/status/subtitle/objective regions;
+    other static scene pixels remain neural-processed, and exact repeats reuse the last result.
 - m12-dxgi: DirectX 12 present hook (GTA V Enhanced). Dynamically loads
   `d5c_chain.dll` via C ABI to process present buffers in-process (0 ms TCP lag).
 - chain: THE model as an OOP module (`d5c::ChainEngine`). Exported via clean

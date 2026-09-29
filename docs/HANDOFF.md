@@ -35,6 +35,13 @@
 
 ## 2. Solved Issues & Completed Milestones in Current Session
 
+### Stage 21: HUD-Scoped Mask & Restore Overlay Non-Activation (2026-09-29)
+1. **Latest Log Diagnosis:** `nr_layer_win.log` showed the old mask treating 50-84% of the entire frame as UI when moving, then switching to full-frame processing at 85% held pixels. `m11d.log` measured about 370 ms/frame at 1366x768; the x86 TCP path remains synchronous. The manager error log contains repeated x86 daemon-stop notices.
+2. **HUD Mask:** Layer passthrough is now limited to unchanged pixels inside proportional lower-left minimap, upper-right status, lower-center subtitle, and upper-left objective bands. Whole-frame motion still controls static-frame caching, but stationary world pixels outside HUD bands stay neural-processed.
+3. **Noise Conditioning:** Restored the public per-frame `frameIndex` noise input in both native and scaled inference paths; frozen-frame reprocessing reuses the same index.
+4. **Overlay Focus:** The saved setting had `overlay_focus=True`, which explicitly forces the overlay to foreground and accounts for game minimization. Reset it to false; saved the prior current config as `%LOCALAPPDATA%\DLSS5Manager\config.json.before_latest_report`.
+5. **Verification Limit:** Rebuilt x86/x64 layers and reran M13 integration tests. The HUD-zone mask is only compiled so far and needs an in-game image/log confirmation; it is a spatial heuristic, not OCR. Frame processing remains slideshow-speed at native resolution until a separate x86 cadence/interpolation design is implemented.
+
 ### Stage 20: Restore Public Image Baseline & Eliminate Stale C ABI Copies (2026-09-29)
 1. **Image Regression:** Compared current knobs with `origin/master`: public feature conditioning was `(style=0, tone=1.0, structure=1.0, skin=-1, auto=-1)` and compose blend was `1.0`; the user's saved profile had intensity `1.65`, tone `0.85`, structure `1.6`. Reset global Phase30 defaults/profile to the public baseline; saved the previous config as `%LOCALAPPDATA%\DLSS5Manager\config.json.pre_public_baseline`. Render scale, game list, and per-game overrides were left intact.
 2. **Parameter Routing:** Phase30 intensity is now distinct from legacy residual gain; the manager passes residual gain as neutral `1.0` while intensity controls compose mix. The daemon receives all Phase30 values explicitly.

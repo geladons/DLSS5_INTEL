@@ -1,5 +1,12 @@
 # DEV_STATE.md - where we are (updated 2026-09-29 by Antigravity)
 
+## Stage 21: HUD-Scoped Mask & Restore Overlay Non-Activation (2026-09-29)
+- Latest production logs showed the prior temporal mask sending 50-84% of the entire frame as "UI" while moving and switching to full-frame processing at 85% held pixels. At 1366x768, the x86 daemon measured ~370 ms/frame (about 2.7 processed FPS). `manager_err.log` also contains repeated x86 daemon-stop notices.
+- Replaced broad held-pixel passthrough with held pixels only inside proportional HUD/text bands: lower-left minimap, upper-right status, lower-center subtitles, and upper-left objective text. Static-frame classification still uses whole-frame movement, but cached output and mask no longer copy half the stationary world unprocessed.
+- Restored the public `frameIndex`-keyed noise input in both native and scaled inference paths; local code had pinned it to seed 1 for every live frame. Frozen-frame reprocess keeps the same frame index.
+- Current user config had `overlay_focus=True`, which intentionally called `SetForegroundWindow` and explains minimization. Reset it to false, preserving current settings in `%LOCALAPPDATA%\DLSS5Manager\config.json.before_latest_report`.
+- Rebuilt x86 and x64 layers. The spatial HUD mask is compiled but needs an in-game log/image check; this is a positional HUD heuristic, not OCR. x86 inference remains synchronous and the latest measured rate remains slideshow-speed.
+
 ## Stage 20: Restore Public Image Baseline & Eliminate Stale C ABI Copies (2026-09-29)
 - Compared local `origin/master` controls with the current Phase30 path. Public compose used blend 1.0 and feature inputs `(style=0, tone=1.0, structure=1.0, skin=-1, auto=-1)`; the saved profile had intensity 1.65, tone 0.85, and structure 1.6.
 - Reset Phase30 defaults and the user's global profile to the public neutral values; prior profile backed up as `%LOCALAPPDATA%\DLSS5Manager\config.json.pre_public_baseline`. Render scale 0.67, game list, and per-game overrides were not changed.
