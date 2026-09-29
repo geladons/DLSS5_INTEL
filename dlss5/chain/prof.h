@@ -27,11 +27,19 @@ public:
     // Reset the pool and write the frame-start timestamp. Call inside the
     // frame command buffer, before the first dispatch.
     void begin(VkCommandBuffer cb);
+    // Boundary BEFORE a dispatch.
+    void markBegin(VkCommandBuffer cb);
     // Boundary AFTER a dispatch. fam/note must be string literals (only the
     // pointer is stored). m/n/k = GEMM dims or 0; gx/gy/gz = dispatch grid.
+    void markEnd(VkCommandBuffer cb, const char* fam, const char* note,
+                 uint32_t m, uint32_t n, uint32_t k,
+                 uint32_t gx, uint32_t gy, uint32_t gz,
+                 uint64_t bytes = 0);
+    // Legacy helper writing markBegin + markEnd in sequence.
     void mark(VkCommandBuffer cb, const char* fam, const char* note,
               uint32_t m, uint32_t n, uint32_t k,
-              uint32_t gx, uint32_t gy, uint32_t gz);
+              uint32_t gx, uint32_t gy, uint32_t gz,
+              uint64_t bytes = 0);
     // After the frame fence: fetch timestamps, append CSV rows.
     bool collect(VkDevice dev, float periodNs, long frameIndex);
 
@@ -40,6 +48,7 @@ private:
         const char* fam;
         const char* note;
         uint32_t m, n, k, gx, gy, gz;
+        uint64_t bytes;
     };
 
     VkQueryPool pool_ = VK_NULL_HANDLE;

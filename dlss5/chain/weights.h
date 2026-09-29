@@ -17,11 +17,15 @@ struct Tensor {
     std::string dtype;
     std::vector<int64_t> shape;
     uint64_t off0 = 0, off1 = 0;
+    bool isQuantized = false;
+    uint64_t scaleRelOff = 0; // byte offset of float scales[N] relative to W_q in source file
     uint64_t numel() const {
         uint64_t n = 1;
         for (auto s : shape) n *= (uint64_t)s;
         return n;
     }
+    int64_t K() const { return shape.size() >= 2 ? shape[0] : 0; }
+    int64_t N() const { return shape.size() >= 2 ? shape[1] : 0; }
 };
 
 struct WeightsFile {
@@ -39,7 +43,8 @@ void InitSwizzle();
 
 class WeightsStore {
 public:
-    bool load(const std::string& path);     // read + parse safetensors
+    bool load(const std::string& path);     // read + parse safetensors or INT8 .bin pack
+    bool loadInt8(const std::string& path); // load INT8 quantized pack alongside FP16 weights
     bool computePack();                     // sorted pack offsets + layout cross-check
 
     // Writes the whole host arena image: pack region [0, packTotal) with
@@ -51,12 +56,24 @@ public:
 
     const Tensor& tensor(const std::string& n) const { return wf.tensors.at(n); }
     bool has(const std::string& n) const { return wf.tensors.count(n) != 0; }
+    bool isQuantized(const std::string& n) const {
+        auto it = wf.tensors.find(n);
+        return it != wf.tensors.end() && it->second.isQuantized;
+    }
+    uint64_t woff(const std::string& n) const { return poff.at(n); }
+    uint64_t scaleOff(const std::string& n) const {
+        auto it = scalePoff.find(n);
+        return it != scalePoff.end() ? it->second : 0;
+    }
 
     static std::string tname(const char* fmt, int i);
 
     WeightsFile wf;
+    WeightsFile wfInt8;                     // secondary weights file when loaded alongside
     std::map<std::string, uint64_t> poff;   // tensor name -> offset in the pack
-    uint64_t packTotal = 291535872ull;      // docs/pack-layout.txt (256-aligned total)
+    std::map<std::string, uint64_t> scalePoff; // tensor name -> scale offset in the pack (INT8)
+    uint64_t packTotal = 291535872ull;      // 256-aligned total
+    bool hasQuantizedWeights = false;
 };
 
 } // namespace d5c

@@ -106,3 +106,42 @@ The official real-time target for DLSS 5 v0.2 on Intel Arc Pro B50 is:
 - **Adaptive GPU Frame Generation (0.39 ms):**
   - Bidirectional optical flow frame generation executes in **0.39 ms** on Arc Pro B50 (over 2500 FPS theoretical capacity).
   - Generating 1 interpolated frame between every processed frame converts 20-25 raw FPS into **40 - 50 perceived FPS**, providing fluid and responsive gameplay with reconstructed 1080p clarity and RCAS sharpness.
+
+---
+
+## 5. Architectural Findings: Busy vs Idle Profile & The DRAM-Bound Reality (v0.3 Transition)
+
+### A. Refutation of the "Barrier Tax" Hypothesis
+Prior to full-chain hardware profiling, an isolated benchmark comparing standalone kernel execution (3.46 ms) against in-chain execution (8.74 ms) suggested that up to 60% of frame time was lost to Vulkan inter-dispatch barrier stalls.
+
+To definitively test this, `ChainProf` was upgraded to record paired hardware timestamps (`markBegin` immediately before `vkCmdDispatch` and `markEnd` immediately after) across all 1,402 dispatches:
+- **Scale 0.50 (960x576, 232.54 ms frame):**
+  - **GPU Busy Time:** **228.66 ms (98.33%!)**
+  - **Inter-Dispatch Idle Time:** **3.88 ms (1.67%!)**
+  - GEMM: 115.04 ms busy / 2.13 ms idle (1.81% idle)
+- **Native 100% (1920x1088, 867.63 ms frame):**
+  - **GPU Busy Time:** **861.55 ms (99.30%!)**
+  - **Inter-Dispatch Idle Time:** **6.08 ms (0.70%!)**
+  - GEMM: 429.62 ms busy / 2.17 ms idle (0.50% idle)
+
+**Conclusion:** The barrier tax hypothesis was falsified. On Intel Arc Pro B50, Vulkan pipeline barriers cost only **~2.7 microseconds** per dispatch. The GPU execution units are **98.3% - 99.3% continuously active**. Merging dispatches solely to reduce barrier count is a closed dead end (<2% potential headroom).
+
+### B. The True Bottleneck: GDDR6 Memory Bandwidth & Working Set Thrashing
+- The standalone test looped 15 times over the *same* buffers, measuring **warm L2/L3 cache streaming throughput**.
+- In the real DLSSNR U-Net chain, the arena is **1.95 GB** (at 960x576) and **6.59 GB** (at 1080p).
+- Each layer accesses cold memory addresses that completely evict the 16 MB L2 and 32 MB L3 caches.
+- For shape `(552960, 128, 32)`: 35.4 MB read + 141.5 MB write = **176.9 MB of cold DRAM traffic**. At ~25 GB/s real GDDR6 read/write bandwidth, this takes ~7.1 ms of DRAM transfer time *inside the kernel execution* (`busy_us`).
+- **Total Frame DRAM Traffic:** 232.5 ms x ~224 GB/s peak ~ **52 GB** traffic per frame at 0.50 scale; 867 ms x 224 GB/s ~ **194 GB** at 1080p.
+- **The Governing Principle for v0.3:** The chain is completely **DRAM memory-bandwidth bound**. Every gigabyte of memory traffic reduced translates directly to execution time savings.
+
+### C. Refined v0.3 Optimization Hierarchy
+1. **INT8 End-to-End (DRAM Bandwidth Halving):**
+   - Halves weight traffic (263 -> 131.5 MB) and activation traffic (e.g. 35.4 -> 17.7 MB on L0).
+   - Keeps matrix B (4 KB) pinned in L1/L2 cache.
+2. **Flash-Attention Fusion (34% of Frame Time):**
+   - Attention kernels (`cosw` 39.6 ms + `smaxw` 29.6 ms + `gather` 8.8 ms = **78.0 ms at 0.50 scale**; **281.1 ms at 1080p**).
+   - Fusing with online softmax eliminates materializing the attention score matrix to DRAM.
+3. **Traffic-Targeted Kernel Fusion:**
+   - Pure traffic kernels (`trans` 28 ms, `part` 29 ms, `ew` 25 ms, `gather` 37 ms at 1080p) fused into producer epilogues / consumer prologues.
+   - Merging FFN branches (`expBase` + `prjBase`) to read common input X once instead of 4 times.
+

@@ -1,0 +1,154 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_shader_subgroup_basic : require
+
+/*
+ * gemm_i8 -- INT8 Cooperative Matrix GEMM for Intel Arc Pro B50 (Battlemage Xe2).
+ *
+ * Hardware config: coopmat 8x16x32 A=i8 B=i8 C=i32 sat=0 scope=3 (Subgroup).
+ * TM=8, TN=16, TK=32.
+ * RM=4, RN=2 (BM=32, BN=32 tile per workgroup, preserving optimal Xe2 occupancy).
+ * 1 subgroup of 32 invocations per workgroup (LOCAL_SIZE = 32).
+ *
+ * For K=32 shapes, (K + TK - 1)/TK = 1. The entire K-loop collapses into a single tile step (t=0),
+ * eliminating software pipelining overhead and loop branching.
+ *
+ * Direct register epilogue: Dequantizes int32 accumulator directly to narrow FP16
+ *   float val = float(acc[i][j][e]) * pc.scale_a * b_scale[col + j * TN + e_col];
+ * Zero shared memory allocation, zero barriers, optimal instruction density.
+ */
+
+layout(local_size_x = 32) in;
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer Int8Buf  { int8_t    v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf { float     v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer HalfBuf  { float16_t v[]; };
+
+layout(push_constant, scalar) uniform Push {
+    Int8Buf a;
+    Int8Buf b;
+    HalfBuf c;          // narrow FP16 output
+    FloatBuf b_scale;   // per-channel scale B
+    float scale_a;      // scalar scale A
+    uint m, n, k, batch;
+    uint sa, sb, sc;    // per-batch element strides
+    uint flags;         // bit0: transpose B
+    uint lda, ldb, ldc; // row strides; 0 = dense default
+    uint pad;
+} pc;
+
+const uint TM = 8, TN = 16, TK = 32;
+const uint RM = 4, RN = 2;
+const uint BM = TM * RM, BN = TN * RN;
+
+void main() {
+    uint row = gl_WorkGroupID.y * BM;
+    uint col = gl_WorkGroupID.x * BN;
+    if (row >= pc.m || col >= pc.n) return;
+
+    uint batch = gl_WorkGroupID.z;
+    uint ao = batch * pc.sa;
+    uint bo = batch * pc.sb;
+    uint co = batch * pc.sc;
+
+    uint lda = pc.lda != 0u ? pc.lda : pc.k;
+    uint ldb = pc.ldb != 0u ? pc.ldb : ((pc.flags & 1u) != 0u ? pc.k : pc.n);
+    uint ldc = pc.ldc != 0u ? pc.ldc : pc.n;
+
+    coopmat<int32_t, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> acc[RM][RN];
+    for (uint i = 0u; i < RM; i++) {
+        for (uint j = 0u; j < RN; j++) {
+            acc[i][j] = coopmat<int32_t, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(0);
+        }
+    }
+
+    coopmat<int8_t, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA> a[RM];
+    coopmat<int8_t, gl_ScopeSubgroup, TK, TN, gl_MatrixUseB> b[RN];
+    const uint tiles = (pc.k + TK - 1u) / TK;
+
+    if (tiles == 1u) {
+        if ((pc.flags & 1u) != 0u) {
+            // B is row-major (N, K): ColumnMajor load transposes to (K, N)
+            for (uint i = 0u; i < RM; i++)
+                coopMatLoad(a[i], pc.a.v, ao + (row + i * TM) * lda, lda,
+                            gl_CooperativeMatrixLayoutRowMajor);
+            for (uint j = 0u; j < RN; j++)
+                coopMatLoad(b[j], pc.b.v, bo + (col + j * TN) * ldb, ldb,
+                            gl_CooperativeMatrixLayoutColumnMajor);
+            for (uint i = 0u; i < RM; i++)
+                for (uint j = 0u; j < RN; j++)
+                    acc[i][j] = coopMatMulAdd(a[i], b[j], acc[i][j]);
+        } else {
+            // B is row-major (K, N)
+            for (uint i = 0u; i < RM; i++)
+                coopMatLoad(a[i], pc.a.v, ao + (row + i * TM) * lda, lda,
+                            gl_CooperativeMatrixLayoutRowMajor);
+            for (uint j = 0u; j < RN; j++)
+                coopMatLoad(b[j], pc.b.v, bo + col + j * TN, ldb,
+                            gl_CooperativeMatrixLayoutRowMajor);
+            for (uint i = 0u; i < RM; i++)
+                for (uint j = 0u; j < RN; j++)
+                    acc[i][j] = coopMatMulAdd(a[i], b[j], acc[i][j]);
+        }
+    } else {
+        if ((pc.flags & 1u) != 0u) {
+            for (uint t = 0u; t < tiles; ++t) {
+                for (uint i = 0u; i < RM; i++)
+                    coopMatLoad(a[i], pc.a.v, ao + (row + i * TM) * lda + t * TK, lda,
+                                gl_CooperativeMatrixLayoutRowMajor);
+                for (uint j = 0u; j < RN; j++)
+                    coopMatLoad(b[j], pc.b.v, bo + (col + j * TN) * ldb + t * TK, ldb,
+                                gl_CooperativeMatrixLayoutColumnMajor);
+                for (uint i = 0u; i < RM; i++)
+                    for (uint j = 0u; j < RN; j++)
+                        acc[i][j] = coopMatMulAdd(a[i], b[j], acc[i][j]);
+            }
+        } else {
+            for (uint t = 0u; t < tiles; ++t) {
+                for (uint i = 0u; i < RM; i++)
+                    coopMatLoad(a[i], pc.a.v, ao + (row + i * TM) * lda + t * TK, lda,
+                                gl_CooperativeMatrixLayoutRowMajor);
+                for (uint j = 0u; j < RN; j++)
+                    coopMatLoad(b[j], pc.b.v, bo + (t * TK) * ldb + col + j * TN, ldb,
+                                gl_CooperativeMatrixLayoutRowMajor);
+                for (uint i = 0u; i < RM; i++)
+                    for (uint j = 0u; j < RN; j++)
+                        acc[i][j] = coopMatMulAdd(a[i], b[j], acc[i][j]);
+            }
+        }
+    }
+
+    // Epilogue: dequantize into narrow FP16
+    // Intel Xe2 8x16 coopmat lane mapping:
+    //   e_col = gl_SubgroupInvocationID % 16
+    //   e_row = (gl_SubgroupInvocationID / 16) + 2 * e
+    uint e_col = gl_SubgroupInvocationID % 16u;
+    uint lane_row_base = gl_SubgroupInvocationID / 16u;
+
+    for (uint j = 0u; j < RN; j++) {
+        uint c_out = col + j * TN + e_col;
+        float scale_b = (c_out < pc.n) ? pc.b_scale.v[c_out] : 0.0;
+        float factor = pc.scale_a * scale_b;
+
+        for (uint i = 0u; i < RM; i++) {
+            for (uint e = 0u; e < acc[i][j].length(); e++) {
+                uint e_row = lane_row_base + 2u * e;
+                uint r_out = row + i * TM + e_row;
+                if (r_out < pc.m && c_out < pc.n) {
+                    float val = float(acc[i][j][e]) * factor;
+                    pc.c.v[co + r_out * ldc + c_out] = float16_t(val);
+                }
+            }
+        }
+    }
+}

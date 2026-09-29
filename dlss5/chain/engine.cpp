@@ -431,8 +431,10 @@ void ChainEngine::recordFrame(long frameIndex) {
             vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeDecode_);
             vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLayout_, 0, 1,
                                     &setFinal_, 0, nullptr);
+            if (prof_.enabled()) prof_.markBegin(cmd_);
             vkCmdDispatch(cmd_, (W_ + 15) / 16, (H_ + 15) / 16, 1);
-            if (prof_.enabled()) prof_.mark(cmd_, "decode", "", 0, 0, 0, (W_ + 15) / 16, (H_ + 15) / 16, 1);
+            if (prof_.enabled()) prof_.markEnd(cmd_, "decode", "", 0, 0, 0, (W_ + 15) / 16, (H_ + 15) / 16, 1,
+                                               (uint64_t)W_ * H_ * 16);
             barrierAll();
             vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 0);
             // features at the full vendor extent (temporal OFF: channels 7-9 take
@@ -449,9 +451,11 @@ void ChainEngine::recordFrame(long frameIndex) {
             p.c[0] = 0.0f; p.c[1] = 1.0f; p.c[2] = 1.0f;
             p.d[0] = 0.0f; p.d[1] = 0.0f; p.d[2] = 0.0f; p.d[3] = 0.0f;
             push(p);
+            if (prof_.enabled()) prof_.markBegin(cmd_);
             vkCmdDispatch(cmd_, ((uint64_t)netW_ * netH_ + 255) / 256, 1, 1);
-            if (prof_.enabled()) prof_.mark(cmd_, "features", "", 0, 16, 0,
-                                            (uint32_t)(((uint64_t)netW_ * netH_ + 255) / 256), 1, 1);
+            if (prof_.enabled()) prof_.markEnd(cmd_, "features", "", 0, 16, 0,
+                                               (uint32_t)(((uint64_t)netW_ * netH_ + 255) / 256), 1, 1,
+                                               (uint64_t)netW_ * netH_ * 12 + (uint64_t)st_[0].TOK * 64);
             barrierAll();
             vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 1);
         }
@@ -460,9 +464,11 @@ void ChainEngine::recordFrame(long frameIndex) {
             PackPush fp{arena_.A(arena_.off.oFeatV), arena_.A(arena_.off.oX16), st_[0].TOK * 16};
             vkCmdPushConstants(cmd_, rec_.featpackPipe().layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                                sizeof(fp), &fp);
+            if (prof_.enabled()) prof_.markBegin(cmd_);
             vkCmdDispatch(cmd_, (st_[0].TOK * 16 + 255) / 256, 1, 1);
-            if (prof_.enabled()) prof_.mark(cmd_, "featpack", "", 0, 16, 0,
-                                            (st_[0].TOK * 16 + 255) / 256, 1, 1);
+            if (prof_.enabled()) prof_.markEnd(cmd_, "featpack", "", 0, 16, 0,
+                                               (st_[0].TOK * 16 + 255) / 256, 1, 1,
+                                               (uint64_t)st_[0].TOK * 96);
             barrierAll();
             vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 2);
             // full 71-block DLSSNR U-Net chain (~1400 dispatches)
@@ -480,9 +486,11 @@ void ChainEngine::recordFrame(long frameIndex) {
             p.c[2] = cfg_.headGain;       // vendor residual scale
             p.c[3] = cfg_.headBlend;      // vendor mix factor (M13 knob #2)
             push(p);
+            if (prof_.enabled()) prof_.markBegin(cmd_);
             vkCmdDispatch(cmd_, ((uint64_t)regionW_ * regionH_ + 255) / 256, 1, 1);
-            if (prof_.enabled()) prof_.mark(cmd_, "compose", "", 0, 0, 0,
-                                            (uint32_t)(((uint64_t)regionW_ * regionH_ + 255) / 256), 1, 1);
+            if (prof_.enabled()) prof_.markEnd(cmd_, "compose", "", 0, 0, 0,
+                                               (uint32_t)(((uint64_t)regionW_ * regionH_ + 255) / 256), 1, 1,
+                                               (uint64_t)regionW_ * regionH_ * 24 + (uint64_t)st_[0].TOK * 64);
             barrierAll();
             vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeEncode_);
             p.a[0] = (int32_t)W_; p.a[1] = (int32_t)H_; p.a[2] = (int32_t)rl; p.a[3] = (int32_t)rt;
@@ -490,8 +498,10 @@ void ChainEngine::recordFrame(long frameIndex) {
             p.b[3] = 0;                   // absolute (direct color)
             p.c[0] = 0.0f;
             push(p);
+            if (prof_.enabled()) prof_.markBegin(cmd_);
             vkCmdDispatch(cmd_, (W_ + 15) / 16, (H_ + 15) / 16, 1);
-            if (prof_.enabled()) prof_.mark(cmd_, "encode", "", 0, 0, 0, (W_ + 15) / 16, (H_ + 15) / 16, 1);
+            if (prof_.enabled()) prof_.markEnd(cmd_, "encode", "", 0, 0, 0, (W_ + 15) / 16, (H_ + 15) / 16, 1,
+                                               (uint64_t)regionW_ * regionH_ * 12 + (uint64_t)W_ * H_ * 4);
             barrierAll();
             vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 5);
         }
@@ -500,8 +510,10 @@ void ChainEngine::recordFrame(long frameIndex) {
             vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeDecode_);
             vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLayout_, 0, 1,
                                     &setDown_, 0, nullptr);
+            if (prof_.enabled()) prof_.markBegin(cmd_);
             vkCmdDispatch(cmd_, (W_ + 15) / 16, (H_ + 15) / 16, 1);
-            if (prof_.enabled()) prof_.mark(cmd_, "decode", "", 0, 0, 0, (W_ + 15) / 16, (H_ + 15) / 16, 1);
+            if (prof_.enabled()) prof_.markEnd(cmd_, "decode", "", 0, 0, 0, (W_ + 15) / 16, (H_ + 15) / 16, 1,
+                                               (uint64_t)W_ * H_ * 16);
             barrierAll();
 
             // Downscale: 2 passes of pipeRescale_
@@ -519,8 +531,10 @@ void ChainEngine::recordFrame(long frameIndex) {
             p.d[0] = 1.0f; // src buf 1 (bufRgb_)
             p.d[1] = 2.0f; // dst buf 2 (bufT_)
             push(p);
+            if (prof_.enabled()) prof_.markBegin(cmd_);
             vkCmdDispatch(cmd_, (regionW_ + 15) / 16, (netH_ + 15) / 16, 1);
-            if (prof_.enabled()) prof_.mark(cmd_, "rescale_down_v", "", 0, 0, 0, (regionW_ + 15) / 16, (netH_ + 15) / 16, 1);
+            if (prof_.enabled()) prof_.markEnd(cmd_, "rescale_down_v", "", 0, 0, 0, (regionW_ + 15) / 16, (netH_ + 15) / 16, 1,
+                                               (uint64_t)regionW_ * (regionH_ + netH_) * 12);
             barrierAll();
 
             // H pass: axis 1, bufT_(2) -> bufNetRgb_(4)
@@ -535,8 +549,10 @@ void ChainEngine::recordFrame(long frameIndex) {
             p.d[0] = 2.0f; // src buf 2 (bufT_)
             p.d[1] = 4.0f; // dst buf 4 (bufNetRgb_)
             push(p);
+            if (prof_.enabled()) prof_.markBegin(cmd_);
             vkCmdDispatch(cmd_, (netW_ + 15) / 16, (netH_ + 15) / 16, 1);
-            if (prof_.enabled()) prof_.mark(cmd_, "rescale_down_h", "", 0, 0, 0, (netW_ + 15) / 16, (netH_ + 15) / 16, 1);
+            if (prof_.enabled()) prof_.markEnd(cmd_, "rescale_down_h", "", 0, 0, 0, (netW_ + 15) / 16, (netH_ + 15) / 16, 1,
+                                               (uint64_t)netH_ * (regionW_ + netW_) * 12);
             barrierAll();
             vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 0);
 
@@ -555,9 +571,11 @@ void ChainEngine::recordFrame(long frameIndex) {
             p.c[0] = 0.0f; p.c[1] = 1.0f; p.c[2] = 1.0f;
             p.d[0] = 0.0f; p.d[1] = 0.0f; p.d[2] = 0.0f; p.d[3] = 0.0f;
             push(p);
+            if (prof_.enabled()) prof_.markBegin(cmd_);
             vkCmdDispatch(cmd_, ((uint64_t)netW_ * netH_ + 255) / 256, 1, 1);
-            if (prof_.enabled()) prof_.mark(cmd_, "features", "", 0, 16, 0,
-                                            (uint32_t)(((uint64_t)netW_ * netH_ + 255) / 256), 1, 1);
+            if (prof_.enabled()) prof_.markEnd(cmd_, "features", "", 0, 16, 0,
+                                               (uint32_t)(((uint64_t)netW_ * netH_ + 255) / 256), 1, 1,
+                                               (uint64_t)netW_ * netH_ * 12 + (uint64_t)st_[0].TOK * 64);
             barrierAll();
             vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 1);
         }
@@ -566,9 +584,11 @@ void ChainEngine::recordFrame(long frameIndex) {
             PackPush fp{arena_.A(arena_.off.oFeatV), arena_.A(arena_.off.oX16), st_[0].TOK * 16};
             vkCmdPushConstants(cmd_, rec_.featpackPipe().layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                                sizeof(fp), &fp);
+            if (prof_.enabled()) prof_.markBegin(cmd_);
             vkCmdDispatch(cmd_, (st_[0].TOK * 16 + 255) / 256, 1, 1);
-            if (prof_.enabled()) prof_.mark(cmd_, "featpack", "", 0, 16, 0,
-                                            (st_[0].TOK * 16 + 255) / 256, 1, 1);
+            if (prof_.enabled()) prof_.markEnd(cmd_, "featpack", "", 0, 16, 0,
+                                               (st_[0].TOK * 16 + 255) / 256, 1, 1,
+                                               (uint64_t)st_[0].TOK * 96);
             barrierAll();
             vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 2);
             // full 71-block DLSSNR U-Net chain
@@ -586,9 +606,11 @@ void ChainEngine::recordFrame(long frameIndex) {
             p.c[2] = cfg_.headGain;
             p.c[3] = cfg_.headBlend;
             push(p);
+            if (prof_.enabled()) prof_.markBegin(cmd_);
             vkCmdDispatch(cmd_, ((uint64_t)netW_ * netH_ + 255) / 256, 1, 1);
-            if (prof_.enabled()) prof_.mark(cmd_, "compose", "", 0, 0, 0,
-                                            (uint32_t)(((uint64_t)netW_ * netH_ + 255) / 256), 1, 1);
+            if (prof_.enabled()) prof_.markEnd(cmd_, "compose", "", 0, 0, 0,
+                                               (uint32_t)(((uint64_t)netW_ * netH_ + 255) / 256), 1, 1,
+                                               (uint64_t)netW_ * netH_ * 24 + (uint64_t)st_[0].TOK * 64);
             barrierAll();
 
             // Upscale: 2 passes of pipeRescale_
@@ -608,8 +630,10 @@ void ChainEngine::recordFrame(long frameIndex) {
             p.d[0] = 4.0f; // src buf 4 (bufFinLow_)
             p.d[1] = 2.0f; // dst buf 2 (bufT_)
             push(p);
+            if (prof_.enabled()) prof_.markBegin(cmd_);
             vkCmdDispatch(cmd_, (netW_ + 15) / 16, (regionH_ + 15) / 16, 1);
-            if (prof_.enabled()) prof_.mark(cmd_, "rescale_up_v", "", 0, 0, 0, (netW_ + 15) / 16, (regionH_ + 15) / 16, 1);
+            if (prof_.enabled()) prof_.markEnd(cmd_, "rescale_up_v", "", 0, 0, 0, (netW_ + 15) / 16, (regionH_ + 15) / 16, 1,
+                                               (uint64_t)netW_ * (netH_ + regionH_) * 12);
             barrierAll();
 
             // H pass: axis 1, bufT_(2) -> bufFin_(6)
@@ -624,8 +648,10 @@ void ChainEngine::recordFrame(long frameIndex) {
             p.d[0] = 2.0f; // src buf 2 (bufT_)
             p.d[1] = 6.0f; // dst buf 6 (bufFin_)
             push(p);
+            if (prof_.enabled()) prof_.markBegin(cmd_);
             vkCmdDispatch(cmd_, (regionW_ + 15) / 16, (regionH_ + 15) / 16, 1);
-            if (prof_.enabled()) prof_.mark(cmd_, "rescale_up_h", "", 0, 0, 0, (regionW_ + 15) / 16, (regionH_ + 15) / 16, 1);
+            if (prof_.enabled()) prof_.markEnd(cmd_, "rescale_up_h", "", 0, 0, 0, (regionW_ + 15) / 16, (regionH_ + 15) / 16, 1,
+                                               (uint64_t)regionH_ * (netW_ + regionW_) * 12);
             barrierAll();
 
             // Encode: bufFin_(6) + bufRgb_(1) -> viewFinal_(9)
@@ -635,8 +661,10 @@ void ChainEngine::recordFrame(long frameIndex) {
             p.b[3] = 0;                   // absolute (direct color)
             p.c[0] = cfg_.sharpness;
             push(p);
+            if (prof_.enabled()) prof_.markBegin(cmd_);
             vkCmdDispatch(cmd_, (W_ + 15) / 16, (H_ + 15) / 16, 1);
-            if (prof_.enabled()) prof_.mark(cmd_, "encode", "", 0, 0, 0, (W_ + 15) / 16, (H_ + 15) / 16, 1);
+            if (prof_.enabled()) prof_.markEnd(cmd_, "encode", "", 0, 0, 0, (W_ + 15) / 16, (H_ + 15) / 16, 1,
+                                               (uint64_t)regionW_ * regionH_ * 12 + (uint64_t)W_ * H_ * 4);
             barrierAll();
             vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 5);
         }

@@ -39,7 +39,7 @@ foreach(S ${SHADERS})
     list(APPEND SPV_OUTPUTS ${SPV})
 endforeach()
 
-set(M8_SHADERS gemm gemm_rn1 cosine cosine_win softmax elementwise
+set(M8_SHADERS gemm gemm_rn1 gemm_i8 cosine cosine_win softmax elementwise
                partition transpose_we gather_residual merge featpack headpack
                pool2 upmerge)
 foreach(S ${M8_SHADERS})
@@ -104,7 +104,7 @@ set_property(GLOBAL PROPERTY D5C_SPV_DIR "${CMAKE_CURRENT_BINARY_DIR}")
 function(d5c_stage_shaders TGT)
     get_property(SPV_DIR GLOBAL PROPERTY D5C_SPV_DIR)
     set(SHADERS decode features compose encode rescale framegen)
-    set(M8_SHADERS gemm gemm_rn1 cosine cosine_win softmax elementwise
+    set(M8_SHADERS gemm gemm_rn1 gemm_i8 cosine cosine_win softmax elementwise
                    partition transpose_we gather_residual merge featpack headpack
                    pool2 upmerge)
     set(STAGED "")
