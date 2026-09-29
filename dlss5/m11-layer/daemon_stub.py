@@ -7,7 +7,7 @@ import sys
 
 import numpy as np
 
-HOST, PORT = "127.0.0.1", 47990
+HOST, PORT = "127.0.0.1", 48990
 
 
 def recvn(conn, n):

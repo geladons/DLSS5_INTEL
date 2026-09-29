@@ -8,13 +8,13 @@
  * no feedback loop: the game's own pixels are what changes.
  *
  * Port notes (Windows): pthread -> CRITICAL_SECTION, Unix socket -> TCP
- * 127.0.0.1:NR_LAYER_PORT (default 47990), access() -> _access(), stderr ->
+ * 127.0.0.1:NR_LAYER_PORT (default 48990), access() -> _access(), stderr ->
  * %TEMP%\nr_layer_win.log. Logic mirrors the Linux original 1:1; the default
  * sync model stays "idle" (vkQueueWaitIdle), NR_LAYER_SYNC=semaphore enables
  * the present-semaphore ring.
  *
  * Env: ENABLE_NR_LAYER=1 arms the layer (manifest enable_environment).
- *   NR_LAYER_PORT     daemon TCP port (default 47990)
+ *   NR_LAYER_PORT     daemon TCP port (default 48990)
  *   NR_LAYER_TRIGGER  while this file exists: process + hold (photo mode)
  *   NR_LAYER_LIVE N   every Nth present processed; between frames re-blit the
  *                     last result (slideshow mode). N=1 = every present.
@@ -1294,10 +1294,6 @@ static uint32_t settled(const unsigned char *now, const unsigned char *before,
         mask[i] = moved ? 0u : 0xFFu;
         held += !moved;
     }
-    if (held >= (uint32_t)((uint64_t)pixels * 85 / 100)) {
-        nr_log("[nr_layer] menu / static screen detected (%u%% held still); preserving native resolution",
-               (unsigned)(100ull * held / pixels));
-    }
     return held;
 }
 
@@ -1339,23 +1335,22 @@ static int process_frame(device_data *data, swapchain_data *chain,
         uint32_t held = settled(data->mapped, data->earlier, pixels,
                                 data->outgoing + needed);
         if (held >= (uint32_t)((uint64_t)pixels * 85 / 100)) {
-            /* Static menu or still frame: save current native pixels and bypass processing */
-            if (data->earlier_size < needed) {
-                unsigned char *grown = (unsigned char *)realloc(data->earlier, (size_t)needed);
-                if (grown) {
-                    data->earlier = grown;
-                    data->earlier_size = needed;
-                }
+            masked = 0;
+            if (memcmp(data->mapped, data->earlier, (size_t)needed) == 0 &&
+                data->have_prev_processed && data->prev_processed &&
+                data->prev_processed_size >= needed && data->result &&
+                data->result_size >= needed) {
+                memcpy(data->mapped, data->prev_processed, (size_t)needed);
+                memcpy(data->result, data->prev_processed, (size_t)needed);
+                return 0;
             }
-            if (data->earlier && data->earlier_size >= needed) {
-                memcpy(data->earlier, data->mapped, (size_t)needed);
-                data->have_earlier = 1;
-            }
-            return 1; /* Skip DLSS processing and writeback: present untouched native image */
+            nr_log("[nr_layer] static frame detected (%u%% held still); processing full frame",
+                   (unsigned)(100ull * held / pixels));
+        } else {
+            masked = mask_worth_sending(held, pixels);
+            nr_log("[nr_layer] %u%% of the frame held still; ui mask %s",
+                   100u * held / pixels, masked ? "sent" : "refused");
         }
-        masked = mask_worth_sending(held, pixels);
-        nr_log("[nr_layer] %u%% of the frame held still; ui mask %s",
-             100u * held / pixels, masked ? "sent" : "refused");
     }
 
     /* Save native input into data->earlier before processing */

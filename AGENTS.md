@@ -87,9 +87,9 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
   - x64 games (RDR2, Witcher 3, Cyberpunk): loads `d5c_chain.dll` via C ABI
     and executes directly in-process on host-visible staging buffers (0 ms
     socket lag, no background daemon).
-  - x86 games (GTA IV via DXVK): connects over TCP (127.0.0.1:47990) to `m11d.exe`.
-  - Static UI Masking: static pixels (`settled()`) are preserved 100% native
-    resolution, ensuring menu text, dialogue, and HUD are never blurred.
+  - x86 games (GTA IV via DXVK): connects over TCP (127.0.0.1:48990) to `m11d.exe`.
+  - Moving-scene UI Masking: held pixels are preserved when the scene is moving;
+    static menus are processed as a whole and exact repeats reuse the last result.
 - m12-dxgi: DirectX 12 present hook (GTA V Enhanced). Dynamically loads
   `d5c_chain.dll` via C ABI to process present buffers in-process (0 ms TCP lag).
 - chain: THE model as an OOP module (`d5c::ChainEngine`). Exported via clean
@@ -98,9 +98,9 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
     128-bit vectorized memory ops, epilogue residual add fusion.
   - Bounded contrast-adaptive sharpening (CAS) in `encode.comp` (`pc.c[0]`).
   - Deterministic noise seed pinned (`p.b[0] = 1`) to eliminate flickering.
-- m11d: DLSSNR frame daemon for 32-bit x86 titles (TCP 127.0.0.1:47990).
-  Lifecycle is fully auto-managed by `m13`: starts automatically when an x86
-  game launches, and terminates immediately upon game exit to free all VRAM.
+- m11d: DLSSNR frame daemon for 32-bit x86 titles (TCP 127.0.0.1:48990).
+  Lifecycle is auto-managed by `m13`: starts for x86 games, stops after the
+  x86 exit grace period, and is reclaimed immediately before an x64 launch.
 - m13: DLSS 5 Manager GUI (`m13.pyw`) & In-Game Overlay (`CTRL+ALT+G`).
   - Presets: Native (1.0), Quality (0.67), Balanced (0.58), Performance (0.50),
     Ultra Performance (0.33), and Sharpness (0.0..1.0).

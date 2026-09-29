@@ -35,6 +35,12 @@
 
 ## 2. Solved Issues & Completed Milestones in Current Session
 
+### Stage 19: GTA IV Menu Processing, Overlay Access & Game Handoff (2026-09-29)
+1. **GTA IV Static Menu Processing:** The old 85% held-still bypass returned the native frame unchanged, so static menus never received DLSSNR. Static screens now get one neural pass, identical inputs reuse the processed result, and moving scenes retain the UI mask for held pixels.
+2. **In-Game Controls:** The manager header no longer duplicates gain, blend, and sharpness controls already owned by Settings. The `CTRL+ALT+G` panel has a scrollable body and explicitly takes foreground focus when opened so all Phase30 controls can be reached and clicked.
+3. **Game-to-Game VRAM Handoff:** x64 launches stop an x86 daemon still in its exit grace period. When the last managed game exits, DX9/DX12 pause and overlay freeze/reprocess flags return to defaults. Phase30 configuration is included in manager-launched game environments.
+4. **Runtime Refresh & Verification:** Rebuilt both x64 and x86 Vulkan layers; deploy refreshes stale game-local DLLs by comparing hashes while preserving the original in `.m13bak`. `python dlss5\m13\test_stage5.py` passes. Owner-side GTA IV image-quality and input validation remains outstanding.
+
 ### Stage 17: Multi-Engine Game Presentation Fixes & Stability Hardening (Commits `d90e680`, `6505874`, `4063eaf`, `298666a`)
 1. **GTA IV (x86 DX9 / DXVK) Freeze & Flickering:**
    - *Freeze Cause:* Port collision on `47990` with Sunshine (Moonlight host, PID ~7960). `nr_layer_win32.dll` connected to Sunshine instead of `m11d`, blocking synchronously for 60 seconds inside `vkQueuePresentKHR`.

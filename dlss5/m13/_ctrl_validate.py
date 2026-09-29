@@ -1,5 +1,5 @@
 # Control-channel validation for m11d (M13 part 1).
-# Starts nothing itself - expects a fresh m11d on 127.0.0.1:47990.
+# Starts nothing itself - expects a fresh m11d on 127.0.0.1:48990.
 # Checks: STATUS/SETGAIN roundtrip, and that a gain change takes effect on
 # the NEXT frame WITHOUT a daemon restart (same frame in at gain 2.0 vs 1.0
 # must produce different outputs).
@@ -13,7 +13,7 @@ import time
 sys.path.insert(0, r"" + str(_REPO) + r"\dlss5\m13")
 from daemonctl import M11dClient, MAGIC_CTRL
 
-HOST, PORT = "127.0.0.1", 47990
+HOST, PORT = "127.0.0.1", 48990
 W = H = 320
 MAGIC_PLAIN = 0x304E524E
 

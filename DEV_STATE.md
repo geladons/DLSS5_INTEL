@@ -1,5 +1,12 @@
 # DEV_STATE.md - where we are (updated 2026-09-29 by Antigravity)
 
+## Stage 19: GTA IV Menu Processing, Overlay Access & Game Handoff (2026-09-29)
+- Removed duplicate gain, blend, and sharpness sliders from the manager header; the vendor tuning controls remain in Settings.
+- Made the in-game overlay body scrollable and explicitly activated it on open so its Phase30 controls remain reachable and mouse-operable.
+- Changed the x86 Vulkan layer to process static menu frames instead of bypassing them. Static UI masking is applied only when the scene is moving; identical static inputs reuse their cached processed result.
+- Before launching an x64 game, the manager stops a lingering x86 daemon to release exclusive VRAM. Runtime pause/freeze/reprocess flags reset when the last managed game exits, and game-specific settings are passed through to launch.
+- Rebuilt x64 and x86 presentation layers. `python dlss5\m13\test_stage5.py` passes. Live GTA IV visual quality still requires an owner-side game run.
+
 ## Stage 17: Multi-Engine Game Presentation Fixes & Hardening (2026-09-29 COMPLETED)
 - **1. GTA IV Menu Freeze & Flickering/Ripple (x86 D3D9 / DXVK):**
   - **Sunshine Port Conflict:** Sunshine permanently occupies TCP 47990 on this host. Reassigned daemon and layer communication to dedicated port **48990**.

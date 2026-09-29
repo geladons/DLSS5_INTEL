@@ -20,8 +20,9 @@ except (ImportError, ValueError):
 GAMES_CACHE_PATH = os.path.join(CONFIG_DIR, "games_cache.json")
 
 
-def load_cache(path=GAMES_CACHE_PATH):
+def load_cache(path=None):
     """Load cached games from disk -> list[Game]. Returns [] on miss/error."""
+    path = path or GAMES_CACHE_PATH
     if not os.path.isfile(path):
         return []
     try:
@@ -52,8 +53,9 @@ def load_cache(path=GAMES_CACHE_PATH):
         return []
 
 
-def save_cache(games, path=GAMES_CACHE_PATH):
+def save_cache(games, path=None):
     """Serialize list[Game] to atomic JSON cache."""
+    path = path or GAMES_CACHE_PATH
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         entries = []
@@ -79,8 +81,9 @@ def save_cache(games, path=GAMES_CACHE_PATH):
         return False
 
 
-def clear_cache(path=GAMES_CACHE_PATH):
+def clear_cache(path=None):
     """Remove cache file if present."""
+    path = path or GAMES_CACHE_PATH
     try:
         if os.path.exists(path):
             os.remove(path)

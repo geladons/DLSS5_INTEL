@@ -2,13 +2,9 @@
 # m13.overlay - in-game control overlay (hotkey, default CTRL+ALT+G).
 # Frameless, always-on-top, semi-transparent panel centered over the screen.
 #
-# MOUSE & NOACTIVATE:
-# The overlay window ALWAYS maintains WS_EX_TOPMOST | WS_EX_NOACTIVATE |
-# WS_EX_TOOLWINDOW styles. It never steals Windows foreground focus from the
-# game, so borderless and exclusive-fullscreen games NEVER minimize when the
-# overlay is opened. Clicks, drags, and selections on the overlay work cleanly
-# without activating the window, while _free_cursor() and _cursor_keeper()
-# keep the mouse cursor visible and free of game clipping rectangles.
+# MOUSE & FOCUS:
+# The topmost panel takes foreground focus while visible, releases the game's
+# cursor clipping, and returns focus to the game when hidden.
 #
 # PHOTO MODE: open the overlay -> the frame FREEZES (the layer/proxy holds
 # the raw frame and re-blits its processed result, the game keeps running
@@ -241,8 +237,23 @@ class ControlOverlay:
             widget.bind("<ButtonPress-1>", self._drag_start)
             widget.bind("<B1-Motion>", self._drag_move)
 
-        body = tk.Frame(w, bg=BG, padx=14, pady=10)
-        body.pack(fill="both", expand=True)
+        body_shell = tk.Frame(w, bg=BG)
+        body_shell.pack(fill="both", expand=True)
+        self.body_canvas = tk.Canvas(
+            body_shell, bg=BG, highlightthickness=0, borderwidth=0)
+        body_scroll = ttk.Scrollbar(
+            body_shell, orient="vertical", command=self.body_canvas.yview)
+        self.body_canvas.configure(yscrollcommand=body_scroll.set)
+        body_scroll.pack(side="right", fill="y")
+        self.body_canvas.pack(side="left", fill="both", expand=True)
+        body = tk.Frame(self.body_canvas, bg=BG, padx=14, pady=10)
+        self._body_window = self.body_canvas.create_window(
+            (0, 0), window=body, anchor="nw")
+        body.bind("<Configure>", lambda _e: self.body_canvas.configure(
+            scrollregion=self.body_canvas.bbox("all")))
+        self.body_canvas.bind(
+            "<Configure>", lambda e: self.body_canvas.itemconfigure(
+                self._body_window, width=e.width))
 
         self.freeze_lbl = tk.Label(
             body, text="", bg=BG, fg=AMBER, font=("Segoe UI", 8),
@@ -662,13 +673,16 @@ class ControlOverlay:
         _free_cursor()
 
         # Display and focus the overlay without minimizing fullscreen games.
-        # overrideredirect(True) + WS_EX_TOPMOST + focus_set() lets Tkinter
-        # receive mouse clicks, drags, and key events, keeping the cursor visible.
+        # Activate the panel so Tk receives clicks even when the game owns focus.
         self.win.deiconify()
         self.win.configure(cursor="arrow")
         self.win.attributes("-topmost", True)
         self.win.lift()
-        self.win.focus_set()
+        try:
+            _force_foreground(int(self.win.wm_frame(), 16))
+            self.win.focus_force()
+        except (tk.TclError, ValueError):
+            self.win.focus_set()
         self._focus_mode = True
 
         self._warp_cursor()

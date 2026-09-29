@@ -168,6 +168,25 @@ with patch("subprocess.Popen") as mock_popen:
         assert os.path.exists(gamelaunch.DX9_TRIGGER), "DX9_TRIGGER flag not set for dx9"
         print("  gamelaunch trigger flag set for layer mode [PASS]")
 
+        with tempfile.TemporaryDirectory() as flags_dir:
+            flag_paths = {
+                "DX9_TRIGGER": os.path.join(flags_dir, "dx9.flag"),
+                "M12_PAUSE": os.path.join(flags_dir, "m12.flag"),
+                "FREEZE_FLAG": os.path.join(flags_dir, "freeze.flag"),
+                "REPROC_FLAG": os.path.join(flags_dir, "reproc.flag"),
+            }
+            with patch.multiple(gamelaunch, **flag_paths):
+                gamelaunch._flag_set(gamelaunch.DX9_TRIGGER, False)
+                gamelaunch._flag_set(gamelaunch.M12_PAUSE, True)
+                gamelaunch._flag_set(gamelaunch.FREEZE_FLAG, True)
+                gamelaunch._flag_set(gamelaunch.REPROC_FLAG, True)
+                gamelaunch.reset_runtime_flags()
+                assert os.path.exists(gamelaunch.DX9_TRIGGER)
+                assert not os.path.exists(gamelaunch.M12_PAUSE)
+                assert not os.path.exists(gamelaunch.FREEZE_FLAG)
+                assert not os.path.exists(gamelaunch.REPROC_FLAG)
+            print("  gamelaunch.reset_runtime_flags clears stale game state [PASS]")
+
 # 5.4 Test controller.game_launch architecture-aware daemon handling
 with tempfile.TemporaryDirectory() as td:
     cfg_file = os.path.join(td, "ctl_cfg.json")
@@ -189,16 +208,20 @@ with tempfile.TemporaryDirectory() as td:
             dummy_x86: {"mode": "dx9", "arch": "x86", "name": "Game32"},
         })
 
-        # Test 64-bit game launch: should NOT call daemon_start
-        with patch.object(ctl, "game_deploy", return_value=(True, "deployed")), \
-             patch.object(ctl, "daemon_start") as mock_dstart, \
-             patch("m13.gamelaunch.launch_game", return_value=(True, "launched pid 111")) as mock_lg:
-
-            ok, msg = ctl.game_launch(dummy_x64)
-            assert ok, "game_launch x64 failed: %s" % msg
-            mock_dstart.assert_not_called()
-            mock_lg.assert_called_once_with(dummy_x64, "dx11", scale=0.58, gain=1.5, blend=0.75)
-            print("  controller.game_launch x64: In-Process (daemon NOT started) + config propagated [PASS]")
+        # A daemon still in its x86 grace period must be stopped before x64.
+        with patch.object(type(ctl.daemon), "running", True):
+            with patch.object(ctl, "game_deploy", return_value=(True, "deployed")), \
+                 patch.object(ctl, "daemon_start") as mock_dstart, \
+                 patch.object(ctl.daemon, "stop", return_value=(True, "stopped")) as mock_dstop, \
+                 patch("m13.gamelaunch.launch_game", return_value=(True, "launched pid 111")) as mock_lg:
+                ok, msg = ctl.game_launch(dummy_x64)
+                assert ok, "game_launch x64 failed: %s" % msg
+                mock_dstart.assert_not_called()
+                mock_dstop.assert_called_once()
+                mock_lg.assert_called_once_with(
+                    dummy_x64, "dx11", scale=0.58, gain=1.5, blend=0.75,
+                    cfg=ctl.cfg)
+                print("  controller.game_launch x64: lingering daemon stopped + config propagated [PASS]")
 
         # Test 32-bit game launch: SHOULD call daemon_start when daemon not running
         with patch.object(ctl, "game_deploy", return_value=(True, "deployed")), \
@@ -208,7 +231,8 @@ with tempfile.TemporaryDirectory() as td:
             ok, msg = ctl.game_launch(dummy_x86)
             assert ok, "game_launch x86 failed: %s" % msg
             mock_dstart.assert_called_once()
-            mock_lg.assert_called_once_with(dummy_x86, "dx9", scale=0.58, gain=1.5, blend=0.75)
+            mock_lg.assert_called_once_with(dummy_x86, "dx9", scale=0.58,
+                                            gain=1.5, blend=0.75, cfg=ctl.cfg)
             print("  controller.game_launch x86: TCP daemon fallback (daemon_start called) [PASS]")
     finally:
         ctl.shutdown()

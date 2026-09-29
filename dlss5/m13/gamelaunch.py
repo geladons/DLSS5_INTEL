@@ -75,6 +75,16 @@ def freeze_active():
     return _flag_exists(FREEZE_FLAG)
 
 
+def reset_runtime_flags():
+    """Restore unpaused defaults after the last managed game exits."""
+    for path, present in ((DX9_TRIGGER, True), (M12_PAUSE, False),
+                          (FREEZE_FLAG, False), (REPROC_FLAG, False)):
+        try:
+            _flag_set(path, present)
+        except OSError:
+            pass
+
+
 def reproc_bump():
     """Ask the layer/proxy to re-send the held raw frame (after a gain push).
     Writing fresh content updates the mtime the layer watches."""

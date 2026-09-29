@@ -2,15 +2,14 @@
 # m13.daemonctl - NRCT control-channel client for the m11d daemon.
 #
 # Protocol (see dlss5/m11d/main.cpp): one TCP connection per request to
-# 127.0.0.1:47990, 16-byte header {magic='NRCT', cmd, payload, reserved}:
+# 127.0.0.1:48990, 16-byte header {magic='NRCT', cmd, payload, reserved}:
 #   cmd 1 SETGAIN: payload = IEEE754 float bits -> reply {magic, ok, gain, frames}
 #   cmd 2 STATUS:  no payload             -> reply {magic, ok, gain, frames}
 # The reply carries the ACTIVE gain and the processed-frame counter, so the
 # caller can confirm a live change without restarting anything.
 #
-# GOTCHA: 127.0.0.1:47990 is co-owned by Sunshine (wildcard listener, its
-# web UI). A raw TCP connect SUCCEEDS even with m11d down - the probe is
-# only trustworthy when the reply magic matches NRCT (see alive()).
+# Sunshine owns 47990. A raw TCP connect to another endpoint can still succeed
+# without m11d, so the probe trusts only a reply whose magic matches NRCT.
 # ============================================================================
 import os
 import socket
@@ -63,7 +62,7 @@ class M11dClient:
                               % len(rep))
         magic, ok, gain_bits, frames = struct.unpack("<4I", rep)
         if magic != MAGIC_CTRL:
-            raise DaemonError("reply magic 0x%08x != NRCT (Sunshine on 47990?)"
+            raise DaemonError("reply magic 0x%08x != NRCT (wrong service on 48990?)"
                               % magic)
         if not ok:
             raise DaemonError("daemon rejected control cmd %d" % cmd)

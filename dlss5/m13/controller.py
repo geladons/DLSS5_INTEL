@@ -138,6 +138,8 @@ class StateMonitor(threading.Thread):
             self._x86_empty_ticks = getattr(self, "_x86_empty_ticks", 0) + 1
 
         exited_games = self._prev_running_games - currently_running
+        if exited_games and not currently_running:
+            gamelaunch.reset_runtime_flags()
         if exited_games or not has_running_x86:
             if not has_running_x86 and ctl.daemon.running and self._x86_empty_ticks >= 10:
                 msg = "[controller] game exited; stopping x86 background daemon"
@@ -763,19 +765,28 @@ class M13Controller:
             ok, msg = self.game_deploy(exe)     # auto-deploy on launch
             if not ok:
                 return False, msg
+        daemon_note = None
         if meta.get("arch") == "x86":
             if not self.daemon.running:
                 ok, msg = self.daemon_start()
                 if not ok and "already" not in msg:
                     return False, msg
+        elif self.daemon.running:
+            ok, msg = self.daemon.stop()
+            if not ok and self.daemon.running:
+                return False, "cannot release x86 daemon before x64 game: %s" % msg
+            daemon_note = "stopped x86 daemon before x64 launch"
         target = self.launch_target(exe, meta)
         scale = self.cfg.get("scale")
         gain = self.cfg.get("gain")
         blend = self.cfg.get("blend")
         ok, msg = gamelaunch.launch_game(target, meta["mode"],
-                                         scale=scale, gain=gain, blend=blend)
+                                         scale=scale, gain=gain, blend=blend,
+                                         cfg=self.cfg)
         if ok:
             self.launched_exes.add(os.path.abspath(target).lower())
+            if daemon_note:
+                msg = "%s | %s" % (daemon_note, msg)
             if target.lower() != exe.lower():
                 msg = "%s (via %s)" % (msg, os.path.basename(target))
         return ok, msg

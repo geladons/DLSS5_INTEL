@@ -23,7 +23,6 @@
 # ============================================================================
 import os
 import queue
-import time
 import tkinter as tk
 from tkinter import filedialog, ttk
 from tkinter.scrolledtext import ScrolledText
@@ -184,12 +183,12 @@ class ManagerUI:
         self.logo.pack(side="left", padx=(0, 8))
         self._draw_logo(ACCENT)
         self.logo.bind("<Button-1>", self._logo_click)
-        ttl = tk.Frame(head, bg=BG)
-        ttl.pack(side="left")
-        self.title_lbl = tk.Label(ttl, text=tr("app_title"), bg=BG, fg=FG,
+        title = tk.Frame(head, bg=BG)
+        title.pack(side="left")
+        self.title_lbl = tk.Label(title, text=tr("app_title"), bg=BG, fg=FG,
                                   font=("Segoe UI", 14, "bold"))
         self.title_lbl.pack(anchor="w")
-        tk.Label(ttl, text=tr("app_subtitle"), bg=BG, fg=MUTED,
+        tk.Label(title, text=tr("app_subtitle"), bg=BG, fg=MUTED,
                  font=("Segoe UI", 8)).pack(anchor="w")
         ttk.Button(head, text=tr("overlay_button", hotkey_label(
             self.ctl.cfg.get("overlay_hotkey"))),
@@ -198,107 +197,50 @@ class ManagerUI:
         bar = tk.Frame(self.root, bg=PANEL,
                        highlightthickness=1, highlightbackground=BORDER)
         bar.pack(fill="x", padx=12, pady=4)
-        inner = tk.Frame(bar, bg=PANEL)
-        inner.pack(fill="x", padx=10, pady=8)
-
-        status_box = tk.Frame(inner, bg=PANEL)
-        status_box.pack(side="left")
-        self.dot = tk.Label(status_box, text="●", font=("Segoe UI", 10), bg=PANEL, fg=GREEN)
+        status_box = tk.Frame(bar, bg=PANEL)
+        status_box.pack(fill="x", padx=10, pady=8)
+        self.dot = tk.Label(status_box, text="●", font=("Segoe UI", 10),
+                            bg=PANEL, fg=GREEN)
         self.dot.pack(side="left")
-        self.st_engine = tk.Label(status_box, text=tr("engine_active"), bg=PANEL,
-                                  fg=GREEN, font=("Segoe UI", 9, "bold"))
+        self.st_engine = tk.Label(status_box, text=tr("engine_active"),
+                                  bg=PANEL, fg=GREEN,
+                                  font=("Segoe UI", 9, "bold"))
         self.st_engine.pack(side="left", padx=(6, 8))
         self.st_daemon = self.st_engine  # back-compat alias
-        self.daemon_info = tk.Label(status_box, text="Direct GPU (0 ms TCP lag)",
-                                    bg=PANEL, fg=MUTED, font=("Segoe UI", 8))
+        self.daemon_info = tk.Label(status_box,
+                                    text="Direct GPU (0 ms TCP lag)",
+                                    bg=PANEL, fg=MUTED,
+                                    font=("Segoe UI", 8))
         self.daemon_info.pack(side="left", padx=(4, 0))
 
-        sliders_box = tk.Frame(inner, bg=PANEL)
-        sliders_box.pack(side="right")
-
-        tk.Label(sliders_box, text=tr("p30_intensity"), bg=PANEL, fg=MUTED).pack(
-            side="left", padx=(10, 4))
-        self.gain_var = tk.DoubleVar(
-            value=float(self.ctl.cfg.get("intensity") or self.ctl.cfg.get("gain") or 1.6))
-        self._suppress_scale = None   # programmatic-set echo suppression:
-        self._scale_dragging = False  # Tk fires the scale command DEFERRED
-        self._pending_push = None     # (value, time) of an in-flight push
-        self.gain_scale = tk.Scale(
-            sliders_box, from_=0.0, to=2.0, resolution=0.05, orient="horizontal",
-            length=130, variable=self.gain_var, command=self._gain_moved,
-            bg=PANEL, fg=FG, troughcolor=PANEL2, highlightthickness=0, bd=0,
-            activebackground=ACCENT, showvalue=False, sliderrelief="flat")
-        self.gain_scale.pack(side="left")
-        self.gain_scale.bind("<ButtonPress-1>",
-                             lambda _e: setattr(self, "_scale_dragging", True))
-        self.gain_scale.bind("<ButtonRelease-1>",
-                             lambda _e: setattr(self, "_scale_dragging",
-                                                False))
-        self.gain_lbl = tk.Label(sliders_box, text="%.2f" % self.gain_var.get(),
-                                 bg=PANEL, fg=ACCENT,
-                                 font=("Consolas", 10, "bold"), width=5)
-        self.gain_lbl.pack(side="left")
-        tk.Label(sliders_box, text=tr("ov_blend").lower(), bg=PANEL,
-                 fg=MUTED).pack(side="left", padx=(8, 4))
-        self.blend_var = tk.DoubleVar(
-            value=float(self.ctl.cfg.get("blend") or 1.0))
-        self.blend_scale = tk.Scale(
-            sliders_box, from_=0.0, to=1.0, resolution=0.05, orient="horizontal",
-            length=90, variable=self.blend_var, command=self._blend_moved,
-            bg=PANEL, fg=FG, troughcolor=PANEL2, highlightthickness=0, bd=0,
-            activebackground=ACCENT, showvalue=False, sliderrelief="flat")
-        self.blend_scale.pack(side="left")
-        self.blend_lbl = tk.Label(sliders_box, text="%.2f" % self.blend_var.get(),
-                                  bg=PANEL, fg=ACCENT,
-                                  font=("Consolas", 10, "bold"), width=5)
-        self.blend_lbl.pack(side="left")
-
-        inner2 = tk.Frame(bar, bg=PANEL)
-        inner2.pack(fill="x", padx=10, pady=(0, 8))
-
-        tk.Label(inner2, text=tr("scale"), bg=PANEL, fg=MUTED,
+        controls = tk.Frame(bar, bg=PANEL)
+        controls.pack(fill="x", padx=10, pady=(0, 8))
+        tk.Label(controls, text=tr("scale"), bg=PANEL, fg=MUTED,
                  font=("Segoe UI", 9, "bold")).pack(side="left", padx=(0, 6))
         self.scale_var = tk.StringVar(
             value=scale_to_preset_label(self.ctl.cfg.get("scale")))
         self.scale_cb = ttk.Combobox(
-            inner2, textvariable=self.scale_var, width=24, state="readonly",
+            controls, textvariable=self.scale_var, width=24, state="readonly",
             values=scale_preset_labels())
         self.scale_cb.pack(side="left", padx=(0, 14))
         self.scale_cb.bind("<<ComboboxSelected>>", self._scale_selected)
-
         self.framegen_var = tk.BooleanVar(
             value=bool(self.ctl.cfg.get("frame_gen")))
         self.framegen_chk = ttk.Checkbutton(
-            inner2, text=tr("framegen"), variable=self.framegen_var,
+            controls, text=tr("framegen"), variable=self.framegen_var,
             command=self._framegen_toggled)
         self.framegen_chk.pack(side="left", padx=(0, 14))
-
-        tk.Label(inner2, text=tr("sharpness"), bg=PANEL, fg=MUTED,
-                 font=("Segoe UI", 9, "bold")).pack(side="left", padx=(0, 6))
-        self.sharpness_var = tk.DoubleVar(
-            value=float(self.ctl.cfg.get("sharpness") or 0.8))
-        self.sharpness_scale = tk.Scale(
-            inner2, from_=0.0, to=1.0, resolution=0.05, orient="horizontal",
-            length=100, variable=self.sharpness_var, command=self._sharpness_moved,
-            bg=PANEL, fg=FG, troughcolor=PANEL2, highlightthickness=0, bd=0,
-            activebackground=ACCENT, showvalue=False, sliderrelief="flat")
-        self.sharpness_scale.pack(side="left")
-        self.sharpness_lbl = tk.Label(
-            inner2, text="%.2f" % self.sharpness_var.get(),
-            bg=PANEL, fg=ACCENT, font=("Consolas", 10, "bold"), width=5)
-        self.sharpness_lbl.pack(side="left")
-
-        self.fg_hint = tk.Label(
-            inner2, text=tr("framegen_hint"), bg=PANEL, fg=MUTED,
-            font=("Segoe UI", 8))
+        self.fg_hint = tk.Label(controls, text=tr("framegen_hint"),
+                                bg=PANEL, fg=MUTED,
+                                font=("Segoe UI", 8))
         self.fg_hint.pack(side="right")
 
     def _draw_logo(self, color):
         self.logo.delete("all")
-        self.logo.create_polygon(15, 2, 28, 15, 15, 28, 2, 15, fill=color,
-                                 outline="")
-        self.logo.create_polygon(15, 8, 22, 15, 15, 22, 8, 15, fill=BG,
-                                 outline="")
+        self.logo.create_polygon(15, 2, 28, 15, 15, 28, 2, 15,
+                                 fill=color, outline="")
+        self.logo.create_polygon(15, 8, 22, 15, 15, 22, 8, 15,
+                                 fill=BG, outline="")
 
     def _logo_click(self, _e):
         """Hidden easter egg: five clicks on the diamond."""
@@ -374,11 +316,9 @@ class ManagerUI:
         self.screen_tail.pack(anchor="w")
 
     def _screen_start(self):
-        self.ctl.cfg.set("gain", round(float(self.gain_var.get()), 3))
         self.ctl.submit(self.ctl.screen_start)
 
     def _screen_window_start(self):
-        self.ctl.cfg.set("gain", round(float(self.gain_var.get()), 3))
         self.ctl.submit(lambda: self.ctl.screen.start_window(
             self.win_var.get(), self.ctl.cfg.get("gain"),
             float(self.ctl.cfg.get("blend") or 1.0)))
@@ -485,44 +425,19 @@ class ManagerUI:
         self.logq.put(("mgr", msg))
 
     def _daemon_start(self):
-        self.ctl.cfg.set("gain", round(float(self.gain_var.get()), 3))
         self.ctl.submit(self.ctl.daemon_start)
 
-    def _gain_moved(self, _v):
-        g = round(float(self.gain_var.get()), 3)
-        # Tk fires the scale command DEFERRED (idle) even for programmatic
-        # set(): drop the echo of a poll-driven sync so a stale snapshot
-        # never overwrites a value the user just pushed.
-        if self._suppress_scale is not None and \
-                abs(g - self._suppress_scale) < 1e-9:
-            self._suppress_scale = None
-            return
-        self._suppress_scale = None
-        self.gain_lbl.config(text="%.2f" % g)
-        self._pending_push = (g, time.time())
-        if hasattr(self, "p30_panel") and self.p30_panel:
-            self.p30_panel.set_values({"intensity": g})
-        self.root.after_idle(lambda: self.ctl.submit(self.ctl.set_gain, g))
 
     def _on_phase30_change(self, key, val):
-        if key == "intensity":
-            self.gain_var.set(val)
-            self.gain_lbl.config(text="%.2f" % val)
         self.ctl.submit(self.ctl.set_phase30, {key: val})
         if hasattr(self, "overlay") and self.overlay:
             self.overlay.sync_phase30({key: val})
 
     def _on_phase30_reset(self):
         self.ctl.submit(self.ctl.reset_phase30)
-        self.gain_var.set(1.6)
-        self.gain_lbl.config(text="1.60")
         if hasattr(self, "overlay") and self.overlay:
             self.overlay.sync_phase30(PHASE30_DEFAULTS)
 
-    def _blend_moved(self, _v):
-        b = round(float(self.blend_var.get()), 3)
-        self.blend_lbl.config(text="%.2f" % b)
-        self.root.after_idle(lambda: self.ctl.submit(self.ctl.set_blend, b))
 
     def _scale_selected(self, _e=None):
         lbl = self.scale_var.get()
@@ -536,13 +451,6 @@ class ManagerUI:
         self.ctl.submit(self.ctl.set_framegen, fg)
         if hasattr(self, "overlay") and self.overlay:
             self.overlay.sync_framegen(fg)
-
-    def _sharpness_moved(self, _v):
-        s = round(float(self.sharpness_var.get()), 2)
-        self.sharpness_lbl.config(text="%.2f" % s)
-        self.root.after_idle(lambda: self.ctl.submit(self.ctl.set_sharpness, s))
-        if hasattr(self, "overlay") and self.overlay:
-            self.overlay.sync_sharpness(s)
 
     # -------------------------------------------------------------- poll ---
     def _poll(self):
