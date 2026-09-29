@@ -33,7 +33,7 @@ from .i18n import (set_language, tr, scale_preset_labels,
                    scale_to_preset_label, preset_label_to_scale)
 from .logtail import LogHub
 from .overlay import ControlOverlay, hotkey_label
-from .phase30 import Phase30Panel
+from .phase30 import Phase30Panel, PHASE30_DEFAULTS
 from .splash import Splash
 from .ui_games import GamesTab
 
@@ -517,7 +517,7 @@ class ManagerUI:
         self.gain_var.set(1.6)
         self.gain_lbl.config(text="1.60")
         if hasattr(self, "overlay") and self.overlay:
-            self.overlay.sync_phase30(self.ctl.cfg.get_phase30())
+            self.overlay.sync_phase30(PHASE30_DEFAULTS)
 
     def _blend_moved(self, _v):
         b = round(float(self.blend_var.get()), 3)

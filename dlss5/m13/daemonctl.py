@@ -12,6 +12,7 @@
 # web UI). A raw TCP connect SUCCEEDS even with m11d down - the probe is
 # only trustworthy when the reply magic matches NRCT (see alive()).
 # ============================================================================
+import os
 import socket
 import struct
 

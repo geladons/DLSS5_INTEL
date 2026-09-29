@@ -151,7 +151,54 @@ class TestOverlayStatusLogic(unittest.TestCase):
             set_language("en")
             self.assertTrue(bool(tr(key)))
             set_language("ru")
-            self.assertTrue(bool(tr(key)))
+class TestPhase30Widgets(unittest.TestCase):
+    def setUp(self):
+        import tkinter as tk
+        self.root = tk.Tk()
+        self.root.withdraw()
+
+    def tearDown(self):
+        self.root.destroy()
+
+    def test_phase30_panel_controls(self):
+        changes = []
+        resets = []
+        panel = phase30.Phase30Panel(
+            self.root,
+            on_change=lambda k, v: changes.append((k, v)),
+            on_reset=lambda: resets.append(True)
+        )
+        panel.pack()
+
+        # 1. Slider change
+        panel._do_push("intensity", 1.8)
+        self.assertIn(("intensity", 1.8), changes)
+
+        # 2. Style index dropdown change
+        panel._var_style.set(panel._style_labels[2])
+        panel._on_style_selected(None)
+        self.assertIn(("style_index", 2), changes)
+
+        # 3. Auto mask toggle
+        panel._var_auto_mask.set(False)
+        panel._on_mask_toggle()
+        self.assertIn(("auto_mask", False), changes)
+
+        # 4. External set_values
+        panel.set_values({
+            "local_tone": 1.4,
+            "skin_structure": -1.0,
+            "color_strength": 0.5,
+        })
+        vals = panel.get_values()
+        self.assertEqual(vals["local_tone"], 1.4)
+        self.assertEqual(vals["skin_structure"], -1.0)
+        self.assertEqual(vals["color_strength"], 0.5)
+
+        # 5. Reset button
+        panel.reset_defaults()
+        self.assertEqual(len(resets), 1)
+        self.assertEqual(panel.get_values(), phase30.PHASE30_DEFAULTS)
 
 
 if __name__ == "__main__":

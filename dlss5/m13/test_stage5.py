@@ -304,9 +304,10 @@ with tempfile.TemporaryDirectory() as td:
                 assert snap["games"][dummy_x86]["running"] is True
                 mock_dstop.assert_not_called()
 
-            # Second pass: game has terminated (find_pid returns None)
+            # Second pass: game has terminated (find_pid returns None, grace period 10 ticks)
             with patch("m13.controller.find_pid", return_value=None):
-                snap = c_ctl.monitor._collect()
+                for _ in range(10):
+                    snap = c_ctl.monitor._collect()
                 assert snap["games"][dummy_x86]["running"] is False
                 mock_dstop.assert_called_once()
                 assert snap["daemon_pid"] is None, "snap['daemon_pid'] should be None after auto-stop"
