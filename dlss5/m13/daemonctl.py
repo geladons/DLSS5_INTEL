@@ -21,6 +21,12 @@ CMD_STATUS = 2
 CMD_SETBLEND = 3
 CMD_SETSCALE = 4
 CMD_SETFRAMEGEN = 5
+CMD_SETLOCALTONE = 6
+CMD_SETLOCALSTRUCTURE = 7
+CMD_SETSKINSTRUCTURE = 8
+CMD_SETAUTOMASK = 9
+CMD_SETSTYLEINDEX = 10
+CMD_SETCOLORSTRENGTH = 11
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 47990
 
@@ -74,6 +80,10 @@ class M11dClient:
         payload = struct.unpack("<I", struct.pack("<f", gain))[0]
         return self._roundtrip(CMD_SETGAIN, payload)
 
+    def set_intensity(self, intensity):
+        """Live Phase30 intensity update (alias for compose gain)."""
+        return self.set_gain(intensity)
+
     def set_blend(self, blend):
         """Live blend (vendor mix factor 0..1) update; next processed frame."""
         if not 0.0 <= blend <= 1.0:
@@ -91,6 +101,28 @@ class M11dClient:
     def set_framegen(self, enable):
         """Live frame generation toggle; next processed frame."""
         return self._roundtrip(CMD_SETFRAMEGEN, 1 if enable else 0)
+
+    def set_local_tone(self, val):
+        payload = struct.unpack("<I", struct.pack("<f", float(val)))[0]
+        return self._roundtrip(CMD_SETLOCALTONE, payload)
+
+    def set_local_structure(self, val):
+        payload = struct.unpack("<I", struct.pack("<f", float(val)))[0]
+        return self._roundtrip(CMD_SETLOCALSTRUCTURE, payload)
+
+    def set_skin_structure(self, val):
+        payload = struct.unpack("<I", struct.pack("<f", float(val)))[0]
+        return self._roundtrip(CMD_SETSKINSTRUCTURE, payload)
+
+    def set_auto_mask(self, enable):
+        return self._roundtrip(CMD_SETAUTOMASK, 1 if enable else 0)
+
+    def set_style_index(self, idx):
+        return self._roundtrip(CMD_SETSTYLEINDEX, int(idx))
+
+    def set_color_strength(self, val):
+        payload = struct.unpack("<I", struct.pack("<f", float(val)))[0]
+        return self._roundtrip(CMD_SETCOLORSTRENGTH, payload)
 
     def alive(self):
         """True only when an NRCT-speaking m11d answers (Sunshine doesn't)."""

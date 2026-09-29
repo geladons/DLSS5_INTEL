@@ -22,6 +22,7 @@ from . import gamelaunch
 from . import paths
 from .daemonctl import M11dClient, DaemonError
 from .deploy import Deployer, LayerRegistry
+from .phase30 import phase30_env_dict, write_phase30_knobs, PHASE30_DEFAULTS
 from .processes import ManagedProcess, find_pid
 from .screenmode import ScreenMode
 
@@ -111,8 +112,18 @@ class StateMonitor(threading.Thread):
         snap["scale"] = ctl.cfg.get("scale")
         snap["frame_gen"] = ctl.cfg.get("frame_gen")
         snap["sharpness"] = ctl.cfg.get("sharpness")
+        active_game = self._active_game(snap)
+        snap["active_game"] = active_game
         snap["active_mode"] = self._active_mode(snap)
-        snap["active_game"] = self._active_game(snap)
+        p30 = ctl.cfg.get_phase30(active_game)
+        snap["phase30"] = p30
+        snap["intensity"] = p30["intensity"]
+        snap["local_tone"] = p30["local_tone"]
+        snap["local_structure"] = p30["local_structure"]
+        snap["skin_structure"] = p30["skin_structure"]
+        snap["auto_mask"] = p30["auto_mask"]
+        snap["style_index"] = p30["style_index"]
+        snap["color_strength"] = p30["color_strength"]
 
         currently_running = {exe for exe, g in games.items() if g.get("running")}
         exited_games = self._prev_running_games - currently_running
@@ -212,6 +223,9 @@ class M13Controller:
         os.environ["M12_SCALE"] = s_val
         os.environ["DLSS5_FRAMEGEN"] = "1" if self.cfg.get("frame_gen") else "0"
         os.environ["DLSS5_SHARPNESS"] = str(float(self.cfg.get("sharpness") or 0.8))
+        p30 = self.cfg.get_phase30()
+        os.environ.update(phase30_env_dict(p30))
+        write_phase30_knobs(p30)
 
         self.monitor.start()
 
@@ -360,6 +374,10 @@ class M13Controller:
         the ~30 s weights upload and looks like a crash). Always persisted."""
         gain = max(0.0, min(16.0, float(gain)))
         self.cfg.set("gain", gain)
+        self.cfg.set("intensity", gain)
+        p30 = self.cfg.get_phase30()
+        os.environ.update(phase30_env_dict(p30))
+        write_phase30_knobs(p30)
         if self.daemon.running:
             try:
                 g, _ = self.client.set_gain(gain)
@@ -464,6 +482,144 @@ class M13Controller:
         if gamelaunch.freeze_active():
             gamelaunch.reproc_bump()
         return True, "sharpness -> %.2f" % val
+
+    # ------------------------------------------------------------- phase30 --
+    def set_intensity(self, intensity, exe=None):
+        """Phase 30 intensity (0.0..2.0, default 1.6)."""
+        return self.set_gain(intensity)
+
+    def set_local_tone(self, val, exe=None):
+        val = max(0.0, min(2.0, float(val)))
+        self.cfg.set_phase30({"local_tone": val}, exe=exe)
+        p30 = self.cfg.get_phase30(exe)
+        os.environ.update(phase30_env_dict(p30))
+        write_phase30_knobs(p30)
+        if gamelaunch.freeze_active():
+            gamelaunch.reproc_bump()
+        if self.daemon.running:
+            try:
+                self.client.set_local_tone(val)
+            except Exception:
+                pass
+        return True, "local_tone -> %.2f" % val
+
+    def set_local_structure(self, val, exe=None):
+        val = max(0.0, min(2.0, float(val)))
+        self.cfg.set_phase30({"local_structure": val}, exe=exe)
+        p30 = self.cfg.get_phase30(exe)
+        os.environ.update(phase30_env_dict(p30))
+        write_phase30_knobs(p30)
+        if gamelaunch.freeze_active():
+            gamelaunch.reproc_bump()
+        if self.daemon.running:
+            try:
+                self.client.set_local_structure(val)
+            except Exception:
+                pass
+        return True, "local_structure -> %.2f" % val
+
+    def set_skin_structure(self, val, exe=None):
+        val = max(-1.0, min(2.0, float(val)))
+        self.cfg.set_phase30({"skin_structure": val}, exe=exe)
+        p30 = self.cfg.get_phase30(exe)
+        os.environ.update(phase30_env_dict(p30))
+        write_phase30_knobs(p30)
+        if gamelaunch.freeze_active():
+            gamelaunch.reproc_bump()
+        if self.daemon.running:
+            try:
+                self.client.set_skin_structure(val)
+            except Exception:
+                pass
+        return True, "skin_structure -> %.2f" % val
+
+    def set_auto_mask(self, val, exe=None):
+        val = bool(val)
+        self.cfg.set_phase30({"auto_mask": val}, exe=exe)
+        p30 = self.cfg.get_phase30(exe)
+        os.environ.update(phase30_env_dict(p30))
+        write_phase30_knobs(p30)
+        if gamelaunch.freeze_active():
+            gamelaunch.reproc_bump()
+        if self.daemon.running:
+            try:
+                self.client.set_auto_mask(val)
+            except Exception:
+                pass
+        return True, "auto_mask -> %s" % ("ON" if val else "OFF")
+
+    def set_style_index(self, val, exe=None):
+        val = int(val)
+        val = min(max(val, 0), 2)
+        self.cfg.set_phase30({"style_index": val}, exe=exe)
+        p30 = self.cfg.get_phase30(exe)
+        os.environ.update(phase30_env_dict(p30))
+        write_phase30_knobs(p30)
+        if gamelaunch.freeze_active():
+            gamelaunch.reproc_bump()
+        if self.daemon.running:
+            try:
+                self.client.set_style_index(val)
+            except Exception:
+                pass
+        return True, "style_index -> %d" % val
+
+    def set_color_strength(self, val, exe=None):
+        val = max(0.0, min(2.0, float(val)))
+        self.cfg.set_phase30({"color_strength": val}, exe=exe)
+        p30 = self.cfg.get_phase30(exe)
+        os.environ.update(phase30_env_dict(p30))
+        write_phase30_knobs(p30)
+        if gamelaunch.freeze_active():
+            gamelaunch.reproc_bump()
+        if self.daemon.running:
+            try:
+                self.client.set_color_strength(val)
+            except Exception:
+                pass
+        return True, "color_strength -> %.2f" % val
+
+    def set_phase30(self, params, exe=None):
+        self.cfg.set_phase30(params, exe=exe)
+        p30 = self.cfg.get_phase30(exe)
+        os.environ.update(phase30_env_dict(p30))
+        write_phase30_knobs(p30)
+        if gamelaunch.freeze_active():
+            gamelaunch.reproc_bump()
+        if self.daemon.running:
+            for k, v in params.items():
+                try:
+                    if k in ("intensity", "gain"):
+                        self.client.set_gain(float(v))
+                    elif k == "local_tone":
+                        self.client.set_local_tone(float(v))
+                    elif k == "local_structure":
+                        self.client.set_local_structure(float(v))
+                    elif k == "skin_structure":
+                        self.client.set_skin_structure(float(v))
+                    elif k == "auto_mask":
+                        self.client.set_auto_mask(bool(v))
+                    elif k == "style_index":
+                        self.client.set_style_index(int(v))
+                    elif k == "color_strength":
+                        self.client.set_color_strength(float(v))
+                except Exception:
+                    pass
+        return True, "Phase30 parameters updated"
+
+    def reset_phase30(self, exe=None):
+        self.cfg.reset_phase30(exe=exe)
+        p30 = self.cfg.get_phase30(exe)
+        os.environ.update(phase30_env_dict(p30))
+        write_phase30_knobs(p30)
+        if gamelaunch.freeze_active():
+            gamelaunch.reproc_bump()
+        if self.daemon.running:
+            try:
+                self.client.set_gain(p30["intensity"])
+            except Exception:
+                pass
+        return True, "Phase30 parameters reset to defaults"
 
     # ---------------------------------------------------------- screen mode --
     def screen_start(self, gain=None):

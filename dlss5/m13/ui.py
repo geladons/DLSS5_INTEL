@@ -33,6 +33,7 @@ from .i18n import (set_language, tr, scale_preset_labels,
                    scale_to_preset_label, preset_label_to_scale)
 from .logtail import LogHub
 from .overlay import ControlOverlay, hotkey_label
+from .phase30 import Phase30Panel
 from .splash import Splash
 from .ui_games import GamesTab
 
@@ -89,9 +90,10 @@ class ManagerUI:
         self.root.after(200, self._drain_log)
         self.root.after(POLL_MS, self._poll)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
-        # hands-free bring-up + first game scan (worker thread)
+        # hands-free bring-up + cached or first game scan (worker thread)
         self.ctl.submit(self.ctl.autosetup)
-        self.games_tab.scan_start()
+        if not self.games_tab.scanned:
+            self.games_tab.scan_start()
         self._splash()
 
     # ------------------------------------------------------------ splash ---
@@ -214,9 +216,10 @@ class ManagerUI:
         sliders_box = tk.Frame(inner, bg=PANEL)
         sliders_box.pack(side="right")
 
-        tk.Label(sliders_box, text=tr("gain"), bg=PANEL, fg=MUTED).pack(
+        tk.Label(sliders_box, text=tr("p30_intensity"), bg=PANEL, fg=MUTED).pack(
             side="left", padx=(10, 4))
-        self.gain_var = tk.DoubleVar(value=self.ctl.cfg.get("gain"))
+        self.gain_var = tk.DoubleVar(
+            value=float(self.ctl.cfg.get("intensity") or self.ctl.cfg.get("gain") or 1.6))
         self._suppress_scale = None   # programmatic-set echo suppression:
         self._scale_dragging = False  # Tk fires the scale command DEFERRED
         self._pending_push = None     # (value, time) of an in-flight push
@@ -460,6 +463,16 @@ class ManagerUI:
                             "overlay_focus", bool(self.focus_var.get()))
                         ).pack(anchor="w")
 
+        p30_wrap = tk.Frame(t, bg=PANEL, highlightthickness=1,
+                            highlightbackground=BORDER)
+        p30_wrap.pack(fill="x", pady=(10, 6))
+        self.p30_panel = Phase30Panel(
+            p30_wrap, initial_values=self.ctl.cfg.get_phase30(),
+            on_change=self._on_phase30_change,
+            on_reset=self._on_phase30_reset,
+            bg=PANEL, fg=FG, accent=ACCENT, panel2=PANEL2, muted=MUTED)
+        self.p30_panel.pack(fill="x", padx=10, pady=8)
+
         ttk.Label(t, text=tr("hotkey_note",
                              self.ctl.cfg.get("overlay_hotkey")),
                   style="Muted.TLabel").pack(anchor="w", pady=(10, 2))
@@ -487,7 +500,24 @@ class ManagerUI:
         self._suppress_scale = None
         self.gain_lbl.config(text="%.2f" % g)
         self._pending_push = (g, time.time())
+        if hasattr(self, "p30_panel") and self.p30_panel:
+            self.p30_panel.set_values({"intensity": g})
         self.root.after_idle(lambda: self.ctl.submit(self.ctl.set_gain, g))
+
+    def _on_phase30_change(self, key, val):
+        if key == "intensity":
+            self.gain_var.set(val)
+            self.gain_lbl.config(text="%.2f" % val)
+        self.ctl.submit(self.ctl.set_phase30, {key: val})
+        if hasattr(self, "overlay") and self.overlay:
+            self.overlay.sync_phase30({key: val})
+
+    def _on_phase30_reset(self):
+        self.ctl.submit(self.ctl.reset_phase30)
+        self.gain_var.set(1.6)
+        self.gain_lbl.config(text="1.60")
+        if hasattr(self, "overlay") and self.overlay:
+            self.overlay.sync_phase30(self.ctl.cfg.get_phase30())
 
     def _blend_moved(self, _v):
         b = round(float(self.blend_var.get()), 3)
@@ -548,6 +578,8 @@ class ManagerUI:
             text=tr("screen_state_up", snap["screen_pid"]) if screen_up
             else tr("screen_state_off"))
         self.games_tab.render(snap)
+        if hasattr(self, "p30_panel") and self.p30_panel and snap.get("phase30"):
+            self.p30_panel.set_values(snap.get("phase30"))
         self._render_checklist(snap)
 
     def _render_checklist(self, snap):

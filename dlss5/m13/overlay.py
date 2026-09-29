@@ -29,6 +29,7 @@ from .processes import suspend_pid, resume_pid, hwnd_for_pid
 from . import gamelaunch
 from .i18n import (tr, scale_preset_labels, scale_to_preset_label,
                    preset_label_to_scale)
+from .phase30 import Phase30Panel
 
 VK = {"control": 0x11, "ctrl": 0x11, "alt": 0x12, "shift": 0x10}
 POLL_MS = 120
@@ -193,7 +194,7 @@ def _force_foreground(hwnd):
 class ControlOverlay:
     """Frameless always-on-top control panel floating over the game."""
 
-    WIDTH, HEIGHT = 460, 490
+    WIDTH, HEIGHT = 470, 710
 
     def __init__(self, master, ctl, on_log):
         self.ctl = ctl
@@ -260,66 +261,17 @@ class ControlOverlay:
                                  font=("Segoe UI", 8))
         self.mode_lbl.pack(anchor="w", pady=(3, 8))
 
-        # gain
-        grow = tk.Frame(body, bg=BG)
-        grow.pack(fill="x")
-        tk.Label(grow, text=tr("ov_gain"), bg=BG, fg=FG,
-                 font=("Segoe UI", 9, "bold")).pack(side="left")
-        tk.Button(grow, text=tr("ov_reset"), font=("Segoe UI", 7),
-                  bg=PANEL, fg=MUTED, activebackground=PANEL2,
-                  activeforeground=FG, relief="flat", bd=0, padx=6,
-                  cursor="hand2", command=self._reset_gain).pack(
-            side="left", padx=(8, 0))
-        self.gain_val = tk.Label(grow, text="1.00", bg=BG, fg=ACCENT,
-                                 font=("Consolas", 10, "bold"), width=5)
-        self.gain_val.pack(side="right")
-        self.var = tk.DoubleVar(value=self.ctl.cfg.get("gain"))
-        self._suppress_scale = None   # programmatic set echo suppression:
-        self._scale_dragging = False  # Tk fires the command DEFERRED
-        self.scale = tk.Scale(
-            body, from_=0.0, to=2.0, resolution=0.05, orient="horizontal",
-            variable=self.var, command=self._debounced_push,
-            bg=BG, fg=FG, troughcolor=PANEL2, highlightthickness=0, bd=0,
-            activebackground=ACCENT, showvalue=False, sliderrelief="flat")
-        self.scale.pack(fill="x", pady=(0, 4))
-        self.scale.bind("<ButtonPress-1>",
-                        lambda _e: setattr(self, "_scale_dragging", True))
-        self.scale.bind("<ButtonRelease-1>",
-                        lambda _e: setattr(self, "_scale_dragging", False))
-
-        # blend (effect mix: 0 = original frame, 1 = full network output)
-        brow = tk.Frame(body, bg=BG)
-        brow.pack(fill="x")
-        tk.Label(brow, text=tr("ov_blend"), bg=BG, fg=FG,
-                 font=("Segoe UI", 9, "bold")).pack(side="left")
-        tk.Button(brow, text=tr("ov_blend_reset"), font=("Segoe UI", 7),
-                  bg=PANEL, fg=MUTED, activebackground=PANEL2,
-                  activeforeground=FG, relief="flat", bd=0, padx=6,
-                  cursor="hand2", command=self._reset_blend).pack(
-            side="left", padx=(8, 0))
-        self.blend_val = tk.Label(brow, text="1.00", bg=BG, fg=ACCENT,
-                                  font=("Consolas", 10, "bold"), width=5)
-        self.blend_val.pack(side="right")
-        self.blend_var = tk.DoubleVar(value=float(
-            self.ctl.cfg.get("blend") or 1.0))
-        self.blend_scale = tk.Scale(
-            body, from_=0.0, to=1.0, resolution=0.05, orient="horizontal",
-            variable=self.blend_var, command=self._debounced_blend,
-            bg=BG, fg=FG, troughcolor=PANEL2, highlightthickness=0, bd=0,
-            activebackground=ACCENT, showvalue=False, sliderrelief="flat")
-        self.blend_scale.pack(fill="x", pady=(0, 4))
-
-        # scale preset
-        srow = tk.Frame(body, bg=BG)
-        srow.pack(fill="x", pady=(4, 4))
-        tk.Label(srow, text=tr("scale"), bg=BG, fg=FG,
-                 font=("Segoe UI", 9, "bold")).pack(side="left")
+        # Scale & FrameGen row
+        top_row = tk.Frame(body, bg=BG)
+        top_row.pack(fill="x", pady=(2, 4))
+        tk.Label(top_row, text=tr("scale"), bg=BG, fg=FG,
+                 font=("Segoe UI", 8, "bold")).pack(side="left")
         self.scale_var = tk.StringVar(
             value=scale_to_preset_label(self.ctl.cfg.get("scale")))
         self.scale_cb = ttk.Combobox(
-            srow, textvariable=self.scale_var, state="readonly",
-            values=scale_preset_labels(), width=24)
-        self.scale_cb.pack(side="right")
+            top_row, textvariable=self.scale_var, state="readonly",
+            values=scale_preset_labels(), width=18)
+        self.scale_cb.pack(side="left", padx=(6, 12))
         self.scale_cb.bind("<<ComboboxSelected>>", self._scale_selected)
 
         def _fix_popdown(_e):
@@ -331,61 +283,92 @@ class ControlOverlay:
                 pass
         self.scale_cb.bind("<Button-1>", _fix_popdown, add="+")
 
-        # frame generation toggle
-        fgrow = tk.Frame(body, bg=BG)
-        fgrow.pack(fill="x", pady=(2, 4))
         self.fg_var = tk.BooleanVar(value=bool(self.ctl.cfg.get("frame_gen")))
         self.fg_chk = tk.Checkbutton(
-            fgrow, text=tr("framegen"), variable=self.fg_var,
+            top_row, text=tr("framegen"), variable=self.fg_var,
             command=self._save_framegen, bg=BG, fg=FG, selectcolor=PANEL,
             activebackground=BG, activeforeground=FG,
-            font=("Segoe UI", 9, "bold"), cursor="hand2")
-        self.fg_chk.pack(side="left")
-        tk.Label(fgrow, text=tr("framegen_hint"), bg=BG, fg=MUTED,
-                 font=("Segoe UI", 7)).pack(side="right")
+            font=("Segoe UI", 8, "bold"), cursor="hand2")
+        self.fg_chk.pack(side="right")
 
-        # sharpness
-        shrow = tk.Frame(body, bg=BG)
-        shrow.pack(fill="x")
-        tk.Label(shrow, text=tr("sharpness"), bg=BG, fg=FG,
-                 font=("Segoe UI", 9, "bold")).pack(side="left")
-        tk.Button(shrow, text="Reset 0.8", font=("Segoe UI", 7),
-                  bg=PANEL, fg=MUTED, activebackground=PANEL2,
-                  activeforeground=FG, relief="flat", bd=0, padx=6,
-                  cursor="hand2", command=self._reset_sharpness).pack(
-            side="left", padx=(8, 0))
+        # Blend & Sharpness row
+        bs_row = tk.Frame(body, bg=BG)
+        bs_row.pack(fill="x", pady=(2, 4))
+
+        # Blend
+        b_box = tk.Frame(bs_row, bg=BG)
+        b_box.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        b_hdr = tk.Frame(b_box, bg=BG)
+        b_hdr.pack(fill="x")
+        tk.Label(b_hdr, text=tr("ov_blend"), bg=BG, fg=FG,
+                 font=("Segoe UI", 8, "bold")).pack(side="left")
+        self.blend_val = tk.Label(b_hdr, text="%.2f" % float(self.ctl.cfg.get("blend") or 1.0),
+                                  bg=BG, fg=ACCENT, font=("Consolas", 8, "bold"))
+        self.blend_val.pack(side="right")
+        self.blend_var = tk.DoubleVar(value=float(self.ctl.cfg.get("blend") or 1.0))
+        self.blend_scale = tk.Scale(
+            b_box, from_=0.0, to=1.0, resolution=0.05, orient="horizontal",
+            variable=self.blend_var, command=self._debounced_blend,
+            bg=BG, fg=FG, troughcolor=PANEL2, highlightthickness=0, bd=0,
+            activebackground=ACCENT, showvalue=False, sliderrelief="flat")
+        self.blend_scale.pack(fill="x")
+
+        # Sharpness
+        s_box = tk.Frame(bs_row, bg=BG)
+        s_box.pack(side="right", fill="x", expand=True, padx=(6, 0))
+        s_hdr = tk.Frame(s_box, bg=BG)
+        s_hdr.pack(fill="x")
+        tk.Label(s_hdr, text=tr("sharpness"), bg=BG, fg=FG,
+                 font=("Segoe UI", 8, "bold")).pack(side="left")
         self.sharpness_val = tk.Label(
-            shrow, text="%.2f" % float(self.ctl.cfg.get("sharpness") or 0.8),
-            bg=BG, fg=ACCENT, font=("Consolas", 10, "bold"), width=5)
+            s_hdr, text="%.2f" % float(self.ctl.cfg.get("sharpness") or 0.8),
+            bg=BG, fg=ACCENT, font=("Consolas", 8, "bold"))
         self.sharpness_val.pack(side="right")
         self.sharpness_var = tk.DoubleVar(
             value=float(self.ctl.cfg.get("sharpness") or 0.8))
         self.sharpness_scale = tk.Scale(
-            body, from_=0.0, to=1.0, resolution=0.05, orient="horizontal",
+            s_box, from_=0.0, to=1.0, resolution=0.05, orient="horizontal",
             variable=self.sharpness_var, command=self._debounced_sharpness,
             bg=BG, fg=FG, troughcolor=PANEL2, highlightthickness=0, bd=0,
             activebackground=ACCENT, showvalue=False, sliderrelief="flat")
-        self.sharpness_scale.pack(fill="x", pady=(0, 4))
+        self.sharpness_scale.pack(fill="x")
 
-        prow = tk.Frame(body, bg=BG)
-        prow.pack(fill="x", pady=(0, 4))
-        self.ap_var = tk.BooleanVar(
-            value=bool(self.ctl.cfg.get("overlay_autopause")))
-        tk.Checkbutton(prow, text=tr("ov_autopause"), variable=self.ap_var,
-                       command=self._save_autopause, bg=BG, fg=MUTED,
-                       selectcolor=PANEL, activebackground=BG,
-                       activeforeground=FG, font=("Segoe UI", 8),
-                       cursor="hand2").pack(side="right")
+        # Phase 30 Vendor Panel
+        p30_wrap = tk.Frame(body, bg=PANEL, highlightthickness=1,
+                            highlightbackground=PANEL2)
+        p30_wrap.pack(fill="x", pady=(4, 6))
+        self.p30_panel = Phase30Panel(
+            p30_wrap, initial_values=self.ctl.cfg.get_phase30(),
+            on_change=self._on_phase30_change,
+            on_reset=self._on_phase30_reset,
+            bg=PANEL, fg=FG, accent=ACCENT, panel2=PANEL2, muted=MUTED,
+            compact=True)
+        self.p30_panel.pack(fill="x", padx=8, pady=6)
 
-        frow = tk.Frame(body, bg=BG)
-        frow.pack(fill="x", pady=(0, 6))
+        # Legacy variables for compatibility
+        self.var = tk.DoubleVar(
+            value=float(self.ctl.cfg.get("intensity") or self.ctl.cfg.get("gain") or 1.6))
+        self._suppress_scale = None
+        self._scale_dragging = False
+
+        # Options: freeze and autopause
+        opts_row = tk.Frame(body, bg=BG)
+        opts_row.pack(fill="x", pady=(2, 4))
         self.fr_var = tk.BooleanVar(
             value=bool(self.ctl.cfg.get("overlay_freeze")))
-        tk.Checkbutton(frow, text=tr("ov_freeze_opt"),
+        tk.Checkbutton(opts_row, text=tr("ov_freeze_opt"),
                        variable=self.fr_var, command=self._save_freeze,
                        bg=BG, fg=MUTED, selectcolor=PANEL,
                        activebackground=BG, activeforeground=FG,
                        font=("Segoe UI", 8), cursor="hand2").pack(side="left")
+
+        self.ap_var = tk.BooleanVar(
+            value=bool(self.ctl.cfg.get("overlay_autopause")))
+        tk.Checkbutton(opts_row, text=tr("ov_autopause"), variable=self.ap_var,
+                       command=self._save_autopause, bg=BG, fg=MUTED,
+                       selectcolor=PANEL, activebackground=BG,
+                       activeforeground=FG, font=("Segoe UI", 8),
+                       cursor="hand2").pack(side="right")
 
         self.status = tk.Label(body, text="", bg=BG, fg=MUTED,
                                font=("Consolas", 8), justify="left")
@@ -416,7 +399,8 @@ class ControlOverlay:
             self._suppress_scale = None      # echo of a status-driven sync
             return
         self._suppress_scale = None
-        self.gain_val.config(text="%.2f" % g)
+        if hasattr(self, "p30_panel") and self.p30_panel:
+            self.p30_panel.set_values({"intensity": g})
         self._pending_push = (g, time.time())
         if self._after_id:
             self.win.after_cancel(self._after_id)
@@ -428,8 +412,25 @@ class ControlOverlay:
         self.ctl.submit(self.ctl.set_gain, g)
 
     def _reset_gain(self):
-        self.var.set(1.0)
-        self._debounced_push(1.0)
+        self.var.set(1.6)
+        self._debounced_push(1.6)
+        if hasattr(self, "p30_panel") and self.p30_panel:
+            self.p30_panel.set_values({"intensity": 1.6})
+
+    def _on_phase30_change(self, key, val):
+        if key == "intensity":
+            self.var.set(val)
+        self.ctl.submit(self.ctl.set_phase30, {key: val})
+        self.on_log("[overlay] Phase30 %s -> %s" % (key, val))
+
+    def _on_phase30_reset(self):
+        self.ctl.submit(self.ctl.reset_phase30)
+        self.var.set(1.6)
+        self.on_log("[overlay] Phase30 reset to defaults")
+
+    def sync_phase30(self, p):
+        if hasattr(self, "p30_panel") and self.p30_panel:
+            self.p30_panel.set_values(p)
 
     def _debounced_blend(self, _val):
         b = round(float(self.blend_var.get()), 3)
@@ -533,9 +534,13 @@ class ControlOverlay:
                                    activebackground=PANEL2)
         self.mode_lbl.config(text=tr("ov_target", names.get(
             mode, tr("ov_target_none"))))
+        active_game = snap.get("active_game")
+        game_meta = (snap.get("games") or {}).get(active_game) if active_game else None
+        game_arch = game_meta.get("arch") if game_meta else None
+
         if snap.get("daemon_pid") is not None:
             g, f = snap.get("daemon_gain"), snap.get("daemon_frames")
-            txt = tr("ov_daemon_up", snap["daemon_pid"])
+            txt = tr("ov_status_daemon") + " (PID %s)" % snap["daemon_pid"]
             if g is not None:
                 txt += tr("ov_daemon_stats", g, f or 0)
                 pending = self._pending_push
@@ -546,16 +551,28 @@ class ControlOverlay:
                 if not self._scale_dragging and not self._pending_push:
                     self._suppress_scale = round(g, 3)
                     self.var.set(g)
-                    self.gain_val.config(text="%.2f" % g)
             if snap.get("daemon_err"):
                 txt += tr("daemon_busy")
-            self.status.config(text=txt, fg=MUTED)
+            self.status.config(text=txt, fg=GREEN)
+        elif mode in ("vulkan", "dx12", "dx11") or (active_game and game_arch != "x86"):
+            target_str = names.get(mode, mode or "Direct")
+            self.status.config(
+                text="%s (%s, 0 ms lag)" % (tr("ov_status_direct"), target_str),
+                fg=GREEN)
         elif snap.get("screen_pid") is not None:
             self.status.config(text=tr("ov_screen_up", snap["screen_pid"]),
-                               fg=MUTED)
+                               fg=ACCENT)
+        elif (active_game and game_arch == "x86") or (mode == "dx9" and snap.get("daemon_pid") is None):
+            self.status.config(text=tr("ov_status_daemon_down_x86"), fg=RED)
         else:
-            self.status.config(text=tr("ov_daemon_down"), fg=RED)
+            self.status.config(text=tr("ov_status_standby"), fg=MUTED)
+
+        p30 = snap.get("phase30")
+        if p30 and hasattr(self, "p30_panel") and self.p30_panel and not self.p30_panel.is_dragging():
+            self.p30_panel.set_values(p30)
+
         self.win.after(STATUS_MS, self._refresh)
+
 
     # ------------------------------------------------------- focus / cursor
     def _take_focus(self):

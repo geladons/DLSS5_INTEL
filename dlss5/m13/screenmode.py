@@ -16,6 +16,7 @@
 import os
 
 from . import paths
+from .phase30 import write_phase30_knobs
 from .processes import ManagedProcess
 
 M8B_EXE = paths.find("m8b_exe")
@@ -24,7 +25,7 @@ M8B_LOG = os.path.join(paths.find("logs"), "m8b-live.log")
 KNOB_FILE = os.path.join(os.environ.get("TEMP", "."), "m13_screen_knobs.txt")
 
 
-def write_knobs(gain, blend, scale=None, framegen=None):
+def write_knobs(gain, blend, scale=None, framegen=None, phase30=None):
     """Live retune of the running m8blive (polled per processed frame)."""
     try:
         with open(KNOB_FILE, "w") as f:
@@ -36,6 +37,10 @@ def write_knobs(gain, blend, scale=None, framegen=None):
             f.write(" ".join(parts))
     except OSError:
         pass
+    p = {"intensity": gain}
+    if phase30:
+        p.update(phase30)
+    write_phase30_knobs(p)
 
 
 class ScreenMode:

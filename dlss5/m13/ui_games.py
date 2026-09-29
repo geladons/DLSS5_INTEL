@@ -15,6 +15,7 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, ttk
 
+from .gamescache import load_cache, save_cache
 from .i18n import tr
 from .icons import IconCache
 
@@ -119,18 +120,26 @@ class GamesTab:
         self._selected = None
         self.icons = IconCache(size=48)
         self._build(nb)
+        cached = load_cache()
+        if cached:
+            self.scanned = cached
+            self.scan_info.config(text=tr("games_found", len(self.scanned)))
+            self.cards_fill()
+        else:
+            self.scan_info.config(text="")
 
     def _build(self, nb):
         t = ttk.Frame(nb, padding=10)
         nb.add(t, text=tr("tab_games"))
         self.tab_frame = t
         top = ttk.Frame(t)
-        top.pack(fill="x")
+        top.pack(fill="x", pady=(0, 4))
         ttk.Button(top, text=tr("rescan"), style="Accent.TButton",
                    command=self.scan_start).pack(side="left")
         ttk.Button(top, text=tr("add_manual"),
                    command=self._add_manual).pack(side="left", padx=6)
-        self.scan_info = ttk.Label(top, text=tr("scanning"),
+
+        self.scan_info = ttk.Label(top, text="",
                                    style="Muted.TLabel")
         self.scan_info.pack(side="left", padx=10)
 
@@ -269,8 +278,9 @@ class GamesTab:
             self.scan_info.config(text=tr("scan_failed", payload))
             return
         self.scanned = payload
+        save_cache(self.scanned)
         self.scan_info.config(text=tr("games_found", len(self.scanned)))
-        self.ui.log("mgr", "game scan: %d games (grouped, launchers "
+        self.ui.log("mgr", "game scan: %d games (cached, launchers "
                     "resolved)" % len(self.scanned))
         self.cards_fill()
 

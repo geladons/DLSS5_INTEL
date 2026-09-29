@@ -122,7 +122,7 @@ _S = {
                     "ru": "Горячая клавиша оверлея: %s (меняется в config.json)"},
     "config_note": {"en": "Config: %s", "ru": "Конфиг: %s"},
     # ---- games tab --------------------------------------------------------
-    "rescan": {"en": "Rescan", "ru": "Пересканировать"},
+    "rescan": {"en": "Rescan Games", "ru": "Пересканировать игры"},
     "add_manual": {"en": "Add exe manually...", "ru": "Добавить exe вручную..."},
     "scanning": {"en": "scanning drives (up to ~20 s)...",
                  "ru": "сканирую диски (до ~20 с)..."},
@@ -186,7 +186,51 @@ _S = {
     "ov_screen_up": {"en": "screen overlay up (pid %s)",
                      "ru": "оверлей экрана работает (pid %s)"},
     "ov_daemon_down": {"en": "daemon down", "ru": "демон остановлен"},
+    "ov_status_direct": {"en": "Direct In-Process", "ru": "Direct In-Process"},
+    "ov_status_daemon": {"en": "Daemon Active (x86)", "ru": "Daemon Active (x86)"},
+    "ov_status_standby": {"en": "Standby", "ru": "Standby"},
+    "ov_status_daemon_down_x86": {"en": "Daemon Offline (x86 required)",
+                                  "ru": "Демон отключен (нужен для x86)"},
     "ov_hide_hint": {"en": "%s - hide the panel", "ru": "%s - скрыть панель"},
+    # ---- phase30 vendor panel ---------------------------------------------
+    "p30_title": {"en": "NVIDIA Phase30 Vendor Tuning",
+                  "ru": "Панель тюнинга NVIDIA Phase30"},
+    "p30_reset": {"en": "Reset to Defaults", "ru": "Сбросить настройки"},
+    "p30_reset_tip": {
+        "en": "Reset all Phase30 parameters to default baseline (gain/intensity 1.6)",
+        "ru": "Сбросить все параметры Phase30 к базовым значениям (gain/intensity 1.6)"},
+    "p30_intensity": {"en": "Intensity", "ru": "Интенсивность"},
+    "p30_intensity_tip": {
+        "en": "Compose-side blending and extrapolation (0.0..2.0, default 1.6)",
+        "ru": "Смешивание и экстраполяция на стадии композиции (0.0..2.0, по умолч. 1.6)"},
+    "p30_local_tone": {"en": "Local Tone", "ru": "Локальный тон"},
+    "p30_local_tone_tip": {
+        "en": "Local tone and brightness for low-frequency components (0.0..2.0, default 1.0)",
+        "ru": "Локальный тон и яркость низкочастотной составляющей (0.0..2.0, по умолч. 1.0)"},
+    "p30_local_structure": {"en": "Local Structure", "ru": "Локальная структура"},
+    "p30_local_structure_tip": {
+        "en": "Local structure and detail enhancement (0.0..2.0, default 1.5)",
+        "ru": "Сила локальной структуры и резкость деталей (0.0..2.0, по умолч. 1.5)"},
+    "p30_skin_structure": {"en": "Skin Structure", "ru": "Структура поверхностей"},
+    "p30_skin_structure_tip": {
+        "en": "Skin and surface texture (-1.0..2.0, default 2.0; -1.0 = follow local_structure)",
+        "ru": "Фильтрация текстур и структуры кожи (-1.0..2.0, по умолч. 2.0; -1.0 = как локальная)"},
+    "p30_skin_follow": {"en": "Follow", "ru": "Авто"},
+    "p30_auto_mask": {"en": "Auto Skin/UI Mask", "ru": "Авто-маска (UI / кожа)"},
+    "p30_auto_mask_tip": {
+        "en": "Automatically detect and preserve UI elements and skin tones (default ON)",
+        "ru": "Автоматическое определение и защита элементов UI и оттенков кожи (вкл)"},
+    "p30_style_index": {"en": "Render Style", "ru": "Стиль рендера"},
+    "p30_style_index_tip": {
+        "en": "Neural processing style preset (0 = Default, 1 = Natural, 2 = Cinematic)",
+        "ru": "Стиль нейросетевой обработки (0 = Стандартный, 1 = Натуральный, 2 = Кино)"},
+    "p30_style_0": {"en": "0: Default", "ru": "0: Стандартный"},
+    "p30_style_1": {"en": "1: Natural", "ru": "1: Натуральный"},
+    "p30_style_2": {"en": "2: Cinematic", "ru": "2: Кинематографичный"},
+    "p30_color_strength": {"en": "Color Strength", "ru": "Насыщенность цвета"},
+    "p30_color_strength_tip": {
+        "en": "Color component strength and chroma preservation (0.0..2.0, default 1.0)",
+        "ru": "Усиление цветовых компонент и сохранение хроматики (0.0..2.0, по умолч. 1.0)"},
     # ---- splash -----------------------------------------------------------
     "splash_subtitle": {"en": "neural upscaling, live on your GPU",
                         "ru": "нейросетевой апскейл на твоей видеокарте"},

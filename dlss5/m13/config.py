@@ -16,7 +16,14 @@ CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 
 DEFAULTS = {
     "weights_path": None,        # autodetected from the bundle, else asked
-    "gain": 1.0,                 # last used gain, pushed to m11d live
+    "gain": 1.6,                 # baseline default 1.6 (mirrors intensity)
+    "intensity": 1.6,            # Phase30: compose-side blending & extrapolation (0.0..2.0)
+    "local_tone": 1.0,           # Phase30: local tone / brightness (0.0..2.0)
+    "local_structure": 1.5,      # Phase30: local structure / detail strength (0.0..2.0)
+    "skin_structure": 2.0,       # Phase30: skin structure (-1.0..2.0, -1.0 = follow local_structure)
+    "auto_mask": True,           # Phase30: auto skin/UI mask toggle
+    "style_index": 0,            # Phase30: style index (0 = Default, 1 = Natural, 2 = Cinematic)
+    "color_strength": 1.0,       # Phase30: color component strength (0.0..2.0)
     "blend": 1.0,                # effect mix: 0 = original, 1 = full network
     "scale": 0.50,               # Preset options: 1.00 Native, 0.67 Quality, 0.58 Balanced, 0.50 Performance, 0.33 Ultra Performance
     "frame_gen": True,           # Frame Generation enabled by default
@@ -27,7 +34,8 @@ DEFAULTS = {
     "dx12_game": None,
     "games": {},                 # exe path -> {"mode": dx9|dx11|dx12,
                                  #              "arch": x64|x86, "name": str,
-                                 #              "launch_exe": optional wrapper}
+                                 #              "launch_exe": optional wrapper,
+                                 #              "phase30": optional per-game dict}
     "screen_args": "",           # extra m8blive args for screen mode
     "overlay_autopause": False,  # pause processing when the overlay opens
     "overlay_freeze": False,     # FREEZE the frame while the overlay is open (False = live game keeps running)
@@ -61,12 +69,69 @@ class Config:
             json.dump(self.data, f, indent=2, sort_keys=True)
         os.replace(tmp, self.path)   # atomic-ish: no half-written config
 
-    def get(self, key):
-        return self.data.get(key)
+    def get(self, key, default=None):
+        if key == "gain" and "gain" not in self.data and "intensity" in self.data:
+            return self.data["intensity"]
+        if key == "intensity" and "intensity" not in self.data and "gain" in self.data:
+            return self.data["gain"]
+        return self.data.get(key, default)
 
     def set(self, key, value):
         self.data[key] = value
+        if key == "gain":
+            self.data["intensity"] = float(value)
+        elif key == "intensity":
+            self.data["gain"] = float(value)
         self.save()
+
+    def get_phase30(self, exe=None):
+        """Retrieve Phase 30 settings for a specific game or globally."""
+        out = {
+            "intensity": float(self.get("intensity", 1.6)),
+            "local_tone": float(self.get("local_tone", 1.0)),
+            "local_structure": float(self.get("local_structure", 1.5)),
+            "skin_structure": float(self.get("skin_structure", 2.0)),
+            "auto_mask": bool(self.get("auto_mask", True)),
+            "style_index": int(self.get("style_index", 0)),
+            "color_strength": float(self.get("color_strength", 1.0)),
+        }
+        if exe:
+            games = self.data.get("games") or {}
+            gmeta = games.get(exe) or {}
+            p_game = gmeta.get("phase30") or {}
+            for k in out:
+                if k in p_game:
+                    out[k] = p_game[k]
+        return out
+
+    def set_phase30(self, params, exe=None):
+        """Update Phase 30 settings globally and optionally per-game."""
+        if exe:
+            games = dict(self.data.get("games") or {})
+            if exe in games:
+                gmeta = dict(games[exe])
+                p_game = dict(gmeta.get("phase30") or {})
+                p_game.update(params)
+                gmeta["phase30"] = p_game
+                games[exe] = gmeta
+                self.data["games"] = games
+        else:
+            for k, v in params.items():
+                if k in ("intensity", "gain"):
+                    self.data["intensity"] = float(v)
+                    self.data["gain"] = float(v)
+                elif k in self.data:
+                    self.data[k] = v
+        self.save()
+
+    def reset_phase30(self, exe=None):
+        """Reset Phase 30 settings to defaults."""
+        try:
+            from .phase30 import PHASE30_DEFAULTS
+        except (ImportError, ValueError):
+            from phase30 import PHASE30_DEFAULTS
+        self.set_phase30(PHASE30_DEFAULTS, exe=exe)
+
 
     @property
     def first_run(self):

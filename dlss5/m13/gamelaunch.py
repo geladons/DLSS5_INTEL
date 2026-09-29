@@ -24,6 +24,8 @@
 import os
 import subprocess
 
+from .phase30 import phase30_env_dict, write_phase30_knobs
+
 DX9_TRIGGER = os.path.join(os.environ.get("TEMP", "."), "m13_dx9_trigger.flag")
 M12_PAUSE = os.path.join(os.environ.get("TEMP", "."), "m12_pause.flag")
 FREEZE_FLAG = os.path.join(os.environ.get("TEMP", "."), "m13_freeze.flag")
@@ -181,11 +183,31 @@ def launch_game(exe_path, mode, scale=None, gain=None, blend=None, cfg=None, sha
         env["NR_LAYER_GAIN"] = g_val
         env["DLSS5_GAIN"] = g_val
         env["M12_GAIN"] = g_val
+        env["NR_LAYER_INTENSITY"] = g_val
+        env["DLSS5_INTENSITY"] = g_val
+        env["M12_INTENSITY"] = g_val
     if blend is not None:
         b_val = str(blend)
         env["NR_LAYER_BLEND"] = b_val
         env["DLSS5_BLEND"] = b_val
         env["M12_BLEND"] = b_val
+
+    p30 = None
+    if cfg is not None and hasattr(cfg, "get_phase30"):
+        p30 = cfg.get_phase30(exe_path)
+    elif cfg is not None and hasattr(cfg, "get"):
+        p30 = {
+            "intensity": cfg.get("intensity") or cfg.get("gain") or 1.6,
+            "local_tone": cfg.get("local_tone") or 1.0,
+            "local_structure": cfg.get("local_structure") or 1.5,
+            "skin_structure": cfg.get("skin_structure") if cfg.get("skin_structure") is not None else 2.0,
+            "auto_mask": True if cfg.get("auto_mask") is None else bool(cfg.get("auto_mask")),
+            "style_index": cfg.get("style_index") or 0,
+            "color_strength": cfg.get("color_strength") or 1.0,
+        }
+    if p30:
+        env.update(phase30_env_dict(p30))
+        write_phase30_knobs(p30)
 
     return _launch(exe_path, env)
 
