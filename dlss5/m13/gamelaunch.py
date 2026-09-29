@@ -156,7 +156,17 @@ def launch_game(exe_path, mode, scale=None, gain=None, blend=None, cfg=None, sha
             "NR_LAYER_REPROC": REPROC_FLAG,
             "NR_LAYER_UI_MASK": "1",
         })
-        env["NR_LAYER_HUDMASK"] = hudmask.apply(exe_path, cfg)
+        auto_mask = False
+        if cfg is not None and hasattr(cfg, "get_phase30"):
+            p30_cfg = cfg.get_phase30(exe_path)
+            auto_mask = bool(p30_cfg.get("auto_mask", False))
+        elif isinstance(cfg, dict):
+            auto_mask = bool(cfg.get("auto_mask", False))
+        if auto_mask:
+            env["NR_LAYER_HUDMASK"] = hudmask.apply(exe_path, cfg)
+        else:
+            hudmask.write_regions([])
+            env["NR_LAYER_HUDMASK"] = hudmask.HUDMASK_FLAG
     elif mode == "dx12":
         _flag_set(M12_PAUSE, False)    # make sure we start un-paused
         # DX12 uses m12_dxgi.dll proxy + in-process d5c_chain.dll.

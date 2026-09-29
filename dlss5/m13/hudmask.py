@@ -23,10 +23,10 @@ HUDMASK_FLAG = os.path.join(os.environ.get("TEMP", "."), "m13_hudmask.cfg")
 
 PRESETS = {
     "gtaiv.exe": [
-        {"shape": "ellipse", "x": 0.08, "y": 0.90, "w": 0.065, "h": 0.10},
-        {"shape": "rect", "x": 0.82, "y": 0.00, "w": 0.18, "h": 0.26},
-        {"shape": "rect", "x": 0.18, "y": 0.89, "w": 0.64, "h": 0.11},
-        {"shape": "rect", "x": 0.00, "y": 0.00, "w": 0.32, "h": 0.15},
+        {"shape": "ellipse", "x": 0.075, "y": 0.92, "w": 0.055, "h": 0.075},
+        {"shape": "rect", "x": 0.88, "y": 0.00, "w": 0.12, "h": 0.18},
+        {"shape": "rect", "x": 0.25, "y": 0.93, "w": 0.50, "h": 0.06},
+        {"shape": "rect", "x": 0.00, "y": 0.00, "w": 0.25, "h": 0.10},
     ],
 }
 

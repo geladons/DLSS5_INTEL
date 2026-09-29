@@ -24,6 +24,7 @@ from tkinter import ttk
 
 from .processes import suspend_pid, resume_pid, hwnd_for_pid
 from . import gamelaunch
+from . import hudmask
 from .i18n import (tr, scale_preset_labels, scale_to_preset_label,
                    preset_label_to_scale)
 from .phase30 import Phase30Panel
