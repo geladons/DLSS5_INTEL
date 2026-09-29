@@ -52,7 +52,7 @@
 #define MAX_IMAGES 8
 #define SYNC_SLOTS 4
 #define NR_MAX_WAITS 16
-#define NR_DEFAULT_PORT 47990
+#define NR_DEFAULT_PORT 48990
 
 static int sync_semaphores;
 
@@ -452,7 +452,7 @@ static int exchange(const void *header, size_t header_size, const void *payload,
     if (!winsock_up()) return -1;
     SOCKET fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (fd == INVALID_SOCKET) return -1;
-    DWORD tv = 60000;
+    DWORD tv = 1500;
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)&tv, sizeof tv);
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof tv);
     struct sockaddr_in address;
@@ -653,6 +653,16 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
     link->u.pLayerInfo = link->u.pLayerInfo->pNext;
     PFN_vkCreateInstance create =
         (PFN_vkCreateInstance)next_instance_proc(NULL, "vkCreateInstance");
+    if (!create) return VK_ERROR_INITIALIZATION_FAILED;
+
+    if (info && info->pApplicationInfo && info->pApplicationInfo->pApplicationName) {
+        const char *app = info->pApplicationInfo->pApplicationName;
+        if (!strcmp(app, "dlss5_inprocess") || !strcmp(app, "m11d") || !strcmp(app, "d5c")) {
+            nr_log("[nr_layer] bypass interception for internal process: %s", app);
+            return create(info, allocator, instance);
+        }
+    }
+
     VkResult r = create(info, allocator, instance);
     if (r == VK_SUCCESS) {
         layer_instance = *instance;
@@ -694,6 +704,18 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
     return r;
 }
 
+VKAPI_ATTR void VKAPI_CALL nr_DestroyInstance(VkInstance instance,
+                                             const VkAllocationCallbacks *allocator)
+{
+    PFN_vkDestroyInstance destroy = NULL;
+    if (next_instance_proc)
+        destroy = (PFN_vkDestroyInstance)next_instance_proc(instance, "vkDestroyInstance");
+    if (instance == layer_instance) {
+        layer_instance = VK_NULL_HANDLE;
+    }
+    if (destroy) destroy(instance, allocator);
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL nr_CreateDevice(VkPhysicalDevice physical,
                                                const VkDeviceCreateInfo *info,
                                                const VkAllocationCallbacks *allocator,
@@ -705,9 +727,22 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateDevice(VkPhysicalDevice physical,
     PFN_vkGetDeviceProcAddr next_device = link->u.pLayerInfo->pfnNextGetDeviceProcAddr;
     link->u.pLayerInfo = link->u.pLayerInfo->pNext;
 
-    PFN_vkCreateDevice create = (PFN_vkCreateDevice)next_instance(NULL, "vkCreateDevice");
+    PFN_vkCreateDevice create = NULL;
+    if (next_instance && layer_instance)
+        create = (PFN_vkCreateDevice)next_instance(layer_instance, "vkCreateDevice");
+    if (!create && next_instance)
+        create = (PFN_vkCreateDevice)next_instance(NULL, "vkCreateDevice");
+    if (!create && next_instance_proc && layer_instance)
+        create = (PFN_vkCreateDevice)next_instance_proc(layer_instance, "vkCreateDevice");
+    if (!create && next_instance_proc)
+        create = (PFN_vkCreateDevice)next_instance_proc(NULL, "vkCreateDevice");
+    if (!create) {
+        nr_log("[nr_layer] FATAL: vkCreateDevice proc address not found");
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
     VkResult r = create(physical, info, allocator, device);
-    if (r != VK_SUCCESS) return r;
+    if (r != VK_SUCCESS || !device || !*device) return r;
 
     lock();
     device_data *data = NULL;
@@ -1145,7 +1180,7 @@ static uint32_t settled(const unsigned char *now, const unsigned char *before,
     uint32_t held = 0;
     for (uint32_t i = 0; i < pixels; i++) {
         const unsigned char *a = now + 4 * i, *b = before + 4 * i;
-        int moved = abs(a[0] - b[0]) + abs(a[1] - b[1]) + abs(a[2] - b[2]) > 6;
+        int moved = abs(a[0] - b[0]) + abs(a[1] - b[1]) + abs(a[2] - b[2]) > 12;
         mask[i] = moved ? 0u : 0xFFu;
         held += !moved;
     }
@@ -1193,6 +1228,21 @@ static int process_frame(device_data *data, swapchain_data *chain,
         memcpy(data->outgoing, data->mapped, (size_t)needed);
         uint32_t held = settled(data->mapped, data->earlier, pixels,
                                 data->outgoing + needed);
+        if (held >= (uint32_t)((uint64_t)pixels * 85 / 100)) {
+            /* Static menu or still frame: save current native pixels and bypass processing */
+            if (data->earlier_size < needed) {
+                unsigned char *grown = (unsigned char *)realloc(data->earlier, (size_t)needed);
+                if (grown) {
+                    data->earlier = grown;
+                    data->earlier_size = needed;
+                }
+            }
+            if (data->earlier && data->earlier_size >= needed) {
+                memcpy(data->earlier, data->mapped, (size_t)needed);
+                data->have_earlier = 1;
+            }
+            return 1; /* Skip DLSS processing and writeback: present untouched native image */
+        }
         masked = mask_worth_sending(held, pixels);
         nr_log("[nr_layer] %u%% of the frame held still; ui mask %s",
              100u * held / pixels, masked ? "sent" : "refused");
@@ -1276,7 +1326,8 @@ static int process_frame(device_data *data, swapchain_data *chain,
 static VkResult present_now(device_data *data, VkQueue queue,
                             const VkPresentInfoKHR *info)
 {
-    if (!sync_semaphores || !data || !data->present_signal)
+    if (!data || !data->present) return VK_ERROR_INITIALIZATION_FAILED;
+    if (!sync_semaphores || !data->present_signal)
         return data->present(queue, info);
     VkPresentInfoKHR patched = *info;
     patched.waitSemaphoreCount = 1;
@@ -1376,7 +1427,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
     queue_data *owner = find_queue(queue);
     if (owner && !owner->capture_ok) {
         device_data *host = find_device(owner->device);
-        if (host) return host->present(queue, info);
+        if (host && host->present) return host->present(queue, info);
     }
     if (owner) {
         data = find_device(owner->device);
@@ -1392,7 +1443,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
     }
     if (!data)
         for (int i = 0; i < 8; i++) if (devices[i].device) { data = &devices[i]; break; }
-    if (!data) return VK_ERROR_INITIALIZATION_FAILED;
+    if (!data || !data->present) return VK_ERROR_INITIALIZATION_FAILED;
 
     data->present_plain = info->waitSemaphoreCount > NR_MAX_WAITS;
     data->present_wait = info->pWaitSemaphores;
@@ -1545,6 +1596,7 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL nr_GetInstanceProcAddr_(VkInstance inst
 {
     INTERCEPT(CreateInstance);
     INTERCEPT(CreateDevice);
+    INTERCEPT(DestroyInstance);
     if (!strcmp(pName, "vkGetInstanceProcAddr")) return (PFN_vkVoidFunction)nr_GetInstanceProcAddr_;
     if (!strcmp(pName, "vkGetDeviceProcAddr")) return (PFN_vkVoidFunction)nr_GetDeviceProcAddr_;
     INTERCEPT(QueuePresentKHR);

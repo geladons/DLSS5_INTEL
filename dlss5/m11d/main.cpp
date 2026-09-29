@@ -135,7 +135,10 @@ static bool writeAll(SOCKET s, const uint8_t* src, size_t n) {
 // ------------------------------------------------------------------ main --
 int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
-    int port = 47990;
+    int port = 48990;
+    const char* port_env = std::getenv("NR_LAYER_PORT");
+    if (!port_env) port_env = std::getenv("DLSS5_PORT");
+    if (port_env) port = std::atoi(port_env);
     float gain = 1.0f;
     float blend = 1.0f;
     float scale = 1.0f;

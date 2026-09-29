@@ -51,6 +51,9 @@ bool VkContext::pickDevice(const VkContextConfig& cfg) {
     D5C_VK_RET(vkEnumeratePhysicalDevices(vk.inst, &n, nullptr));
     std::vector<VkPhysicalDevice> pds(n);
     D5C_VK_RET(vkEnumeratePhysicalDevices(vk.inst, &n, pds.data()));
+    VkPhysicalDevice bestDevice = VK_NULL_HANDLE;
+    int bestScore = -1;
+
     for (auto d : pds) {
         VkPhysicalDeviceIDProperties id{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
         VkPhysicalDeviceProperties2 p2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
@@ -58,22 +61,58 @@ bool VkContext::pickDevice(const VkContextConfig& cfg) {
         vkGetPhysicalDeviceProperties2(d, &p2);
         LUID l{};
         if (id.deviceLUIDValid) std::memcpy(&l, id.deviceLUID, VK_LUID_SIZE);
-        bool match = !cfg.useLuid ||
-                     (id.deviceLUIDValid &&
-                      l.HighPart == cfg.luid.HighPart &&
-                      l.LowPart == cfg.luid.LowPart);
-        bool picked = match && vk.pd == VK_NULL_HANDLE;
-        std::printf("[VK] device \"%s\" LUID=%s %s\n", p2.properties.deviceName,
+
+        bool luidMatch = cfg.useLuid && id.deviceLUIDValid &&
+                         l.HighPart == cfg.luid.HighPart &&
+                         l.LowPart == cfg.luid.LowPart;
+
+        uint32_t next = 0;
+        vkEnumerateDeviceExtensionProperties(d, nullptr, &next, nullptr);
+        std::vector<VkExtensionProperties> exts(next);
+        vkEnumerateDeviceExtensionProperties(d, nullptr, &next, exts.data());
+        bool hasCoop = false;
+        for (auto& e : exts) {
+            if (std::strcmp(e.extensionName, VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME) == 0) {
+                hasCoop = true;
+                break;
+            }
+        }
+
+        int score = 0;
+        if (cfg.useLuid) {
+            if (luidMatch) score += 1000;
+            else score -= 1000;
+        } else {
+            if (hasCoop) score += 100;
+            if (p2.properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) score += 50;
+            if (p2.properties.vendorID == 0x8086) score += 30;
+            if (p2.properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) score -= 100;
+            if (std::strstr(p2.properties.deviceName, "Basic Render") != nullptr) score -= 100;
+            if (std::strstr(p2.properties.deviceName, "QEMU") != nullptr) score -= 100;
+        }
+
+        std::printf("[VK] device \"%s\" vendor=0x%04x LUID=%s coopmat=%d score=%d\n",
+                    p2.properties.deviceName, p2.properties.vendorID,
                     id.deviceLUIDValid ? LuidStr(l).c_str() : "(invalid)",
-                    picked ? (cfg.useLuid ? "  <== MATCHES DXGI adapter" : "  <== selected") : "");
-        if (picked) vk.pd = d;
+                    hasCoop ? 1 : 0, score);
+
+        if (score > bestScore) {
+            bestScore = score;
+            bestDevice = d;
+        }
     }
-    if (!vk.pd) {
-        std::fprintf(stderr, "[FAIL] no Vulkan device %s\n",
-                     cfg.useLuid ? "LUID-matches DXGI" : "available");
-        return false;
+
+    if (bestDevice != VK_NULL_HANDLE && bestScore >= 0) {
+        vk.pd = bestDevice;
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(vk.pd, &props);
+        std::printf("[VK] selected device: \"%s\"\n", props.deviceName);
+        return true;
     }
-    return true;
+
+    std::fprintf(stderr, "[FAIL] no Vulkan device %s\n",
+                 cfg.useLuid ? "LUID-matches DXGI" : "available");
+    return false;
 }
 
 bool VkContext::checkCoopmat() {
