@@ -67,8 +67,21 @@ void ChainRecorder::recordWindowBlock(VkCommandBuffer cb, int famIdx, int idx, c
     VkDeviceSize x16 = cur.is16 ? cur.off : O.oG2;
     if (!cur.is16) { dEw(cb, A(cur.off), 0, 0, 0, A(O.oG2), TOKS * C, 2, 0); bar(cb); }
     if (fam == 0) {
-        dGemm(cb, famIdx, A(x16), A(woff(tn("block%d.layer0.weight1", idx))), A(O.oG3),
-              TOKS, 4 * C, C, 1, 0, 0, 0, gflags(EPI_GATE_E4M3, true), C, 4 * C, 4 * C);
+        std::string w1 = tn("block%d.layer0.weight1", idx);
+        bool useI8 = isQuantized(w1);
+        if (const char* p = std::getenv("D5C_INT8_PILOT")) {
+            if (idx > std::atoi(p)) useI8 = false;
+        }
+        if (useI8) {
+            dQuantAct(cb, A(x16), A(O.oQAct), A(O.oQScale), TOKS, (uint32_t)C);
+            bar(cb);
+            dGemmI8(cb, famIdx, A(O.oQAct), A(woff(w1)), A(O.oG3),
+                    A(wscale(w1)), A(O.oQScale), 0.0f,
+                    TOKS, 4 * C, C, 1, 0, 0, 0, gflags(EPI_GATE_E4M3, true), C, 4 * C, 4 * C);
+        } else {
+            dGemm(cb, famIdx, A(x16), A(woff(w1)), A(O.oG3),
+                  TOKS, 4 * C, C, 1, 0, 0, 0, gflags(EPI_GATE_E4M3, true), C, 4 * C, 4 * C);
+        }
         bar(cb);
         uint32_t epi = cur.is16 ? EPI_RESIDUAL_F16 : EPI_RESIDUAL_FP32;
         dGemm(cb, famIdx, A(O.oG3), A(woff(tn("block%d.layer0.weight2", idx))), A(O.oG4),

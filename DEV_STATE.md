@@ -1,5 +1,47 @@
 # DEV_STATE.md - where we are (updated 2026-09-28 by Antigravity)
 
+## Stage 10: INT8 Full U-Net Integration, Pilot Benchmarks & Bandwidth Dissection (2026-09-28 COMPLETED)
+- **1. Objective & Hardware Implementation:**
+  - Integrated INT8 end-to-end into the real 71-block DLSS 5 U-Net running on Intel Arc Pro B50 (Battlemage Xe2, Vulkan 1.3).
+  - **Dynamic Activation Quantization Shader (`quant_act.comp`):**
+    - Dynamic symmetric per-32-token block absmax scaling via shared memory tree reduction (`256` invocations/workgroup).
+    - Grid dispatch `((M + 31) / 32, 1, 1)` writes INT8 activations `aq` and float block scales `scales[b]`.
+  - **INT8 Cooperative Matrix Shader (`gemm_i8.comp`):**
+    - Xe2 hardware config: `coopmat 8x16x32 A=i8 B=i8 C=i32 sat=0 scope=3` (Subgroup).
+    - Tile config: `TM=8, TN=16, TK=32`, `RM=4, RN=2` (`BM=32, BN=32` workgroup tile, preserving 8 threads/EU occupancy).
+    - Staged through shared memory `stage[BM * BN]` for hardware row-major de-swizzling and exact per-channel scale alignment.
+    - Integrated epilogue publisher (`gate_activation` + `e4m3` from `publish.glsl`), dynamic block scaling, and 128-bit coalesced stores (`Half4Buf`).
+  - **Engine, Dispatcher & Memory Architecture:**
+    - Clean OOP dispatchers `dQuantAct` and `dGemmI8` in `dlss5/chain/recorder.h` / `recorder.cpp`.
+    - Scratch arena slots `off.oQAct` and `off.oQScale` allocated within chunked memory boundaries.
+    - Selective weight overriding in `dlss5/chain/weights.cpp` (`loadInt8`), synchronized with `D5C_INT8_PILOT`.
+
+- **2. Numerical Quality & Accuracy Audit (`tools/compare_metrics.py`):**
+  - Evaluated on live 1080p outputs against pure FP16 baseline:
+    - **Pilot 0 (Block 0 `weight1`, shape 2088960x128x32):**
+      - Pixel PSNR: **45.85 dB**, Max Pixel Diff: 14, Mean Pixel Diff: 0.7776, Corr: 0.9660.
+    - **Pilot 4 (Blocks 0, 1, 2, 3, 4 `weight1`):**
+      - Pixel PSNR: **45.33 dB**, Max Pixel Diff: 15, Mean Pixel Diff: 0.8291, Corr: 0.9679.
+    - **Pilot 70 (All 10 `weight1` blocks: 0, 1, 2, 3, 4, 66, 67, 68, 69, 70):**
+      - Pixel PSNR: **45.27 dB**, Max Pixel Diff: 17, Mean Pixel Diff: 0.8332, Corr: 0.9678.
+      - Exact matching pixel bytes: **50.75%**; Within $\pm 1$ LSB: **79.70%**.
+    - **Intermediate Activation Audit:**
+      - All 8 intermediate tensor dumps (`live_frs`, `live_b4ds`, `live_b22ds`, `live_b38`, `live_b48`, `live_b69`, `live_mrg70`, `live_head`) verified with **0 NaNs, 0 Infs** (100% clean).
+
+- **3. Hard Architectural Findings (Negative Result & Bandwidth Proof):**
+  - **Negative Result 1: Asymmetric Shapes ($N \gg K$) with Separate Activation Quantization:**
+    - For `weight1` ($M=2,088,960, N=128, K=32$), output C is $4\times$ larger than input A (534.8 MB write vs 133.7 MB read).
+    - 80% of `weight1`'s DRAM traffic is WRITING C to VRAM!
+    - Running a separate `quant_act` pass read A (133.7 MB) and wrote Aq (66.8 MB), creating 200.5 MB of extra DRAM traffic.
+    - Measured GPU busy time: FP16 `weight1` took **116.4 ms** total across all 10 blocks; INT8 `qact` (8.8 ms) + `gemm_i8` (117.0 ms) took **125.8 ms** (+8% runtime).
+    - **Discovery:** On tall-skinny asymmetric matrices where $N \gg K$, an un-fused activation quantization pass increases DRAM memory traffic, negating INT8 read bandwidth savings.
+  - **Negative Result 2: Shared Memory Scale Pre-loading in GEMM Epilogue:**
+    - Pre-loading per-channel scales into `shared float s_scale[BN]` inside `gemm_i8.comp` increased register pressure and shared memory conflict, halving EU wave occupancy. Execution time degraded from 27 ms to 41 ms (+55% regression). Reverted immediately to restore 27 ms baseline.
+  - **Where INT8 Wins Decisively:**
+    - 1) Inverted shapes where $K \gg N$ (`weight2` where $K=128, N=32$), where reading A dominates 80% of traffic (saving 534 MB DRAM traffic).
+    - 2) Producer-fused activation quantization (generating INT8 in `dEw`/`publish`/`pool` directly to eliminate `qact` DRAM roundtrips).
+    - 3) Attention QKV and projection GEMMs where $K$ ranges from 64 to 512.
+
 ## Stage 9: Full-Chain Hardware Busy vs Idle Profile (811 GEMMs, 1402 Dispatches) (2026-09-28 COMPLETED)
 - **1. Objective & Hardware Measurement:**
   - Extended `ChainProf` with paired timestamps per dispatch (`markBegin` immediately before `vkCmdDispatch`, `markEnd` immediately after).

@@ -31,12 +31,20 @@ struct GemmI8Push {
     uint64_t b;
     uint64_t c;
     uint64_t b_scale;
+    uint64_t a_scale;
     float scale_a;
     uint32_t m, n, k, batch;
     uint32_t sa, sb, sc;
     uint32_t flags;
     uint32_t lda, ldb, ldc;
     uint32_t pad;
+};
+
+struct QuantActPush {
+    uint64_t a;       // input FP16 [M, K]
+    uint64_t aq;      // output INT8 [M, K]
+    uint64_t scales;  // output float scales[ceil(M/32)]
+    uint32_t m, k;    // matrix dimensions
 };
 
 struct CosPush { uint64_t a, c, d; uint32_t m, flags; };
@@ -133,10 +141,12 @@ private:
                uint32_t flags, uint32_t lda, uint32_t ldb, uint32_t ldc,
                uint64_t res = 0, uint64_t skip = 0);
     void dGemmI8(VkCommandBuffer cb, int fam, uint64_t a, uint64_t b, uint64_t c2,
-                 uint64_t b_scale, float scale_a,
+                 uint64_t b_scale, uint64_t a_scale, float scale_a,
                  uint32_t m, uint32_t n, uint32_t k, uint32_t batch,
                  uint32_t sa, uint32_t sb, uint32_t sc,
                  uint32_t flags, uint32_t lda, uint32_t ldb, uint32_t ldc);
+    void dQuantAct(VkCommandBuffer cb, uint64_t a, uint64_t aq, uint64_t scales,
+                   uint32_t m, uint32_t k);
     void dEw(VkCommandBuffer cb, uint64_t a, uint64_t b, uint64_t c2, uint64_t d,
              uint64_t h, uint32_t n, uint32_t kind, uint32_t ch);
     void dPart(VkCommandBuffer cb, uint64_t a, uint64_t c2, const Stage& s, uint32_t C,
@@ -186,7 +196,7 @@ private:
     uint64_t T6_ = 0;
     uint32_t T6P_ = 0;
 
-    ChainPipe pGemm, pGemm1, pGemmI8, pCos, pCosW, pSmax, pEw, pPart, pTrans, pGather,
+    ChainPipe pGemm, pGemm1, pGemmI8, pQuantAct, pCos, pCosW, pSmax, pEw, pPart, pTrans, pGather,
               pMerge, pFeatpack, pHeadpack, pPool, pUpM;
 
     uint64_t A(VkDeviceSize o) const { return ar_->A(o); }

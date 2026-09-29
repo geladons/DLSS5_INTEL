@@ -72,4 +72,41 @@
 1. **Sunshine is Permanent:** Sunshine (PID ~6524 / ~4792) streams this desktop to the owner via Moonlight. **NEVER kill Sunshine.**
 2. **Local Git Commits Only:** Keep all commits local on `master` branch. Do NOT push to remote repositories.
 3. **ASCII-Only in Code and Scripts:** Non-ASCII comments in `.cmd` or `.cpp` can trigger launcher parse bugs on this host.
-4. **Weights Proprietary:** `dlssnr-logical.safetensors` must never be committed to git.
+4. **Weights Proprietary:** `dlssnr-logical.safetensors` and `dlssnr-int8.bin` must never be committed to git.
+
+---
+
+## 5. Current Active Work: INT8 Full U-Net Integration (2026-09-28)
+
+### What is Completed & Fully Verified:
+1. **Dynamic Activation Quantization Shader (`quant_act.comp`):**
+   - Implements dynamic per-32-token block symmetric scaling via shared memory tree reduction (`256` invocations/workgroup).
+   - Writes INT8 activations and float scales (`scales[b]`).
+2. **Cooperative Matrix INT8 Kernel (`gemm_i8.comp`):**
+   - Config: `coopmat 8x16x32 A=i8 B=i8 C=i32 sat=0 scope=3` (Subgroup).
+   - `RM=4, RN=2` (`BM=32, BN=32` tile) maintaining maximum 8 threads/EU wave occupancy on Battlemage Xe2.
+   - Staged through shared memory `stage[BM * BN]` for hardware de-swizzling and per-channel scale alignment.
+   - Fused epilogue (`gate_activation` + `e4m3` from `publish.glsl`), 128-bit coalesced stores (`Half4Buf`).
+3. **Dispatcher & Engine Plumbing:**
+   - `dQuantAct` and `dGemmI8` in `dlss5/chain/recorder.h` / `recorder.cpp`.
+   - Dedicated aligned scratch arena slots `oQAct` and `oQScale`.
+   - Selective INT8 weights overriding in `weights.cpp` via `loadInt8()`, controlled by `D5C_INT8_PILOT`.
+4. **Quality & Verification Passed:**
+   - Verified on all 10 `weight1` blocks (0, 1, 2, 3, 4, 66, 67, 68, 69, 70):
+     - Output Pixel PSNR: **45.27 dB** (target >= 40.0 dB).
+     - Pearson Correlation: **0.9678**.
+     - Exactly matching pixel bytes: **50.75%**; within $\pm 1$ LSB: **79.70%**.
+     - Zero NaNs, zero Infs across the entire 71-block graph.
+5. **Architectural Findings Recorded:**
+   - On tall-skinny asymmetric matrices where $N \gg K$ (such as `weight1` where $M=2,088,960, N=128, K=32$), output $C$ is 4x larger than $A$ (534 MB write vs 133 MB read). Writing $C$ consumes 80% of DRAM traffic. Running a separate `quant_act` shader adds 200 MB of DRAM traffic, slightly increasing total execution time (125.8 ms vs 116.4 ms).
+   - Preloading scales into shared memory `s_scale[BN]` in `gemm_i8.comp` caused EU occupancy collapse (27 ms -> 41 ms); direct vector store was restored.
+
+### Exact Roadmap for the Next Session:
+1. **Target $K \gg N$ Layers (`weight2`):**
+   - `weight2` has shape $M=2,088,960, N=32, K=128$.
+   - Reading $A$ is 80% of DRAM traffic (534.8 MB). Quantizing $A$ directly cuts DRAM traffic in half, saving over **1.07 GB** of bandwidth across the 10 blocks!
+2. **Inter-Layer Producer Fusion (`weight1` $\to$ `weight2`):**
+   - Wire `weight1` to write quantized activations directly into `oG3`, eliminating `qact` DRAM roundtrips entirely.
+3. **Expand to Attention Projections & FFN Expand:**
+   - Quantize QKV ($64 \times 96 \times 32$), attention projection ($64 \times C \times C$), and branched FFN expand ($TOK \times 128 \times C$).
+

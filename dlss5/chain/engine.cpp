@@ -124,6 +124,23 @@ bool ChainEngine::init(const EngineConfig& cfg) {
     std::printf("loading DLSSNR graph... (weights + chain setup; ~1-2 s, not a hang)\n");
     auto tW0 = std::chrono::steady_clock::now();
     if (!ws_.load(cfg.weightsPath)) return false;
+    // Optional INT8 quantized weights pack (auto-probe sibling or work/mlxw/dlssnr-int8.bin)
+    std::string int8Path;
+    if (const char* envI8 = std::getenv("D5C_INT8_PACK")) {
+        int8Path = envI8;
+    } else {
+        auto slash = cfg.weightsPath.find_last_of("/\\");
+        std::string dir = (slash != std::string::npos) ? cfg.weightsPath.substr(0, slash + 1) : "";
+        if (std::ifstream(dir + "dlssnr-int8.bin", std::ios::binary).good()) {
+            int8Path = dir + "dlssnr-int8.bin";
+        } else if (std::ifstream("work/mlxw/dlssnr-int8.bin", std::ios::binary).good()) {
+            int8Path = "work/mlxw/dlssnr-int8.bin";
+        }
+    }
+    if (!int8Path.empty() && std::getenv("D5C_NO_INT8") == nullptr) {
+        std::printf("[chain] loading INT8 weights pack alongside: %s\n", int8Path.c_str());
+        ws_.loadInt8(int8Path);
+    }
     if (!ws_.computePack()) return false;
     arena_.layout(st_, T6P_, ws_.packTotal, ws_);
     arena_.allocDevice(c);

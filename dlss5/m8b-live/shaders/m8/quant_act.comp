@@ -1,0 +1,83 @@
+#version 450
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+/*
+ * quant_act -- Dynamic Activation Quantization to INT8 for DLSSNR Graph.
+ *
+ * Quantizes FP16 activations A[M, K] into symmetric INT8 Aq[M, K] with
+ * dynamic per-32-token block scaling:
+ *   scales[b] = max(abs(A[b*32 .. b*32+31, :])) / 127.0
+ *   Aq[r, c]  = clamp(round(A[r, c] / scales[b]), -127, 127)
+ *
+ * Block size of 32 tokens matches Xe2 BM=32 workgroup tile in gemm_i8.comp.
+ * Dispatched with grid ((M + 31) / 32, 1, 1), 256 invocations per workgroup.
+ */
+
+layout(local_size_x = 256) in;
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer HalfBuf  { float16_t v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer Int8Buf  { int8_t    v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf { float     v[]; };
+
+layout(push_constant, scalar) uniform Push {
+    HalfBuf  a;        // input FP16 [M, K]
+    Int8Buf  aq;       // output INT8 [M, K]
+    FloatBuf scales;   // output float scales[ceil(M/32)]
+    uint     m;        // rows (tokens)
+    uint     k;        // columns (channels)
+} pc;
+
+shared float s_max[256];
+shared float s_inv_scale;
+
+void main() {
+    uint b = gl_WorkGroupID.x;
+    uint t = gl_LocalInvocationID.x;
+
+    uint row_start = b * 32u;
+    if (row_start >= pc.m) return;
+    uint row_count = min(32u, pc.m - row_start);
+    uint n_elems = row_count * pc.k;
+    uint base = row_start * pc.k;
+
+    // Phase 1: parallel search for block absmax across all channels
+    float local_max = 0.0;
+    for (uint i = t; i < n_elems; i += 256u) {
+        float val = abs(float(pc.a.v[base + i]));
+        local_max = max(local_max, val);
+    }
+    s_max[t] = local_max;
+    barrier();
+
+    // Phase 2: parallel tree reduction to find global maximum of 32-row block
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (t < stride) {
+            s_max[t] = max(s_max[t], s_max[t + stride]);
+        }
+        barrier();
+    }
+
+    // Phase 3: compute symmetric scale factor and inverted multiplier
+    if (t == 0u) {
+        float block_max = s_max[0];
+        float scale = (block_max > 0.0) ? (block_max / 127.0) : 1.0;
+        pc.scales.v[b] = scale;
+        s_inv_scale = 1.0 / scale;
+    }
+    barrier();
+
+    // Phase 4: quantize FP16 elements to symmetric INT8 with saturation clamp
+    float inv_scale = s_inv_scale;
+    for (uint i = t; i < n_elems; i += 256u) {
+        float v = float(pc.a.v[base + i]) * inv_scale;
+        int q = int(round(v));
+        pc.aq.v[base + i] = int8_t(clamp(q, -127, 127));
+    }
+}

@@ -11,6 +11,9 @@
 #extension GL_KHR_memory_scope_semantics : require
 #extension GL_KHR_cooperative_matrix : require
 #extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_memory_scope_semantics : require
+
+#include "publish.glsl"
 
 /*
  * gemm_i8 -- INT8 Cooperative Matrix GEMM for Intel Arc Pro B50 (Battlemage Xe2).
@@ -23,9 +26,8 @@
  * For K=32 shapes, (K + TK - 1)/TK = 1. The entire K-loop collapses into a single tile step (t=0),
  * eliminating software pipelining overhead and loop branching.
  *
- * Direct register epilogue: Dequantizes int32 accumulator directly to narrow FP16
- *   float val = float(acc[i][j][e]) * pc.scale_a * b_scale[col + j * TN + e_col];
- * Zero shared memory allocation, zero barriers, optimal instruction density.
+ * Dequantization epilogue: Staged through shared memory for vendor-defined
+ * cooperative matrix register lane de-swizzling and per-channel scale alignment.
  */
 
 layout(local_size_x = 32) in;
@@ -33,13 +35,15 @@ layout(local_size_x = 32) in;
 layout(buffer_reference, scalar, buffer_reference_align = 16) buffer Int8Buf  { int8_t    v[]; };
 layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf { float     v[]; };
 layout(buffer_reference, scalar, buffer_reference_align = 16) buffer HalfBuf  { float16_t v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 8)  buffer Half4Buf { f16vec4   v4[]; };
 
 layout(push_constant, scalar) uniform Push {
     Int8Buf a;
     Int8Buf b;
     HalfBuf c;          // narrow FP16 output
     FloatBuf b_scale;   // per-channel scale B
-    float scale_a;      // scalar scale A
+    uint64_t a_scale;   // optional per-block scale A (if non-zero)
+    float scale_a;      // scalar scale A fallback
     uint m, n, k, batch;
     uint sa, sb, sc;    // per-batch element strides
     uint flags;         // bit0: transpose B
@@ -50,6 +54,8 @@ layout(push_constant, scalar) uniform Push {
 const uint TM = 8, TN = 16, TK = 32;
 const uint RM = 4, RN = 2;
 const uint BM = TM * RM, BN = TN * RN;
+
+shared int32_t stage[BM * BN];
 
 void main() {
     uint row = gl_WorkGroupID.y * BM;
@@ -128,26 +134,37 @@ void main() {
         }
     }
 
-    // Epilogue: dequantize into narrow FP16
-    // Intel Xe2 8x16 coopmat lane mapping:
-    //   e_col = gl_SubgroupInvocationID % 16
-    //   e_row = (gl_SubgroupInvocationID / 16) + 2 * e
-    uint e_col = gl_SubgroupInvocationID % 16u;
-    uint lane_row_base = gl_SubgroupInvocationID / 16u;
+    // Epilogue: store accumulators into shared memory (hardware row-major de-swizzling)
+    for (uint i = 0u; i < RM; i++)
+        for (uint j = 0u; j < RN; j++)
+            coopMatStore(acc[i][j], stage, i * TM * BN + j * TN, BN,
+                         gl_CooperativeMatrixLayoutRowMajor);
 
-    for (uint j = 0u; j < RN; j++) {
-        uint c_out = col + j * TN + e_col;
-        float scale_b = (c_out < pc.n) ? pc.b_scale.v[c_out] : 0.0;
-        float factor = pc.scale_a * scale_b;
+    subgroupMemoryBarrierShared();
+    subgroupBarrier();
 
-        for (uint i = 0u; i < RM; i++) {
-            for (uint e = 0u; e < acc[i][j].length(); e++) {
-                uint e_row = lane_row_base + 2u * e;
-                uint r_out = row + i * TM + e_row;
-                if (r_out < pc.m && c_out < pc.n) {
-                    float val = float(acc[i][j][e]) * factor;
-                    pc.c.v[co + r_out * ldc + c_out] = float16_t(val);
-                }
+    float act_scale = (pc.a_scale != 0ul) ? FloatBuf(pc.a_scale).v[gl_WorkGroupID.y] : pc.scale_a;
+    uint epilogue = (pc.flags >> 8) & 0xFu;
+
+    for (uint e = gl_LocalInvocationID.x * 4u; e < BM * BN; e += 32u * 4u) {
+        uint r = row + e / BN;
+        if (r >= pc.m) continue;
+        uint c_base = col + (e % BN);
+        uint at = co + r * ldc + c_base;
+
+        f16vec4 v_out;
+        for (uint k = 0u; k < 4u; ++k) {
+            uint c = c_base + k;
+            float scale_b = (c < pc.n) ? pc.b_scale.v[c] : 0.0;
+            float val = float(stage[e + k]) * (act_scale * scale_b);
+            if (epilogue != 0u) val = publish(epilogue, val);
+            v_out[k] = float16_t(val);
+        }
+        if ((at & 3u) == 0u && (uint(uint64_t(pc.c)) & 7u) == 0u) {
+            Half4Buf(uint64_t(pc.c)).v4[at >> 2] = v_out;
+        } else {
+            for (uint k = 0u; k < 4u; ++k) {
+                if (c_base + k < pc.n) pc.c.v[at + k] = v_out[k];
             }
         }
     }

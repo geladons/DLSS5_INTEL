@@ -223,11 +223,18 @@ bool WeightsStore::loadInt8(const std::string& path) {
     size_t replaced = 0;
     for (auto& kv : wfInt8.tensors) {
         if (kv.second.isQuantized) {
-            wf.tensors[kv.first] = kv.second;
-            replaced++;
+            // Only override tensors that have active INT8 execution paths in the graph
+            if (kv.first.find(".layer0.weight1") != std::string::npos) {
+                if (const char* p = std::getenv("D5C_INT8_PILOT")) {
+                    int blk = std::atoi(kv.first.substr(5, kv.first.find('.') - 5).c_str());
+                    if (blk > std::atoi(p)) continue;
+                }
+                wf.tensors[kv.first] = kv.second;
+                replaced++;
+            }
         }
     }
-    std::printf("[weights] INT8 quantized weights loaded alongside: %zu tensors overridden\n", replaced);
+    std::printf("[weights] INT8 quantized weights loaded alongside: %zu tensors overridden (fam 0 weight1)\n", replaced);
     return true;
 }
 

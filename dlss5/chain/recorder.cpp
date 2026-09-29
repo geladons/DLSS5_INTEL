@@ -39,6 +39,7 @@ void ChainRecorder::init(const VkCtx& c, const ChainArena& arena, const WeightsS
     chainMakePipe(c, shaderDir + "gemm.spv", pGemm);
     chainMakePipe(c, shaderDir + "gemm_rn1.spv", pGemm1);
     chainMakePipe(c, shaderDir + "gemm_i8.spv", pGemmI8);
+    chainMakePipe(c, shaderDir + "quant_act.spv", pQuantAct);
     chainMakePipe(c, shaderDir + "cosine.spv", pCos);
     chainMakePipe(c, shaderDir + "cosine_win.spv", pCosW);
     chainMakePipe(c, shaderDir + "softmax.spv", pSmax);
@@ -51,12 +52,12 @@ void ChainRecorder::init(const VkCtx& c, const ChainArena& arena, const WeightsS
     chainMakePipe(c, shaderDir + "headpack.spv", pHeadpack);
     chainMakePipe(c, shaderDir + "pool2.spv", pPool);
     chainMakePipe(c, shaderDir + "upmerge.spv", pUpM);
-    std::printf("[chain] 15 pipelines up (11 kernels + featpack/headpack + pool2/upmerge), %zu BDA chunk bases, chunk0 0x%llx\n",
+    std::printf("[chain] 16 pipelines up (12 kernels + featpack/headpack + pool2/upmerge), %zu BDA chunk bases, chunk0 0x%llx\n",
                 arena.chunks.size(), (unsigned long long)arena.chunks[0].baseA);
 }
 
 void ChainRecorder::destroy(const VkCtx& c) {
-    for (ChainPipe* cp : {&pGemm, &pGemm1, &pGemmI8, &pCos, &pCosW, &pSmax, &pEw, &pPart, &pTrans,
+    for (ChainPipe* cp : {&pGemm, &pGemm1, &pGemmI8, &pQuantAct, &pCos, &pCosW, &pSmax, &pEw, &pPart, &pTrans,
                           &pGather, &pMerge, &pFeatpack, &pHeadpack, &pPool, &pUpM}) {
         vkDestroyPipeline(c.dev, cp->pipe, nullptr);
         vkDestroyPipelineLayout(c.dev, cp->layout, nullptr);
@@ -113,7 +114,7 @@ void ChainRecorder::dGemm(VkCommandBuffer cb, int fam, uint64_t a, uint64_t b, u
 }
 
 void ChainRecorder::dGemmI8(VkCommandBuffer cb, int fam, uint64_t a, uint64_t b, uint64_t c2,
-                            uint64_t b_scale, float scale_a,
+                            uint64_t b_scale, uint64_t a_scale, float scale_a,
                             uint32_t m, uint32_t n, uint32_t k, uint32_t batch,
                             uint32_t sa, uint32_t sb, uint32_t sc,
                             uint32_t flags, uint32_t lda, uint32_t ldb, uint32_t ldc) {
@@ -121,21 +122,39 @@ void ChainRecorder::dGemmI8(VkCommandBuffer cb, int fam, uint64_t a, uint64_t b,
     constexpr uint32_t GEMM_BM = 32;
     constexpr uint32_t GEMM_BN = 32;
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pGemmI8.pipe);
-    GemmI8Push p{a, b, c2, b_scale, scale_a, m, n, k, batch, sa, sb, sc, flags, lda, ldb, ldc, 0};
+    GemmI8Push p{a, b, c2, b_scale, a_scale, scale_a, m, n, k, batch, sa, sb, sc, flags, lda, ldb, ldc, 0};
     vkCmdPushConstants(cb, pGemmI8.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
 
     uint64_t bcount = (batch == 0) ? 1 : (uint64_t)batch;
-    // Memory traffic: int8 input A (M*K*1), int8 weights B (K*N*1), float weights scale (N*4), fp16 output C (M*N*2)
+    // Memory traffic: int8 input A (M*K*1), int8 weights B (K*N*1), float weights scale (N*4),
+    // float act scale ((M+31)/32 * 4 if dynamic), fp16 output C (M*N*2)
+    uint64_t actScaleBytes = (a_scale != 0) ? (((uint64_t)m + 31) / 32 * 4) : 0;
     uint64_t bytes = bcount * (
         (uint64_t)m * k * 1 +
         (uint64_t)k * n * 1 +
         (uint64_t)n * 4 +
+        actScaleBytes +
         (uint64_t)m * n * 2
     );
 
     pmBegin(cb);
     vkCmdDispatch(cb, (n + GEMM_BN - 1) / GEMM_BN, (m + GEMM_BM - 1) / GEMM_BM, batch);
     pmEnd(cb, "gemm_i8", "blk", m, n, k, (n + GEMM_BN - 1) / GEMM_BN, (m + GEMM_BM - 1) / GEMM_BM, batch, bytes);
+}
+
+void ChainRecorder::dQuantAct(VkCommandBuffer cb, uint64_t a, uint64_t aq, uint64_t scales,
+                              uint32_t m, uint32_t k) {
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pQuantAct.pipe);
+    QuantActPush p{a, aq, scales, m, k};
+    vkCmdPushConstants(cb, pQuantAct.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
+
+    uint32_t numBlocks = (m + 31) / 32;
+    // Traffic: read FP16 A (M*K*2), write INT8 Aq (M*K*1), write scales (numBlocks*4)
+    uint64_t bytes = (uint64_t)m * k * 2 + (uint64_t)m * k * 1 + (uint64_t)numBlocks * 4;
+
+    pmBegin(cb);
+    vkCmdDispatch(cb, numBlocks, 1, 1);
+    pmEnd(cb, "qact", "", m, k, 0, numBlocks, 1, 1, bytes);
 }
 
 void ChainRecorder::dEw(VkCommandBuffer cb, uint64_t a, uint64_t b, uint64_t c2, uint64_t d,
