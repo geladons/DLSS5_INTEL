@@ -13,8 +13,10 @@ static long daemon_port()
     static long port = -1;
     if (port < 0) {
         const char *env = getenv("M12_PORT");
-        port = env ? strtol(env, NULL, 10) : 47990;
-        if (port <= 0 || port > 65535) port = 47990;
+        if (!env) env = getenv("NR_LAYER_PORT");
+        if (!env) env = getenv("DLSS5_PORT");
+        port = env ? strtol(env, NULL, 10) : 48990;
+        if (port <= 0 || port > 65535) port = 48990;
     }
     return port;
 }
@@ -37,7 +39,7 @@ int m12_exchange(const uint32_t header[4], const void *payload,
     if (!winsock_up()) return -1;
     SOCKET fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (fd == INVALID_SOCKET) return -1;
-    DWORD tv = 60000;  // first frame may carry the ~6 s daemon weight load
+    DWORD tv = 2000;
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)&tv, sizeof tv);
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof tv);
     struct sockaddr_in addr;

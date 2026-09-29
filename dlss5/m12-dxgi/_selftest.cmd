@@ -22,6 +22,7 @@ if not exist "%EXE%" (
 copy /y "%EXE%" "%RUN%\m12_test.exe" >nul
 del "%RUN%\test.log" 2>nul
 set M12_LIVE=4
+set M12_PORT=48990
 set "M12_DUMP=%RUN%\dump.bmp"
 if "%~1"=="--sync" (
     pushd "%RUN%"

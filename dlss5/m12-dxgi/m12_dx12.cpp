@@ -538,6 +538,27 @@ bool M12Dx12Processor::grabRaw(ID3D12Resource *bb)
     return true;
 }
 
+// SEH helper functions (free of C++ objects with destructors to avoid C2712)
+static int safe_process_frame(PFN_dlss5_process_frame pfn, void *engine, uint32_t w, uint32_t h,
+                              const uint8_t *in, uint8_t *out, long frame)
+{
+    __try {
+        return pfn(engine, w, h, in, out, frame);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -999;
+    }
+}
+
+static int safe_interpolate_frame(PFN_dlss5_interpolate_frame pfn, void *engine, uint32_t w, uint32_t h,
+                                  const uint8_t *a, const uint8_t *b, uint8_t *out, float alpha)
+{
+    __try {
+        return pfn(engine, w, h, a, b, out, alpha);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -999;
+    }
+}
+
 // raw_ -> in-process DLSS 5 (or daemon fallback) -> processed_.
 // Re-sending the same raw_ with a new daemon gain is exactly the "live knob on a frozen frame" reprocess.
 bool M12Dx12Processor::sendRaw()
@@ -553,9 +574,9 @@ bool M12Dx12Processor::sendRaw()
         }
 
         std::vector<BYTE> reply(raw_.size());
-        int r = pfn_dlss5_process_frame(g_engine, width_, height_,
-                                        raw_.data(), reply.data(),
-                                        (long)present_count_);
+        int r = safe_process_frame(pfn_dlss5_process_frame, g_engine, width_, height_,
+                                   raw_.data(), reply.data(),
+                                   (long)present_count_);
         if (r == 0) {
             processed_.swap(reply);
             have_processed_ = true;
@@ -787,9 +808,9 @@ void M12Dx12Processor::onPresent()
             if (grabRaw(bb.Get()) && !raw_.empty() && raw_.size() == (std::size_t)width_ * height_ * 4) {
                 std::size_t needed = (std::size_t)width_ * height_ * 4;
                 if (interp_.size() < needed) interp_.resize(needed);
-                int r = pfn_dlss5_interpolate_frame(g_engine, width_, height_,
-                                                    processed_.data(), raw_.data(),
-                                                    interp_.data(), 0.5f);
+                int r = safe_interpolate_frame(pfn_dlss5_interpolate_frame, g_engine, width_, height_,
+                                                processed_.data(), raw_.data(),
+                                                interp_.data(), 0.5f);
                 if (r == 0) {
                     static UINT64 s_fg_count = 0;
                     s_fg_count++;

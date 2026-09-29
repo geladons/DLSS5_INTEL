@@ -46,34 +46,42 @@ void *orig_entry(void *obj, int idx)
     return e == vt->second.end() ? NULL : e->second;
 }
 
-// Patches the given entries of the object's CURRENT vtable in place.
-// Idempotent per vtable. Returns FALSE if the page could not be opened.
+// Patches a single entry of the object's CURRENT vtable in place.
+// Idempotent per vtable entry. Returns FALSE if the page could not be opened.
+bool patch_entry(void *obj, int idx, void *fn)
+{
+    if (!obj || !fn || g_restored) return false;
+    void **vt = *(void ***)obj;
+    std::map<int, void *> &rec = g_orig[vt];
+    if (rec.find(idx) != rec.end()) return true;
+    DWORD old_protect = 0;
+    if (!VirtualProtect(&vt[idx], sizeof(void *), PAGE_READWRITE, &old_protect)) {
+        m12_logf("VirtualProtect failed on vtable %p index %d (err %lu)",
+                 vt, idx, GetLastError());
+        return false;
+    }
+    rec[idx] = vt[idx];
+    vt[idx] = fn;
+    DWORD ignored = 0;
+    VirtualProtect(&vt[idx], sizeof(void *), old_protect, &ignored);
+    return true;
+}
+
 bool patch_in_place(void *obj, int idx0, void *fn0, int idx1, void *fn1, int idx2,
                     void *fn2, int idx3, void *fn3)
 {
-    void **vt = *(void ***)obj;
-    if (g_restored) return false;
-    if (g_orig.find(vt) != g_orig.end()) return true;
-    DWORD old_protect = 0;
-    if (!VirtualProtect(vt, 64 * sizeof(void *), PAGE_READWRITE, &old_protect)) {
-        m12_logf("VirtualProtect failed on vtable %p (err %lu); cannot hook in place",
-                 vt, GetLastError());
-        return false;
-    }
-    std::map<int, void *> &rec = g_orig[vt];
+    if (!obj || g_restored) return false;
     struct {
         int idx;
         void *fn;
     } patches[4] = {{idx0, fn0}, {idx1, fn1}, {idx2, fn2}, {idx3, fn3}};
+    bool ok = true;
     for (int i = 0; i < 4; i++) {
-        if (!patches[i].fn) continue;
-        rec[patches[i].idx] = vt[patches[i].idx];
-        vt[patches[i].idx] = patches[i].fn;
+        if (patches[i].fn) {
+            if (!patch_entry(obj, patches[i].idx, patches[i].fn)) ok = false;
+        }
     }
-    DWORD ignored = 0;
-    VirtualProtect(vt, 64 * sizeof(void *), old_protect, &ignored);
-    m12_logf("vtable %p patched in place (%u entries)", vt, (unsigned)rec.size());
-    return true;
+    return ok;
 }
 
 int live_every()
@@ -289,6 +297,17 @@ HRESULT WINAPI hooked_CreateSwapChainForComposition(IDXGIFactory2 *factory,
     return hr;
 }
 
+HRESULT WINAPI hooked_Factory_QueryInterface(IDXGIFactory *factory, const IID &riid, void **ppv)
+{
+    void *orig = orig_entry(factory, 0);
+    if (!orig) return E_NOINTERFACE;
+    HRESULT hr = ((HRESULT(WINAPI *)(IDXGIFactory *, const IID &, void **))orig)(factory, riid, ppv);
+    if (SUCCEEDED(hr) && ppv && *ppv) {
+        m12_hook_factory(*ppv);
+    }
+    return hr;
+}
+
 }  // namespace
 
 void m12_hook_init()
@@ -309,11 +328,12 @@ void m12_hook_factory(void *factory)
         LeaveCriticalSection(&g_cs);
         return;
     }
-    // 10 CreateSwapChain, 15 ForHwnd, 16 ForCoreWindow, 24 ForComposition.
-    patch_in_place(factory, 10, (void *)&hooked_CreateSwapChain, 15,
-                   (void *)&hooked_CreateSwapChainForHwnd, 16,
-                   (void *)&hooked_CreateSwapChainForCoreWindow, 24,
-                   (void *)&hooked_CreateSwapChainForComposition);
+    // 0 QueryInterface, 10 CreateSwapChain, 15 ForHwnd, 16 ForCoreWindow, 24 ForComposition.
+    patch_entry(factory, 0, (void *)&hooked_Factory_QueryInterface);
+    patch_entry(factory, 10, (void *)&hooked_CreateSwapChain);
+    patch_entry(factory, 15, (void *)&hooked_CreateSwapChainForHwnd);
+    patch_entry(factory, 16, (void *)&hooked_CreateSwapChainForCoreWindow);
+    patch_entry(factory, 24, (void *)&hooked_CreateSwapChainForComposition);
     LeaveCriticalSection(&g_cs);
     m12_hotkeys_ensure_started();
 }
