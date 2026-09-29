@@ -67,12 +67,27 @@ void ChainRecorder::recordWindowBlock(VkCommandBuffer cb, int famIdx, int idx, c
     VkDeviceSize x16 = cur.is16 ? cur.off : O.oG2;
     if (!cur.is16) { dEw(cb, A(cur.off), 0, 0, 0, A(O.oG2), TOKS * C, 2, 0); bar(cb); }
     if (fam == 0) {
+        auto parsePilot = [](const char* envName, const char* legacyEnv, int defaultVal) -> int {
+            if (const char* p = std::getenv(envName)) {
+                if (std::strcmp(p, "none") == 0 || std::strcmp(p, "off") == 0) return -1;
+                return std::atoi(p);
+            }
+            if (legacyEnv) {
+                if (const char* p = std::getenv(legacyEnv)) {
+                    if (std::strcmp(p, "none") == 0 || std::strcmp(p, "off") == 0) return -1;
+                    return std::atoi(p);
+                }
+            }
+            return defaultVal;
+        };
+
+        int pilotW1 = parsePilot("D5C_INT8_W1", "D5C_INT8_PILOT", 70);
+        int pilotW2 = parsePilot("D5C_INT8_W2", "D5C_INT8_PILOT", 70);
+
         std::string w1 = tn("block%d.layer0.weight1", idx);
-        bool useI8 = isQuantized(w1);
-        if (const char* p = std::getenv("D5C_INT8_PILOT")) {
-            if (idx > std::atoi(p)) useI8 = false;
-        }
-        if (useI8) {
+        bool useI8_w1 = isQuantized(w1) && (pilotW1 >= 0 && idx <= pilotW1);
+
+        if (useI8_w1) {
             dQuantAct(cb, A(x16), A(O.oQAct), A(O.oQScale), TOKS, (uint32_t)C);
             bar(cb);
             dGemmI8(cb, famIdx, A(O.oQAct), A(woff(w1)), A(O.oG3),
@@ -83,10 +98,24 @@ void ChainRecorder::recordWindowBlock(VkCommandBuffer cb, int famIdx, int idx, c
                   TOKS, 4 * C, C, 1, 0, 0, 0, gflags(EPI_GATE_E4M3, true), C, 4 * C, 4 * C);
         }
         bar(cb);
+
+        std::string w2 = tn("block%d.layer0.weight2", idx);
+        bool useI8_w2 = isQuantized(w2) && (pilotW2 >= 0 && idx <= pilotW2);
         uint32_t epi = cur.is16 ? EPI_RESIDUAL_F16 : EPI_RESIDUAL_FP32;
-        dGemm(cb, famIdx, A(O.oG3), A(woff(tn("block%d.layer0.weight2", idx))), A(O.oG4),
-              TOKS, C, 4 * C, 1, 0, 0, 0, gflags(epi, false), 4 * C, C, C,
-              A(cur.off), A(vec(tn("block%d.layer0.ffn_cos_skip", idx))));
+
+        if (useI8_w2) {
+            dQuantAct(cb, A(O.oG3), A(O.oQAct), A(O.oQScale), TOKS, 4 * (uint32_t)C);
+            bar(cb);
+            dGemmI8(cb, famIdx, A(O.oQAct), A(woff(w2)), A(O.oG4),
+                    A(wscale(w2)), A(O.oQScale), 0.0f,
+                    TOKS, (uint32_t)C, 4 * (uint32_t)C, 1, 0, 0, 0,
+                    gflags(epi, false), 4 * (uint32_t)C, (uint32_t)C, (uint32_t)C,
+                    A(cur.off), A(vec(tn("block%d.layer0.ffn_cos_skip", idx))));
+        } else {
+            dGemm(cb, famIdx, A(O.oG3), A(woff(w2)), A(O.oG4),
+                  TOKS, C, 4 * C, 1, 0, 0, 0, gflags(epi, false), 4 * C, C, C,
+                  A(cur.off), A(vec(tn("block%d.layer0.ffn_cos_skip", idx))));
+        }
         bar(cb);
         recordWindowAttn(cb, famIdx, idx, s, C, H, fam, oy, ox, O.oG4, false, rawOff, pubOff, publish);
     } else if (fam == 1) {

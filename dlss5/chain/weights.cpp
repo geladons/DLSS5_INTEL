@@ -221,20 +221,47 @@ bool WeightsStore::loadInt8(const std::string& path) {
     if (!binParse(path, wfInt8)) return false;
     hasQuantizedWeights = true;
     size_t replaced = 0;
-    for (auto& kv : wfInt8.tensors) {
-        if (kv.second.isQuantized) {
-            // Only override tensors that have active INT8 execution paths in the graph
-            if (kv.first.find(".layer0.weight1") != std::string::npos) {
-                if (const char* p = std::getenv("D5C_INT8_PILOT")) {
-                    int blk = std::atoi(kv.first.substr(5, kv.first.find('.') - 5).c_str());
-                    if (blk > std::atoi(p)) continue;
-                }
-                wf.tensors[kv.first] = kv.second;
-                replaced++;
+
+    auto parsePilot = [](const char* envName, const char* legacyEnv, int defaultVal) -> int {
+        if (const char* p = std::getenv(envName)) {
+            if (std::strcmp(p, "none") == 0 || std::strcmp(p, "off") == 0) return -1;
+            return std::atoi(p);
+        }
+        if (legacyEnv) {
+            if (const char* p = std::getenv(legacyEnv)) {
+                if (std::strcmp(p, "none") == 0 || std::strcmp(p, "off") == 0) return -1;
+                return std::atoi(p);
             }
         }
+        return defaultVal;
+    };
+
+    int pilotW1   = parsePilot("D5C_INT8_W1", "D5C_INT8_PILOT", 70);
+    int pilotW2   = parsePilot("D5C_INT8_W2", "D5C_INT8_PILOT", 70);
+    int pilotAttn = parsePilot("D5C_INT8_ATTN", nullptr, -1);
+
+    for (auto& kv : wfInt8.tensors) {
+        if (!kv.second.isQuantized) continue;
+        int blk = std::atoi(kv.first.substr(5, kv.first.find('.') - 5).c_str());
+
+        bool overrideTensor = false;
+        if (kv.first.find(".layer0.weight1") != std::string::npos) {
+            if (pilotW1 >= 0 && blk <= pilotW1) overrideTensor = true;
+        } else if (kv.first.find(".layer0.weight2") != std::string::npos) {
+            if (pilotW2 >= 0 && blk <= pilotW2) overrideTensor = true;
+        } else if (kv.first.find(".qkv_weight") != std::string::npos ||
+                   kv.first.find(".projection_weight") != std::string::npos ||
+                   kv.first.find(".ffn_expand_weight") != std::string::npos) {
+            if (pilotAttn >= 0 && blk <= pilotAttn) overrideTensor = true;
+        }
+
+        if (overrideTensor) {
+            wf.tensors[kv.first] = kv.second;
+            replaced++;
+        }
     }
-    std::printf("[weights] INT8 quantized weights loaded alongside: %zu tensors overridden (fam 0 weight1)\n", replaced);
+    std::printf("[weights] INT8 quantized weights loaded: %zu tensors overridden (w1: pilot=%d, w2: pilot=%d, attn: pilot=%d)\n",
+                replaced, pilotW1, pilotW2, pilotAttn);
     return true;
 }
 

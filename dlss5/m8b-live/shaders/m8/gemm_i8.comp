@@ -11,7 +11,6 @@
 #extension GL_KHR_memory_scope_semantics : require
 #extension GL_KHR_cooperative_matrix : require
 #extension GL_KHR_shader_subgroup_basic : require
-#extension GL_KHR_memory_scope_semantics : require
 
 #include "publish.glsl"
 
@@ -25,30 +24,37 @@
  *
  * For K=32 shapes, (K + TK - 1)/TK = 1. The entire K-loop collapses into a single tile step (t=0),
  * eliminating software pipelining overhead and loop branching.
+ * For K=128 shapes (e.g. weight2), the K-loop evaluates 4 tiles (128/32).
  *
  * Dequantization epilogue: Staged through shared memory for vendor-defined
  * cooperative matrix register lane de-swizzling and per-channel scale alignment.
+ * Supports FP16 narrow output (with publish epilogues) and FP32 output (with fused residual add).
  */
+
+const uint EPI_RESIDUAL_FP32 = 5u;
+const uint EPI_RESIDUAL_F16  = 6u;
 
 layout(local_size_x = 32) in;
 
-layout(buffer_reference, scalar, buffer_reference_align = 16) buffer Int8Buf  { int8_t    v[]; };
-layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf { float     v[]; };
-layout(buffer_reference, scalar, buffer_reference_align = 16) buffer HalfBuf  { float16_t v[]; };
-layout(buffer_reference, scalar, buffer_reference_align = 8)  buffer Half4Buf { f16vec4   v4[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer Int8Buf   { int8_t    v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf  { float     v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer Float4Buf { vec4      v4[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer HalfBuf   { float16_t v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 8)  buffer Half4Buf  { f16vec4   v4[]; };
 
 layout(push_constant, scalar) uniform Push {
-    Int8Buf a;
-    Int8Buf b;
-    HalfBuf c;          // narrow FP16 output
+    Int8Buf  a;
+    Int8Buf  b;
+    uint64_t c;          // HalfBuf if narrow (flags & 0x1000), FloatBuf if !narrow
     FloatBuf b_scale;   // per-channel scale B
     uint64_t a_scale;   // optional per-block scale A (if non-zero)
-    float scale_a;      // scalar scale A fallback
-    uint m, n, k, batch;
-    uint sa, sb, sc;    // per-batch element strides
-    uint flags;         // bit0: transpose B
-    uint lda, ldb, ldc; // row strides; 0 = dense default
-    uint pad;
+    uint32_t m, n, k, batch;
+    uint32_t sa, sb, sc;    // per-batch element strides
+    uint32_t flags;         // bit0: transpose B, bit12: narrow (0x1000)
+    uint32_t lda, ldb, ldc; // row strides; 0 = dense default
+    float    scale_a;       // scalar scale A fallback
+    uint64_t res;
+    uint64_t skip;
 } pc;
 
 const uint TM = 8, TN = 16, TK = 32;
@@ -145,26 +151,76 @@ void main() {
 
     float act_scale = (pc.a_scale != 0ul) ? FloatBuf(pc.a_scale).v[gl_WorkGroupID.y] : pc.scale_a;
     uint epilogue = (pc.flags >> 8) & 0xFu;
+    bool narrow = (pc.flags & 0x1000u) != 0u;
 
-    for (uint e = gl_LocalInvocationID.x * 4u; e < BM * BN; e += 32u * 4u) {
-        uint r = row + e / BN;
-        if (r >= pc.m) continue;
-        uint c_base = col + (e % BN);
-        uint at = co + r * ldc + c_base;
+    if (epilogue == EPI_RESIDUAL_FP32 || epilogue == EPI_RESIDUAL_F16) {
+        for (uint e = gl_LocalInvocationID.x * 4u; e < BM * BN; e += 32u * 4u) {
+            uint r = row + e / BN;
+            if (r >= pc.m) continue;
+            uint c_base = col + (e % BN);
+            uint at = co + r * ldc + c_base;
 
-        f16vec4 v_out;
-        for (uint k = 0u; k < 4u; ++k) {
-            uint c = c_base + k;
-            float scale_b = (c < pc.n) ? pc.b_scale.v[c] : 0.0;
-            float val = float(stage[e + k]) * (act_scale * scale_b);
-            if (epilogue != 0u) val = publish(epilogue, val);
-            v_out[k] = float16_t(val);
-        }
-        if ((at & 3u) == 0u && (uint(uint64_t(pc.c)) & 7u) == 0u) {
-            Half4Buf(uint64_t(pc.c)).v4[at >> 2] = v_out;
-        } else {
+            vec4 v_out;
             for (uint k = 0u; k < 4u; ++k) {
-                if (c_base + k < pc.n) pc.c.v[at + k] = v_out[k];
+                uint c = c_base + k;
+                float scale_b = (c < pc.n) ? pc.b_scale.v[c] : 0.0;
+                float val = float(stage[e + k]) * (act_scale * scale_b);
+                uint idx = at + k;
+                float resVal = (epilogue == EPI_RESIDUAL_F16)
+                    ? f16_widen(uint(float16BitsToUint16(HalfBuf(pc.res).v[idx])))
+                    : FloatBuf(pc.res).v[idx];
+                float skipVal = (c < pc.n) ? FloatBuf(pc.skip).v[c] : 0.0;
+                v_out[k] = val + resVal * skipVal;
+            }
+            if (narrow) {
+                if ((at & 3u) == 0u && (uint(pc.c) & 7u) == 0u) {
+                    Half4Buf(pc.c).v4[at >> 2] = f16vec4(v_out);
+                } else {
+                    for (uint k = 0u; k < 4u; ++k) {
+                        if (c_base + k < pc.n) HalfBuf(pc.c).v[at + k] = float16_t(v_out[k]);
+                    }
+                }
+            } else {
+                if ((at & 3u) == 0u && (uint(pc.c) & 15u) == 0u) {
+                    Float4Buf(pc.c).v4[at >> 2] = v_out;
+                } else {
+                    for (uint k = 0u; k < 4u; ++k) {
+                        if (c_base + k < pc.n) FloatBuf(pc.c).v[at + k] = v_out[k];
+                    }
+                }
+            }
+        }
+    } else {
+        for (uint e = gl_LocalInvocationID.x * 4u; e < BM * BN; e += 32u * 4u) {
+            uint r = row + e / BN;
+            if (r >= pc.m) continue;
+            uint c_base = col + (e % BN);
+            uint at = co + r * ldc + c_base;
+
+            vec4 v_out;
+            for (uint k = 0u; k < 4u; ++k) {
+                uint c = c_base + k;
+                float scale_b = (c < pc.n) ? pc.b_scale.v[c] : 0.0;
+                float val = float(stage[e + k]) * (act_scale * scale_b);
+                if (epilogue != 0u) val = publish(epilogue, val);
+                v_out[k] = val;
+            }
+            if (narrow) {
+                if ((at & 3u) == 0u && (uint(pc.c) & 7u) == 0u) {
+                    Half4Buf(pc.c).v4[at >> 2] = f16vec4(v_out);
+                } else {
+                    for (uint k = 0u; k < 4u; ++k) {
+                        if (c_base + k < pc.n) HalfBuf(pc.c).v[at + k] = float16_t(v_out[k]);
+                    }
+                }
+            } else {
+                if ((at & 3u) == 0u && (uint(pc.c) & 15u) == 0u) {
+                    Float4Buf(pc.c).v4[at >> 2] = v_out;
+                } else {
+                    for (uint k = 0u; k < 4u; ++k) {
+                        if (c_base + k < pc.n) FloatBuf(pc.c).v[at + k] = v_out[k];
+                    }
+                }
             }
         }
     }

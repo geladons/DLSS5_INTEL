@@ -117,24 +117,31 @@ void ChainRecorder::dGemmI8(VkCommandBuffer cb, int fam, uint64_t a, uint64_t b,
                             uint64_t b_scale, uint64_t a_scale, float scale_a,
                             uint32_t m, uint32_t n, uint32_t k, uint32_t batch,
                             uint32_t sa, uint32_t sb, uint32_t sc,
-                            uint32_t flags, uint32_t lda, uint32_t ldb, uint32_t ldc) {
+                            uint32_t flags, uint32_t lda, uint32_t ldb, uint32_t ldc,
+                            uint64_t res, uint64_t skip) {
     (void)fam;
     constexpr uint32_t GEMM_BM = 32;
     constexpr uint32_t GEMM_BN = 32;
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pGemmI8.pipe);
-    GemmI8Push p{a, b, c2, b_scale, a_scale, scale_a, m, n, k, batch, sa, sb, sc, flags, lda, ldb, ldc, 0};
+    GemmI8Push p{a, b, c2, b_scale, a_scale, m, n, k, batch, sa, sb, sc, flags, lda, ldb, ldc, scale_a, res, skip};
     vkCmdPushConstants(cb, pGemmI8.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
 
     uint64_t bcount = (batch == 0) ? 1 : (uint64_t)batch;
-    // Memory traffic: int8 input A (M*K*1), int8 weights B (K*N*1), float weights scale (N*4),
-    // float act scale ((M+31)/32 * 4 if dynamic), fp16 output C (M*N*2)
     uint64_t actScaleBytes = (a_scale != 0) ? (((uint64_t)m + 31) / 32 * 4) : 0;
+    bool narrow = (flags & F_NARROW) != 0;
+    uint32_t epi = (flags >> 8) & 0xFu;
+    uint64_t resBytes = 0;
+    if (epi == EPI_RESIDUAL_FP32) resBytes = (uint64_t)m * n * 4 + (uint64_t)n * 4;
+    else if (epi == EPI_RESIDUAL_F16) resBytes = (uint64_t)m * n * 2 + (uint64_t)n * 4;
+    uint64_t outBytes = narrow ? ((uint64_t)m * n * 2) : ((uint64_t)m * n * 4);
+
     uint64_t bytes = bcount * (
         (uint64_t)m * k * 1 +
         (uint64_t)k * n * 1 +
         (uint64_t)n * 4 +
         actScaleBytes +
-        (uint64_t)m * n * 2
+        resBytes +
+        outBytes
     );
 
     pmBegin(cb);

@@ -32,12 +32,13 @@ struct GemmI8Push {
     uint64_t c;
     uint64_t b_scale;
     uint64_t a_scale;
-    float scale_a;
     uint32_t m, n, k, batch;
     uint32_t sa, sb, sc;
     uint32_t flags;
     uint32_t lda, ldb, ldc;
-    uint32_t pad;
+    float scale_a;
+    uint64_t res;
+    uint64_t skip;
 };
 
 struct QuantActPush {
@@ -144,7 +145,8 @@ private:
                  uint64_t b_scale, uint64_t a_scale, float scale_a,
                  uint32_t m, uint32_t n, uint32_t k, uint32_t batch,
                  uint32_t sa, uint32_t sb, uint32_t sc,
-                 uint32_t flags, uint32_t lda, uint32_t ldb, uint32_t ldc);
+                 uint32_t flags, uint32_t lda, uint32_t ldb, uint32_t ldc,
+                 uint64_t res = 0, uint64_t skip = 0);
     void dQuantAct(VkCommandBuffer cb, uint64_t a, uint64_t aq, uint64_t scales,
                    uint32_t m, uint32_t k);
     void dEw(VkCommandBuffer cb, uint64_t a, uint64_t b, uint64_t c2, uint64_t d,
