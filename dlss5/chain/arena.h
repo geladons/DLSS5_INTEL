@@ -38,7 +38,7 @@ struct ArenaOffsets {
                  oSS = 0, oB4DS = 0, oB22DS = 0, oBRIDGE = 0, oB38 = 0, oB39 = 0,
                  oB48 = 0, oB69 = 0, oMRG39 = 0, oMRG70 = 0, oHEAD = 0;
     VkDeviceSize oFeatV = 0, oHeadDC = 0;
-    VkDeviceSize oQAct = 0, oQScale = 0;
+    VkDeviceSize oQAct = 0, oQScale = 0, oQScale2 = 0;
 };
 
 class ChainArena {

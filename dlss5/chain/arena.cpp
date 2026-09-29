@@ -137,6 +137,7 @@ void ChainArena::layout(const Stage st[7], uint64_t T6P, uint64_t packTotalIn,
     off.oHeadDC = slot(1024);
     off.oQAct = slot(maxTok4C * 1);
     off.oQScale = slot((((uint64_t)st[0].TOK + 31) / 32) * 4);
+    off.oQScale2 = slot((((uint64_t)st[0].TOK + 31) / 32) * 16);
 
     auto preVec = [&](const std::string& n) { if (ws.poff.count(n)) needVecL(n); };
     for (int i = 0; i <= 70; ++i) {

@@ -39,6 +39,7 @@ struct GemmI8Push {
     float scale_a;
     uint64_t res;
     uint64_t skip;
+    uint64_t out_scale;
 };
 
 struct QuantActPush {
@@ -89,7 +90,7 @@ struct HeadPush { uint64_t src, dst, dc; uint32_t ntok; float gain; uint32_t mod
 
 enum { EPI_NONE = 0, EPI_E4M3 = 1, EPI_GATE = 2, EPI_GATE_E4M3 = 3, EPI_HALF = 4,
        EPI_RESIDUAL_FP32 = 5, EPI_RESIDUAL_F16 = 6 };
-enum { F_NARROW = 0x1000, F_TRANSPOSE = 1 };
+enum { F_NARROW = 0x1000, F_TRANSPOSE = 1, F_FUSED_I8_PRODUCER = 0x2000, F_FUSED_I8_CONSUMER = 0x4000 };
 
 struct ChainPipe {
     VkPipeline pipe = VK_NULL_HANDLE;
@@ -146,7 +147,7 @@ private:
                  uint32_t m, uint32_t n, uint32_t k, uint32_t batch,
                  uint32_t sa, uint32_t sb, uint32_t sc,
                  uint32_t flags, uint32_t lda, uint32_t ldb, uint32_t ldc,
-                 uint64_t res = 0, uint64_t skip = 0);
+                 uint64_t res = 0, uint64_t skip = 0, uint64_t out_scale = 0);
     void dQuantAct(VkCommandBuffer cb, uint64_t a, uint64_t aq, uint64_t scales,
                    uint32_t m, uint32_t k);
     void dEw(VkCommandBuffer cb, uint64_t a, uint64_t b, uint64_t c2, uint64_t d,

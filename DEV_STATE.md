@@ -1,5 +1,62 @@
 # DEV_STATE.md - where we are (updated 2026-09-28 by Antigravity)
 
+## Stage 12: Fusion weight1 -> weight2: Direct INT8 Pipeline, Subgroup Reduction & QAct Elimination (2026-09-28 COMPLETED)
+- **1. Objective & Hardware Implementation:**
+  - Designed and implemented producer-consumer kernel fusion across `weight1 -> weight2` in `fam == 0` (Blocks 0, 1, 2, 3, 4, 66, 67, 68, 69, 70).
+  - **Fused Producer (`F_FUSED_I8_PRODUCER = 0x2000u` on `weight1`):**
+    - Epilogue evaluates `publish(EPI_GATE_E4M3, val)`.
+    - Computes per-(32x32) tile absmax across 32 threads in the workgroup using hardware cross-lane reduction `subgroupMax(my_max)` (`GL_KHR_shader_subgroup_arithmetic`).
+    - Workgroup $(X, Y)$ writes dynamic tile scale `tile_scale` to `out_scale` (`O.oQScale2`, 4 floats per row block, index `y * 4 + x`).
+    - Invocations directly quantize to symmetric INT8 with saturation clamp to $[-127, 127]$ and write directly to `O.oG3`. Output write traffic of `weight1` is halved.
+  - **Fused Consumer (`F_FUSED_I8_CONSUMER = 0x4000u` on `weight2`):**
+    - Multi-tile K-loop (4 tiles for $K=128$) loads INT8 activations directly from `O.oG3`.
+    - For tile $t \in [0..3]$, loads scale from `a_scale[y * 4 + t]`, accumulates in float shared memory `stage_f[BM * BN]`.
+    - Multiplies by per-channel scale B, adds fused residual (`cur.off`) with `ffn_cos_skip`, writes FP32 directly to `O.oG4`.
+  - **Total Elimination of Intermediate `quant_act` Pass:**
+    - Completely eliminates standalone `quant_act` on `O.oG3`, cutting 10 dispatches and 10 pipeline barriers per frame.
+    - Zero DRAM roundtrips of FP16 activations between `weight1` and `weight2`.
+  - **Rollback Safety:** Controlled via `D5C_INT8_FUSION` (defaults to 1; setting `0` cleanly falls back to unfused path with bit-exact parity).
+
+- **2. Numerical Quality & Accuracy Audit (`tools/compare_metrics.py`):**
+  - **Fused W1+W2 Pilot 70 (All 10 blocks in INT8):**
+    - **Pixel PSNR: 45.05 dB** (higher than unfused 44.42 dB due to finer-grained 32x32 tile scaling dynamic range!).
+    - **Pearson Correlation (r): 0.9698** (well above > 0.95 threshold).
+    - Mean Pixel Diff: **0.8445** (down from 0.9052 px).
+    - Max Pixel Diff: 25.
+    - Exact Matching Bytes: **51.26%**, Within $\pm 1$ LSB: **79.50%**.
+    - Intermediate Activations: **0 NaNs, 0 Infs** across all 12 monitored tensors.
+  - **Unfused Rollback (`D5C_INT8_FUSION=0`):**
+    - Pixel PSNR: **44.42 dB**, $r = 0.9696$, mean diff 0.9052 px (100% bit-exact parity).
+
+- **3. Hardware Profiling & DRAM Traffic Dissection (`tools/analyze_fusion_benchmarks.py`):**
+  - **1080p (1920x1088, 5 frames measured on Intel Arc Pro B50):**
+    - Dispatches: 1271 -> 1261 (-10 dispatches eliminated).
+    - `QAct for W2`: **25.93 ms -> 0.00 ms (100% ELIMINATED!)**
+    - `Weight1 GEMM`: 188.21 ms -> 165.57 ms (**-22.64 ms saved**, traffic halved from 2407.6 MB to 1342.2 MB).
+    - `Weight2 GEMM`: 36.67 ms -> 33.15 ms (**-3.52 ms saved**).
+    - `W1+W2+QActs Sum`: 258.73 ms -> 206.61 ms (**-52.12 ms saved!**).
+    - Total Frame Busy Time: 839.95 ms -> 741.83 ms (**-98.12 ms saved per frame! 1.13x frame speedup**).
+    - Total Frame DRAM Traffic: 72.53 GB -> 68.26 GB (**-4.27 GB DRAM traffic saved per frame!**).
+  - **960x576 (10 frames measured on Intel Arc Pro B50):**
+    - `QAct for W2`: **7.24 ms -> 0.00 ms (100% ELIMINATED!)**
+    - `W1+W2+QActs Sum`: 68.42 ms -> 57.77 ms (**-10.65 ms saved**).
+    - DRAM Traffic Saved: **-1.13 GB per frame**.
+
+## Stage 11: INT8 Weight2 End-to-End ($K=128, N=32$) with Fused Residuals (2026-09-28 COMPLETED)
+- **1. Objective & Hardware Implementation:**
+  - Extended INT8 cooperative matrix engine to handle inverted tall-skinny GEMM shapes ($K=128, N=32$ in `fam == 0`).
+  - Added `EPI_RESIDUAL_FP32` (5) and `EPI_RESIDUAL_F16` (6) epilogue support with fused residual accumulation and 128-bit vector stores (`Float4Buf`).
+  - Implemented multi-tile K-loop (4 tiles for $K=128$).
+  - Separated pilot controls in `dlss5/chain/weights.cpp`: `D5C_INT8_W1`, `D5C_INT8_W2`, `D5C_INT8_ATTN`.
+  - Expanded `off.oQAct` in `arena.cpp` to `maxTok4C * 1` to accommodate $K=128$ activation buffers.
+- **2. Numerical Quality & Accuracy Audit:**
+  - **Weight2 Pilot 0:** Pixel PSNR **49.06 dB**, $r = 0.9963$, mean diff 0.4696 px, 0 NaNs/Infs.
+  - **Weight2 Pilot 70:** Pixel PSNR **48.76 dB**, $r = 0.9954$, mean diff 0.5067 px, 0 NaNs/Infs.
+  - **W1+W2 Pilot 70 (Unfused):** Pixel PSNR **44.42 dB**, $r = 0.9696$, mean diff 0.9052 px, 0 NaNs/Infs.
+- **3. Standalone GEMM Benchmark:**
+  - 1080p Weight2 GEMM alone: FP16 = **35.79 ms** (5516.5 MB) -> INT8 = **29.12 ms** (4448.0 MB) (1.23x speedup, -6.67 ms, -1.07 GB GEMM traffic).
+  - Standalone `quant_act` added 25.66 ms and 3.2 GB DRAM traffic, proving that kernel fusion was mandatory to unlock the full performance benefit.
+
 ## Stage 10: INT8 Full U-Net Integration, Pilot Benchmarks & Bandwidth Dissection (2026-09-28 COMPLETED)
 - **1. Objective & Hardware Implementation:**
   - Integrated INT8 end-to-end into the real 71-block DLSS 5 U-Net running on Intel Arc Pro B50 (Battlemage Xe2, Vulkan 1.3).

@@ -84,37 +84,59 @@ void ChainRecorder::recordWindowBlock(VkCommandBuffer cb, int famIdx, int idx, c
         int pilotW1 = parsePilot("D5C_INT8_W1", "D5C_INT8_PILOT", 70);
         int pilotW2 = parsePilot("D5C_INT8_W2", "D5C_INT8_PILOT", 70);
 
+        const char* envFusion = std::getenv("D5C_INT8_FUSION");
+        bool enableFusion = !envFusion || (std::strcmp(envFusion, "0") != 0 && std::strcmp(envFusion, "off") != 0);
+
         std::string w1 = tn("block%d.layer0.weight1", idx);
         bool useI8_w1 = isQuantized(w1) && (pilotW1 >= 0 && idx <= pilotW1);
-
-        if (useI8_w1) {
-            dQuantAct(cb, A(x16), A(O.oQAct), A(O.oQScale), TOKS, (uint32_t)C);
-            bar(cb);
-            dGemmI8(cb, famIdx, A(O.oQAct), A(woff(w1)), A(O.oG3),
-                    A(wscale(w1)), A(O.oQScale), 0.0f,
-                    TOKS, 4 * C, C, 1, 0, 0, 0, gflags(EPI_GATE_E4M3, true), C, 4 * C, 4 * C);
-        } else {
-            dGemm(cb, famIdx, A(x16), A(woff(w1)), A(O.oG3),
-                  TOKS, 4 * C, C, 1, 0, 0, 0, gflags(EPI_GATE_E4M3, true), C, 4 * C, 4 * C);
-        }
-        bar(cb);
 
         std::string w2 = tn("block%d.layer0.weight2", idx);
         bool useI8_w2 = isQuantized(w2) && (pilotW2 >= 0 && idx <= pilotW2);
         uint32_t epi = cur.is16 ? EPI_RESIDUAL_F16 : EPI_RESIDUAL_FP32;
 
-        if (useI8_w2) {
-            dQuantAct(cb, A(O.oG3), A(O.oQAct), A(O.oQScale), TOKS, 4 * (uint32_t)C);
+        bool doFusion = useI8_w1 && useI8_w2 && enableFusion;
+
+        if (doFusion) {
+            dQuantAct(cb, A(x16), A(O.oQAct), A(O.oQScale), TOKS, (uint32_t)C);
             bar(cb);
-            dGemmI8(cb, famIdx, A(O.oQAct), A(woff(w2)), A(O.oG4),
-                    A(wscale(w2)), A(O.oQScale), 0.0f,
+            dGemmI8(cb, famIdx, A(O.oQAct), A(woff(w1)), A(O.oG3),
+                    A(wscale(w1)), A(O.oQScale), 0.0f,
+                    TOKS, 4 * C, C, 1, 0, 0, 0,
+                    gflags(EPI_GATE_E4M3, false) | F_FUSED_I8_PRODUCER,
+                    C, 4 * C, 4 * C, 0, 0, A(O.oQScale2));
+            bar(cb);
+            dGemmI8(cb, famIdx, A(O.oG3), A(woff(w2)), A(O.oG4),
+                    A(wscale(w2)), A(O.oQScale2), 0.0f,
                     TOKS, (uint32_t)C, 4 * (uint32_t)C, 1, 0, 0, 0,
-                    gflags(epi, false), 4 * (uint32_t)C, (uint32_t)C, (uint32_t)C,
+                    gflags(epi, false) | F_FUSED_I8_CONSUMER,
+                    4 * (uint32_t)C, (uint32_t)C, (uint32_t)C,
                     A(cur.off), A(vec(tn("block%d.layer0.ffn_cos_skip", idx))));
         } else {
-            dGemm(cb, famIdx, A(O.oG3), A(woff(w2)), A(O.oG4),
-                  TOKS, C, 4 * C, 1, 0, 0, 0, gflags(epi, false), 4 * C, C, C,
-                  A(cur.off), A(vec(tn("block%d.layer0.ffn_cos_skip", idx))));
+            if (useI8_w1) {
+                dQuantAct(cb, A(x16), A(O.oQAct), A(O.oQScale), TOKS, (uint32_t)C);
+                bar(cb);
+                dGemmI8(cb, famIdx, A(O.oQAct), A(woff(w1)), A(O.oG3),
+                        A(wscale(w1)), A(O.oQScale), 0.0f,
+                        TOKS, 4 * C, C, 1, 0, 0, 0, gflags(EPI_GATE_E4M3, true), C, 4 * C, 4 * C);
+            } else {
+                dGemm(cb, famIdx, A(x16), A(woff(w1)), A(O.oG3),
+                      TOKS, 4 * C, C, 1, 0, 0, 0, gflags(EPI_GATE_E4M3, true), C, 4 * C, 4 * C);
+            }
+            bar(cb);
+
+            if (useI8_w2) {
+                dQuantAct(cb, A(O.oG3), A(O.oQAct), A(O.oQScale), TOKS, 4 * (uint32_t)C);
+                bar(cb);
+                dGemmI8(cb, famIdx, A(O.oQAct), A(woff(w2)), A(O.oG4),
+                        A(wscale(w2)), A(O.oQScale), 0.0f,
+                        TOKS, (uint32_t)C, 4 * (uint32_t)C, 1, 0, 0, 0,
+                        gflags(epi, false), 4 * (uint32_t)C, (uint32_t)C, (uint32_t)C,
+                        A(cur.off), A(vec(tn("block%d.layer0.ffn_cos_skip", idx))));
+            } else {
+                dGemm(cb, famIdx, A(O.oG3), A(woff(w2)), A(O.oG4),
+                      TOKS, C, 4 * C, 1, 0, 0, 0, gflags(epi, false), 4 * C, C, C,
+                      A(cur.off), A(vec(tn("block%d.layer0.ffn_cos_skip", idx))));
+            }
         }
         bar(cb);
         recordWindowAttn(cb, famIdx, idx, s, C, H, fam, oy, ox, O.oG4, false, rawOff, pubOff, publish);
