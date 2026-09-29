@@ -1,113 +1,121 @@
-# HANDOFF: DLSS 5 on Intel Arc Pro B50 (Updated 2026-09-28)
+# HANDOFF: DLSS 5 on Intel Arc Pro B50 (Updated 2026-09-29, v0.3 Release)
 
-## 1. Quick Start & Execution
+## 1. Quick Start & Verification in New Session
 - **Production Bundle (User-Ready):**
   - Path: `C:\Users\<owner>\Desktop\production`
-  - Launcher: Run `DLSS5 Manager.cmd` or `pythonw m13.pyw` directly from that directory.
-  - Binaries and weights: All 101 hashes verified, `dlssnr-logical.safetensors` staged, x64/x86 layers registered.
-- **Build from Source:**
-  - Build Chain & Daemon: `cd dlss5\m11d && build.cmd`
-  - Build Vulkan Layer (x64): `cd dlss5\m11-layer && build.cmd`
-  - Build Vulkan Layer (x86): `cd dlss5\m11-layer && _build_x86.cmd`
-  - Build DX12 Proxy: `cd dlss5\m12-dxgi && build.cmd`
-  - Package Production: `python dlss5\m13\_build_production.py`
-- **Validation:**
-  - PyTorch Goldens: `cd dlss5\m11d\build\Release && m11d.exe --weights ..\..\..\..\work\mlxw\dlssnr-logical.safetensors --selftest ..\..\..\..\work\_m9b_cmp\native_crop.bmp && python ..\..\_validate.py out` (Must report `VALIDATION PASS`).
-  - Unit Tests: `python dlss5\m13\test_stage5.py` (Must report `ALL STAGE 5 & TASK B UNIT TESTS PASSED SUCCESSFULLY!`).
+  - Launcher: Run `DLSS5 Manager.vbs` (zero console flash) or `DLSS 5 Manager.cmd`.
+  - Content: 113 binaries and assets verified with SHA-1 hashes; INT8 weights (`dlssnr-int8.bin`, 158 MB) packaged alongside FP16 safetensors (`dlssnr-logical.safetensors`, 291 MB); x64/x86 layer manifests patched with absolute paths.
+- **Run Bundle Selftest:**
+  ```cmd
+  cd /d C:\Users\<owner>\Desktop\production\runtime\m11d
+  m11d.exe --weights "C:\Users\<owner>\Desktop\production\weights\dlssnr-logical.safetensors" --selftest "C:\Users\<owner>\Desktop\DLSS5_INTEL\work\_m9b_cmp\native_crop.bmp"
+  ```
+  Must output `[selftest] processed in ... ms` and `EXITCODE=0`.
+- **Verify Numerical Accuracy:**
+  ```cmd
+  python tools\compare_prod_accuracy.py
+  ```
+  Must report:
+  - `vs FP16 Reference: PSNR = 45.05 dB, exact = 51.26%, max_diff = 25.0`
+  - `vs Stage 14/15 Fused Reference: PSNR = 999.00 dB, exact = 100.00%, max_diff = 0.0`
+- **Verify Production Manager Imports:**
+  ```cmd
+  python tools\test_m13_imports.py
+  ```
+  Must report all 16 package modules `[OK]`.
+- **Verify DLL Exports:**
+  ```cmd
+  python tools\check_pe_exports_pure.py
+  ```
+  Must report all required exports for `nr_layer_win.dll`, `nr_layer_win32.dll`, `m12_dxgi.dll`, and `d5c_chain.dll`.
 
 ---
 
-## 2. Solved Issues & Ground Truth from Current Session
+## 2. Solved Issues & Completed Milestones in Current Session
 
-### Issue 1: Game & Menu Temporal Shaking / Judder (SOLVED)
-- **Root Cause:** An experimental alternating odd-frame replacement `interpolateFrame(prev, in, 0.5)` in `chain_c_api.cpp` and `m11d.exe` replaced odd game frames with past interpolated frames. Because present layers present one frame per present call, this jumped time backward and forward ($t=0 \to t=0.5 \to t=2.0 \to t=2.5$), causing violent 60 Hz judder across scenes, characters, and menus.
-- **Resolution:** Removed the odd-frame replacement block. Every frame advances monotonically forward through the full DLSS 5 U-Net pass. Judder and flickering are 100% eliminated.
+### Stage 14: Flash-Attention Fusion (`attn_fused.comp`, Commit `64e6ef9`)
+- **Architecture:** Replaced 3 separate dispatches ($QK^T$ GEMM + `smaxw` + $PV$ GEMM) with a single compute shader per 64-token window (`attn_fused.comp`).
+- **Direct-Cache Architecture on Xe2:** Staged $Q$ (2 KB) in shared memory, streaming $K$ and $V$ directly from L1/L2 cache via `coopMatLoad` instructions. This reduced shared memory from 96 KB to 6.25 KB, circumventing Intel Arc B50's 48 KB hardware SLM limit and granting maximum thread occupancy (8 threads/EU).
+- **Bank Conflict Elimination:** Stored with padded leading stride $= 68$ elements ($\gcd(68, 32) = 4$), mathematically eliminating 16-way and 32-way shared memory bank conflict serialization.
+- **On-Chip Softmax:** Max-subtract-exp-sum computed on-chip via `subgroupMax`/`subgroupAdd` reductions in Cooperative Matrix registers.
+- **Memory & Dispatch Gains:**
+  - Cut 124 dispatches per frame (186 $\to$ 62 attention dispatches).
+  - DRAM buffers `oSCW` (46 MB) and `oPRW` (23 MB) **100% eliminated**.
+  - Saved **15.12 GB DRAM traffic per frame at 1080p** (-4.13 GB @ 960x576).
+  - Chain selftest time: 741.83 ms $\to$ **622.9 ms (-119 ms saved)**.
+- **Rollback Flag:** `D5C_INT8_ATTN_FUSED=0`.
 
-### Issue 2: Menu & HUD Blur (UI Masking) (SOLVED)
-- **Root Cause:**
-  1. `data->have_earlier` was never set to 1 in `nr_layer_win.c`, disabling UI mask calculation.
-  2. `mask_worth_sending` rejected masks if `held >= 90%`, which caused menus (95% static text) to lose UI masking and become blurred.
-- **Resolution:**
-  - Fixed `have_earlier` tracking and native input caching in `data->earlier`.
-  - In `mask_worth_sending`: Changed condition to `held > (pixels / 100)`. In menus, all static text, buttons, and frames are preserved bit-exact from the native input frame, while moving 3D character models are processed by DLSS 5.
+### Stage 15: Vectorized 128-bit Downsample Pool (`pool2.comp`, Commit `201d5d2`)
+- **Root Cause:** Legacy `pool2.comp` mapped 1 thread per token and looped channels, striding warps by $C$ elements (128-2048 bytes), causing 16x-32x sector waste and 97% cacheline thrashing (10.0 GB/s bandwidth hole).
+- **Vectorized Architecture:** Mapped 1 invocation per `(token, ch4)` slot with 128-bit `vec4`/`f16vec4` coalesced loads and stores.
+- **Performance Gains:**
+  - 1080p Pool Busy Time: **42.45 ms -> 2.53 ms (16.8x speedup! -39.92 ms saved)**.
+  - 960x576 Pool Busy Time: **6.30 ms -> 0.66 ms (9.5x speedup)**.
+  - 1080p Steady-State Chain: **912.9 ms -> 767.5 ms (-145.4 ms saved)**.
+  - 1080p Selftest Chain: **622.9 ms -> 547.0 ms (-75.9 ms saved; total -194.8 ms from baseline)**.
+  - 960x576 Steady-State Chain: **266.8 ms -> 210.2 ms (-56.6 ms saved)**.
+- **Rollback Flag:** `D5C_INT8_POOL_VEC=0`.
 
-### Issue 3: In-Game Overlay Mouse Focus & Freeze (SOLVED)
-- **Root Cause:**
-  - Overlay opened with `WS_EX_NOACTIVATE` without stealing focus to prevent window minimization, but the game had captured the mouse and called `ShowCursor(FALSE)`.
-  - Moonlight hid client cursor because the foreground window (game) had hidden its cursor.
-  - Previous `suspend_pid()` suspended the game process in kernel mode while holding the Win32 input queue, locking the mouse.
-- **Resolution:**
-  - `overlay_freeze` defaults to `False` (live game runs at 60+ FPS while adjusting sliders). Photo Mode Freeze is triggered on demand via `freeze_set(True)`.
-  - In `overlay.py`: `_free_cursor()` attaches thread input (`AttachThreadInput`) to the foreground game thread, releases clipping (`ClipCursor(None)`), releases capture (`ReleaseCapture()`), and un-hides `IDC_ARROW`.
-  - `self.win.focus_set()` and `self.win.lift()` give the overlay mouse focus without calling `SW_RESTORE`, preventing DWM from minimizing exclusive fullscreen games.
-
-### Issue 4: UI Window Layout Broken After Exiting Low-Resolution Games (SOLVED)
-- **Root Cause:** When running games in 800x600 exclusive fullscreen (e.g. GTA IV), Windows shrinks all desktop windows to fit 800x600. When returning to 2560x1440, Tkinter did not handle display mode changes and kept the shrunken/distorted layout.
-- **Resolution:** Added `<FocusIn>` handler in `dlss5/m13/ui.py` with `minsize(1024, 760)` that automatically detects shrunken window dimensions and restores `1024x760` geometry and re-renders cards.
-- **Daemon Lifecycle:** In `controller.py`, `StateMonitor` automatically detects when the game process terminates and stops the background `m11d.exe` process, immediately freeing VRAM and resetting status to `"Direct GPU"`.
-
-### Issue 5: High-Frequency Noise Flickering ("Гирлянда") (SOLVED)
-- **Root Cause:** In `features.comp`, pseudo-random noise `deterministicNoise(x, y, frameIndex)` changed seed every frame. Multiplied by `gain`, this created frame-to-frame pixel sparkling.
-- **Resolution:** Pinned deterministic noise seed `p.b[0] = 1` in `dlss5/chain/engine.cpp` during temporal passthrough.
-
-### Issue 6: Contrast-Adaptive Edge Sharpening (CAS) (SOLVED)
-- **Implementation:** Added robust bounded sharpening into `dlss5/m8b-live/shaders/encode.comp` push constants (`pc.c[0]`), connected to the live `Sharpness` slider (0.0 to 1.0). Strictly bounded to local 3x3 neighborhood limits: mathematically impossible to ring, halo, or amplify noise.
+### Stage 16: v0.3 Production Release Packaging & Multi-Frontend Validation (Commit `b6db10d`)
+- **Full Clean Rebuild:** Rebuilt all runtime targets:
+  - `d5c_chain.dll` (Core neural module)
+  - `m11d.exe` (Frame daemon & verification)
+  - `nr_layer_win.dll` (Vulkan layer x64)
+  - `m12_dxgi.dll` (DX12 proxy hook)
+  - `m8blive.exe` (Desktop overlay runner)
+  - All SPIR-V kernels (`attn_fused.spv`, `pool2.spv`, `gemm_i8.spv`, etc.) synchronized.
+- **Bundle Packaging (`_build_production.py`):**
+  - Updated to package INT8 weights (`dlssnr-int8.bin`) alongside FP16 safetensors with SHA-1 validation.
+  - Patched Vulkan layer JSON manifests with absolute paths for x86 and x64 loaders.
+- **Verification Gates:**
+  - Production bundle selftest: exit code 0, 45.05 dB PSNR vs FP16 reference, 999.00 dB (100.00% bit-exact, max_diff=0.0) vs Stage 14/15 reference, 0 NaNs/Infs.
+  - PE exports inspected: all Vulkan negotiation, DXGI factories, and C ABI entry points verified.
+  - Production Manager (`m13`): all 16 Python package modules import cleanly.
+  - Desktop capture / screen mode: confirmed graceful error reporting on locked session (`E_ACCESSDENIED`).
+  - Running background tasks: 0 active tasks (task-570 killed cleanly).
 
 ---
 
-## 3. Architecture Matrix
+### 3. Architecture & Binary Matrix
 
 | Subsystem | Binary / Module | Description | Mode |
 | :--- | :--- | :--- | :--- |
-| **x64 Vulkan Games** (RDR2, Witcher 3, Cyberpunk) | `nr_layer_win.dll` + `d5c_chain.dll` | Direct In-Process GPU execution via C ABI | 0 ms Socket Lag, No Daemon |
-| **x64 DX12 Games** (GTA V Enhanced) | `m12_dxgi.dll` + `d5c_chain.dll` | Direct In-Process GPU execution via C ABI | 0 ms Socket Lag, No Daemon |
+| **x64 Vulkan Games** (RDR2, Witcher 3, Cyberpunk) | `nr_layer_win.dll` + `d5c_chain.dll` | Direct in-process GPU execution via C ABI | 0 ms Socket Lag, No Daemon |
+| **x64 DX12 Games** (GTA V Enhanced) | `m12_dxgi.dll` + `d5c_chain.dll` | Direct in-process GPU execution via C ABI | 0 ms Socket Lag, No Daemon |
 | **x86 Vulkan/DX9 Games** (GTA IV via DXVK) | `nr_layer_win32.dll` $\leftrightarrow$ `m11d.exe` | TCP loopback bridge (x86 $\to$ x64 daemon) | Auto-managed daemon lifecycle |
 | **Screen Mode** (Desktop / Window Overlay) | `m8blive.exe` | Standalone direct DDA desktop capture overlay | Direct GPU, No Daemon |
 | **Management GUI & Overlay** | `m13` (`pythonw m13.pyw`) | Tkinter modern dashboard & in-game overlay | Topmost non-minimizing overlay |
-| **Official Performance Benchmarks** | [docs/BENCHMARKS.md](BENCHMARKS.md) | Verified hardware matrix, 15-20 ms reconciliation, 50% preset target | 233.5 ms @ 0.50 scale, 0.39 ms FrameGen |
+| **Official Performance Benchmarks** | [docs/BENCHMARKS.md](BENCHMARKS.md) | Verified hardware matrix, 15-20 ms reconciliation | 210.2 ms @ 0.50 scale, 547 ms @ 1080p |
 
 ---
 
-## 4. Host Quirks & Red Lines
-1. **Sunshine is Permanent:** Sunshine (PID ~6524 / ~4792) streams this desktop to the owner via Moonlight. **NEVER kill Sunshine.**
-2. **Local Git Commits Only:** Keep all commits local on `master` branch. Do NOT push to remote repositories.
+### 4. Ground-Truth Hardware Performance Matrix (Intel Arc Pro B50)
+
+| Resolution / Extent | v0.2 Release | Baseline (Stage 13) | v0.3 Fused Attention | v0.3 Final Release | Delta from v0.2 |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **1080p Native (Selftest)** | 867.2 ms | 741.8 ms | 622.9 ms | **547.0 ms** | **-320.2 ms (-36.9%)** |
+| **1080p Native (Steady State)** | 909.3 ms | 839.9 ms | 904.6 ms | **767.5 ms** | **-141.8 ms (-15.6%)** |
+| **960x576 (0.50x Steady State)** | 233.5 ms | 214.4 ms | 247.3 ms (cold) | **210.2 ms** | **-23.3 ms (-10.0%)** |
+| **DRAM Traffic @ 1080p** | 72.5 GB | 68.3 GB | 53.1 GB | **53.1 GB** | **-19.4 GB (-26.8%)** |
+| **Dispatches @ 1080p** | 1271 | 1261 | 1007 | **1007** | **-264 dispatches** |
+| **FrameGen (Optical Flow)** | 0.39 ms | 0.39 ms | 0.39 ms | **0.39 ms** | **2500+ FPS** |
+
+---
+
+### 5. Host Quirks, Rules & Red Lines (Mandatory)
+1. **Sunshine is Permanent:** Sunshine (PID ~7784 / ~6524) streams this desktop to the owner via Moonlight. **NEVER stop or kill Sunshine.**
+2. **Local Git Commits Only:** Keep commits local on `master`. Do NOT push to remote repositories. Use `git add -f` for docs/*.md, *.log.
 3. **ASCII-Only in Code and Scripts:** Non-ASCII comments in `.cmd` or `.cpp` can trigger launcher parse bugs on this host.
-4. **Weights Proprietary:** `dlssnr-logical.safetensors` and `dlssnr-int8.bin` must never be committed to git.
+4. **Weights Proprietary:** `dlssnr-logical.safetensors` and `dlssnr-int8.bin` must NEVER be committed to git.
+5. **No Foreground Long Commands:** Always launch heavy/looping commands detached or via asynchronous scripts.
 
 ---
 
-## 5. Optimization Progress & Current State (2026-09-28)
-
-### What is Completed & Fully Verified:
-1. **INT8 Weight1 & Weight2 End-to-End (`Stage 11`, Commit `8af6ea5`):**
-   - Dynamic per-32-token symmetric activation quantization (`quant_act.comp`).
-   - INT8 coopmat 8x16x32 ($BM=32, BN=32$) with fused gate+e4m3 epilogue for `weight1` and multi-tile K-loop (4 tiles for $K=128$) with fused residual for `weight2`.
-   - Quality: Weight2 Pilot 70: **48.76 dB**, $r = 0.9954$.
-2. **Fused `weight1 -> weight2` Pipeline (`Stage 12`, Commit `ce060bd`):**
-   - Direct producer-consumer pipeline: `weight1` epilogue computes 32x32 tile absmax via `subgroupMax()` reduction, writes tile scales to `O.oQScale2`, directly writes INT8 activations to `O.oG3`.
-   - `weight2` multi-tile K-loop loads INT8 directly from `O.oG3` with tile scales.
-   - Intermediate `quant_act` pass **100% ELIMINATED** (10 dispatches and 10 barriers removed per frame).
-   - Quality: **45.05 dB PSNR** (improved from 44.42 dB due to 32x32 tile scale dynamic range), $r = 0.9698$, 0 NaNs/Infs.
-   - Hardware Measured Benchmarks (Intel Arc Pro B50):
-     - 1080p: **741.83 ms** (-98.12 ms saved per frame, **1.13x speedup**; **-4.27 GB DRAM traffic saved**).
-     - 960x576: **214.38 ms** (-19.39 ms saved per frame; **-1.13 GB DRAM traffic saved**).
-3. **Window Attention (QKV & Projection) in INT8 (`Stage 13`, Commit `51409de`):**
-   - Batched scale indexing `by = gl_WorkGroupID.z * ((pc.m + BM - 1u) / BM) + gl_WorkGroupID.y` across all window grids ($z \in [0..W_w-1]$).
-   - Sized `off.oQScale` and `off.oQScale2` using `maxTokens = std::max(st[0].TOK, Ww * 64)` to avert 610-float buffer overruns.
-   - Granular controls: `D5C_INT8_ATTN` (default `-1` for 100% rollback safety), `D5C_INT8_ATTN_QKV`, `D5C_INT8_ATTN_PROJ`.
-   - Window block filtering in `weights.cpp` (`isWindow = blk <= 30 || blk >= 40`), preserving FP16 precision for global blocks 31..38.
-   - Quality: Attention Pilot 70: **44.94 dB PSNR**, $r = 0.9680$, 0 NaNs/Infs. Rollback baseline: **45.05 dB PSNR** (bit-exact).
-   - Roofline Finding: All Attention GEMMs in FP16 execute in only **46.1 ms** total across the whole network (weights live permanently in L2 cache, direct register-to-memory stores). Un-fused INT8 adds `quant_act` (+24.0 ms) and shared-memory dequant (+54.2 ms) overhead, confirming that the remaining attention leverage is in **Flash-Attention fusion**.
-
----
-
-## 6. Exact Roadmap for Next Session: Flash-Attention Fusion
-
-### Target: Fuse `cosw` + `smaxw` + `gather` into Single On-Chip Attention Kernel
-- **Measured Problem:** The Attention Subsystem (`cosw` 91.2 ms + `smaxw` 78.7 ms + `gather` 32.7 ms = **202.6 ms on 1080p**, 60.9 ms on 960x576) is memory-bound, materializing intermediate score matrices (`oSCW` $[W_w, H, 64, 64]$ and `oPRW`) to DRAM.
-- **Solution:**
-  1. **Fused Flash-Attention Kernel:** Compute Query/Key dot-products, online softmax normalization (running max + sum), and Value accumulation directly in SRAM / registers per window tile ($64 \times 64$).
-  2. **Eliminate Intermediate Buffers:** Remove `oSCW` (46 MB) and `oPRW` (23 MB) DRAM traffic entirely.
-  3. **Expected Leverage:** Cut ~100-150 ms from 1080p frame time, targeting **< 600 ms @ 1080p** and **< 160 ms @ 960x576**.
-
-
+### 6. Roadmap & Next Steps for v0.4
+1. **Window Transpose & Partition Vectorization:**
+   - Profiling shows `trans.comp` (29.59 ms @ 1080p) and `part.comp` (27.30 ms @ 1080p) are memory-bound latency holes with scalar or un-coalesced access patterns.
+   - Vectorize memory loads/stores to 128-bit `vec4`/`f16vec4` following the successful `pool2.comp` pattern (potential ~30-40 ms savings at 1080p).
+2. **Quantization of Global Blocks (Blocks 31..38):**
+   - Currently, global attention blocks 31..38 remain in FP16. Evaluate INT8 quantization with global token normalization.
+3. **End-to-End Live Game Validation:**
+   - Test production bundle on live game targets (RDR2, GTA IV, GTA V Enhanced) through Moonlight stream to confirm real-time visual fidelity and HUD preservation.

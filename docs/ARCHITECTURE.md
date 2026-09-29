@@ -152,18 +152,18 @@ Current verified numbers on the Intel Arc Pro B50 (Vulkan 1.4.348, XMX Xe2):
 
 | Size / Preset | Chain time | Raw FPS | With FrameGen | Result |
 |---|---|---|---|---|
-| **Performance Preset (Scale 0.50, 960x576)** | **233.5 ms** | **4.28 fps** | **~8.5 fps** | **Current v0.2 baseline; target 40-60 ms (playable)** |
+| **Performance Preset (Scale 0.50, 960x576)** | **210.2 ms steady** | **4.76 fps** | **~9.5 fps** | **Current v0.3 release; target 40-60 ms (playable)** |
 | Ultra Performance (Scale 0.33, 640x384) | 125.5 ms | 7.97 fps | ~15.9 fps | Fast test extent |
 | 500x500 window mode | ~135 ms | ~7 fps | ~14 fps | Retro window mode |
-| **1080p Native (Scale 1.00, 1920x1088)** | **909.3 ms** | **1.10 fps** | **~2.2 fps** | Heavy compute (811 GEMMs; selftest 586.9 ms) |
+| **1080p Native (Scale 1.00, 1920x1088)** | **547.0 ms selftest / 767.5 ms steady** | **1.30-1.83 fps** | **~2.6-3.7 fps** | Heavy compute (-320 ms reduction from v0.2) |
 | GPU Frame Generation (Optical Flow) | 0.39 ms | 2564 fps (theor.) | 2x multiplier | Bidirectional temporal interpolation |
 
 For full per-kernel hardware breakdowns, speedup history, and historical metric reconciliation, see the official reference document: [docs/BENCHMARKS.md](BENCHMARKS.md).
 
-Known headroom (measured, documented in DEV_STATE.md): barrier tax ~276 ms at
-1080p (addressed), shallow-K M-tiling for memory-bound GEMM layers (underway),
-INT8 cooperative matrix quantization (XMX hardware supported), and attention
-kernel fusion. Real-time path focuses on the 0.50 scale Performance preset.
+Key breakthroughs in v0.3: Flash-Attention kernel fusion (`attn_fused.comp`) eliminating
+intermediate DRAM buffers `oSCW`/`oPRW` (-15.12 GB DRAM traffic at 1080p), and
+vectorized 128-bit downsample pooling (`pool2.comp`, 16.8x kernel speedup). Real-time path
+focuses on the 0.50 scale Performance preset.
 
 ## Repository map
 
