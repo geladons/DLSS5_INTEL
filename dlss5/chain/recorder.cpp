@@ -141,15 +141,14 @@ void ChainRecorder::dGemmI8(VkCommandBuffer cb, int fam, uint64_t a, uint64_t b,
     else if (epi == EPI_RESIDUAL_F16) resBytes = (uint64_t)m * n * 2 + (uint64_t)n * 4;
     uint64_t outBytes = isProducer ? ((uint64_t)m * n * 1) : (narrow ? ((uint64_t)m * n * 2) : ((uint64_t)m * n * 4));
 
+    uint64_t bBytes = (sb == 0) ? ((uint64_t)k * n * 1 + (uint64_t)n * 4) : (bcount * ((uint64_t)k * n * 1 + (uint64_t)n * 4));
     uint64_t bytes = bcount * (
         (uint64_t)m * k * 1 +
-        (uint64_t)k * n * 1 +
-        (uint64_t)n * 4 +
         actScaleBytes +
         outScaleBytes +
         resBytes +
         outBytes
-    );
+    ) + bBytes;
 
     pmBegin(cb);
     vkCmdDispatch(cb, (n + GEMM_BN - 1) / GEMM_BN, (m + GEMM_BM - 1) / GEMM_BM, batch);

@@ -16,6 +16,20 @@ static void winGeo(const Stage& s, int oy, int ox,
     Ww = hp8 * wp8;
 }
 
+static int parsePilot(const char* envName, const char* legacyEnv, int defaultVal) {
+    if (const char* p = std::getenv(envName)) {
+        if (std::strcmp(p, "none") == 0 || std::strcmp(p, "off") == 0) return -1;
+        return std::atoi(p);
+    }
+    if (legacyEnv) {
+        if (const char* p = std::getenv(legacyEnv)) {
+            if (std::strcmp(p, "none") == 0 || std::strcmp(p, "off") == 0) return -1;
+            return std::atoi(p);
+        }
+    }
+    return defaultVal;
+}
+
 // ---- window attention shared tail (per-stage geometry) -----------------
 void ChainRecorder::recordWindowAttn(VkCommandBuffer cb, int famIdx, int idx, const Stage& s,
                                      int C, int H, int fam, int oy, int ox,
@@ -30,10 +44,26 @@ void ChainRecorder::recordWindowAttn(VkCommandBuffer cb, int famIdx, int idx, co
     std::string projN = lay(fam == 2 ? "block%d.layer3.projection_weight" : "block%d.layer0.projection_weight");
     std::string acosN = lay(fam == 2 ? "block%d.layer3.attn_cos_skip" : "block%d.layer0.attn_cos_skip");
 
+    int pilotQKV = parsePilot("D5C_INT8_ATTN_QKV", "D5C_INT8_ATTN", -1);
+    int pilotProj = parsePilot("D5C_INT8_ATTN_PROJ", "D5C_INT8_ATTN", -1);
+
+    bool useI8_qkv = isQuantized(qkvN) && (pilotQKV >= 0 && idx <= pilotQKV);
+    bool useI8_proj = isQuantized(projN) && (pilotProj >= 0 && idx <= pilotProj);
+
     dPart(cb, A(ffnOff), A(ar_->off.oWIN), s, (uint32_t)C, padTop, padLeft, wp8, ffn16);
     bar(cb);
-    dGemm(cb, famIdx, A(ar_->off.oWIN), A(woff(qkvN)), A(ar_->off.oPROJW), 64, 3 * C, C, Ww,
-          64 * C, 0, 64 * 3 * C, gflags(EPI_NONE, false), C, 3 * C, 3 * C);
+    if (useI8_qkv) {
+        dQuantAct(cb, A(ar_->off.oWIN), A(ar_->off.oQAct), A(ar_->off.oQScale), Ww * 64, (uint32_t)C);
+        bar(cb);
+        dGemmI8(cb, famIdx, A(ar_->off.oQAct), A(woff(qkvN)), A(ar_->off.oPROJW),
+                A(wscale(qkvN)), A(ar_->off.oQScale), 0.0f,
+                64, 3 * (uint32_t)C, (uint32_t)C, Ww,
+                64 * (uint32_t)C, 0, 64 * 3 * (uint32_t)C,
+                gflags(EPI_NONE, false), (uint32_t)C, 3 * (uint32_t)C, 3 * (uint32_t)C);
+    } else {
+        dGemm(cb, famIdx, A(ar_->off.oWIN), A(woff(qkvN)), A(ar_->off.oPROJW), 64, 3 * C, C, Ww,
+              64 * C, 0, 64 * 3 * C, gflags(EPI_NONE, false), C, 3 * C, 3 * C);
+    }
     bar(cb);
     // M10: fused Q/K/V dispatch reads oPROJW once and writes oQW, oKW, oVW.
     dCosW(cb, A(ar_->off.oPROJW), A(ar_->off.oQW), A(ar_->off.oKW), A(ar_->off.oVW),
@@ -49,8 +79,18 @@ void ChainRecorder::recordWindowAttn(VkCommandBuffer cb, int famIdx, int idx, co
     bar(cb);
     dTrans(cb, A(ar_->off.oMGW), A(ar_->off.oATW), Ww, H);
     bar(cb);
-    dGemm(cb, famIdx, A(ar_->off.oATW), A(woff(projN)), A(ar_->off.oABW), 64, C, C, Ww,
-          64 * C, 0, 64 * C, gflags(EPI_NONE, false), C, C, C);
+    if (useI8_proj) {
+        dQuantAct(cb, A(ar_->off.oATW), A(ar_->off.oQAct), A(ar_->off.oQScale), Ww * 64, (uint32_t)C);
+        bar(cb);
+        dGemmI8(cb, famIdx, A(ar_->off.oQAct), A(woff(projN)), A(ar_->off.oABW),
+                A(wscale(projN)), A(ar_->off.oQScale), 0.0f,
+                64, (uint32_t)C, (uint32_t)C, Ww,
+                64 * (uint32_t)C, 0, 64 * (uint32_t)C,
+                gflags(EPI_NONE, false), (uint32_t)C, (uint32_t)C, (uint32_t)C);
+    } else {
+        dGemm(cb, famIdx, A(ar_->off.oATW), A(woff(projN)), A(ar_->off.oABW), 64, C, C, Ww,
+              64 * C, 0, 64 * C, gflags(EPI_NONE, false), C, C, C);
+    }
     bar(cb);
     dGather(cb, A(ar_->off.oABW), A(ffnOff), A(vec(acosN)), A(rawOff), A(publish ? pubOff : rawOff),
             s, (uint32_t)C, padTop, padLeft, wp8, publish, ffn16);
@@ -67,20 +107,6 @@ void ChainRecorder::recordWindowBlock(VkCommandBuffer cb, int famIdx, int idx, c
     VkDeviceSize x16 = cur.is16 ? cur.off : O.oG2;
     if (!cur.is16) { dEw(cb, A(cur.off), 0, 0, 0, A(O.oG2), TOKS * C, 2, 0); bar(cb); }
     if (fam == 0) {
-        auto parsePilot = [](const char* envName, const char* legacyEnv, int defaultVal) -> int {
-            if (const char* p = std::getenv(envName)) {
-                if (std::strcmp(p, "none") == 0 || std::strcmp(p, "off") == 0) return -1;
-                return std::atoi(p);
-            }
-            if (legacyEnv) {
-                if (const char* p = std::getenv(legacyEnv)) {
-                    if (std::strcmp(p, "none") == 0 || std::strcmp(p, "off") == 0) return -1;
-                    return std::atoi(p);
-                }
-            }
-            return defaultVal;
-        };
-
         int pilotW1 = parsePilot("D5C_INT8_W1", "D5C_INT8_PILOT", 70);
         int pilotW2 = parsePilot("D5C_INT8_W2", "D5C_INT8_PILOT", 70);
 

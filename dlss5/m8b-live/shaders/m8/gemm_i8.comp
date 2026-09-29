@@ -144,7 +144,8 @@ void main() {
             subgroupMemoryBarrierShared();
             subgroupBarrier();
 
-            float tile_scale_a = FloatBuf(pc.a_scale).v[gl_WorkGroupID.y * num_k_tiles + t];
+            uint by = gl_WorkGroupID.z * ((pc.m + BM - 1u) / BM) + gl_WorkGroupID.y;
+            float tile_scale_a = FloatBuf(pc.a_scale).v[by * num_k_tiles + t];
             for (uint e = gl_LocalInvocationID.x * 4u; e < BM * BN; e += 32u * 4u) {
                 stage_f[e + 0u] += float(stage[e + 0u]) * tile_scale_a;
                 stage_f[e + 1u] += float(stage[e + 1u]) * tile_scale_a;
@@ -260,7 +261,8 @@ void main() {
     subgroupMemoryBarrierShared();
     subgroupBarrier();
 
-    float act_scale = (pc.a_scale != 0ul) ? FloatBuf(pc.a_scale).v[gl_WorkGroupID.y] : pc.scale_a;
+    uint by = gl_WorkGroupID.z * ((pc.m + BM - 1u) / BM) + gl_WorkGroupID.y;
+    float act_scale = (pc.a_scale != 0ul) ? FloatBuf(pc.a_scale).v[by] : pc.scale_a;
     uint epilogue = (pc.flags >> 8) & 0xFu;
     bool narrow = (pc.flags & F_NARROW) != 0u;
 

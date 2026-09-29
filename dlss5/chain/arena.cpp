@@ -87,9 +87,11 @@ void ChainArena::layout(const Stage st[7], uint64_t T6P, uint64_t packTotalIn,
     }
     maxTokC = std::max(maxTokC, T6 * 1024);
     uint64_t wWin = 0, wProj = 0, wQkv = 0, wSc = 0;
+    uint64_t maxTokens = (uint64_t)st[0].TOK;
     for (int s = 0; s < 6; ++s) {
         uint32_t hp8 = (st[s].H + 4 + 7) / 8, wp8 = (st[s].W + 4 + 7) / 8;
         uint64_t Ww = (uint64_t)hp8 * wp8, Hd = stageC[s] / 32;
+        maxTokens = std::max(maxTokens, Ww * 64);
         wWin = std::max(wWin, Ww * 64 * stageC[s]);
         wProj = std::max(wProj, Ww * 64 * 3 * stageC[s]);
         wQkv = std::max(wQkv, Ww * Hd * 64 * 32);
@@ -135,9 +137,10 @@ void ChainArena::layout(const Stage st[7], uint64_t T6P, uint64_t packTotalIn,
     // (kept allocated: descriptor bindings 3/15 reference these ranges)
     off.oFeatV = slot((uint64_t)st[0].TOK * 16 * 4);
     off.oHeadDC = slot(1024);
-    off.oQAct = slot(maxTok4C * 1);
-    off.oQScale = slot((((uint64_t)st[0].TOK + 31) / 32) * 4);
-    off.oQScale2 = slot((((uint64_t)st[0].TOK + 31) / 32) * 16);
+    uint64_t maxBlocks = (maxTokens + 31) / 32;
+    off.oQAct = slot(std::max(maxTok4C, wWin) * 1);
+    off.oQScale = slot(maxBlocks * 4);
+    off.oQScale2 = slot(maxBlocks * 16);
 
     auto preVec = [&](const std::string& n) { if (ws.poff.count(n)) needVecL(n); };
     for (int i = 0; i <= 70; ++i) {

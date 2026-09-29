@@ -239,19 +239,24 @@ bool WeightsStore::loadInt8(const std::string& path) {
     int pilotW1   = parsePilot("D5C_INT8_W1", "D5C_INT8_PILOT", 70);
     int pilotW2   = parsePilot("D5C_INT8_W2", "D5C_INT8_PILOT", 70);
     int pilotAttn = parsePilot("D5C_INT8_ATTN", nullptr, -1);
+    int pilotQKV  = parsePilot("D5C_INT8_ATTN_QKV", "D5C_INT8_ATTN", -1);
+    int pilotProj = parsePilot("D5C_INT8_ATTN_PROJ", "D5C_INT8_ATTN", -1);
 
     for (auto& kv : wfInt8.tensors) {
         if (!kv.second.isQuantized) continue;
         int blk = std::atoi(kv.first.substr(5, kv.first.find('.') - 5).c_str());
 
+        bool isWindow = (blk <= 30) || (blk >= 40);
         bool overrideTensor = false;
         if (kv.first.find(".layer0.weight1") != std::string::npos) {
             if (pilotW1 >= 0 && blk <= pilotW1) overrideTensor = true;
         } else if (kv.first.find(".layer0.weight2") != std::string::npos) {
             if (pilotW2 >= 0 && blk <= pilotW2) overrideTensor = true;
-        } else if (kv.first.find(".qkv_weight") != std::string::npos ||
-                   kv.first.find(".projection_weight") != std::string::npos ||
-                   kv.first.find(".ffn_expand_weight") != std::string::npos) {
+        } else if (kv.first.find(".qkv_weight") != std::string::npos) {
+            if (isWindow && pilotQKV >= 0 && blk <= pilotQKV) overrideTensor = true;
+        } else if (kv.first.find(".projection_weight") != std::string::npos) {
+            if (isWindow && pilotProj >= 0 && blk <= pilotProj) overrideTensor = true;
+        } else if (kv.first.find(".ffn_expand_weight") != std::string::npos) {
             if (pilotAttn >= 0 && blk <= pilotAttn) overrideTensor = true;
         }
 
@@ -260,8 +265,8 @@ bool WeightsStore::loadInt8(const std::string& path) {
             replaced++;
         }
     }
-    std::printf("[weights] INT8 quantized weights loaded: %zu tensors overridden (w1: pilot=%d, w2: pilot=%d, attn: pilot=%d)\n",
-                replaced, pilotW1, pilotW2, pilotAttn);
+    std::printf("[weights] INT8 quantized weights loaded: %zu tensors overridden (w1: %d, w2: %d, qkv: %d, proj: %d)\n",
+                replaced, pilotW1, pilotW2, pilotQKV, pilotProj);
     return true;
 }
 
