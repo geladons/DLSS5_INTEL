@@ -433,11 +433,16 @@ def _game_from_group(root, source, name=None, depth=4):
     # main binary: biggest API-positive exe; prefer a name similar to the
     # folder on ties (avoids picking a bundled dedicated server etc.)
     folder_norm = _norm(os.path.basename(os.path.abspath(root)))
-    mains.sort(key=lambda g: (
-        -g.size,
-        0 if _norm(os.path.splitext(os.path.basename(g.exe))[0]) in folder_norm
-        or folder_norm in _norm(os.path.splitext(os.path.basename(g.exe))[0])
-        else 1))
+
+    def _main_sort_key(g):
+        base_norm = _norm(os.path.splitext(os.path.basename(g.exe))[0])
+        name_match = 0 if (base_norm in folder_norm or folder_norm in base_norm) else 1
+        # For dual-binary games like The Witcher 3 (bin\x64\witcher3.exe [dx11] vs
+        # bin\x64_dx12\witcher3.exe [dx12]), prefer DX12 for DLSS 5 on modern Arc GPUs.
+        is_dx12 = 0 if ("dx12" in g.apis or "dx12" in g.exe.lower()) else 1
+        return (name_match, is_dx12, -g.size)
+
+    mains.sort(key=_main_sort_key)
     main = mains[0]
     main.likely = True
     if not name:
@@ -447,7 +452,12 @@ def _game_from_group(root, source, name=None, depth=4):
     wrapper = _pick_wrapper(root_level, main.exe,
                             os.path.basename(os.path.abspath(root)))
     if wrapper:
-        main.launch_exe = wrapper
+        # If the wrapper is REDprelauncher.exe (CDPR launcher window),
+        # launching the game directly bypasses the launcher window completely!
+        if "redprelauncher" in os.path.basename(wrapper).lower():
+            main.launch_exe = main.exe
+        else:
+            main.launch_exe = wrapper
     return main
 
 

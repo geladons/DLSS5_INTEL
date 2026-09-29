@@ -28,7 +28,7 @@ CMD_SETAUTOMASK = 9
 CMD_SETSTYLEINDEX = 10
 CMD_SETCOLORSTRENGTH = 11
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 47990
+DEFAULT_PORT = int(os.environ.get("NR_LAYER_PORT") or os.environ.get("DLSS5_PORT") or 48990)
 
 
 class DaemonError(Exception):

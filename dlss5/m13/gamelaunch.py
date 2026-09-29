@@ -134,21 +134,26 @@ def launch_game(exe_path, mode, scale=None, gain=None, blend=None, cfg=None, sha
     if mode not in ("dx9", "dx11", "vulkan", "dx12"):
         return False, "unknown mode: %s" % mode
 
+    env = {}
     if mode in ("dx9", "dx11", "vulkan"):
         _flag_set(DX9_TRIGGER, True)   # processing ON from the first present
+        env.update({
+            "ENABLE_NR_LAYER": "1",
+            "NR_LAYER_LIVE": "1",
+            "NR_LAYER_TRIGGER": DX9_TRIGGER,
+            "NR_LAYER_FREEZE": FREEZE_FLAG,
+            "NR_LAYER_REPROC": REPROC_FLAG,
+            "NR_LAYER_UI_MASK": "1",
+        })
     elif mode == "dx12":
         _flag_set(M12_PAUSE, False)    # make sure we start un-paused
+        # DX12 uses m12_dxgi.dll proxy + in-process d5c_chain.dll.
+        # Disable the Vulkan presentation layer to avoid layer collision with d5c_chain's Vulkan context.
+        env.update({
+            "ENABLE_NR_LAYER": "0",
+        })
 
     freeze_set(False)                  # never launch into a frozen frame
-
-    env = {
-        "ENABLE_NR_LAYER": "1",
-        "NR_LAYER_LIVE": "1",
-        "NR_LAYER_TRIGGER": DX9_TRIGGER,
-        "NR_LAYER_FREEZE": FREEZE_FLAG,
-        "NR_LAYER_REPROC": REPROC_FLAG,
-        "NR_LAYER_UI_MASK": "1",
-    }
     sharp_val = 0.8
     if cfg is not None and hasattr(cfg, "get"):
         sharp_val = cfg.get("sharpness") or 0.8

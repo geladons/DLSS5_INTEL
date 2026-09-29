@@ -20,7 +20,7 @@ from . import config as config_mod
 from . import deploy as deploy_mod
 from . import gamelaunch
 from . import paths
-from .daemonctl import M11dClient, DaemonError
+from .daemonctl import M11dClient, DaemonError, DEFAULT_PORT
 from .deploy import Deployer, LayerRegistry
 from .phase30 import phase30_env_dict, write_phase30_knobs, PHASE30_DEFAULTS
 from .processes import ManagedProcess, find_pid
@@ -126,14 +126,20 @@ class StateMonitor(threading.Thread):
         snap["color_strength"] = p30["color_strength"]
 
         currently_running = {exe for exe, g in games.items() if g.get("running")}
+        has_running_x86 = any(
+            g.get("arch") == "x86"
+            for exe, g in games.items()
+            if g.get("running")
+        ) or (find_pid("gtaiv.exe") is not None) or (find_pid("GTAIV.exe") is not None)
+
+        if has_running_x86:
+            self._x86_empty_ticks = 0
+        else:
+            self._x86_empty_ticks = getattr(self, "_x86_empty_ticks", 0) + 1
+
         exited_games = self._prev_running_games - currently_running
-        if exited_games:
-            has_running_x86 = any(
-                g.get("arch") == "x86"
-                for exe, g in games.items()
-                if g.get("running")
-            )
-            if not has_running_x86 and ctl.daemon.running:
+        if exited_games or not has_running_x86:
+            if not has_running_x86 and ctl.daemon.running and self._x86_empty_ticks >= 10:
                 msg = "[controller] game exited; stopping x86 background daemon"
                 print(msg, flush=True)
                 if ctl.worker and getattr(ctl.worker, "on_result", None):
@@ -352,7 +358,7 @@ class M13Controller:
             # (that was "screen mode kills the daemon").
             ok, msg = self.screen.stop()
             notes.append("screen overlay stopped (%s)" % msg)
-        args = ["--port", "47990", "--gain", "%.3f" % self.cfg.get("gain"),
+        args = ["--port", str(DEFAULT_PORT), "--gain", "%.3f" % self.cfg.get("gain"),
                 "--blend", "%.3f" % float(self.cfg.get("blend") or 1.0),
                 "--scale", "%.2f" % float(self.cfg.get("scale") or 0.50),
                 "--framegen", "1" if self.cfg.get("frame_gen") else "0",
