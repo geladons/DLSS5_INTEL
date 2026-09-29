@@ -213,27 +213,10 @@ class ManagerUI:
                                     font=("Segoe UI", 8))
         self.daemon_info.pack(side="left", padx=(4, 0))
 
-        controls = tk.Frame(bar, bg=PANEL)
-        controls.pack(fill="x", padx=10, pady=(0, 8))
-        tk.Label(controls, text=tr("scale"), bg=PANEL, fg=MUTED,
-                 font=("Segoe UI", 9, "bold")).pack(side="left", padx=(0, 6))
         self.scale_var = tk.StringVar(
             value=scale_to_preset_label(self.ctl.cfg.get("scale")))
-        self.scale_cb = ttk.Combobox(
-            controls, textvariable=self.scale_var, width=24, state="readonly",
-            values=scale_preset_labels())
-        self.scale_cb.pack(side="left", padx=(0, 14))
-        self.scale_cb.bind("<<ComboboxSelected>>", self._scale_selected)
         self.framegen_var = tk.BooleanVar(
             value=bool(self.ctl.cfg.get("frame_gen")))
-        self.framegen_chk = ttk.Checkbutton(
-            controls, text=tr("framegen"), variable=self.framegen_var,
-            command=self._framegen_toggled)
-        self.framegen_chk.pack(side="left", padx=(0, 14))
-        self.fg_hint = tk.Label(controls, text=tr("framegen_hint"),
-                                bg=PANEL, fg=MUTED,
-                                font=("Segoe UI", 8))
-        self.fg_hint.pack(side="right")
 
     def _draw_logo(self, color):
         self.logo.delete("all")
@@ -378,6 +361,22 @@ class ManagerUI:
         lang_box.bind("<<ComboboxSelected>>", lang_changed)
         ttk.Label(lang, text=tr("language_note"),
                   style="Muted.TLabel").pack(side="left")
+
+        eng = ttk.LabelFrame(t, text=tr("scale"), padding=8)
+        eng.pack(fill="x", pady=6)
+        ttk.Label(eng, text=tr("scale")).pack(side="left", padx=(0, 6))
+        self.scale_cb = ttk.Combobox(
+            eng, textvariable=self.scale_var, width=24, state="readonly",
+            values=scale_preset_labels())
+        self.scale_cb.pack(side="left", padx=(0, 14))
+        self.scale_cb.bind("<<ComboboxSelected>>", self._scale_selected)
+        self.framegen_chk = ttk.Checkbutton(
+            eng, text=tr("framegen"), variable=self.framegen_var,
+            command=self._framegen_toggled)
+        self.framegen_chk.pack(side="left", padx=(0, 14))
+        self.fg_hint = ttk.Label(eng, text=tr("framegen_hint"),
+                                 style="Muted.TLabel")
+        self.fg_hint.pack(side="right")
 
         opts = ttk.Frame(t)
         opts.pack(anchor="w", pady=6)
