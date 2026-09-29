@@ -457,6 +457,8 @@ void ChainEngine::recordFrame(long frameIndex) {
             // features at the full vendor extent (temporal OFF: channels 7-9 take
             // the vendor first-frame layout every frame)
             vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeFeatures_);
+            float p30Ctrl[5];
+            cfg_.phase30.computeFeatureControls(p30Ctrl);
             Push p{};
             p.a[0] = (int32_t)netW_; p.a[1] = (int32_t)netH_;
             p.a[2] = (int32_t)regionW_; p.a[3] = (int32_t)regionH_;
@@ -465,8 +467,14 @@ void ChainEngine::recordFrame(long frameIndex) {
             // Golden validation uses frameIndex=1, matching seed 1.
             p.b[0] = 1;
             p.b[1] = (int32_t)rl; p.b[2] = (int32_t)rt; p.b[3] = (int32_t)W_;
-            p.c[0] = 0.0f; p.c[1] = 1.0f; p.c[2] = 1.0f;
-            p.d[0] = 0.0f; p.d[1] = 0.0f; p.d[2] = 0.0f; p.d[3] = 0.0f;
+            p.c[0] = p30Ctrl[0]; // ch 10: style
+            p.c[1] = p30Ctrl[1]; // ch 11: tone
+            p.c[2] = p30Ctrl[2]; // ch 12: structure
+            p.c[3] = p30Ctrl[3]; // ch 13: skin_structure
+            p.d[0] = 0.0f;       // histValid
+            p.d[1] = p30Ctrl[4]; // ch 14: auto_mask_structure
+            p.d[2] = 1.0f;       // phase30Valid
+            p.d[3] = 0.0f;
             push(p);
             if (prof_.enabled()) prof_.markBegin(cmd_);
             vkCmdDispatch(cmd_, ((uint64_t)netW_ * netH_ + 255) / 256, 1, 1);
@@ -498,10 +506,12 @@ void ChainEngine::recordFrame(long frameIndex) {
             vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeCompose_);
             p.a[0] = (int32_t)W_; p.a[1] = (int32_t)rt; p.a[2] = (int32_t)rl; p.a[3] = (int32_t)netW_;
             p.b[0] = (int32_t)regionW_; p.b[1] = (int32_t)regionH_;
-            p.c[0] = 12.0f / 255.0f;      // legacy accumulate clamp (unused in absolute mode)
-            p.c[1] = 0.0f;                // absolute mode (no accumulate)
-            p.c[2] = cfg_.headGain;       // vendor residual scale
-            p.c[3] = cfg_.headBlend;      // vendor mix factor (M13 knob #2)
+            p.c[0] = 12.0f / 255.0f;              // legacy accumulate clamp (unused in absolute mode)
+            p.c[1] = 0.0f;                        // absolute mode (no accumulate)
+            p.c[2] = cfg_.headGain;               // vendor residual scale
+            p.c[3] = cfg_.phase30.intensity;      // Phase 30 intensity extrapolation (default 1.6)
+            p.d[0] = cfg_.phase30.colorStrength;  // Phase 30 color strength (default 1.0)
+            p.d[1] = 1.0f;                        // Phase 30 compose active flag
             push(p);
             if (prof_.enabled()) prof_.markBegin(cmd_);
             vkCmdDispatch(cmd_, ((uint64_t)regionW_ * regionH_ + 255) / 256, 1, 1);
@@ -578,6 +588,8 @@ void ChainEngine::recordFrame(long frameIndex) {
             vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLayout_, 0, 1,
                                     &setFinal_, 0, nullptr);
             p = Push{};
+            float p30Ctrl[5];
+            cfg_.phase30.computeFeatureControls(p30Ctrl);
             p.a[0] = (int32_t)netW_; p.a[1] = (int32_t)netH_;
             p.a[2] = (int32_t)netW_; p.a[3] = (int32_t)netH_;
             // When temporal history is not active, use a fixed seed (1) for deterministic
@@ -585,8 +597,14 @@ void ChainEngine::recordFrame(long frameIndex) {
             // Golden validation uses frameIndex=1, matching seed 1.
             p.b[0] = 1;
             p.b[1] = 0; p.b[2] = 0; p.b[3] = (int32_t)netW_;
-            p.c[0] = 0.0f; p.c[1] = 1.0f; p.c[2] = 1.0f;
-            p.d[0] = 0.0f; p.d[1] = 0.0f; p.d[2] = 0.0f; p.d[3] = 0.0f;
+            p.c[0] = p30Ctrl[0]; // ch 10: style
+            p.c[1] = p30Ctrl[1]; // ch 11: tone
+            p.c[2] = p30Ctrl[2]; // ch 12: structure
+            p.c[3] = p30Ctrl[3]; // ch 13: skin_structure
+            p.d[0] = 0.0f;       // histValid
+            p.d[1] = p30Ctrl[4]; // ch 14: auto_mask_structure
+            p.d[2] = 1.0f;       // phase30Valid
+            p.d[3] = 0.0f;
             push(p);
             if (prof_.enabled()) prof_.markBegin(cmd_);
             vkCmdDispatch(cmd_, ((uint64_t)netW_ * netH_ + 255) / 256, 1, 1);
@@ -621,7 +639,9 @@ void ChainEngine::recordFrame(long frameIndex) {
             p.c[0] = 12.0f / 255.0f;
             p.c[1] = 0.0f;
             p.c[2] = cfg_.headGain;
-            p.c[3] = cfg_.headBlend;
+            p.c[3] = cfg_.phase30.intensity;
+            p.d[0] = cfg_.phase30.colorStrength;
+            p.d[1] = 1.0f;
             push(p);
             if (prof_.enabled()) prof_.markBegin(cmd_);
             vkCmdDispatch(cmd_, ((uint64_t)netW_ * netH_ + 255) / 256, 1, 1);

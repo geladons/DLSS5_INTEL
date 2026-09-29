@@ -214,12 +214,27 @@ static PFN_dlss5_set_sharpness pfn_dlss5_set_sharpness = NULL;
 static PFN_dlss5_interpolate_frame pfn_dlss5_interpolate_frame = NULL;
 static PFN_dlss5_set_framegen pfn_dlss5_set_framegen = NULL;
 static PFN_dlss5_get_framegen pfn_dlss5_get_framegen = NULL;
+static PFN_dlss5_set_phase30 pfn_dlss5_set_phase30 = NULL;
+static PFN_dlss5_set_intensity pfn_dlss5_set_intensity = NULL;
+static PFN_dlss5_set_local_tone pfn_dlss5_set_local_tone = NULL;
+static PFN_dlss5_set_local_structure pfn_dlss5_set_local_structure = NULL;
+static PFN_dlss5_set_skin_structure pfn_dlss5_set_skin_structure = NULL;
+static PFN_dlss5_set_auto_mask pfn_dlss5_set_auto_mask = NULL;
+static PFN_dlss5_set_style_index pfn_dlss5_set_style_index = NULL;
+static PFN_dlss5_set_color_strength pfn_dlss5_set_color_strength = NULL;
 static int g_inprocess_attempted = 0;
 static int g_inprocess_active = 0;
 static float g_cur_scale = -1.0f;
 static float g_cur_gain = -1.0f;
 static float g_cur_blend = -1.0f;
 static float g_cur_sharpness = -1.0f;
+static float g_cur_intensity = -1.0f;
+static float g_cur_local_tone = -1.0f;
+static float g_cur_local_structure = -1.0f;
+static float g_cur_skin_structure = -999.0f;
+static int g_cur_auto_mask = -1;
+static int g_cur_style_index = -1;
+static float g_cur_color_strength = -1.0f;
 
 static int is_framegen_enabled(void)
 {
@@ -305,6 +320,93 @@ static void update_live_knobs(void)
         int enable = (fg_s[0] == '1' || !strcmp(fg_s, "true") || !strcmp(fg_s, "on")) ? 1 : 0;
         pfn_dlss5_set_framegen(g_engine, enable);
     }
+
+    const char *intensity_s = getenv("NR_LAYER_INTENSITY");
+    if (!intensity_s) intensity_s = getenv("DLSS5_INTENSITY");
+    if (intensity_s && pfn_dlss5_set_intensity) {
+        float val = (float)atof(intensity_s);
+        float diff = val - g_cur_intensity;
+        if (diff < 0.0f) diff = -diff;
+        if (diff > 1e-4f) {
+            g_cur_intensity = val;
+            pfn_dlss5_set_intensity(g_engine, val);
+            nr_log("[nr_layer] live intensity updated: %.2f", val);
+        }
+    }
+
+    const char *lt_s = getenv("NR_LAYER_LOCAL_TONE");
+    if (!lt_s) lt_s = getenv("DLSS5_LOCAL_TONE");
+    if (lt_s && pfn_dlss5_set_local_tone) {
+        float val = (float)atof(lt_s);
+        float diff = val - g_cur_local_tone;
+        if (diff < 0.0f) diff = -diff;
+        if (diff > 1e-4f) {
+            g_cur_local_tone = val;
+            pfn_dlss5_set_local_tone(g_engine, val);
+            nr_log("[nr_layer] live local_tone updated: %.2f", val);
+        }
+    }
+
+    const char *ls_s = getenv("NR_LAYER_LOCAL_STRUCTURE");
+    if (!ls_s) ls_s = getenv("DLSS5_LOCAL_STRUCTURE");
+    if (ls_s && pfn_dlss5_set_local_structure) {
+        float val = (float)atof(ls_s);
+        float diff = val - g_cur_local_structure;
+        if (diff < 0.0f) diff = -diff;
+        if (diff > 1e-4f) {
+            g_cur_local_structure = val;
+            pfn_dlss5_set_local_structure(g_engine, val);
+            nr_log("[nr_layer] live local_structure updated: %.2f", val);
+        }
+    }
+
+    const char *ss_s = getenv("NR_LAYER_SKIN_STRUCTURE");
+    if (!ss_s) ss_s = getenv("DLSS5_SKIN_STRUCTURE");
+    if (ss_s && pfn_dlss5_set_skin_structure) {
+        float val = (float)atof(ss_s);
+        float diff = val - g_cur_skin_structure;
+        if (diff < 0.0f) diff = -diff;
+        if (diff > 1e-4f) {
+            g_cur_skin_structure = val;
+            pfn_dlss5_set_skin_structure(g_engine, val);
+            nr_log("[nr_layer] live skin_structure updated: %.2f", val);
+        }
+    }
+
+    const char *am_s = getenv("NR_LAYER_AUTO_MASK");
+    if (!am_s) am_s = getenv("DLSS5_AUTO_MASK");
+    if (am_s && pfn_dlss5_set_auto_mask) {
+        int val = (am_s[0] == '1' || !strcmp(am_s, "true") || !strcmp(am_s, "on")) ? 1 : 0;
+        if (val != g_cur_auto_mask) {
+            g_cur_auto_mask = val;
+            pfn_dlss5_set_auto_mask(g_engine, val);
+            nr_log("[nr_layer] live auto_mask updated: %d", val);
+        }
+    }
+
+    const char *si_s = getenv("NR_LAYER_STYLE_INDEX");
+    if (!si_s) si_s = getenv("DLSS5_STYLE_INDEX");
+    if (si_s && pfn_dlss5_set_style_index) {
+        int val = atoi(si_s);
+        if (val != g_cur_style_index) {
+            g_cur_style_index = val;
+            pfn_dlss5_set_style_index(g_engine, val);
+            nr_log("[nr_layer] live style_index updated: %d", val);
+        }
+    }
+
+    const char *cs_s = getenv("NR_LAYER_COLOR_STRENGTH");
+    if (!cs_s) cs_s = getenv("DLSS5_COLOR_STRENGTH");
+    if (cs_s && pfn_dlss5_set_color_strength) {
+        float val = (float)atof(cs_s);
+        float diff = val - g_cur_color_strength;
+        if (diff < 0.0f) diff = -diff;
+        if (diff > 1e-4f) {
+            g_cur_color_strength = val;
+            pfn_dlss5_set_color_strength(g_engine, val);
+            nr_log("[nr_layer] live color_strength updated: %.2f", val);
+        }
+    }
 }
 
 static void ensure_inprocess(void)
@@ -377,6 +479,14 @@ static void ensure_inprocess(void)
     pfn_dlss5_interpolate_frame = (PFN_dlss5_interpolate_frame)GetProcAddress(hDll, "dlss5_interpolate_frame");
     pfn_dlss5_set_framegen = (PFN_dlss5_set_framegen)GetProcAddress(hDll, "dlss5_set_framegen");
     pfn_dlss5_get_framegen = (PFN_dlss5_get_framegen)GetProcAddress(hDll, "dlss5_get_framegen");
+    pfn_dlss5_set_phase30 = (PFN_dlss5_set_phase30)GetProcAddress(hDll, "dlss5_set_phase30");
+    pfn_dlss5_set_intensity = (PFN_dlss5_set_intensity)GetProcAddress(hDll, "dlss5_set_intensity");
+    pfn_dlss5_set_local_tone = (PFN_dlss5_set_local_tone)GetProcAddress(hDll, "dlss5_set_local_tone");
+    pfn_dlss5_set_local_structure = (PFN_dlss5_set_local_structure)GetProcAddress(hDll, "dlss5_set_local_structure");
+    pfn_dlss5_set_skin_structure = (PFN_dlss5_set_skin_structure)GetProcAddress(hDll, "dlss5_set_skin_structure");
+    pfn_dlss5_set_auto_mask = (PFN_dlss5_set_auto_mask)GetProcAddress(hDll, "dlss5_set_auto_mask");
+    pfn_dlss5_set_style_index = (PFN_dlss5_set_style_index)GetProcAddress(hDll, "dlss5_set_style_index");
+    pfn_dlss5_set_color_strength = (PFN_dlss5_set_color_strength)GetProcAddress(hDll, "dlss5_set_color_strength");
 
     if (!pfn_dlss5_create || !pfn_dlss5_destroy || !pfn_dlss5_process_frame) {
         nr_log("d5c_chain.dll missing exports; falling back to TCP");
@@ -1662,6 +1772,14 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
         pfn_dlss5_interpolate_frame = NULL;
         pfn_dlss5_set_framegen = NULL;
         pfn_dlss5_get_framegen = NULL;
+        pfn_dlss5_set_phase30 = NULL;
+        pfn_dlss5_set_intensity = NULL;
+        pfn_dlss5_set_local_tone = NULL;
+        pfn_dlss5_set_local_structure = NULL;
+        pfn_dlss5_set_skin_structure = NULL;
+        pfn_dlss5_set_auto_mask = NULL;
+        pfn_dlss5_set_style_index = NULL;
+        pfn_dlss5_set_color_strength = NULL;
         g_inprocess_active = 0;
         g_inprocess_attempted = 0;
         if (g_lock_ready) { DeleteCriticalSection(&g_lock); g_lock_ready = 0; }

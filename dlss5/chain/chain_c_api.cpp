@@ -57,6 +57,16 @@ public:
           blend_((b >= 0.0f && b <= 1.0f) ? b : 1.0f),
           sharpness_(0.8f)
     {
+        p30Ctl_.loadFromEnv();
+        p30Ctl_.pollKnobsFile();
+        if (g > 0.0f) {
+            p30Ctl_.setIntensity(g);
+        } else if (b > 0.0f) {
+            p30Ctl_.setIntensity(b);
+        }
+        gain_ = p30Ctl_.params().intensity;
+        blend_ = p30Ctl_.params().intensity;
+
         const char* s_env = std::getenv("DLSS5_SHARPNESS");
         if (!s_env) s_env = std::getenv("NR_LAYER_SHARPNESS");
         if (s_env) {
@@ -95,6 +105,7 @@ public:
         cfg.headGain = gain_;
         cfg.headBlend = blend_;
         cfg.renderScale = scale_;
+        cfg.phase30 = p30Ctl_.params();
         const char* s_env = std::getenv("DLSS5_SHARPNESS");
         if (!s_env) s_env = std::getenv("NR_LAYER_SHARPNESS");
         if (s_env) {
@@ -156,6 +167,10 @@ public:
         // Preserve original game alpha channel across processing
         for (size_t i = 0; i < px; ++i) {
             alphaBuf_[i] = inBytes[i * 4 + 3];
+        }
+
+        if (p30Ctl_.pollKnobsFile() || p30Ctl_.loadFromEnv()) {
+            engine_.setPhase30(p30Ctl_.params());
         }
 
         d5c::FrameStats stats{};
@@ -232,6 +247,56 @@ public:
         if (initialized_) {
             engine_.setSharpness(s);
         }
+    }
+
+    void setPhase30(float intensity, float local_tone, float local_structure,
+                    float skin_structure, int auto_mask, int style_index,
+                    float color_strength) {
+        d5c::Phase30Params p{};
+        p.intensity = intensity;
+        p.localTone = local_tone;
+        p.localStructure = local_structure;
+        p.skinStructure = skin_structure;
+        p.autoMask = (auto_mask != 0);
+        p.styleIndex = style_index;
+        p.colorStrength = color_strength;
+        p30Ctl_.setParams(p);
+        gain_ = p.intensity;
+        blend_ = p.intensity;
+        if (initialized_) {
+            engine_.setPhase30(p30Ctl_.params());
+        }
+    }
+
+    void setIntensity(float v) {
+        p30Ctl_.setIntensity(v);
+        gain_ = v;
+        blend_ = v;
+        if (initialized_) engine_.setIntensity(v);
+    }
+    void setLocalTone(float v) {
+        p30Ctl_.setLocalTone(v);
+        if (initialized_) engine_.setLocalTone(v);
+    }
+    void setLocalStructure(float v) {
+        p30Ctl_.setLocalStructure(v);
+        if (initialized_) engine_.setLocalStructure(v);
+    }
+    void setSkinStructure(float v) {
+        p30Ctl_.setSkinStructure(v);
+        if (initialized_) engine_.setSkinStructure(v);
+    }
+    void setAutoMask(int v) {
+        p30Ctl_.setAutoMask(v != 0);
+        if (initialized_) engine_.setAutoMask(v != 0);
+    }
+    void setStyleIndex(int v) {
+        p30Ctl_.setStyleIndex(v);
+        if (initialized_) engine_.setStyleIndex(v);
+    }
+    void setColorStrength(float v) {
+        p30Ctl_.setColorStrength(v);
+        if (initialized_) engine_.setColorStrength(v);
     }
 
     void shutdown() {
@@ -312,6 +377,7 @@ private:
     bool havePrev_ = false;
     uint32_t prevW_ = 0, prevH_ = 0;
     std::vector<uint8_t> alphaBuf_;
+    d5c::Phase30Controller p30Ctl_;
 };
 
 } // namespace
@@ -383,6 +449,86 @@ DLSS5_API void dlss5_set_sharpness(void* handle, float s) {
     try {
         auto* ctx = static_cast<EngineContext*>(handle);
         ctx->setSharpness(s);
+    } catch (...) {
+    }
+}
+
+DLSS5_API void dlss5_set_phase30(void* handle,
+                                 float intensity,
+                                 float local_tone,
+                                 float local_structure,
+                                 float skin_structure,
+                                 int auto_mask,
+                                 int style_index,
+                                 float color_strength) {
+    if (!handle) return;
+    try {
+        auto* ctx = static_cast<EngineContext*>(handle);
+        ctx->setPhase30(intensity, local_tone, local_structure, skin_structure,
+                        auto_mask, style_index, color_strength);
+    } catch (...) {
+    }
+}
+
+DLSS5_API void dlss5_set_intensity(void* handle, float intensity) {
+    if (!handle) return;
+    try {
+        auto* ctx = static_cast<EngineContext*>(handle);
+        ctx->setIntensity(intensity);
+    } catch (...) {
+    }
+}
+
+DLSS5_API void dlss5_set_local_tone(void* handle, float local_tone) {
+    if (!handle) return;
+    try {
+        auto* ctx = static_cast<EngineContext*>(handle);
+        ctx->setLocalTone(local_tone);
+    } catch (...) {
+    }
+}
+
+DLSS5_API void dlss5_set_local_structure(void* handle, float local_structure) {
+    if (!handle) return;
+    try {
+        auto* ctx = static_cast<EngineContext*>(handle);
+        ctx->setLocalStructure(local_structure);
+    } catch (...) {
+    }
+}
+
+DLSS5_API void dlss5_set_skin_structure(void* handle, float skin_structure) {
+    if (!handle) return;
+    try {
+        auto* ctx = static_cast<EngineContext*>(handle);
+        ctx->setSkinStructure(skin_structure);
+    } catch (...) {
+    }
+}
+
+DLSS5_API void dlss5_set_auto_mask(void* handle, int auto_mask) {
+    if (!handle) return;
+    try {
+        auto* ctx = static_cast<EngineContext*>(handle);
+        ctx->setAutoMask(auto_mask);
+    } catch (...) {
+    }
+}
+
+DLSS5_API void dlss5_set_style_index(void* handle, int style_index) {
+    if (!handle) return;
+    try {
+        auto* ctx = static_cast<EngineContext*>(handle);
+        ctx->setStyleIndex(style_index);
+    } catch (...) {
+    }
+}
+
+DLSS5_API void dlss5_set_color_strength(void* handle, float color_strength) {
+    if (!handle) return;
+    try {
+        auto* ctx = static_cast<EngineContext*>(handle);
+        ctx->setColorStrength(color_strength);
     } catch (...) {
     }
 }

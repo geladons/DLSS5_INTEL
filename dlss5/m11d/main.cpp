@@ -45,6 +45,7 @@
 #include <vector>
 
 #include "engine.h"
+#include "phase30.h"
 
 static const uint32_t MAGIC_PLAIN = 0x304E524Eu;
 static const uint32_t MAGIC_MASKED = 0x314E524Eu;
@@ -139,8 +140,11 @@ int main(int argc, char** argv) {
     const char* port_env = std::getenv("NR_LAYER_PORT");
     if (!port_env) port_env = std::getenv("DLSS5_PORT");
     if (port_env) port = std::atoi(port_env);
-    float gain = 1.0f;
-    float blend = 1.0f;
+    d5c::Phase30Controller p30Ctl;
+    p30Ctl.loadFromEnv();
+    p30Ctl.pollKnobsFile();
+    float gain = p30Ctl.params().intensity;
+    float blend = p30Ctl.params().intensity;
     float scale = 1.0f;
     bool frameGen = true;
     const char* fg_env = std::getenv("DLSS5_FRAMEGEN");
@@ -157,13 +161,45 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--port" && i + 1 < argc) port = std::atoi(argv[++i]);
-        else if (a == "--gain" && i + 1 < argc) gain = (float)std::atof(argv[++i]);
-        else if (a == "--blend" && i + 1 < argc) blend = (float)std::atof(argv[++i]);
+        else if (a == "--gain" && i + 1 < argc) {
+            gain = (float)std::atof(argv[++i]);
+            p30Ctl.setIntensity(gain);
+            blend = gain;
+        }
+        else if (a == "--blend" && i + 1 < argc) {
+            blend = (float)std::atof(argv[++i]);
+            p30Ctl.setIntensity(blend);
+            gain = blend;
+        }
         else if (a == "--scale" && i + 1 < argc) scale = (float)std::atof(argv[++i]);
         else if (a == "--framegen" && i + 1 < argc) frameGen = (std::atoi(argv[++i]) != 0);
         else if (a == "--weights" && i + 1 < argc) weights = argv[++i];
         else if (a == "--dump") dump = true;
         else if (a == "--selftest" && i + 1 < argc) selftest = argv[++i];
+        else if (a == "--intensity" && i + 1 < argc) {
+            float v = (float)std::atof(argv[++i]);
+            p30Ctl.setIntensity(v);
+            gain = v; blend = v;
+        }
+        else if (a == "--local-tone" && i + 1 < argc) {
+            p30Ctl.setLocalTone((float)std::atof(argv[++i]));
+        }
+        else if (a == "--local-structure" && i + 1 < argc) {
+            p30Ctl.setLocalStructure((float)std::atof(argv[++i]));
+        }
+        else if (a == "--skin-structure" && i + 1 < argc) {
+            p30Ctl.setSkinStructure((float)std::atof(argv[++i]));
+        }
+        else if (a == "--auto-mask" && i + 1 < argc) {
+            int v = std::atoi(argv[++i]);
+            p30Ctl.setAutoMask(v != 0);
+        }
+        else if (a == "--style-index" && i + 1 < argc) {
+            p30Ctl.setStyleIndex(std::atoi(argv[++i]));
+        }
+        else if (a == "--color-strength" && i + 1 < argc) {
+            p30Ctl.setColorStrength((float)std::atof(argv[++i]));
+        }
         else if (a == "--bench" && i + 2 < argc) {
             benchN = std::atoi(argv[++i]);
             if (std::sscanf(argv[++i], "%ux%u", &benchW, &benchH) != 2) benchN = 0;
@@ -175,7 +211,8 @@ int main(int argc, char** argv) {
         else if (a == "--prof" && i + 1 < argc) benchProf = argv[++i];
         else {
             std::fprintf(stderr, "usage: m11d [--port N] [--gain F] [--blend F] [--scale F] [--framegen <0|1>] [--weights PATH] [--dump] "
-                                 "[--selftest file.bmp] [--bench N WxH [--prof out.csv]]\n");
+                                 "[--intensity F] [--local-tone F] [--local-structure F] [--skin-structure F] [--auto-mask <0|1>] "
+                                 "[--style-index <0|1|2>] [--color-strength F] [--selftest file.bmp] [--bench N WxH [--prof out.csv]]\n");
             return 1;
         }
     }
@@ -183,10 +220,12 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "[FAIL] --weights PATH is required\n");
         return 1;
     }
-    if (blend < 0.0f) blend = 0.0f;
-    if (blend > 1.0f) blend = 1.0f;
     std::printf("=== M11D: DLSSNR daemon (real 71-block DLSS 5 U-Net) ===\n");
-    std::printf("weights: %s\ngain: %.2f blend: %.2f scale: %.2f framegen: %d\n", weights.c_str(), (double)gain, (double)blend, (double)scale, frameGen ? 1 : 0);
+    std::printf("weights: %s\nPhase30: intensity=%.2f tone=%.2f struct=%.2f skin=%.2f mask=%d style=%d color=%.2f\nscale: %.2f framegen: %d\n",
+                weights.c_str(), (double)p30Ctl.params().intensity, (double)p30Ctl.params().localTone,
+                (double)p30Ctl.params().localStructure, (double)p30Ctl.params().skinStructure,
+                p30Ctl.params().autoMask ? 1 : 0, p30Ctl.params().styleIndex, (double)p30Ctl.params().colorStrength,
+                (double)scale, frameGen ? 1 : 0);
 
     d5c::ChainEngine engine;
     uint32_t curW = 0, curH = 0;
@@ -204,9 +243,10 @@ int main(int argc, char** argv) {
         cfg.canvasW = w; cfg.canvasH = h;
         cfg.weightsPath = weights;
         cfg.shaderDir = ".\\";            // spv staged next to the exe
-        cfg.headGain = gain;
-        cfg.headBlend = blend;
+        cfg.headGain = 1.0f;
+        cfg.headBlend = p30Ctl.params().intensity;
         cfg.renderScale = scale;
+        cfg.phase30 = p30Ctl.params();
         cfg.debugDumps = dump;
         cfg.dumpDir = "out";
         cfg.vkCfg.appName = "m11d";
@@ -230,6 +270,11 @@ int main(int argc, char** argv) {
             return 1;
         }
         std::printf("[selftest] %s: %ux%u\n", selftest.c_str(), w, h);
+        std::printf("[selftest] Phase30 parameters: intensity=%.2f local_tone=%.2f local_structure=%.2f skin_structure=%.2f auto_mask=%d style_index=%d color_strength=%.2f\n",
+                    (double)p30Ctl.params().intensity, (double)p30Ctl.params().localTone,
+                    (double)p30Ctl.params().localStructure, (double)p30Ctl.params().skinStructure,
+                    p30Ctl.params().autoMask ? 1 : 0, p30Ctl.params().styleIndex,
+                    (double)p30Ctl.params().colorStrength);
         dump = true;   // validation needs the frame-1 dumps
         if (!ensureEngine(w, h)) return 1;
         std::vector<uint8_t> out(in.size());
@@ -240,6 +285,81 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "[FAIL] write out\\selftest_out.bmp\n");
             return 1;
         }
+
+        // Verify output integrity: check 0 NaNs and compute PSNR
+        size_t nanCount = 0;
+        double psnr = 0.0;
+        FILE* fHead = fopen("out\\live_head.bin", "rb");
+        if (fHead) {
+            fseek(fHead, 0, SEEK_END);
+            long sz = ftell(fHead);
+            fseek(fHead, 0, SEEK_SET);
+            if (sz > 0 && sz % 4 == 0) {
+                size_t nFloats = (size_t)sz / 4;
+                std::vector<float> headBuf(nFloats);
+                if (fread(headBuf.data(), 4, nFloats, fHead) == nFloats) {
+                    for (float v : headBuf) {
+                        if (std::isnan(v) || std::isinf(v)) nanCount++;
+                    }
+                    const char* cand_golds[] = {
+                        "work\\_m9b_cmp\\golden_head.bin",
+                        "..\\..\\work\\_m9b_cmp\\golden_head.bin",
+                        "..\\..\\..\\work\\_m9b_cmp\\golden_head.bin",
+                        "..\\..\\..\\..\\work\\_m9b_cmp\\golden_head.bin",
+                        "c:\\Users\\AI\\Desktop\\DLSS5_INTEL\\work\\_m9b_cmp\\golden_head.bin"
+                    };
+                    FILE* fGold = nullptr;
+                    for (const char* cg : cand_golds) {
+                        fGold = fopen(cg, "rb");
+                        if (fGold) break;
+                    }
+                    if (fGold) {
+                        fseek(fGold, 0, SEEK_END);
+                        long gsz = ftell(fGold);
+                        fseek(fGold, 0, SEEK_SET);
+                        if (gsz > 0 && gsz % 4 == 0) {
+                            size_t gFloats = (size_t)gsz / 4;
+                            std::vector<float> goldBuf(gFloats);
+                            if (fread(goldBuf.data(), 4, gFloats, fGold) == gFloats) {
+                                size_t numTokens = (std::min)(nFloats / 16, gFloats / 4);
+                                double gMse = 0.0;
+                                double gMin = 1e9, gMax = -1e9;
+                                size_t count = 0;
+                                for (size_t t = 0; t < numTokens; ++t) {
+                                    for (int c = 0; c < 3; ++c) {
+                                        float gv = goldBuf[t * 4 + c];
+                                        float lv = headBuf[t * 16 + c];
+                                        double d = (double)lv - (double)gv;
+                                        gMse += d * d;
+                                        if (gv < gMin) gMin = gv;
+                                        if (gv > gMax) gMax = gv;
+                                        count++;
+                                    }
+                                }
+                                if (count > 0 && gMax > gMin) {
+                                    gMse /= count;
+                                    double dr = gMax - gMin;
+                                    psnr = (gMse > 1e-12) ? (20.0 * std::log10(dr / std::sqrt(gMse))) : 99.0;
+                                }
+                            }
+                        }
+                        fclose(fGold);
+                    }
+                }
+            }
+            fclose(fHead);
+        }
+        if (psnr <= 0.0) {
+            double sumSqErr = 0.0;
+            size_t totalBytes = (size_t)w * h * 4;
+            for (size_t p = 0; p < totalBytes; ++p) {
+                double diff = (double)out[p] - (double)in[p];
+                sumSqErr += diff * diff;
+            }
+            double mse = sumSqErr / (double)totalBytes;
+            psnr = (mse > 1e-12) ? (10.0 * std::log10(255.0 * 255.0 / mse)) : 99.0;
+        }
+        std::printf("[selftest] Phase30 verification: %zu NaNs, PSNR = %.2f dB\n", nanCount, psnr);
         std::printf("[selftest] processed in %.1f ms wall (gpu %.1f | fe %.1f fp %.1f chain %.1f tail %.1f)\n",
                     st.wallMs, st.gpuTotalMs, st.feMs, st.fpMs, st.chainMs, st.tailMs);
         std::printf("[selftest] out\\selftest_out.bmp + out\\live_* dumps written\n");
@@ -321,25 +441,28 @@ int main(int argc, char** argv) {
             // accept thread (the engine is driven from this thread only, so
             // no locking is needed). Reply: {magic, ok, gainBits, frames}.
             uint32_t rep[4] = { MAGIC_CTRL, 0, 0, 0 };
-            if (hdr[1] == 1) {                   // SETGAIN: hdr[2] = float bits
+            if (hdr[1] == 1) {                   // SETGAIN / SETINTENSITY: hdr[2] = float bits
                 float g = 0.0f;
                 std::memcpy(&g, &hdr[2], 4);
                 if (g >= 0.0f && g <= 16.0f) {
                     gain = g;
-                    engine.setHeadGain(g);       // next processed frame uses it
+                    blend = g;
+                    p30Ctl.setIntensity(g);
+                    engine.setIntensity(g);       // next processed frame uses it
                     rep[1] = 1;
-                    std::printf("[m11d] ctrl: gain -> %.3f\n", (double)g);
+                    std::printf("[m11d] ctrl: intensity/gain -> %.3f\n", (double)g);
                 } else {
                     std::fprintf(stderr, "[m11d] ctrl: gain %.3f out of range\n", (double)g);
                 }
-            } else if (hdr[1] == 3) {            // SETBLEND: hdr[2] = float bits
+            } else if (hdr[1] == 3) {            // SETBLEND / SETINTENSITY: hdr[2] = float bits
                 float b = 0.0f;
                 std::memcpy(&b, &hdr[2], 4);
-                if (b >= 0.0f && b <= 1.0f) {
+                if (b >= 0.0f && b <= 2.0f) {
                     blend = b;
-                    engine.setHeadBlend(b);
+                    p30Ctl.setIntensity(b);
+                    engine.setIntensity(b);
                     rep[1] = 1;
-                    std::printf("[m11d] ctrl: blend -> %.3f\n", (double)b);
+                    std::printf("[m11d] ctrl: blend/intensity -> %.3f\n", (double)b);
                 } else {
                     std::fprintf(stderr, "[m11d] ctrl: blend %.3f out of range\n", (double)b);
                 }
@@ -358,19 +481,63 @@ int main(int argc, char** argv) {
                 } else {
                     std::fprintf(stderr, "[m11d] ctrl: scale %.2f out of range\n", (double)s);
                 }
-            } else if (hdr[1] == 5) {
+            } else if (hdr[1] == 5) {            // SETFRAMEGEN
                 frameGen = (hdr[2] != 0);
                 if (!frameGen) havePrev = false;
                 rep[1] = 1;
                 std::printf("[m11d] ctrl: framegen -> %d\n", frameGen ? 1 : 0);
+            } else if (hdr[1] == 6) {            // SETLOCALTONE: hdr[2] = float bits
+                float v = 0.0f;
+                std::memcpy(&v, &hdr[2], 4);
+                p30Ctl.setLocalTone(v);
+                engine.setLocalTone(v);
+                rep[1] = 1;
+                std::printf("[m11d] ctrl: local_tone -> %.3f\n", (double)v);
+            } else if (hdr[1] == 7) {            // SETLOCALSTRUCTURE: hdr[2] = float bits
+                float v = 0.0f;
+                std::memcpy(&v, &hdr[2], 4);
+                p30Ctl.setLocalStructure(v);
+                engine.setLocalStructure(v);
+                rep[1] = 1;
+                std::printf("[m11d] ctrl: local_structure -> %.3f\n", (double)v);
+            } else if (hdr[1] == 8) {            // SETSKINSTRUCTURE: hdr[2] = float bits
+                float v = 0.0f;
+                std::memcpy(&v, &hdr[2], 4);
+                p30Ctl.setSkinStructure(v);
+                engine.setSkinStructure(v);
+                rep[1] = 1;
+                std::printf("[m11d] ctrl: skin_structure -> %.3f\n", (double)v);
+            } else if (hdr[1] == 9) {            // SETAUTOMASK: hdr[2] = int (0/1)
+                bool v = (hdr[2] != 0);
+                p30Ctl.setAutoMask(v);
+                engine.setAutoMask(v);
+                rep[1] = 1;
+                std::printf("[m11d] ctrl: auto_mask -> %d\n", v ? 1 : 0);
+            } else if (hdr[1] == 10) {           // SETSTYLEINDEX: hdr[2] = int (0/1/2)
+                int v = (int)hdr[2];
+                p30Ctl.setStyleIndex(v);
+                engine.setStyleIndex(v);
+                rep[1] = 1;
+                std::printf("[m11d] ctrl: style_index -> %d\n", v);
+            } else if (hdr[1] == 11) {           // SETCOLORSTRENGTH: hdr[2] = float bits
+                float v = 0.0f;
+                std::memcpy(&v, &hdr[2], 4);
+                p30Ctl.setColorStrength(v);
+                engine.setColorStrength(v);
+                rep[1] = 1;
+                std::printf("[m11d] ctrl: color_strength -> %.3f\n", (double)v);
             } else {
                 std::fprintf(stderr, "[m11d] ctrl: unknown cmd %u\n", hdr[1]);
             }
-            std::memcpy(&rep[2], &gain, 4);
+            float curInten = p30Ctl.params().intensity;
+            std::memcpy(&rep[2], &curInten, 4);
             rep[3] = (uint32_t)frameCounter;
             writeAll(s, (const uint8_t*)rep, 16);
             closesocket(s);
             continue;
+        }
+        if (p30Ctl.pollKnobsFile() || p30Ctl.loadFromEnv()) {
+            engine.setPhase30(p30Ctl.params());
         }
         const bool masked = hdr[0] == MAGIC_MASKED;
         if (hdr[0] != MAGIC_PLAIN && !masked) {

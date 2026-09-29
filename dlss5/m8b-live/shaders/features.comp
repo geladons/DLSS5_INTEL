@@ -166,6 +166,12 @@ void main() {
     float ctrl0 = halfr(pc.c.x);
     float ctrl1 = halfr(pc.c.y);
     float ctrl2 = halfr(pc.c.z);
+    float ctrl3 = -1.0;
+    float ctrl4 = -1.0;
+    if (pc.d.z > 0.5) {
+        ctrl3 = pc.c.w < 0.0 ? -1.0 : halfr(pc.c.w);
+        ctrl4 = pc.d.y < 0.0 ? -1.0 : halfr(pc.d.y);
+    }
     vec3 n3 = deterministicNoise(x, y, uint(pc.b.x));
 
     float o[16];
@@ -188,8 +194,8 @@ void main() {
     o[10] = ctrl0;
     o[11] = ctrl1;
     o[12] = ctrl2;
-    o[13] = -1.0;        // plain game recipe (nr_frame.py build_features)
-    o[14] = -1.0;
+    o[13] = ctrl3;       // Phase 30 skin structure
+    o[14] = ctrl4;       // Phase 30 auto-mask structure
     o[15] = 0.0;
     for (uint c = 0u; c < 16u; ++c) f[p * 16u + c] = o[c];
 }

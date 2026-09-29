@@ -73,6 +73,7 @@ add_library(d5c_chain STATIC
     recorder.cpp
     recorder_blocks.cpp
     prof.cpp
+    phase30.cpp
     engine.cpp
     chain_c_api.cpp)
 add_dependencies(d5c_chain d5c_shaders)

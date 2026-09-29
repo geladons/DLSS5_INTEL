@@ -56,6 +56,23 @@ DLSS5_API void dlss5_set_gain(void* handle, float gain);
 DLSS5_API void dlss5_set_blend(void* handle, float blend);
 DLSS5_API void dlss5_set_sharpness(void* handle, float sharpness);
 
+// NVIDIA Phase 30 vendor parameter controls:
+DLSS5_API void dlss5_set_phase30(void* handle,
+                                 float intensity,
+                                 float local_tone,
+                                 float local_structure,
+                                 float skin_structure,
+                                 int auto_mask,
+                                 int style_index,
+                                 float color_strength);
+DLSS5_API void dlss5_set_intensity(void* handle, float intensity);
+DLSS5_API void dlss5_set_local_tone(void* handle, float local_tone);
+DLSS5_API void dlss5_set_local_structure(void* handle, float local_structure);
+DLSS5_API void dlss5_set_skin_structure(void* handle, float skin_structure);
+DLSS5_API void dlss5_set_auto_mask(void* handle, int auto_mask);
+DLSS5_API void dlss5_set_style_index(void* handle, int style_index);
+DLSS5_API void dlss5_set_color_strength(void* handle, float color_strength);
+
 // Frame Generation (FSR 3.1 / Optical Flow Interpolation):
 // Interpolate an intermediate frame between frame0 and frame1 using GPU optical flow.
 DLSS5_API int dlss5_interpolate_frame(void* handle, uint32_t w, uint32_t h,
@@ -76,6 +93,21 @@ typedef void (*PFN_dlss5_set_scale)(void* handle, float scale);
 typedef void (*PFN_dlss5_set_gain)(void* handle, float gain);
 typedef void (*PFN_dlss5_set_blend)(void* handle, float blend);
 typedef void (*PFN_dlss5_set_sharpness)(void* handle, float sharpness);
+typedef void (*PFN_dlss5_set_phase30)(void* handle,
+                                      float intensity,
+                                      float local_tone,
+                                      float local_structure,
+                                      float skin_structure,
+                                      int auto_mask,
+                                      int style_index,
+                                      float color_strength);
+typedef void (*PFN_dlss5_set_intensity)(void* handle, float intensity);
+typedef void (*PFN_dlss5_set_local_tone)(void* handle, float local_tone);
+typedef void (*PFN_dlss5_set_local_structure)(void* handle, float local_structure);
+typedef void (*PFN_dlss5_set_skin_structure)(void* handle, float skin_structure);
+typedef void (*PFN_dlss5_set_auto_mask)(void* handle, int auto_mask);
+typedef void (*PFN_dlss5_set_style_index)(void* handle, int style_index);
+typedef void (*PFN_dlss5_set_color_strength)(void* handle, float color_strength);
 typedef int (*PFN_dlss5_interpolate_frame)(void* handle, uint32_t w, uint32_t h,
                                            const void* frame0_bgra, const void* frame1_bgra,
                                            void* out_interp_bgra, float factor);

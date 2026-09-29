@@ -57,6 +57,14 @@ static PFN_dlss5_set_blend pfn_dlss5_set_blend = NULL;
 static PFN_dlss5_interpolate_frame pfn_dlss5_interpolate_frame = NULL;
 static PFN_dlss5_set_framegen pfn_dlss5_set_framegen = NULL;
 static PFN_dlss5_get_framegen pfn_dlss5_get_framegen = NULL;
+static PFN_dlss5_set_phase30 pfn_dlss5_set_phase30 = NULL;
+static PFN_dlss5_set_intensity pfn_dlss5_set_intensity = NULL;
+static PFN_dlss5_set_local_tone pfn_dlss5_set_local_tone = NULL;
+static PFN_dlss5_set_local_structure pfn_dlss5_set_local_structure = NULL;
+static PFN_dlss5_set_skin_structure pfn_dlss5_set_skin_structure = NULL;
+static PFN_dlss5_set_auto_mask pfn_dlss5_set_auto_mask = NULL;
+static PFN_dlss5_set_style_index pfn_dlss5_set_style_index = NULL;
+static PFN_dlss5_set_color_strength pfn_dlss5_set_color_strength = NULL;
 static int g_inprocess_attempted = 0;
 static int g_inprocess_active = 0;
 static LONG g_proc_count = 0;
@@ -196,6 +204,14 @@ static void ensure_inprocess()
     pfn_dlss5_interpolate_frame = (PFN_dlss5_interpolate_frame)GetProcAddress(hDll, "dlss5_interpolate_frame");
     pfn_dlss5_set_framegen = (PFN_dlss5_set_framegen)GetProcAddress(hDll, "dlss5_set_framegen");
     pfn_dlss5_get_framegen = (PFN_dlss5_get_framegen)GetProcAddress(hDll, "dlss5_get_framegen");
+    pfn_dlss5_set_phase30 = (PFN_dlss5_set_phase30)GetProcAddress(hDll, "dlss5_set_phase30");
+    pfn_dlss5_set_intensity = (PFN_dlss5_set_intensity)GetProcAddress(hDll, "dlss5_set_intensity");
+    pfn_dlss5_set_local_tone = (PFN_dlss5_set_local_tone)GetProcAddress(hDll, "dlss5_set_local_tone");
+    pfn_dlss5_set_local_structure = (PFN_dlss5_set_local_structure)GetProcAddress(hDll, "dlss5_set_local_structure");
+    pfn_dlss5_set_skin_structure = (PFN_dlss5_set_skin_structure)GetProcAddress(hDll, "dlss5_set_skin_structure");
+    pfn_dlss5_set_auto_mask = (PFN_dlss5_set_auto_mask)GetProcAddress(hDll, "dlss5_set_auto_mask");
+    pfn_dlss5_set_style_index = (PFN_dlss5_set_style_index)GetProcAddress(hDll, "dlss5_set_style_index");
+    pfn_dlss5_set_color_strength = (PFN_dlss5_set_color_strength)GetProcAddress(hDll, "dlss5_set_color_strength");
 
     if (!pfn_dlss5_create || !pfn_dlss5_destroy || !pfn_dlss5_process_frame) {
         m12_logf("[m12_dxgi] d5c_chain.dll missing exports; falling back to TCP");
@@ -326,6 +342,14 @@ void m12_dx12_shutdown_inprocess()
     pfn_dlss5_interpolate_frame = NULL;
     pfn_dlss5_set_framegen = NULL;
     pfn_dlss5_get_framegen = NULL;
+    pfn_dlss5_set_phase30 = NULL;
+    pfn_dlss5_set_intensity = NULL;
+    pfn_dlss5_set_local_tone = NULL;
+    pfn_dlss5_set_local_structure = NULL;
+    pfn_dlss5_set_skin_structure = NULL;
+    pfn_dlss5_set_auto_mask = NULL;
+    pfn_dlss5_set_style_index = NULL;
+    pfn_dlss5_set_color_strength = NULL;
     g_inprocess_active = 0;
     g_inprocess_attempted = 0;
     LeaveCriticalSection(&g_inproc_cs);

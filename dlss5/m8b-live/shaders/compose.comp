@@ -101,23 +101,44 @@ void main() {
     uint natP = (uint(pc.a.y) + y) * uint(pc.a.x) + (uint(pc.a.z) + x);
     uint hP = (y * uint(pc.a.w) + x) * 16u;        // head token (region origin == net origin)
     float m = pc.c.x > 0.0 && pc.c.x < 1.0 ? pc.c.x : 1.0;   // accumulate clamp
-    float gain = pc.c.z;
-    float blend = pc.c.w;                          // vendor mix factor (1.0 = full)
-    for (uint c = 0u; c < 3u; ++c) {
-        float source = nat[natP * 3u + c];
-        float halfv = halfr(head[hP + c]) * 0.25 * gain;
-        if (pc.c.y > 0.5) {
-            // Legacy accumulate mode (feedback cancellation).
-            float delta = clamp(halfv, -m, m) * blend;
+    float gain = pc.c.z > 0.0 ? pc.c.z : 1.0;
+    float intensity = pc.c.w;                      // Phase 30 intensity (0..2, default 1.6)
+    float colorStrength = (pc.d.y > 0.5) ? pc.d.x : 1.0;
+
+    if (pc.c.y > 0.5) {
+        // Legacy accumulate mode (feedback cancellation).
+        for (uint c = 0u; c < 3u; ++c) {
+            float source = nat[natP * 3u + c];
+            float halfv = halfr(head[hP + c]) * 0.25 * gain;
+            float delta = clamp(halfv, -m, m) * intensity;
             fin[p * 3u + c] = source + delta;
             nro[p * 3u + c] = clamp(source + delta, 0.0, 1.0);
-        } else {
-            // Vendor compose_head (composition.py:23-32) with the live
-            // blend knob: out = clamp(source + blend * (predicted - source)).
-            float predicted = clamp(source + halfv, 0.0, 1.0);
-            float finalv = clamp(source + blend * (predicted - source), 0.0, 1.0);
-            fin[p * 3u + c] = finalv;
-            nro[p * 3u + c] = predicted;
+        }
+    } else {
+        // Phase 30 compose with extrapolation:
+        //   pred = clamp(source + residual, 0, 1)
+        //   delta = pred - source
+        //   deltaY = dot(delta, vec3(0.299, 0.587, 0.114))
+        //   deltaChroma = delta - deltaY
+        //   adjDelta = deltaY + colorStrength * deltaChroma
+        //   out = clamp(source + intensity * adjDelta, 0, 1)
+        vec3 source;
+        vec3 pred;
+        for (uint c = 0u; c < 3u; ++c) {
+            source[c] = nat[natP * 3u + c];
+            float halfv = halfr(head[hP + c]) * 0.25 * gain;
+            pred[c] = clamp(source[c] + halfv, 0.0, 1.0);
+        }
+
+        vec3 delta = pred - source;
+        float deltaY = 0.299 * delta.r + 0.587 * delta.g + 0.114 * delta.b;
+        vec3 deltaChroma = delta - vec3(deltaY);
+        vec3 adjDelta = vec3(deltaY) + colorStrength * deltaChroma;
+        vec3 finalv = clamp(source + intensity * adjDelta, 0.0, 1.0);
+
+        for (uint c = 0u; c < 3u; ++c) {
+            fin[p * 3u + c] = finalv[c];
+            nro[p * 3u + c] = pred[c];
         }
     }
 }

@@ -5,6 +5,15 @@ EXPORTS
     dlss5_set_scale
     dlss5_set_gain
     dlss5_set_blend
+    dlss5_set_sharpness
+    dlss5_set_phase30
+    dlss5_set_intensity
+    dlss5_set_local_tone
+    dlss5_set_local_structure
+    dlss5_set_skin_structure
+    dlss5_set_auto_mask
+    dlss5_set_style_index
+    dlss5_set_color_strength
     dlss5_interpolate_frame
     dlss5_set_framegen
     dlss5_get_framegen

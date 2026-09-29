@@ -15,6 +15,7 @@
 #include "arena.h"
 #include "recorder.h"
 #include "prof.h"
+#include "phase30.h"
 
 #include <string>
 
@@ -27,9 +28,10 @@ struct EngineConfig {
     std::string weightsPath;                           // dlssnr-logical.safetensors
     std::string shaderDir;                             // dir with *.spv (trailing slash)
     float headGain = 1.0f;                             // vendor residual scale (--gain)
-    float headBlend = 1.0f;                            // vendor mix factor (--blend, M13 knob #2)
+    float headBlend = 1.6f;                            // vendor mix factor / intensity (default 1.6)
     float renderScale = 1.0f;
     float sharpness = 0.8f;
+    Phase30Params phase30{};                           // NVIDIA Phase 30 condition parameters
     VkContextConfig vkCfg{};                           // device selection (headless default)
     bool debugDumps = false;                           // dump live_*.bin on frame index 1
     std::string dumpDir = "out";                       // dump destination
@@ -59,9 +61,20 @@ public:
     // applies to the NEXT processFrame - no engine re-init, no game
     // re-capture. Daemon-side only (single-threaded accept loop).
     void setHeadGain(float g) { cfg_.headGain = g; }
-    void setHeadBlend(float b) { cfg_.headBlend = b; }
+    void setHeadBlend(float b) { cfg_.headBlend = b; cfg_.phase30.intensity = b; }
     void setSharpness(float s) { cfg_.sharpness = s; }
     float sharpness() const { return cfg_.sharpness; }
+
+    // Phase 30 vendor parameter controls
+    void setPhase30(const Phase30Params& p) { cfg_.phase30 = p; cfg_.headBlend = p.intensity; }
+    const Phase30Params& phase30() const { return cfg_.phase30; }
+    void setIntensity(float v) { cfg_.phase30.intensity = v; cfg_.headBlend = v; }
+    void setLocalTone(float v) { cfg_.phase30.localTone = v; }
+    void setLocalStructure(float v) { cfg_.phase30.localStructure = v; }
+    void setSkinStructure(float v) { cfg_.phase30.skinStructure = v; }
+    void setAutoMask(bool v) { cfg_.phase30.autoMask = v; }
+    void setStyleIndex(int v) { cfg_.phase30.styleIndex = v; }
+    void setColorStrength(float v) { cfg_.phase30.colorStrength = v; }
 
     uint32_t netW() const { return netW_; }
     uint32_t netH() const { return netH_; }
