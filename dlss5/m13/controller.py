@@ -15,6 +15,7 @@
 import os
 import queue
 import threading
+import time
 
 from . import config as config_mod
 from . import deploy as deploy_mod
@@ -142,6 +143,7 @@ class StateMonitor(threading.Thread):
         exited_games = self._prev_running_games - currently_running
         if exited_games and not currently_running:
             gamelaunch.reset_runtime_flags()
+            ctl._active_game_exe = None
         if exited_games or not has_running_x86:
             if (not has_running_x86 and self._x86_seen and ctl.daemon.running
                     and self._x86_empty_ticks >= 10):
@@ -226,6 +228,7 @@ class M13Controller:
         self.worker = None          # created by the UI (needs its callback)
         self.launched_exes = set()  # launch targets started BY US this
                                     # session (they carry the layer freeze env)
+        self._active_game_exe = None
 
         # Initialize runtime environment variables from config
         scale = float(self.cfg.get("scale") or 0.50)
@@ -692,6 +695,9 @@ class M13Controller:
             return find_pid(os.path.basename(exe))
         return None
 
+    def active_game_exe(self):
+        return self._active_game_exe
+
     # ----------------------------------------------------------- game mgmt --
     def add_game(self, exe, mode=None, arch=None, name=None, launch_exe=None):
         """Register a game exe; mode/arch auto-detected from the PE imports
@@ -731,11 +737,71 @@ class M13Controller:
             return True, "removed %s" % os.path.basename(exe)
         return False, "not in the list"
 
+    def _ensure_daemon_stopped(self, log_fn=None):
+        def _log(msg):
+            if log_fn:
+                log_fn(msg)
+            print(msg, flush=True)
+        pid = self.daemon.pid
+        if pid is None:
+            return True, "daemon not running"
+        ok, msg = self.daemon.stop()
+        if ok and not self.daemon.running:
+            return True, "stopped x86 daemon before x64 launch"
+        deadline = time.monotonic() + 6.0
+        while time.monotonic() < deadline:
+            if not self.daemon.running:
+                return True, "x86 daemon exited after stop signal"
+            time.sleep(0.3)
+        _log("[controller] graceful daemon stop timed out; force-killing pid %s" % self.daemon.pid)
+        target_pid = self.daemon.pid
+        if target_pid is not None:
+            from .processes import stop_pid
+            stop_pid(target_pid, force=True)
+        deadline2 = time.monotonic() + 3.0
+        while time.monotonic() < deadline2:
+            if not self.daemon.running:
+                return True, "force-killed x86 daemon before x64 launch"
+            time.sleep(0.3)
+        if self.daemon.running:
+            return False, "cannot release x86 daemon before x64 game: daemon still alive after force-kill"
+        return True, "force-killed x86 daemon before x64 launch"
+
+    @staticmethod
+    def _resolve_witcher3_dx12(exe, meta, cfg, log_fn=None):
+        def _log(msg):
+            if log_fn:
+                log_fn(msg)
+            print(msg, flush=True)
+        basename = os.path.basename(exe)
+        if basename.lower() != "witcher3.exe":
+            return exe, meta
+        norm = exe.replace("/", "\\")
+        marker = "\\bin\\x64\\"
+        idx = norm.lower().find(marker.lower())
+        if idx < 0:
+            return exe, meta
+        sibling = norm[:idx] + "\\bin\\x64_dx12\\" + norm[idx + len(marker):]
+        if not os.path.exists(sibling):
+            return exe, meta
+        _log("[controller] witcher3 dx11->dx12 sibling switch: %s -> %s" % (exe, sibling))
+        new_meta = dict(meta)
+        new_meta["mode"] = "dx12"
+        games = dict(cfg.get("games") or {})
+        if exe in games:
+            old_entry = games.pop(exe)
+            old_entry["mode"] = "dx12"
+            games[sibling] = old_entry
+            cfg.set("games", games)
+        return sibling, new_meta
+
     @staticmethod
     def launch_target(exe, meta=None):
-        """What 'Launch' actually starts (the wrapper when registered)."""
         meta = meta or {}
         target = meta.get("launch_exe") or exe
+        if target != exe and not os.path.exists(target):
+            if os.path.exists(exe):
+                return exe
         return target if os.path.exists(target) else exe
 
     def game_deploy(self, exe):
@@ -771,11 +837,19 @@ class M13Controller:
         meta = (self.cfg.get("games") or {}).get(exe)
         if not meta:
             return False, "add the game first"
+        log_fn = None
+        if self.worker and getattr(self.worker, "on_result", None):
+            log_fn = lambda m: self.worker.on_result(True, m)
+        resolved_exe, resolved_meta = self._resolve_witcher3_dx12(
+            exe, meta, self.cfg, log_fn=log_fn)
+        if resolved_exe != exe:
+            exe = resolved_exe
+            meta = resolved_meta
         d = Deployer(os.path.dirname(exe))
         if d.mode_status(meta["mode"], meta["arch"]) != "deployed":
-            ok, msg = self.game_deploy(exe)     # auto-deploy on launch
+            ok, dep_msg = self.game_deploy(exe)
             if not ok:
-                return False, msg
+                return False, dep_msg
         daemon_note = None
         if meta.get("arch") == "x86":
             if not self.daemon.running:
@@ -783,11 +857,14 @@ class M13Controller:
                 if not ok and "already" not in msg:
                     return False, msg
         elif self.daemon.running:
-            ok, msg = self.daemon.stop()
-            if not ok and self.daemon.running:
-                return False, "cannot release x86 daemon before x64 game: %s" % msg
-            daemon_note = "stopped x86 daemon before x64 launch"
+            ok, stop_msg = self._ensure_daemon_stopped(log_fn=log_fn)
+            if not ok:
+                return False, stop_msg
+            daemon_note = stop_msg
         target = self.launch_target(exe, meta)
+        if target != exe and not os.path.exists(target):
+            print("[controller] launch_exe not found, falling back to main exe: %s" % exe, flush=True)
+            target = exe
         scale = self.cfg.get("scale")
         blend = self.cfg.get("blend")
         ok, msg = gamelaunch.launch_game(target, meta["mode"],
@@ -795,6 +872,7 @@ class M13Controller:
                                          cfg=self.cfg)
         if ok:
             self.launched_exes.add(os.path.abspath(target).lower())
+            self._active_game_exe = exe
             if daemon_note:
                 msg = "%s | %s" % (daemon_note, msg)
             if target.lower() != exe.lower():
