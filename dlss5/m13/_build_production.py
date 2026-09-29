@@ -36,16 +36,23 @@ PKG_FILES = ["__init__.py", "config.py", "daemonctl.py", "deploy.py",
 _M11D_DIR = os.path.join(_DLSS5, "m11d", "build", "Release")
 if not os.path.exists(os.path.join(_M11D_DIR, "m11d.exe")):
     _M11D_DIR = os.path.join(_DLSS5, "m11d", "build-nmake")
+_CHAIN_DLL = os.path.join(_DLSS5, "m11d", "build", "chain", "Release",
+                          "d5c_chain.dll")
+if not os.path.exists(_CHAIN_DLL):
+    _CHAIN_DLL = os.path.join(_DLSS5, "m11d", "build-nmake", "chain",
+                              "d5c_chain.dll")
+if not os.path.exists(_CHAIN_DLL):
+    _CHAIN_DLL = os.path.join(_M11D_DIR, "d5c_chain.dll")
 
 # (source, dest-relative, glob-ish file list)
 ARTIFACTS = [
     (_M11D_DIR, ("runtime", "m11d"),
-     ["m11d.exe", "d5c_chain.dll", "*.spv"]),
+    ["m11d.exe", "*.spv"]),
     (os.path.join(_DLSS5, "m8b-live", "build", "Release"), ("runtime", "m8b"),
      ["m8blive.exe", "*.spv"]),
     (os.path.join(_DLSS5, "m11-layer", "build", "Release"),
      ("runtime", "layer", "x64"),
-     ["nr_layer_win.dll", "d5c_chain.dll", "VkLayer_dlssnr_win.json", "*.spv"]),
+      ["nr_layer_win.dll", "VkLayer_dlssnr_win.json", "*.spv"]),
     (os.path.join(_DLSS5, "m11-layer", "x86"), ("runtime", "layer", "x86"),
      ["nr_layer_win32.dll", "VkLayer_dlssnr_win32.json"]),
     (os.path.join(_DLSS5, "m11-layer", "dxvk", "x32"),
@@ -55,7 +62,7 @@ ARTIFACTS = [
      ("runtime", "dxvk", "x64"),
      ["d3d9.dll", "d3d11.dll", "d3d10core.dll", "dxgi.dll"]),
     (os.path.join(_DLSS5, "m12-dxgi", "build", "Release"),
-     ("runtime", "m12"), ["m12_dxgi.dll", "d5c_chain.dll", "*.spv"]),
+     ("runtime", "m12"), ["m12_dxgi.dll", "*.spv"]),
 ]
 
 LAUNCHER_VBS = r'''' DLSS 5 Manager launcher: starts pythonw with NO console.
@@ -199,6 +206,8 @@ def patch_manifests():
 def main():
     if not os.path.exists(WEIGHTS_SRC):
         raise SystemExit("weights not found: %s" % WEIGHTS_SRC)
+    if not os.path.exists(_CHAIN_DLL):
+        raise SystemExit("fresh d5c_chain.dll not found; run dlss5\\m11d\\build.cmd")
     os.makedirs(DEST, exist_ok=True)
     os.makedirs(os.path.join(DEST, "logs"), exist_ok=True)
     os.makedirs(os.path.join(DEST, "weights"), exist_ok=True)
@@ -209,6 +218,13 @@ def main():
         shutil.copy2(os.path.join(_PKG, name), os.path.join(pkg_dst, name))
 
     n = copy_artifacts()
+    for rel in (("runtime", "m11d", "d5c_chain.dll"),
+                ("runtime", "layer", "x64", "d5c_chain.dll"),
+                ("runtime", "m12", "d5c_chain.dll")):
+        dst = os.path.join(DEST, *rel)
+        shutil.copy2(_CHAIN_DLL, dst)
+        assert sha1(_CHAIN_DLL) == sha1(dst), "hash mismatch: d5c_chain.dll"
+        n.append(dst)
     patch_manifests()
 
     w_dst = os.path.join(DEST, "weights",

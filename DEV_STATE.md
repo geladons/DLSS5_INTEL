@@ -1,5 +1,14 @@
 # DEV_STATE.md - where we are (updated 2026-09-29 by Antigravity)
 
+## Stage 20: Restore Public Image Baseline & Eliminate Stale C ABI Copies (2026-09-29)
+- Compared local `origin/master` controls with the current Phase30 path. Public compose used blend 1.0 and feature inputs `(style=0, tone=1.0, structure=1.0, skin=-1, auto=-1)`; the saved profile had intensity 1.65, tone 0.85, and structure 1.6.
+- Reset Phase30 defaults and the user's global profile to the public neutral values; prior profile backed up as `%LOCALAPPDATA%\DLSS5Manager\config.json.pre_public_baseline`. Render scale 0.67, game list, and per-game overrides were not changed.
+- Kept Phase30 intensity separate from legacy residual gain in the C ABI/environment; residual gain now stays 1.0 unless explicitly supplied. Daemon startup passes all Phase30 settings explicitly.
+- Overlay default now honors `overlay_focus=False`: it freezes the layer's original raw frame without force-activating the overlay, and only steals foreground focus when the opt-in setting is enabled. The layer's reprocess path sends the held raw buffer.
+- Production packaging and proxy build scripts now source `d5c_chain.dll` from the canonical CMake target instead of stale staged copies. Full m11d Release and x64 layer builds completed; staged DLL hashes match.
+- M13 integration and Phase30/cache suites pass. In this VS Code session the detached GPU selftest stops at the 4.87 GB host-weight staging allocation without a completion/error record; the existing production selftest log from 00:11 completed successfully. New pixel parity and live GTA IV quality remain unverified.
+- Performance limitation remains: x86 m11d processes synchronously per present and does not use frame interpolation; recorded 800x600 frames take roughly 60-110 ms. This is separate from the restored image baseline and still needs a dedicated cadence/interpolation fix.
+
 ## Stage 19: GTA IV Menu Processing, Overlay Access & Game Handoff (2026-09-29)
 - Removed duplicate gain, blend, and sharpness sliders from the manager header; the vendor tuning controls remain in Settings.
 - Made the in-game overlay body scrollable and explicitly activated it on open so its Phase30 controls remain reachable and mouse-operable.

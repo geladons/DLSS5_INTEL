@@ -360,8 +360,15 @@ class M13Controller:
             # (that was "screen mode kills the daemon").
             ok, msg = self.screen.stop()
             notes.append("screen overlay stopped (%s)" % msg)
-        args = ["--port", str(DEFAULT_PORT), "--gain", "%.3f" % self.cfg.get("gain"),
-                "--blend", "%.3f" % float(self.cfg.get("blend") or 1.0),
+        p30 = self.cfg.get_phase30()
+        args = ["--port", str(DEFAULT_PORT),
+                "--intensity", "%.3f" % p30["intensity"],
+                "--local-tone", "%.3f" % p30["local_tone"],
+                "--local-structure", "%.3f" % p30["local_structure"],
+                "--skin-structure", "%.3f" % p30["skin_structure"],
+                "--auto-mask", "1" if p30["auto_mask"] else "0",
+                "--style-index", str(p30["style_index"]),
+                "--color-strength", "%.3f" % p30["color_strength"],
                 "--scale", "%.2f" % float(self.cfg.get("scale") or 0.50),
                 "--framegen", "1" if self.cfg.get("frame_gen") else "0",
                 "--weights", self.cfg.get("weights_path")]
@@ -493,7 +500,7 @@ class M13Controller:
 
     # ------------------------------------------------------------- phase30 --
     def set_intensity(self, intensity, exe=None):
-        """Phase 30 intensity (0.0..2.0, default 1.6)."""
+        """Phase 30 compose mix (0.0..2.0, public baseline 1.0)."""
         return self.set_gain(intensity)
 
     def set_local_tone(self, val, exe=None):
@@ -778,10 +785,9 @@ class M13Controller:
             daemon_note = "stopped x86 daemon before x64 launch"
         target = self.launch_target(exe, meta)
         scale = self.cfg.get("scale")
-        gain = self.cfg.get("gain")
         blend = self.cfg.get("blend")
         ok, msg = gamelaunch.launch_game(target, meta["mode"],
-                                         scale=scale, gain=gain, blend=blend,
+                                         scale=scale, blend=blend,
                                          cfg=self.cfg)
         if ok:
             self.launched_exes.add(os.path.abspath(target).lower())

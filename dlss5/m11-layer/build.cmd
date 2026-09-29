@@ -7,6 +7,9 @@ set "REPO=%~dp0\..\.."
 set "SRC=%REPO%\dlss5\m11-layer"
 set "BUILD=%SRC%\build"
 set "BUILDNM=%SRC%\build-nmake"
+set "CHAIN_DLL=%REPO%\dlss5\m11d\build\chain\Release\d5c_chain.dll"
+if not exist "%CHAIN_DLL%" set "CHAIN_DLL=%REPO%\dlss5\m11d\build\Release\d5c_chain.dll"
+if not exist "%CHAIN_DLL%" set "CHAIN_DLL=%REPO%\dlss5\m11d\build-nmake\chain\d5c_chain.dll"
 set "CMAKE=C:\Program Files\CMake\bin\cmake.exe"
 set "VULKAN_SDK=C:\VulkanSDK\1.4.357.0"
 set "PATH=%VULKAN_SDK%\Bin;%PATH%"
@@ -21,7 +24,7 @@ if not errorlevel 1 (
     if not exist "%BUILD%\Release\nr_layer_win.dll" ( set FINAL=1 & goto :done )
     rem manifest sits next to the dll; library_path is relative to the json
     copy /y "%SRC%\VkLayer_dlssnr_win.json" "%BUILD%\Release\" >nul
-    if exist "%REPO%\dlss5\m11d\build\Release\d5c_chain.dll" copy /y "%REPO%\dlss5\m11d\build\Release\d5c_chain.dll" "%BUILD%\Release\" >nul
+    if exist "%CHAIN_DLL%" copy /y "%CHAIN_DLL%" "%BUILD%\Release\" >nul
     if exist "%REPO%\dlss5\m11d\build\Release\*.spv" copy /y "%REPO%\dlss5\m11d\build\Release\*.spv" "%BUILD%\Release\" >nul
     set FINAL=0
     goto :done
@@ -38,7 +41,7 @@ if not exist "%BUILDNM%\nr_layer_win.dll" ( set FINAL=1 & goto :done )
 if not exist "%BUILD%\Release" mkdir "%BUILD%\Release"
 copy /y "%BUILDNM%\nr_layer_win.dll" "%BUILD%\Release\" >nul
 copy /y "%SRC%\VkLayer_dlssnr_win.json" "%BUILD%\Release\" >nul
-if exist "%REPO%\dlss5\m11d\build\Release\d5c_chain.dll" copy /y "%REPO%\dlss5\m11d\build\Release\d5c_chain.dll" "%BUILD%\Release\" >nul
+if exist "%CHAIN_DLL%" copy /y "%CHAIN_DLL%" "%BUILD%\Release\" >nul
 if exist "%REPO%\dlss5\m11d\build\Release\*.spv" copy /y "%REPO%\dlss5\m11d\build\Release\*.spv" "%BUILD%\Release\" >nul
 set FINAL=0
 

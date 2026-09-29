@@ -16,12 +16,12 @@ CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 
 DEFAULTS = {
     "weights_path": None,        # autodetected from the bundle, else asked
-    "gain": 1.6,                 # baseline default 1.6 (mirrors intensity)
-    "intensity": 1.6,            # Phase30: compose-side blending & extrapolation (0.0..2.0)
+    "gain": 1.0,                 # legacy residual gain; neutral public baseline
+    "intensity": 1.0,            # Phase30 compose mix; neutral public baseline
     "local_tone": 1.0,           # Phase30: local tone / brightness (0.0..2.0)
-    "local_structure": 1.5,      # Phase30: local structure / detail strength (0.0..2.0)
-    "skin_structure": 2.0,       # Phase30: skin structure (-1.0..2.0, -1.0 = follow local_structure)
-    "auto_mask": True,           # Phase30: auto skin/UI mask toggle
+    "local_structure": 1.0,      # Phase30: local structure / detail strength (0.0..2.0)
+    "skin_structure": -1.0,      # Phase30: optional skin condition disabled
+    "auto_mask": False,          # Phase30: optional skin/UI condition disabled
     "style_index": 0,            # Phase30: style index (0 = Default, 1 = Natural, 2 = Cinematic)
     "color_strength": 1.0,       # Phase30: color component strength (0.0..2.0)
     "blend": 1.0,                # effect mix: 0 = original, 1 = full network
@@ -87,11 +87,11 @@ class Config:
     def get_phase30(self, exe=None):
         """Retrieve Phase 30 settings for a specific game or globally."""
         out = {
-            "intensity": float(self.get("intensity", 1.6)),
+            "intensity": float(self.get("intensity", 1.0)),
             "local_tone": float(self.get("local_tone", 1.0)),
-            "local_structure": float(self.get("local_structure", 1.5)),
-            "skin_structure": float(self.get("skin_structure", 2.0)),
-            "auto_mask": bool(self.get("auto_mask", True)),
+            "local_structure": float(self.get("local_structure", 1.0)),
+            "skin_structure": float(self.get("skin_structure", -1.0)),
+            "auto_mask": bool(self.get("auto_mask", False)),
             "style_index": int(self.get("style_index", 0)),
             "color_strength": float(self.get("color_strength", 1.0)),
         }

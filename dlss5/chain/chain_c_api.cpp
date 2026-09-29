@@ -59,13 +59,6 @@ public:
     {
         p30Ctl_.loadFromEnv();
         p30Ctl_.pollKnobsFile();
-        if (g > 0.0f) {
-            p30Ctl_.setIntensity(g);
-        } else if (b > 0.0f) {
-            p30Ctl_.setIntensity(b);
-        }
-        gain_ = p30Ctl_.params().intensity;
-        blend_ = p30Ctl_.params().intensity;
 
         const char* s_env = std::getenv("DLSS5_SHARPNESS");
         if (!s_env) s_env = std::getenv("NR_LAYER_SHARPNESS");
@@ -261,8 +254,6 @@ public:
         p.styleIndex = style_index;
         p.colorStrength = color_strength;
         p30Ctl_.setParams(p);
-        gain_ = p.intensity;
-        blend_ = p.intensity;
         if (initialized_) {
             engine_.setPhase30(p30Ctl_.params());
         }
@@ -270,8 +261,6 @@ public:
 
     void setIntensity(float v) {
         p30Ctl_.setIntensity(v);
-        gain_ = v;
-        blend_ = v;
         if (initialized_) engine_.setIntensity(v);
     }
     void setLocalTone(float v) {

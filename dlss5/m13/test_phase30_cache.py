@@ -64,22 +64,22 @@ class TestGamesCache(unittest.TestCase):
 
 class TestPhase30DefaultsAndEnv(unittest.TestCase):
     def test_defaults(self):
-        self.assertEqual(phase30.PHASE30_DEFAULTS["intensity"], 1.6)
+        self.assertEqual(phase30.PHASE30_DEFAULTS["intensity"], 1.0)
         self.assertEqual(phase30.PHASE30_DEFAULTS["local_tone"], 1.0)
-        self.assertEqual(phase30.PHASE30_DEFAULTS["local_structure"], 1.5)
-        self.assertEqual(phase30.PHASE30_DEFAULTS["skin_structure"], 2.0)
-        self.assertTrue(phase30.PHASE30_DEFAULTS["auto_mask"])
+        self.assertEqual(phase30.PHASE30_DEFAULTS["local_structure"], 1.0)
+        self.assertEqual(phase30.PHASE30_DEFAULTS["skin_structure"], -1.0)
+        self.assertFalse(phase30.PHASE30_DEFAULTS["auto_mask"])
         self.assertEqual(phase30.PHASE30_DEFAULTS["style_index"], 0)
         self.assertEqual(phase30.PHASE30_DEFAULTS["color_strength"], 1.0)
 
     def test_env_dict(self):
         env = phase30.phase30_env_dict(phase30.PHASE30_DEFAULTS)
-        self.assertEqual(env["DLSS5_INTENSITY"], "1.600")
-        self.assertEqual(env["DLSS5_GAIN"], "1.600")
+        self.assertEqual(env["DLSS5_INTENSITY"], "1.000")
+        self.assertEqual(env["DLSS5_GAIN"], "1.000")
         self.assertEqual(env["DLSS5_LOCAL_TONE"], "1.000")
-        self.assertEqual(env["DLSS5_LOCAL_STRUCTURE"], "1.500")
-        self.assertEqual(env["DLSS5_SKIN_STRUCTURE"], "2.000")
-        self.assertEqual(env["DLSS5_AUTO_MASK"], "1")
+        self.assertEqual(env["DLSS5_LOCAL_STRUCTURE"], "1.000")
+        self.assertEqual(env["DLSS5_SKIN_STRUCTURE"], "-1.000")
+        self.assertEqual(env["DLSS5_AUTO_MASK"], "0")
         self.assertEqual(env["DLSS5_STYLE_INDEX"], "0")
         self.assertEqual(env["DLSS5_COLOR_STRENGTH"], "1.000")
 
@@ -89,7 +89,7 @@ class TestPhase30DefaultsAndEnv(unittest.TestCase):
         self.assertTrue(os.path.exists(path))
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        self.assertEqual(data["intensity"], 1.6)
+        self.assertEqual(data["intensity"], 1.0)
         self.assertEqual(data["style_index"], 0)
 
 
@@ -104,9 +104,9 @@ class TestConfigPhase30(unittest.TestCase):
 
     def test_default_values(self):
         p30 = self.cfg.get_phase30()
-        self.assertEqual(p30["intensity"], 1.6)
-        self.assertEqual(self.cfg.get("gain"), 1.6)
-        self.assertEqual(p30["local_structure"], 1.5)
+        self.assertEqual(p30["intensity"], 1.0)
+        self.assertEqual(self.cfg.get("gain"), 1.0)
+        self.assertEqual(p30["local_structure"], 1.0)
 
     def test_set_phase30_and_gain_sync(self):
         self.cfg.set_phase30({"intensity": 1.25, "local_tone": 0.8})
@@ -124,24 +124,24 @@ class TestConfigPhase30(unittest.TestCase):
         self.cfg.set_phase30({"intensity": 0.5, "local_structure": 0.2})
         self.cfg.reset_phase30()
         p30 = self.cfg.get_phase30()
-        self.assertEqual(p30["intensity"], 1.6)
-        self.assertEqual(p30["local_structure"], 1.5)
-        self.assertEqual(self.cfg.get("gain"), 1.6)
+        self.assertEqual(p30["intensity"], 1.0)
+        self.assertEqual(p30["local_structure"], 1.0)
+        self.assertEqual(self.cfg.get("gain"), 1.0)
 
     def test_per_game_phase30(self):
         game_exe = r"C:\Games\Cyberpunk2077.exe"
         self.cfg.set("games", {game_exe: {"name": "CP2077", "mode": "dx12", "arch": "x64"}})
 
-        # Global is 1.6
-        self.assertEqual(self.cfg.get_phase30(game_exe)["intensity"], 1.6)
+        # Global is the public neutral mix.
+        self.assertEqual(self.cfg.get_phase30(game_exe)["intensity"], 1.0)
 
         # Set game-specific
         self.cfg.set_phase30({"intensity": 1.9, "style_index": 2}, exe=game_exe)
         self.assertEqual(self.cfg.get_phase30(game_exe)["intensity"], 1.9)
         self.assertEqual(self.cfg.get_phase30(game_exe)["style_index"], 2)
 
-        # Global should remain 1.6
-        self.assertEqual(self.cfg.get_phase30()["intensity"], 1.6)
+        # Global should remain unchanged.
+        self.assertEqual(self.cfg.get_phase30()["intensity"], 1.0)
 
 
 class TestOverlayStatusLogic(unittest.TestCase):

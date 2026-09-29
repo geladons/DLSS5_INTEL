@@ -119,7 +119,7 @@ with tempfile.TemporaryDirectory() as td:
 
 print("\n=== 5. Testing Game Launching and Arch-Aware Daemon Handling ===")
 import subprocess
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, PropertyMock
 from m13 import gamelaunch
 
 # 5.1 Test gamelaunch._launch flags and stdio
@@ -219,7 +219,7 @@ with tempfile.TemporaryDirectory() as td:
                 mock_dstart.assert_not_called()
                 mock_dstop.assert_called_once()
                 mock_lg.assert_called_once_with(
-                    dummy_x64, "dx11", scale=0.58, gain=1.5, blend=0.75,
+                    dummy_x64, "dx11", scale=0.58, blend=0.75,
                     cfg=ctl.cfg)
                 print("  controller.game_launch x64: lingering daemon stopped + config propagated [PASS]")
 
@@ -232,8 +232,31 @@ with tempfile.TemporaryDirectory() as td:
             assert ok, "game_launch x86 failed: %s" % msg
             mock_dstart.assert_called_once()
             mock_lg.assert_called_once_with(dummy_x86, "dx9", scale=0.58,
-                                            gain=1.5, blend=0.75, cfg=ctl.cfg)
+                                            blend=0.75, cfg=ctl.cfg)
             print("  controller.game_launch x86: TCP daemon fallback (daemon_start called) [PASS]")
+
+    finally:
+        ctl.shutdown()
+
+with tempfile.TemporaryDirectory() as td:
+    cfg = Config(os.path.join(td, "daemon_args.json"))
+    ctl = M13Controller(cfg)
+    try:
+        with patch.object(ctl, "weights_ok", return_value=True), \
+             patch.object(type(ctl.daemon), "running", new_callable=PropertyMock,
+                          return_value=False), \
+             patch.object(ctl.daemon, "start", return_value=(True, "started")) as mock_daemon_start:
+            ok, msg = ctl.daemon_start()
+            assert ok, "daemon_start failed: %s" % msg
+            args = mock_daemon_start.call_args[0][0]
+            values = dict(zip(args[::2], args[1::2]))
+            assert values["--intensity"] == "1.000"
+            assert values["--local-tone"] == "1.000"
+            assert values["--local-structure"] == "1.000"
+            assert values["--skin-structure"] == "-1.000"
+            assert values["--auto-mask"] == "0"
+            assert "--gain" not in args and "--blend" not in args
+            print("  controller.daemon_start passes public Phase30 values separately from legacy gain [PASS]")
     finally:
         ctl.shutdown()
 
@@ -290,12 +313,17 @@ try:
             ov = overlay.ControlOverlay(tk_root, c_ctl, on_log=lambda m: None)
             assert ov.win.cget("cursor") == "arrow", "Overlay window cursor != arrow"
 
-            # Test show() triggers freeze_set(True) and focus_set
-            ov.show()
+            # Default mode freezes the game without taking foreground focus.
+            with patch("m13.overlay._set_noactivate") as noactivate, \
+                 patch("m13.overlay._force_foreground") as force_foreground:
+                ov.show()
+                noactivate.assert_called_once()
+                assert noactivate.call_args[0][1] is True
+                force_foreground.assert_not_called()
             assert gamelaunch.freeze_active() is True, "gamelaunch.freeze_active() not True after show()"
             assert ov._freeze_flags is True, "ov._freeze_flags not True after show()"
-            assert ov._focus_mode is True, "ov._focus_mode not True after show()"
-            print("  overlay.show() triggers freeze_set(True), arrow cursor, and sets focus [PASS]")
+            assert ov._focus_mode is False, "default overlay unexpectedly took focus"
+            print("  overlay.show() freezes without stealing foreground focus [PASS]")
 
             # Test hide() triggers freeze_set(False) and clears focus_mode
             ov.hide()
@@ -303,6 +331,16 @@ try:
             assert ov._freeze_flags is False, "ov._freeze_flags not False after hide()"
             assert ov._focus_mode is False, "ov._focus_mode not False after hide()"
             print("  overlay.hide() unfreezes game and clears focus [PASS]")
+
+            c.set("overlay_focus", True)
+            with patch("m13.overlay._set_noactivate") as noactivate, \
+                 patch("m13.overlay._force_foreground") as force_foreground:
+                ov.show()
+                noactivate.assert_called_once()
+                assert noactivate.call_args[0][1] is False
+                force_foreground.assert_called_once()
+            assert ov._focus_mode is True
+            ov.hide()
         finally:
             c_ctl.shutdown()
 finally:

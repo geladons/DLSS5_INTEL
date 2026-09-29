@@ -7,6 +7,9 @@ set "REPO=%~dp0\..\.."
 set "SRC=%REPO%\dlss5\m12-dxgi"
 set "BUILD=%SRC%\build"
 set "BUILDNM=%SRC%\build-nmake"
+set "CHAIN_DLL=%REPO%\dlss5\m11d\build\chain\Release\d5c_chain.dll"
+if not exist "%CHAIN_DLL%" set "CHAIN_DLL=%REPO%\dlss5\m11d\build\Release\d5c_chain.dll"
+if not exist "%CHAIN_DLL%" set "CHAIN_DLL=%REPO%\dlss5\m11d\build-nmake\chain\d5c_chain.dll"
 set "CMAKE=C:\Program Files\CMake\bin\cmake.exe"
 
 echo === M12-DXGI build ===
@@ -17,8 +20,8 @@ if not errorlevel 1 (
     "%CMAKE%" --build "%BUILD%" --config Release
     if errorlevel 1 ( set FINAL=1 & goto :done )
     if not exist "%BUILD%\Release\m12_dxgi.dll" ( set FINAL=1 & goto :done )
-    for %%D in ("%REPO%\dlss5\chain\build\Release" "%REPO%\dlss5\m11d\build\Release" "%REPO%\dlss5\m11-layer\build\Release") do (
-        if exist "%%~D\d5c_chain.dll" copy /y "%%~D\d5c_chain.dll" "%BUILD%\Release\" >nul
+    if exist "%CHAIN_DLL%" copy /y "%CHAIN_DLL%" "%BUILD%\Release\" >nul
+    for %%D in ("%REPO%\dlss5\m11d\build\Release" "%REPO%\dlss5\m11-layer\build\Release") do (
         if exist "%%~D\*.spv" copy /y "%%~D\*.spv" "%BUILD%\Release\" >nul
     )
     set FINAL=0
@@ -35,8 +38,8 @@ if errorlevel 1 ( set FINAL=1 & goto :done )
 if not exist "%BUILDNM%\m12_dxgi.dll" ( set FINAL=1 & goto :done )
 if not exist "%BUILD%\Release" mkdir "%BUILD%\Release"
 copy /y "%BUILDNM%\m12_dxgi.dll" "%BUILD%\Release\" >nul
-for %%D in ("%REPO%\dlss5\chain\build\Release" "%REPO%\dlss5\m11d\build\Release" "%REPO%\dlss5\m11-layer\build\Release") do (
-    if exist "%%~D\d5c_chain.dll" copy /y "%%~D\d5c_chain.dll" "%BUILD%\Release\" >nul
+if exist "%CHAIN_DLL%" copy /y "%CHAIN_DLL%" "%BUILD%\Release\" >nul
+for %%D in ("%REPO%\dlss5\m11d\build\Release" "%REPO%\dlss5\m11-layer\build\Release") do (
     if exist "%%~D\*.spv" copy /y "%%~D\*.spv" "%BUILD%\Release\" >nul
 )
 set FINAL=0

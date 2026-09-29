@@ -3,11 +3,11 @@
 #
 # Provides the 7 vendor parameters for compose-side blending, local tone,
 # structure filtering, skin preservation, style index, and chroma control:
-#   1. intensity: 0.0 - 2.0 (default 1.6 - preserves baseline comparison demo)
+#   1. intensity: 0.0 - 2.0 (default 1.0 - public compose baseline)
 #   2. local_tone: 0.0 - 2.0 (default 1.0)
-#   3. local_structure: 0.0 - 2.0 (default 1.5)
-#   4. skin_structure: -1.0 - 2.0 (default 2.0, -1.0 = follow local_structure)
-#   5. auto_mask: bool (default True)
+#   3. local_structure: 0.0 - 2.0 (default 1.0)
+#   4. skin_structure: -1.0 - 2.0 (default -1.0; disabled in public baseline)
+#   5. auto_mask: bool (default False)
 #   6. style_index: 0, 1, 2 (default 0: Default, 1: Natural, 2: Cinematic)
 #   7. color_strength: 0.0 - 2.0 (default 1.0)
 #
@@ -25,11 +25,11 @@ except (ImportError, ValueError):
 
 
 PHASE30_DEFAULTS = {
-    "intensity": 1.6,
+    "intensity": 1.0,
     "local_tone": 1.0,
-    "local_structure": 1.5,
-    "skin_structure": 2.0,
-    "auto_mask": True,
+    "local_structure": 1.0,
+    "skin_structure": -1.0,
+    "auto_mask": False,
     "style_index": 0,
     "color_strength": 1.0,
 }
@@ -58,20 +58,20 @@ def phase30_env_dict(params):
     p = dict(PHASE30_DEFAULTS)
     if params:
         p.update({k: v for k, v in params.items() if k in PHASE30_DEFAULTS})
-    inten = float(p.get("intensity", 1.6))
+    inten = float(p.get("intensity", 1.0))
     ltone = float(p.get("local_tone", 1.0))
-    lstruct = float(p.get("local_structure", 1.5))
-    sstruct = float(p.get("skin_structure", 2.0))
-    amask = 1 if p.get("auto_mask", True) else 0
+    lstruct = float(p.get("local_structure", 1.0))
+    sstruct = float(p.get("skin_structure", -1.0))
+    amask = 1 if p.get("auto_mask", False) else 0
     sidx = int(p.get("style_index", 0))
     cstrength = float(p.get("color_strength", 1.0))
     return {
+        "DLSS5_GAIN": "1.000",
+        "NR_LAYER_GAIN": "1.000",
+        "M12_GAIN": "1.000",
         "DLSS5_INTENSITY": "%.3f" % inten,
         "NR_LAYER_INTENSITY": "%.3f" % inten,
         "M12_INTENSITY": "%.3f" % inten,
-        "DLSS5_GAIN": "%.3f" % inten,
-        "NR_LAYER_GAIN": "%.3f" % inten,
-        "M12_GAIN": "%.3f" % inten,
         "DLSS5_LOCAL_TONE": "%.3f" % ltone,
         "NR_LAYER_LOCAL_TONE": "%.3f" % ltone,
         "M12_LOCAL_TONE": "%.3f" % ltone,
@@ -169,7 +169,7 @@ class Phase30Panel(tk.Frame):
         btn_reset.pack(side="right")
         ToolTip(btn_reset, lambda: tr("p30_reset_tip"))
 
-        # 1. Intensity (0.0..2.0, default 1.6)
+        # 1. Intensity (0.0..2.0, public baseline 1.0)
         self._var_intensity = tk.DoubleVar(value=float(self._vals["intensity"]))
         self.lbl_intensity = self._add_slider(
             tr("p30_intensity"), self._var_intensity, 0.0, 2.0, 0.05,
@@ -181,7 +181,7 @@ class Phase30Panel(tk.Frame):
             tr("p30_local_tone"), self._var_local_tone, 0.0, 2.0, 0.05,
             lambda: tr("p30_local_tone_tip"), "local_tone")
 
-        # 3. Local Structure (0.0..2.0, default 1.5)
+        # 3. Local Structure (0.0..2.0, public baseline 1.0)
         self._var_local_structure = tk.DoubleVar(value=float(self._vals["local_structure"]))
         self.lbl_local_structure = self._add_slider(
             tr("p30_local_structure"), self._var_local_structure, 0.0, 2.0, 0.05,

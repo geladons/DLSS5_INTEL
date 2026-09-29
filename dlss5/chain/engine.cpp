@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <direct.h>
+#include <new>
 
 namespace d5c {
 
@@ -144,8 +145,22 @@ bool ChainEngine::init(const EngineConfig& cfg) {
     if (!ws_.computePack()) return false;
     arena_.layout(st_, T6P_, ws_.packTotal, ws_);
     arena_.allocDevice(c);
-    std::vector<char> hostImg((size_t)arena_.totalBytes);
+    std::printf("[chain] allocating host weight staging: %.1f MB\n",
+                arena_.totalBytes / 1048576.0);
+    std::fflush(stdout);
+    std::vector<char> hostImg;
+    try {
+        hostImg.resize((size_t)arena_.totalBytes);
+    } catch (const std::bad_alloc&) {
+        std::fprintf(stderr, "[FAIL] host weight staging allocation failed (%.1f MB)\n",
+                     arena_.totalBytes / 1048576.0);
+        return false;
+    }
+    std::printf("[chain] host staging allocated; preprocessing tensors\n");
+    std::fflush(stdout);
     ws_.preprocessInto(hostImg.data(), arena_.vecOff, arena_.off.oHeadW);
+    std::printf("[chain] host weight preprocessing complete\n");
+    std::fflush(stdout);
     {   // host-image hash: detects CPU/RAM-side pack corruption (GPU
         // flakiness vs host flakiness discriminator; FNV-1a, one pass)
         uint64_t h = 1469598103934665603ull;

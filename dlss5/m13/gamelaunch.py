@@ -212,13 +212,13 @@ def launch_game(exe_path, mode, scale=None, gain=None, blend=None, cfg=None, sha
         p30 = cfg.get_phase30(exe_path)
     elif cfg is not None and hasattr(cfg, "get"):
         p30 = {
-            "intensity": cfg.get("intensity") or cfg.get("gain") or 1.6,
-            "local_tone": cfg.get("local_tone") or 1.0,
-            "local_structure": cfg.get("local_structure") or 1.5,
-            "skin_structure": cfg.get("skin_structure") if cfg.get("skin_structure") is not None else 2.0,
-            "auto_mask": True if cfg.get("auto_mask") is None else bool(cfg.get("auto_mask")),
-            "style_index": cfg.get("style_index") or 0,
-            "color_strength": cfg.get("color_strength") or 1.0,
+            "intensity": cfg.get("intensity", cfg.get("gain", 1.0)),
+            "local_tone": cfg.get("local_tone", 1.0),
+            "local_structure": cfg.get("local_structure", 1.0),
+            "skin_structure": cfg.get("skin_structure", -1.0),
+            "auto_mask": bool(cfg.get("auto_mask", False)),
+            "style_index": cfg.get("style_index", 0),
+            "color_strength": cfg.get("color_strength", 1.0),
         }
     if p30:
         env.update(phase30_env_dict(p30))

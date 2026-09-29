@@ -28,7 +28,7 @@ struct EngineConfig {
     std::string weightsPath;                           // dlssnr-logical.safetensors
     std::string shaderDir;                             // dir with *.spv (trailing slash)
     float headGain = 1.0f;                             // vendor residual scale (--gain)
-    float headBlend = 1.6f;                            // vendor mix factor / intensity (default 1.6)
+    float headBlend = 1.0f;                            // vendor mix factor / intensity (public baseline 1.0)
     float renderScale = 1.0f;
     float sharpness = 0.8f;
     Phase30Params phase30{};                           // NVIDIA Phase 30 condition parameters

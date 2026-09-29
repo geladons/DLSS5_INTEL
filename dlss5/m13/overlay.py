@@ -106,7 +106,11 @@ class HotkeyPoller:
 def _set_noactivate(hwnd, on=True):
     try:
         style = _u32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
-        style |= WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW
+        style |= WS_EX_TOPMOST | WS_EX_TOOLWINDOW
+        if on:
+            style |= WS_EX_NOACTIVATE
+        else:
+            style &= ~WS_EX_NOACTIVATE
         _u32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style)
     except (ValueError, OSError):
         pass
@@ -358,7 +362,7 @@ class ControlOverlay:
 
         # Legacy variables for compatibility
         self.var = tk.DoubleVar(
-            value=float(self.ctl.cfg.get("intensity") or self.ctl.cfg.get("gain") or 1.6))
+            value=float(self.ctl.cfg.get("intensity") if self.ctl.cfg.get("intensity") is not None else 1.0))
         self._suppress_scale = None
         self._scale_dragging = False
 
@@ -423,10 +427,10 @@ class ControlOverlay:
         self.ctl.submit(self.ctl.set_gain, g)
 
     def _reset_gain(self):
-        self.var.set(1.6)
-        self._debounced_push(1.6)
+        self.var.set(1.0)
+        self._debounced_push(1.0)
         if hasattr(self, "p30_panel") and self.p30_panel:
-            self.p30_panel.set_values({"intensity": 1.6})
+            self.p30_panel.set_values({"intensity": 1.0})
 
     def _on_phase30_change(self, key, val):
         if key == "intensity":
@@ -436,7 +440,7 @@ class ControlOverlay:
 
     def _on_phase30_reset(self):
         self.ctl.submit(self.ctl.reset_phase30)
-        self.var.set(1.6)
+        self.var.set(1.0)
         self.on_log("[overlay] Phase30 reset to defaults")
 
     def sync_phase30(self, p):
@@ -621,14 +625,15 @@ class ControlOverlay:
         self.win.after(150, self._cursor_keeper)
 
     def _return_focus(self):
+        restore_focus = self._focus_mode
         self._focus_mode = False
-        if self._game_hwnd:
+        if restore_focus and self._game_hwnd:
             try:
                 if _u32.GetForegroundWindow() != self._game_hwnd:
                     _u32.SetForegroundWindow(self._game_hwnd)
             except (ValueError, OSError):
                 pass
-            self._game_hwnd = None
+        self._game_hwnd = None
 
     # ------------------------------------------------------------ show/hide
     def toggle(self):
@@ -661,29 +666,37 @@ class ControlOverlay:
             except Exception:
                 pass
 
-        # Always freeze the game on open as requested (presentation layer stands still)
+        focus_enabled = bool(self.ctl.cfg.get("overlay_focus"))
+
+        # Freeze the game on open; keep it running behind the panel.
         gamelaunch.freeze_set(True)
         self._freeze_flags = True
         self.freeze_lbl.config(text=tr("ov_freeze_on"), fg=AMBER)
-        self.on_log("[overlay] frame frozen; mouse focus given to overlay")
+        self.on_log("[overlay] frame frozen; %s" % (
+            "overlay focus enabled" if focus_enabled else "game focus unchanged"))
 
         # Free the cursor, release capture on both threads, set arrow cursor
         _u32.ReleaseCapture()
         _u32.ClipCursor(None)
         _free_cursor()
 
-        # Display and focus the overlay without minimizing fullscreen games.
-        # Activate the panel so Tk receives clicks even when the game owns focus.
+        try:
+            hwnd = int(self.win.wm_frame(), 16)
+            _set_noactivate(hwnd, not focus_enabled)
+        except (tk.TclError, ValueError):
+            hwnd = None
+
+        # Display the panel; only steal focus when explicitly enabled.
         self.win.deiconify()
         self.win.configure(cursor="arrow")
         self.win.attributes("-topmost", True)
         self.win.lift()
-        try:
-            _force_foreground(int(self.win.wm_frame(), 16))
+        if focus_enabled and hwnd is not None:
+            _force_foreground(hwnd)
             self.win.focus_force()
-        except (tk.TclError, ValueError):
-            self.win.focus_set()
-        self._focus_mode = True
+            self._focus_mode = True
+        else:
+            self._focus_mode = False
 
         self._warp_cursor()
         self.win.after(100, _free_cursor)

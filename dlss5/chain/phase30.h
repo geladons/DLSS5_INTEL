@@ -2,11 +2,11 @@
 // dlss5/chain/phase30.h - NVIDIA Phase 30 condition parameter module.
 //
 // Encapsulates the 7 vendor tuning parameters:
-//   1. intensity: 0.0 .. 2.0 (default 1.6)
+//   1. intensity: 0.0 .. 2.0 (public baseline 1.0)
 //   2. local_tone: 0.0 .. 2.0 (default 1.0)
-//   3. local_structure: 0.0 .. 2.0 (default 1.5)
-//   4. skin_structure: -1.0 .. 2.0 (default 2.0, -1.0 = follow local_structure)
-//   5. auto_mask: bool (default true)
+//   3. local_structure: 0.0 .. 2.0 (public baseline 1.0)
+//   4. skin_structure: -1.0 .. 2.0 (public baseline -1.0)
+//   5. auto_mask: bool (public baseline false)
 //   6. style_index: 0, 1, 2 (default 0)
 //   7. color_strength: 0.0 .. 2.0 (default 1.0)
 //
@@ -22,11 +22,11 @@
 namespace d5c {
 
 struct Phase30Params {
-    float intensity = 1.6f;        // Compose-side blend extrapolation (0.0 .. 2.0, default 1.6)
+    float intensity = 1.0f;        // Compose-side mix (0.0 .. 2.0, public baseline 1.0)
     float localTone = 1.0f;        // Local tone strength (0.0 .. 2.0, default 1.0)
-    float localStructure = 1.5f;   // Local structure detail strength (0.0 .. 2.0, default 1.5)
-    float skinStructure = 2.0f;    // Skin structure (-1.0 .. 2.0, default 2.0; -1.0 = follow local)
-    bool autoMask = true;          // Auto skin/UI mask active (default true)
+    float localStructure = 1.0f;   // Local structure detail strength (baseline 1.0)
+    float skinStructure = -1.0f;   // Skin structure disabled in the public baseline
+    bool autoMask = false;         // Optional skin/UI condition disabled in the public baseline
     int styleIndex = 0;            // Style index (0: Default, 1: Natural, 2: Cinematic)
     float colorStrength = 1.0f;    // Color component strength (0.0 .. 2.0, default 1.0)
 

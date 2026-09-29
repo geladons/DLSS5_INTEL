@@ -35,6 +35,13 @@
 
 ## 2. Solved Issues & Completed Milestones in Current Session
 
+### Stage 20: Restore Public Image Baseline & Eliminate Stale C ABI Copies (2026-09-29)
+1. **Image Regression:** Compared current knobs with `origin/master`: public feature conditioning was `(style=0, tone=1.0, structure=1.0, skin=-1, auto=-1)` and compose blend was `1.0`; the user's saved profile had intensity `1.65`, tone `0.85`, structure `1.6`. Reset global Phase30 defaults/profile to the public baseline; saved the previous config as `%LOCALAPPDATA%\DLSS5Manager\config.json.pre_public_baseline`. Render scale, game list, and per-game overrides were left intact.
+2. **Parameter Routing:** Phase30 intensity is now distinct from legacy residual gain; the manager passes residual gain as neutral `1.0` while intensity controls compose mix. The daemon receives all Phase30 values explicitly.
+3. **Overlay Photo Mode:** `overlay_focus=False` no longer forces foreground activation. Opening still sets the freeze flag; the presentation layer retains and reprocesses its original raw frame on knob changes. Foreground focus remains opt-in.
+4. **Stale DLL Prevention:** The packager and x64/DX12 build scripts prefer the current `m11d/build/chain/Release/d5c_chain.dll`, avoiding stale staged copies. Full m11d Release and x64 layer builds completed; source/staged DLL hashes match.
+5. **Verification & Limits:** M13 Stage 5 and Phase30/cache suites pass. In this VS Code session the detached GPU selftest stops at the 4.87 GB host-weight staging allocation without a completion/error record; the existing production selftest log from 00:11 completed successfully. New pixel parity and live GTA IV quality remain unverified. The x86 daemon remains synchronous per present (recorded 60-110 ms at 800x600) and currently has no interpolation on its TCP path; restoring image quality does not solve that separate FPS limit.
+
 ### Stage 19: GTA IV Menu Processing, Overlay Access & Game Handoff (2026-09-29)
 1. **GTA IV Static Menu Processing:** The old 85% held-still bypass returned the native frame unchanged, so static menus never received DLSSNR. Static screens now get one neural pass, identical inputs reuse the processed result, and moving scenes retain the UI mask for held pixels.
 2. **In-Game Controls:** The manager header no longer duplicates gain, blend, and sharpness controls already owned by Settings. The `CTRL+ALT+G` panel has a scrollable body and explicitly takes foreground focus when opened so all Phase30 controls can be reached and clicked.

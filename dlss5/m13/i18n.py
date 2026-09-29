@@ -197,29 +197,29 @@ _S = {
                   "ru": "Панель тюнинга NVIDIA Phase30"},
     "p30_reset": {"en": "Reset to Defaults", "ru": "Сбросить настройки"},
     "p30_reset_tip": {
-        "en": "Reset all Phase30 parameters to default baseline (gain/intensity 1.6)",
-        "ru": "Сбросить все параметры Phase30 к базовым значениям (gain/intensity 1.6)"},
+        "en": "Reset all Phase30 parameters to the public baseline (intensity 1.0)",
+        "ru": "Сбросить параметры Phase30 к базовым значениям (интенсивность 1.0)"},
     "p30_intensity": {"en": "Intensity", "ru": "Интенсивность"},
     "p30_intensity_tip": {
-        "en": "Compose-side blending and extrapolation (0.0..2.0, default 1.6)",
-        "ru": "Смешивание и экстраполяция на стадии композиции (0.0..2.0, по умолч. 1.6)"},
+        "en": "Compose-side mix (0.0..2.0, public baseline 1.0)",
+        "ru": "Смешивание на стадии композиции (0.0..2.0, базовое значение 1.0)"},
     "p30_local_tone": {"en": "Local Tone", "ru": "Локальный тон"},
     "p30_local_tone_tip": {
         "en": "Local tone and brightness for low-frequency components (0.0..2.0, default 1.0)",
         "ru": "Локальный тон и яркость низкочастотной составляющей (0.0..2.0, по умолч. 1.0)"},
     "p30_local_structure": {"en": "Local Structure", "ru": "Локальная структура"},
     "p30_local_structure_tip": {
-        "en": "Local structure and detail enhancement (0.0..2.0, default 1.5)",
-        "ru": "Сила локальной структуры и резкость деталей (0.0..2.0, по умолч. 1.5)"},
+        "en": "Local structure and detail enhancement (0.0..2.0, public baseline 1.0)",
+        "ru": "Сила локальной структуры и резкость деталей (базовое значение 1.0)"},
     "p30_skin_structure": {"en": "Skin Structure", "ru": "Структура поверхностей"},
     "p30_skin_structure_tip": {
-        "en": "Skin and surface texture (-1.0..2.0, default 2.0; -1.0 = follow local_structure)",
-        "ru": "Фильтрация текстур и структуры кожи (-1.0..2.0, по умолч. 2.0; -1.0 = как локальная)"},
+        "en": "Skin and surface texture (-1.0..2.0, public baseline -1.0)",
+        "ru": "Фильтрация текстур и структуры кожи (-1.0..2.0, базовое значение -1.0)"},
     "p30_skin_follow": {"en": "Follow", "ru": "Авто"},
     "p30_auto_mask": {"en": "Auto Skin/UI Mask", "ru": "Авто-маска (UI / кожа)"},
     "p30_auto_mask_tip": {
-        "en": "Automatically detect and preserve UI elements and skin tones (default ON)",
-        "ru": "Автоматическое определение и защита элементов UI и оттенков кожи (вкл)"},
+        "en": "Optional skin/UI conditioning (public baseline OFF)",
+        "ru": "Дополнительная настройка кожи/UI (в исходном профиле выключена)"},
     "p30_style_index": {"en": "Render Style", "ru": "Стиль рендера"},
     "p30_style_index_tip": {
         "en": "Neural processing style preset (0 = Default, 1 = Natural, 2 = Cinematic)",
