@@ -16,19 +16,6 @@ static void winGeo(const Stage& s, int oy, int ox,
     Ww = hp8 * wp8;
 }
 
-static int parsePilot(const char* envName, const char* legacyEnv, int defaultVal) {
-    if (const char* p = std::getenv(envName)) {
-        if (std::strcmp(p, "none") == 0 || std::strcmp(p, "off") == 0) return -1;
-        return std::atoi(p);
-    }
-    if (legacyEnv) {
-        if (const char* p = std::getenv(legacyEnv)) {
-            if (std::strcmp(p, "none") == 0 || std::strcmp(p, "off") == 0) return -1;
-            return std::atoi(p);
-        }
-    }
-    return defaultVal;
-}
 
 // ---- window attention shared tail (per-stage geometry) -----------------
 void ChainRecorder::recordWindowAttn(VkCommandBuffer cb, int famIdx, int idx, const Stage& s,

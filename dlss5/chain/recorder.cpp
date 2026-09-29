@@ -327,15 +327,22 @@ void ChainRecorder::dPool(VkCommandBuffer cb, uint64_t a, uint64_t c2, uint32_t 
                           uint32_t Wpad, uint32_t Hpad, uint32_t C, uint32_t flags) {
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pPool.pipe);
     uint32_t n = (Hpad / 2) * (Wpad / 2);
+
+    int poolVec = parsePilot("D5C_INT8_POOL_VEC", nullptr, 1);
+    bool useVec = (poolVec >= 0 && (poolVec == 0 ? false : true)) && ((C % 4) == 0);
+    if (useVec) flags |= 4u;
+
     PoolPush p{a, c2, Hin, Win, Wpad, C, n, flags};
     vkCmdPushConstants(cb, pPool.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
 
     uint64_t bytes = (uint64_t)Hin * Win * C * ((flags & 1) ? 2 : 4) +
                      (uint64_t)n * C * 2;
 
+    uint32_t dispatchCount = useVec ? (n * (C / 4) + 255) / 256 : (n + 255) / 256;
+
     pmBegin(cb);
-    vkCmdDispatch(cb, (n + 255) / 256, 1, 1);
-    pmEnd(cb, "pool", "", 0, C, 0, (n + 255) / 256, 1, 1, bytes);
+    vkCmdDispatch(cb, dispatchCount, 1, 1);
+    pmEnd(cb, "pool", "", 0, C, 0, dispatchCount, 1, 1, bytes);
 }
 
 void ChainRecorder::dUpMerge(VkCommandBuffer cb, uint64_t a, uint64_t b, uint64_t c2, uint64_t sin,

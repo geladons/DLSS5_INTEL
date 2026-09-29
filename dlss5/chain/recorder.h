@@ -13,6 +13,20 @@
 
 namespace d5c {
 
+inline int parsePilot(const char* envName, const char* legacyEnv, int defaultVal) {
+    if (const char* p = std::getenv(envName)) {
+        if (std::strcmp(p, "none") == 0 || std::strcmp(p, "off") == 0) return -1;
+        return std::atoi(p);
+    }
+    if (legacyEnv) {
+        if (const char* p = std::getenv(legacyEnv)) {
+            if (std::strcmp(p, "none") == 0 || std::strcmp(p, "off") == 0) return -1;
+            return std::atoi(p);
+        }
+    }
+    return defaultVal;
+}
+
 // push blocks (scalar layout) — verbatim from m8-full-chain main.cpp
 #pragma pack(push, 1)
 struct GemmPush {

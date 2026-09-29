@@ -227,3 +227,25 @@ To definitively test this, `ChainProf` was upgraded to record paired hardware ti
 | **qact** (quantize act W1) | 10 | 7.76 ms | 766.0 MB | 98.7 GB/s |
 | **Others** (front-end / bridge) | 5 | 3.32 ms | 434.4 MB | - |
 | **TOTAL** | **1,007** | **904.59 ms** | **53,133.5 MB** | **58.7 GB/s** |
+
+
+---
+
+## 7. Stage 15: Vectorized 128-Bit Downsample Pool (Intel Arc Pro B50)
+
+### A. Motivation & Root Cause Analysis
+- Prior to Stage 15, pool2.comp dispatched 1 thread per output token, sequentially looping over all channels with scalar 32-bit and 16-bit loads.
+- Consecutive threads in a SIMD32 wave had a stride of $ floats (128 to 2048 bytes), causing each lane to hit a different 64-byte DRAM cacheline (16x-32x sector waste and 97% cacheline thrashing).
+- At 1080p, pool consumed **42.45 ms** on only 424 MB of memory traffic (a pathetic 10.0 GB/s effective bandwidth).
+
+### B. Architecture of Vectorized Pool
+- **Mapping:** 1 invocation per (token, ch4) vec4 slot. Consecutive lanes in every SIMD32 wave access consecutive 128-bit memory addresses in DRAM.
+- **Memory Coalescing:** 100% dense DRAM access pattern (0 byte sector waste).
+- **Rollback Control:** Environment variable D5C_INT8_POOL_VEC=0 restores the scalar token-thread path.
+
+### C. Performance & Verification Results
+- **Kernel Busy Time (1080p Native):** **42.45 ms -> 2.53 ms (16.8x speedup! -39.92 ms saved)**
+- **Kernel Busy Time (960x576):** **6.30 ms -> 0.66 ms (9.5x speedup! -5.64 ms saved)**
+- **Total Chain Time (1080p Native):** **912.9 ms -> 767.5 ms (-145.4 ms saved)**
+- **Total Chain Time (960x576):** **266.8 ms -> 210.2 ms (-56.6 ms saved)**
+- **Quality (BMP PSNR vs FP16):** **45.05 dB** (100.00% bit-exact vs unfused baseline, 0 NaNs/Infs).
