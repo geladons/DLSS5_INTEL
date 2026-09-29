@@ -76,37 +76,38 @@
 
 ---
 
-## 5. Current Active Work: INT8 Full U-Net Integration (2026-09-28)
+## 5. Optimization Progress & Current State (2026-09-28)
 
 ### What is Completed & Fully Verified:
-1. **Dynamic Activation Quantization Shader (`quant_act.comp`):**
-   - Implements dynamic per-32-token block symmetric scaling via shared memory tree reduction (`256` invocations/workgroup).
-   - Writes INT8 activations and float scales (`scales[b]`).
-2. **Cooperative Matrix INT8 Kernel (`gemm_i8.comp`):**
-   - Config: `coopmat 8x16x32 A=i8 B=i8 C=i32 sat=0 scope=3` (Subgroup).
-   - `RM=4, RN=2` (`BM=32, BN=32` tile) maintaining maximum 8 threads/EU wave occupancy on Battlemage Xe2.
-   - Staged through shared memory `stage[BM * BN]` for hardware de-swizzling and per-channel scale alignment.
-   - Fused epilogue (`gate_activation` + `e4m3` from `publish.glsl`), 128-bit coalesced stores (`Half4Buf`).
-3. **Dispatcher & Engine Plumbing:**
-   - `dQuantAct` and `dGemmI8` in `dlss5/chain/recorder.h` / `recorder.cpp`.
-   - Dedicated aligned scratch arena slots `oQAct` and `oQScale`.
-   - Selective INT8 weights overriding in `weights.cpp` via `loadInt8()`, controlled by `D5C_INT8_PILOT`.
-4. **Quality & Verification Passed:**
-   - Verified on all 10 `weight1` blocks (0, 1, 2, 3, 4, 66, 67, 68, 69, 70):
-     - Output Pixel PSNR: **45.27 dB** (target >= 40.0 dB).
-     - Pearson Correlation: **0.9678**.
-     - Exactly matching pixel bytes: **50.75%**; within $\pm 1$ LSB: **79.70%**.
-     - Zero NaNs, zero Infs across the entire 71-block graph.
-5. **Architectural Findings Recorded:**
-   - On tall-skinny asymmetric matrices where $N \gg K$ (such as `weight1` where $M=2,088,960, N=128, K=32$), output $C$ is 4x larger than $A$ (534 MB write vs 133 MB read). Writing $C$ consumes 80% of DRAM traffic. Running a separate `quant_act` shader adds 200 MB of DRAM traffic, slightly increasing total execution time (125.8 ms vs 116.4 ms).
-   - Preloading scales into shared memory `s_scale[BN]` in `gemm_i8.comp` caused EU occupancy collapse (27 ms -> 41 ms); direct vector store was restored.
+1. **INT8 Weight1 & Weight2 End-to-End (`Stage 11`, Commit `8af6ea5`):**
+   - Dynamic per-32-token symmetric activation quantization (`quant_act.comp`).
+   - INT8 coopmat 8x16x32 ($BM=32, BN=32$) with fused gate+e4m3 epilogue for `weight1` and multi-tile K-loop (4 tiles for $K=128$) with fused residual for `weight2`.
+   - Quality: Weight2 Pilot 70: **48.76 dB**, $r = 0.9954$.
+2. **Fused `weight1 -> weight2` Pipeline (`Stage 12`, Commit `ce060bd`):**
+   - Direct producer-consumer pipeline: `weight1` epilogue computes 32x32 tile absmax via `subgroupMax()` reduction, writes tile scales to `O.oQScale2`, directly writes INT8 activations to `O.oG3`.
+   - `weight2` multi-tile K-loop loads INT8 directly from `O.oG3` with tile scales.
+   - Intermediate `quant_act` pass **100% ELIMINATED** (10 dispatches and 10 barriers removed per frame).
+   - Quality: **45.05 dB PSNR** (improved from 44.42 dB due to 32x32 tile scale dynamic range), $r = 0.9698$, 0 NaNs/Infs.
+   - Hardware Measured Benchmarks (Intel Arc Pro B50):
+     - 1080p: **741.83 ms** (-98.12 ms saved per frame, **1.13x speedup**; **-4.27 GB DRAM traffic saved**).
+     - 960x576: **214.38 ms** (-19.39 ms saved per frame; **-1.13 GB DRAM traffic saved**).
+3. **Window Attention (QKV & Projection) in INT8 (`Stage 13`, Commit `51409de`):**
+   - Batched scale indexing `by = gl_WorkGroupID.z * ((pc.m + BM - 1u) / BM) + gl_WorkGroupID.y` across all window grids ($z \in [0..W_w-1]$).
+   - Sized `off.oQScale` and `off.oQScale2` using `maxTokens = std::max(st[0].TOK, Ww * 64)` to avert 610-float buffer overruns.
+   - Granular controls: `D5C_INT8_ATTN` (default `-1` for 100% rollback safety), `D5C_INT8_ATTN_QKV`, `D5C_INT8_ATTN_PROJ`.
+   - Window block filtering in `weights.cpp` (`isWindow = blk <= 30 || blk >= 40`), preserving FP16 precision for global blocks 31..38.
+   - Quality: Attention Pilot 70: **44.94 dB PSNR**, $r = 0.9680$, 0 NaNs/Infs. Rollback baseline: **45.05 dB PSNR** (bit-exact).
+   - Roofline Finding: All Attention GEMMs in FP16 execute in only **46.1 ms** total across the whole network (weights live permanently in L2 cache, direct register-to-memory stores). Un-fused INT8 adds `quant_act` (+24.0 ms) and shared-memory dequant (+54.2 ms) overhead, confirming that the remaining attention leverage is in **Flash-Attention fusion**.
 
-### Exact Roadmap for the Next Session:
-1. **Target $K \gg N$ Layers (`weight2`):**
-   - `weight2` has shape $M=2,088,960, N=32, K=128$.
-   - Reading $A$ is 80% of DRAM traffic (534.8 MB). Quantizing $A$ directly cuts DRAM traffic in half, saving over **1.07 GB** of bandwidth across the 10 blocks!
-2. **Inter-Layer Producer Fusion (`weight1` $\to$ `weight2`):**
-   - Wire `weight1` to write quantized activations directly into `oG3`, eliminating `qact` DRAM roundtrips entirely.
-3. **Expand to Attention Projections & FFN Expand:**
-   - Quantize QKV ($64 \times 96 \times 32$), attention projection ($64 \times C \times C$), and branched FFN expand ($TOK \times 128 \times C$).
+---
+
+## 6. Exact Roadmap for Next Session: Flash-Attention Fusion
+
+### Target: Fuse `cosw` + `smaxw` + `gather` into Single On-Chip Attention Kernel
+- **Measured Problem:** The Attention Subsystem (`cosw` 91.2 ms + `smaxw` 78.7 ms + `gather` 32.7 ms = **202.6 ms on 1080p**, 60.9 ms on 960x576) is memory-bound, materializing intermediate score matrices (`oSCW` $[W_w, H, 64, 64]$ and `oPRW`) to DRAM.
+- **Solution:**
+  1. **Fused Flash-Attention Kernel:** Compute Query/Key dot-products, online softmax normalization (running max + sum), and Value accumulation directly in SRAM / registers per window tile ($64 \times 64$).
+  2. **Eliminate Intermediate Buffers:** Remove `oSCW` (46 MB) and `oPRW` (23 MB) DRAM traffic entirely.
+  3. **Expected Leverage:** Cut ~100-150 ms from 1080p frame time, targeting **< 600 ms @ 1080p** and **< 160 ms @ 960x576**.
+
 
