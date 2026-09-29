@@ -1,5 +1,23 @@
 # DEV_STATE.md - where we are (updated 2026-09-29 by Antigravity)
 
+## Stage 17: Multi-Engine Game Presentation Fixes & Hardening (2026-09-29 COMPLETED)
+- **1. GTA IV Menu Freeze & Flickering/Ripple (x86 D3D9 / DXVK):**
+  - **Sunshine Port Conflict:** Sunshine permanently occupies TCP 47990 on this host. Reassigned daemon and layer communication to dedicated port **48990**.
+  - **Socket Timeout:** Reduced layer `exchange()` timeout from 60000 ms to 1500 ms (fail-fast to native presentation).
+  - **Static Menu Bypass:** Restored 85% held-still threshold in `process_frame` and adjusted `settled()` difference threshold to 12. Menu presentation runs at clean native 60 FPS without flickering or socket stalls.
+- **2. Red Dead Redemption 2 Launch Crash (x64 Vulkan):**
+  - **vkCreateDevice NULL Pointer Crash:** Fixed invalid Vulkan loader call `next_instance(NULL, "vkCreateDevice")` by dispatching with `layer_instance` and fallback chain. Added null-pointer validation.
+  - **Instance Tracking:** Intercepted `vkDestroyInstance` and added direct bypass in `nr_CreateInstance` for internal neural compute contexts (`dlss5_inprocess`, `m11d`, `d5c`).
+  - **Device Selection Scoring:** Updated `VkContext::pickDevice` with score-based heuristic, ensuring discrete Intel Arc Pro B50 with coopmat is prioritized over virtual display adapters.
+- **3. Metro Exodus Crash on Launch (DirectX 12):**
+  - **Layer Collision Prevention:** `gamelaunch.py` explicitly disables `ENABLE_NR_LAYER=0` in DX12 mode, eliminating Vulkan presentation layer injection into the DX12 game process.
+  - **COM Factory QueryInterface Hooking:** Hooked `QueryInterface` on `IDXGIFactory` in `m12_hook.cpp` to automatically intercept factory version queries (`IDXGIFactory1..7`) and swapchain views.
+  - **SEH Compute Isolation:** Wrapped in-process DLSS 5 compute and interpolation calls in `m12_dx12.cpp` with structured exception handling (`__try / __except`).
+- **4. The Witcher 3 Next-Gen Launcher Loop & Dual-Binary Deployment:**
+  - **Binary Prioritization:** `gamescan.py` prioritizes `bin\x64_dx12\witcher3.exe` (DX12) over legacy DX11 binary for modern Intel Arc hardware.
+  - **REDprelauncher Bypass:** Automatically bypasses `REDprelauncher.exe` by launching the game binary directly, eliminating the manual click-to-play loop.
+  - **Dual-Renderer Deployment:** `deploy.py` mirrors proxy DLLs across sister directories (`bin\x64` and `bin\x64_dx12`), ensuring seamless DLSS 5 activation under both DX11 and DX12.
+
 ## Stage 16: v0.3 Production Release Packaging, Multi-Frontend Rebuilds & Bundle Verification (2026-09-29 COMPLETED)
 - **1. Objective & Binaries Rebuilt:**
   - Full clean compilation across all frontends and runtimes:
