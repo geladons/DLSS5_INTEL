@@ -212,7 +212,7 @@ with tempfile.TemporaryDirectory() as td:
         with patch.object(type(ctl.daemon), "running", True):
             with patch.object(ctl, "game_deploy", return_value=(True, "deployed")), \
                  patch.object(ctl, "daemon_start") as mock_dstart, \
-                 patch.object(ctl.daemon, "stop", return_value=(True, "stopped")) as mock_dstop, \
+                 patch.object(ctl, "_ensure_daemon_stopped", return_value=(True, "stopped")) as mock_dstop, \
                  patch("m13.gamelaunch.launch_game", return_value=(True, "launched pid 111")) as mock_lg:
                 ok, msg = ctl.game_launch(dummy_x64)
                 assert ok, "game_launch x64 failed: %s" % msg
