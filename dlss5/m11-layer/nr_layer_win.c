@@ -36,6 +36,13 @@
  *   NR_LAYER_UI_MASK  0 = disable exact-repeat reuse of the last processed
  *                     result (default on; legacy name)
  *
+ * Daemon flap control (TCP path, nr_degrade.h): a transient exchange failure
+ * re-blits the last processed frame of the same extent for up to 8
+ * consecutive fails (logged once per streak); past that the daemon is
+ * considered down and frames pass native until it answers again. Swapchains
+ * below 64x64 on either axis are degenerate (menu/letterbox sub-elements)
+ * and always pass through native, never touching the daemon.
+ *
  * Build: see CMakeLists.txt (x64; x86 build needed for 32-bit games).
  */
 #include <winsock2.h>
@@ -51,6 +58,7 @@
 #include <vulkan/vk_layer.h>
 #include "chain_c_api.h"
 #include "nr_framegen.h"
+#include "nr_degrade.h"
 
 #define MAX_SWAPCHAINS 8
 #define MAX_IMAGES 8
@@ -72,6 +80,8 @@ typedef struct device_data {
     void *mapped;
     unsigned char *result;
     VkDeviceSize result_size;
+    int result_valid;          /* result holds a re-blittable frame */
+    uint32_t result_w, result_h; /* extent that frame was processed at */
     int holding;
     VkSwapchainKHR holding_chain; /* the swapchain the held result belongs to */
     unsigned char *earlier;
@@ -136,6 +146,7 @@ static const char *capture_out_path;
 static long capture_every;
 static long live_every;
 static NrFrameGen g_fg;
+static NrDegrade g_dg;
 static long nr_port = NR_DEFAULT_PORT;
 static const char *trigger_path;
 static const char *freeze_path;
@@ -792,6 +803,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
         live_every = live ? strtol(live, NULL, 10) : 0;
         if (live_every < 0) live_every = 0;
         nr_fg_init(&g_fg, live_every);
+        nr_degrade_init(&g_dg);
         const char *port = getenv("NR_LAYER_PORT");
         nr_port = port ? strtol(port, NULL, 10) : NR_DEFAULT_PORT;
         if (nr_port <= 0) nr_port = NR_DEFAULT_PORT;
@@ -1101,6 +1113,7 @@ static int ensure_resources(device_data *data, VkDeviceSize needed)
     free(data->result);
     data->result = (unsigned char *)malloc((size_t)needed);
     data->result_size = needed;
+    data->result_valid = 0; /* the old last-processed frame is gone */
     return data->result ? 0 : -1;
 }
 
@@ -1300,6 +1313,17 @@ static void dump_capture(const char *path, const uint32_t *header,
 static int process_frame(device_data *data, swapchain_data *chain,
                          VkQueue queue, uint32_t index)
 {
+    /* Degenerate swapchain gate: tiny menu/letterbox sub-elements are shown
+     * native without a transfer, engine call, or TCP exchange - processing
+     * them only wastes a full daemon engine re-init per appearance. */
+    int deg_log = NR_DEGRADE_LOG_NONE;
+    if (nr_degrade_is_degenerate(&g_dg, chain->extent.width,
+                                 chain->extent.height, &deg_log)) {
+        if (deg_log == NR_DEGRADE_LOG_DEGENERATE)
+            nr_log("[nr_layer] degenerate swapchain %ux%u; passing through",
+                   chain->extent.width, chain->extent.height);
+        return -1;
+    }
     VkDeviceSize needed = (VkDeviceSize)chain->extent.width * chain->extent.height * 4;
     if (ensure_resources(data, needed)) return -1;
     if (transfer(data, chain, queue, index, 0)) return -1;
@@ -1344,6 +1368,9 @@ static int process_frame(device_data *data, swapchain_data *chain,
         if (r == 0) {
             if (data->result && data->result_size >= needed) {
                 memcpy(data->result, data->mapped, (size_t)needed);
+                data->result_w = chain->extent.width;
+                data->result_h = chain->extent.height;
+                data->result_valid = 1;
             }
             dump_capture(capture_out_path, header, (const unsigned char *)data->mapped, needed);
             nr_log("[nr_layer] in-process processed %ux%u (frame %lu)",
@@ -1355,12 +1382,40 @@ static int process_frame(device_data *data, swapchain_data *chain,
 
     /* No daemon configured: capture-only mode (frame passes through). */
     if (!nr_port) return -1;
-    if (exchange(header, sizeof header, data->mapped, (size_t)needed, data->result,
-                 (size_t)needed)) {
+    /* The reply lands in data->mapped (the payload is fully sent before the
+     * first reply byte arrives, so the alias is safe). Receiving anywhere
+     * else - into data->result as the old code did - lets a timed-out recv
+     * tear the last processed frame we may still want to hold. */
+    if (exchange(header, sizeof header, data->mapped, (size_t)needed,
+                 data->mapped, (size_t)needed)) {
+        int hold = 0;
+        int dlog = nr_degrade_note_fail(&g_dg, &hold);
+        /* Flap control: a known-up daemon inside the fail window re-blits
+         * the last processed result of THIS extent instead of strobing a
+         * raw frame between processed neighbours. */
+        if (hold && data->result_valid && data->result
+            && data->result_size >= needed
+            && data->result_w == chain->extent.width
+            && data->result_h == chain->extent.height) {
+            memcpy(data->mapped, data->result, (size_t)needed);
+            nr_degrade_note_held(&g_dg);
+            if (dlog == NR_DEGRADE_LOG_HICCUP)
+                nr_log("[nr_layer] daemon hiccup; holding last processed "
+                       "frame (fail %u/%u)", g_dg.consecutive_fail,
+                       g_dg.window);
+            return 0;
+        }
+        if (dlog == NR_DEGRADE_LOG_DOWN)
+            nr_log("[nr_layer] daemon considered down; native passthrough");
         nr_log("[nr_layer] the daemon did not answer; frame unchanged");
         return -1;
     }
-    memcpy(data->mapped, data->result, (size_t)needed);
+    if (nr_degrade_note_success(&g_dg) == NR_DEGRADE_LOG_RECOVERY)
+        nr_log("[nr_layer] daemon answered again; processed output resumed");
+    memcpy(data->result, data->mapped, (size_t)needed);
+    data->result_w = chain->extent.width;
+    data->result_h = chain->extent.height;
+    data->result_valid = 1;
     dump_capture(capture_out_path, header, data->result, needed);
     nr_log("[nr_layer] processed %ux%u", chain->extent.width, chain->extent.height);
     return 0;
@@ -1421,6 +1476,9 @@ static int resend_raw(device_data *data, swapchain_data *chain)
         int r = pfn_dlss5_process_frame(g_engine, chain->extent.width, chain->extent.height,
                                         data->raw, data->result, (long)frame_counter);
         if (r == 0) {
+            data->result_w = chain->extent.width;
+            data->result_h = chain->extent.height;
+            data->result_valid = 1;
             nr_log("[nr_layer] in-process reprocessed held raw frame (live knob turn)");
             return 0;
         }
@@ -1433,6 +1491,9 @@ static int resend_raw(device_data *data, swapchain_data *chain)
         nr_log("[nr_layer] reprocess: the daemon did not answer");
         return -1;
     }
+    data->result_w = chain->extent.width;
+    data->result_h = chain->extent.height;
+    data->result_valid = 1;
     nr_log("[nr_layer] reprocessed the held frame (live knob turn)");
     return 0;
 }
@@ -1458,6 +1519,9 @@ static int freeze_capture(device_data *data, swapchain_data *chain,
     data->raw_held = 1;
     if (resend_raw(data, chain)) {
         memcpy(data->result, data->raw, (size_t)needed);
+        data->result_w = chain->extent.width;
+        data->result_h = chain->extent.height;
+        data->result_valid = 1;
         nr_log("[nr_layer] daemon unavailable; freezing the original frame unprocessed");
     }
     memcpy(data->mapped, data->result, (size_t)needed);
