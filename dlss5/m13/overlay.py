@@ -435,11 +435,29 @@ class ControlOverlay:
         if hasattr(self, "p30_panel") and self.p30_panel:
             self.p30_panel.set_values({"intensity": 1.0})
 
+    def _apply_live_mask_toggle(self, enabled):
+        exe = self.ctl.active_game_exe()
+        try:
+            if enabled:
+                if not exe:
+                    self.on_log("[overlay] HUD mask toggle: no active game, will apply on next launch")
+                    return
+                regions = hudmask.resolve(exe, self.ctl.cfg)
+                hudmask.write_regions(regions)
+                self.on_log("[overlay] HUD mask enabled (live)")
+            else:
+                hudmask.write_regions([])
+                self.on_log("[overlay] HUD mask disabled (live)")
+        except (OSError, ValueError) as e:
+            self.on_log("[overlay] HUD mask toggle failed: %s" % e)
+
     def _on_phase30_change(self, key, val):
         if key == "intensity":
             self.var.set(val)
         self.ctl.submit(self.ctl.set_phase30, {key: val})
         self.on_log("[overlay] Phase30 %s -> %s" % (key, val))
+        if key == "auto_mask":
+            self._apply_live_mask_toggle(bool(val))
 
     def _on_phase30_reset(self):
         self.ctl.submit(self.ctl.reset_phase30)
