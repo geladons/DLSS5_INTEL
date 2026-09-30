@@ -12,7 +12,6 @@
 # ============================================================================
 import os
 import threading
-import time
 
 from . import paths
 

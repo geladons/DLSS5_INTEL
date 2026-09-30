@@ -59,7 +59,7 @@ print("HINT:", ui.hint.cget("text"))
 print("OVERLAY STATUS:", ui.overlay.status.cget("text"))
 
 # Stage 5 controls: scale presets, frame generation, sharpness
-from m13.i18n import scale_to_preset_label, preset_label_to_scale
+from m13.i18n import scale_to_preset_label
 
 def pump(count=6, delay=0.1):
     for _ in range(count):

@@ -15,10 +15,6 @@ reference. Their original notices are retained in the file headers.
 DXVK (https://github.com/doitsujin/dxvk) binaries are fetched at build time
 and redistributed unchanged under the zlib license (c) DXVK authors.
 
-AMD FidelityFX FSR 1.0 headers (dlss5/m8b-live/shaders/fsr/ffx_a.h,
-ffx_fsr1.h) are included under the MIT License, Copyright (c) 2021 Advanced
-Micro Devices, Inc.; their license text is retained in the files.
-
 Revisions up to and including public commit cf04e26 were released under the
 MIT License; every later revision is Apache-2.0. No NVIDIA source code or
 model weights are included or distributed.

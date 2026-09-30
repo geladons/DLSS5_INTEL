@@ -11,7 +11,7 @@ import sys
 import time
 
 sys.path.insert(0, r"" + str(_REPO) + r"\dlss5\m13")
-from daemonctl import M11dClient, MAGIC_CTRL
+from daemonctl import M11dClient
 
 HOST, PORT = "127.0.0.1", 48990
 W = H = 320

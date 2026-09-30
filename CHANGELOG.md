@@ -39,6 +39,19 @@ user-visible milestones.
 - `nr_layer_win.c` logs `fg stats: presents/processed/generated/native`;
   overlay logs `[overlay] shown ... fg_before/fg_after`.
 
+### Removed
+- Vendored AMD FSR 1.0 EASU/RCAS compute shaders
+  (`m8b-live/shaders/fsr_easu.comp`, `fsr_rcas.comp`, `fsr/ffx_a.h`,
+  `fsr/ffx_fsr1.h`, MIT) — an experiment superseded by our own bounded
+  CAS in `encode.comp`; never wired into a build.
+- Leftover `m8b-live/shaders/` copies no build compiles: `standin.comp`
+  (the M3 stand-in block, replaced by the real 71-block chain; live
+  copies remain in m3/m4/m5) and `m8/round_test.comp` (the M7a rounding
+  unit kernel; live copies remain in m7/m8/m9).
+- Dead imports in m13 (`logtail`: `time`; `test_launcher` /
+  `test_launch_paths`: unused `MagicMock`/`PropertyMock`; `test_stage5`:
+  unused i18n names; `_ctrl_validate`, `_ui_smoke` helpers).
+
 ## v0.1-demo — 2026-09-25 (M13 v6)
 
 First public demo build.

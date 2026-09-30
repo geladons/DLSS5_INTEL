@@ -3,7 +3,7 @@ import os
 import sys
 import tempfile
 import time
-from unittest.mock import patch, MagicMock, PropertyMock
+from unittest.mock import patch
 
 _DLSS5 = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _DLSS5)

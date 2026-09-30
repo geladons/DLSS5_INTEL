@@ -8,8 +8,7 @@ _DLSS5 = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _DLSS5)
 
 from m13.config import Config, DEFAULTS
-from m13.i18n import (set_language, get_language, tr,
-                      scale_preset_labels, scale_to_preset_label,
+from m13.i18n import (set_language, tr, scale_to_preset_label,
                       preset_label_to_scale)
 
 print("=== 1. Testing DEFAULTS ===")

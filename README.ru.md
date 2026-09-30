@@ -214,9 +214,6 @@ residual-реконструкция при render scale < 1, демон `m11d`, 
 ### Сторонние зависимости
 - **[DXVK](https://github.com/doitsujin/dxvk)** — трансляция D3D9–11 в Vulkan
   (бинарники скачиваются при сборке, © авторы DXVK, лицензия zlib).
-- **AMD FidelityFX FSR 1.0** — заголовки (`dlss5/m8b-live/shaders/fsr/`, MIT,
-  © 2021 Advanced Micro Devices), завендорены для экспериментов EASU/RCAS;
-  в поставляемый пайплайн не входят.
 
 ### Разработка
 - **Архитектура и сопровождение:** владелец проекта

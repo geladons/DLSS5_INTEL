@@ -247,9 +247,6 @@ No code was copied from the projects above.
 ### Third-Party Dependencies
 - **[DXVK](https://github.com/doitsujin/dxvk)** — D3D9–11 to Vulkan
   translation (fetched at build time, © DXVK authors, zlib license).
-- **AMD FidelityFX FSR 1.0** headers (`dlss5/m8b-live/shaders/fsr/`, MIT,
-  © 2021 Advanced Micro Devices) — vendored for the EASU/RCAS experiments;
-  not part of the shipped pipeline.
 
 ### Development
 - **Architecture & Maintainer:** Project owner
