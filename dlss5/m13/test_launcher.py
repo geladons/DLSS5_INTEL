@@ -85,8 +85,35 @@ class TestHappyPath(LauncherBase):
         self.assertLess(order.index("daemon"), order.index("spawn"))
         m_note.assert_called_once_with(exe, exe)
         m_lg.assert_called_once_with(exe, "dx11", scale=0.58, blend=0.75,
-                                     cfg=self.ctl.cfg)
+                                     cfg=self.ctl.cfg, launch_args=[])
         self.assertTrue(any("result=ok" in l for l in self.logs))
+
+    def test_window_flag_appends_windowed_args(self):
+        exe = self._mk("game_x64.exe", mode="dx11")
+        games = self.ctl.cfg.get("games")
+        games[exe]["window"] = True
+        pl, pd = self._patches()
+        with pl as m_lg, pd, \
+             patch.object(deploy_mod.Deployer, "mode_status",
+                          return_value="deployed"):
+            ok, msg = self.launcher.launch(exe)
+        self.assertTrue(ok, msg)
+        self.assertEqual(m_lg.call_args.kwargs["launch_args"],
+                         list(gamelaunch.WINDOW_ARGS))
+
+    def test_launch_args_override_window(self):
+        exe = self._mk("game_x64.exe", mode="dx11")
+        games = self.ctl.cfg.get("games")
+        games[exe]["window"] = True
+        games[exe]["launch_args"] = "-novid -console"
+        pl, pd = self._patches()
+        with pl as m_lg, pd, \
+             patch.object(deploy_mod.Deployer, "mode_status",
+                          return_value="deployed"):
+            ok, msg = self.launcher.launch(exe)
+        self.assertTrue(ok, msg)
+        self.assertEqual(m_lg.call_args.kwargs["launch_args"],
+                         ["-novid", "-console"])
 
 
 class TestGuards(LauncherBase):

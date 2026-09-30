@@ -34,6 +34,11 @@ M12_PAUSE = os.path.join(os.environ.get("TEMP", "."), "m12_pause.flag")
 FREEZE_FLAG = os.path.join(os.environ.get("TEMP", "."), "m13_freeze.flag")
 REPROC_FLAG = os.path.join(os.environ.get("TEMP", "."), "m13_reproc.flag")
 
+# Best-effort windowed launch: appended when a game entry sets "window"
+# and no explicit launch_args exist. Common flags; a game that ignores
+# them just launches as usual (the UI labels this "try").
+WINDOW_ARGS = ("-windowed", "-window")
+
 
 def _flag_exists(path):
     return os.path.exists(path)
@@ -141,15 +146,18 @@ def engine_env(cfg=None, mode=None, arch="x64"):
     return out
 
 
-def _launch(exe_path, env_extra=None):
-    """Game launch (cwd = game dir). Returns (ok, message)."""
+def _launch(exe_path, env_extra=None, args=None):
+    """Game launch (cwd = game dir). Returns (ok, message).
+    args: extra command-line tokens appended after the exe (e.g. the
+    best-effort windowed flags in WINDOW_ARGS or a per-game launch_args
+    string the owner set)."""
     if not os.path.exists(exe_path):
         return False, "game exe not found: %s" % exe_path
     game_dir = os.path.dirname(exe_path)
     env = dict(os.environ)
     if env_extra:
         env.update(env_extra)
-    p = subprocess.Popen([exe_path], cwd=game_dir,
+    p = subprocess.Popen([exe_path] + list(args or []), cwd=game_dir,
                          stdin=subprocess.DEVNULL,
                          stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL,
@@ -234,7 +242,7 @@ def dx12_resume():
 # dx9/dx11/vulkan all ride the m11 Vulkan layer -> they share the trigger
 # flag (for Vulkan games the layer self-loads, no dll deploy). dx12 rides
 # the m12 proxy -> its own pause flag.
-def launch_game(exe_path, mode, scale=None, gain=None, blend=None, cfg=None, sharpness=None):
+def launch_game(exe_path, mode, scale=None, gain=None, blend=None, cfg=None, sharpness=None, launch_args=None):
     if mode not in ("dx9", "dx11", "vulkan", "dx12"):
         return False, "unknown mode: %s" % mode
 
@@ -340,7 +348,7 @@ def launch_game(exe_path, mode, scale=None, gain=None, blend=None, cfg=None, sha
              ee.get("DLSS5_WEIGHTS_PATH") or "(unset)",
              ee.get("DLSS5_SHADER_DIR") or "(unset)"), flush=True)
 
-    return _launch(exe_path, env)
+    return _launch(exe_path, env, args=launch_args)
 
 
 def mode_paused(mode):

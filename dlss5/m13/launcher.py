@@ -15,6 +15,7 @@
 #    stdout (lands in manager_err.log) and the optional log_fn.
 # ============================================================================
 import os
+import shlex
 import threading
 import time
 
@@ -130,8 +131,21 @@ class GameLauncher:
                 games = ctl.cfg.get("games") or {}
                 if exe in games or not isinstance(register, dict):
                     return True, ""
-                return ctl.add_game(exe, register.get("mode"),
-                                    launch_exe=register.get("launch_exe"))
+                ok2, m2 = ctl.add_game(exe, register.get("mode"),
+                                       launch_exe=register.get("launch_exe"))
+                if ok2:
+                    # Carry per-game extras the register dict may hold
+                    # (windowed flag, custom launch_args) into the stored
+                    # meta - add_game only knows the core fields.
+                    extra = {k: v for k, v in register.items()
+                             if k not in ("mode", "arch", "name",
+                                          "launch_exe")}
+                    if extra:
+                        games = ctl.cfg.get("games") or {}
+                        if exe in games:
+                            games[exe].update(extra)
+                            ctl.cfg.save()
+                return ok2, m2
 
             ok, msg = self._timed(game, "register", do_register)
             if not ok:
@@ -215,9 +229,21 @@ class GameLauncher:
                 return self._finish(game, False, msg)
 
             def do_spawn():
+                # Per-game launch args: explicit "launch_args" wins; else
+                # the "window" checkbox appends the best-effort windowed
+                # flags. Wrapper exes may eat them - best effort by design.
+                args = []
+                raw_args = meta.get("launch_args")
+                if raw_args:
+                    args = shlex.split(raw_args, posix=False)
+                elif meta.get("window"):
+                    args = list(gamelaunch.WINDOW_ARGS)
                 ok2, m2 = gamelaunch.launch_game(
                     target, meta["mode"], scale=ctl.cfg.get("scale"),
-                    blend=ctl.cfg.get("blend"), cfg=ctl.cfg)
+                    blend=ctl.cfg.get("blend"), cfg=ctl.cfg,
+                    launch_args=args)
+                if args:
+                    m2 = "%s args=%s" % (m2, " ".join(args))
                 if ok2:
                     ctl.note_launched(exe, target)
                     if target != exe:

@@ -166,6 +166,8 @@ _S = {
     "mode_auto": {"en": "auto", "ru": "авто"},
     "enable": {"en": "Enable DLSS 5", "ru": "Включить DLSS 5"},
     "play": {"en": "Play", "ru": "Играть"},
+    "window_cb": {"en": "Window (try: -windowed)",
+                  "ru": "Окно (попробовать: -windowed)"},
     "pause_resume": {"en": "Pause / Resume", "ru": "Пауза / продолжить"},
     "disable": {"en": "Disable", "ru": "Отключить"},
     "remove": {"en": "Remove", "ru": "Убрать"},

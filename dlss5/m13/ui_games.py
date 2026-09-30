@@ -171,6 +171,12 @@ class GamesTab:
                    command=self._enable).pack(side="left")
         ttk.Button(act, text=tr("play"),
                    command=self._launch).pack(side="left", padx=6)
+        # Windowed checkbox: best effort - the launcher appends
+        # gamelaunch.WINDOW_ARGS ("-windowed -window") when set and no
+        # custom launch_args exist. Remembered per game.
+        self.window_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(act, text=tr("window_cb"),
+                       variable=self.window_var).pack(side="left")
         ttk.Button(act, text=tr("pause_resume"),
                    command=lambda: self.ctl.submit(
                        self.ctl.processing_toggle)).pack(side="left")
@@ -200,6 +206,7 @@ class GamesTab:
         meta = (self.ctl.cfg.get("games") or {}).get(exe or "")
         if meta:
             self.mode_var.set(MODE_NAMES.get(meta["mode"], tr("mode_auto")))
+            self.window_var.set(bool(meta.get("window")))
 
     def _chosen_mode(self):
         v = self.mode_var.get().lower()
@@ -236,12 +243,19 @@ class GamesTab:
             self.ui.log("mgr", tr("pick_game"))
             return
         reg = None
-        if exe not in (self.ctl.cfg.get("games") or {}):
+        window = bool(self.window_var.get())
+        games = self.ctl.cfg.get("games") or {}
+        if exe in games:
+            if games[exe].get("window") != window:
+                games[exe]["window"] = window
+                self.ctl.cfg.save()
+        else:
             launch = None
             for g in self.scanned:
                 if g.exe == exe:
                     launch = g.launch_exe if g.via_wrapper else None
-            reg = {"mode": self._chosen_mode(), "launch_exe": launch}
+            reg = {"mode": self._chosen_mode(), "launch_exe": launch,
+                   "window": window}
         self.ctl.launch_game_async(exe, register=reg)
 
     def _disable(self):
