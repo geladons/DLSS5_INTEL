@@ -12,6 +12,8 @@
 #   gamelaunch.py detached game launch with layer/proxy env, file-based
 #                 pause/resume (never input injection into games)
 #   screenmode.py m8b-live overlay (screen mode) start/stop
+#   launcher.py   GameLauncher: guarded game launch as explicit timed steps
+#   worker.py     ActionWorker action queue + WorkerSupervisor watchdog
 #   logtail.py    threaded log file tails into the UI
 #   overlay.py    frameless in-game control overlay (hotkey, pause, gain)
 #   ui.py         main window (dark theme; zero I/O on the Tk thread -

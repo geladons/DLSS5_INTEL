@@ -13,7 +13,6 @@
 # through a callback the UI marshals via its own queue.
 # ============================================================================
 import os
-import queue
 import tempfile
 import threading
 import time
@@ -22,6 +21,8 @@ from . import config as config_mod
 from . import deploy as deploy_mod
 from . import gamelaunch
 from . import paths
+from .launcher import GameLauncher
+from .worker import ActionWorker, WorkerSupervisor
 from .daemonctl import M11dClient, DaemonError, DEFAULT_PORT
 from .deploy import Deployer, LayerRegistry
 from .phase30 import phase30_env_dict, write_phase30_knobs, PHASE30_DEFAULTS
@@ -183,39 +184,6 @@ class StateMonitor(threading.Thread):
         return None
 
 
-# ------------------------------------------------------------ async jobs ---
-class ActionWorker(threading.Thread):
-    """One sequential worker for every mutating action (daemon start/stop,
-    gain push, deploy, pause/resume). Keeps the Tk thread at 0 ms of I/O."""
-
-    def __init__(self, on_result):
-        super().__init__(daemon=True, name="m13-actions")
-        self.on_result = on_result        # called from THIS thread
-        self.q = queue.Queue()
-        self._stop_ev = threading.Event()
-
-    def submit(self, fn, args=()):
-        self.q.put((fn, args))
-
-    def stop(self):
-        self._stop_ev.set()
-        self.q.put((None, ()))
-
-    def run(self):
-        while not self._stop_ev.is_set():
-            fn, args = self.q.get()
-            if fn is None:
-                continue
-            try:
-                ok, msg = fn(*args)
-            except Exception as e:
-                ok, msg = False, "error: %s" % e
-            try:
-                self.on_result(ok, msg)
-            except Exception:
-                pass
-
-
 # -------------------------------------------------------------- controller --
 class M13Controller:
     def __init__(self, cfg=None):
@@ -228,6 +196,8 @@ class M13Controller:
         self.client = M11dClient(timeout=NRCT_TIMEOUT)
         self.monitor = StateMonitor(self)
         self.worker = None          # created by the UI (needs its callback)
+        self.supervisor = None      # WorkerSupervisor, starts with the worker
+        self.launcher = GameLauncher(self, log_fn=self._worker_log)
         self.launched_exes = set()  # launch targets started BY US this
                                     # session (they carry the layer freeze env)
         self._active_game_exe = None
@@ -336,11 +306,24 @@ class M13Controller:
     def start_worker(self, on_result):
         self.worker = ActionWorker(on_result)
         self.worker.start()
+        self.supervisor = WorkerSupervisor(self)
+        self.supervisor.start()
 
     def shutdown(self):
         self.monitor.stop()
         if self.worker:
             self.worker.stop()
+        if self.supervisor:
+            self.supervisor.stop()
+
+    def _worker_log(self, msg):
+        """Forward a mid-action note to the UI log when a worker exists."""
+        w = self.worker
+        if w and getattr(w, "on_result", None):
+            try:
+                w.on_result(True, msg)
+            except Exception:
+                pass
 
     def snapshot(self):
         return self.monitor.snapshot()
@@ -780,43 +763,6 @@ class M13Controller:
             return False, "cannot release x86 daemon before x64 game: daemon still alive after force-kill"
         return True, "force-killed x86 daemon before x64 launch"
 
-    @staticmethod
-    def _resolve_witcher3_dx12(exe, meta, cfg, log_fn=None):
-        def _log(msg):
-            if log_fn:
-                log_fn(msg)
-            print(msg, flush=True)
-        basename = os.path.basename(exe)
-        if basename.lower() != "witcher3.exe":
-            return exe, meta
-        norm = exe.replace("/", "\\")
-        marker = "\\bin\\x64\\"
-        idx = norm.lower().find(marker.lower())
-        if idx < 0:
-            return exe, meta
-        sibling = norm[:idx] + "\\bin\\x64_dx12\\" + norm[idx + len(marker):]
-        if not os.path.exists(sibling):
-            return exe, meta
-        _log("[controller] witcher3 dx11->dx12 sibling switch: %s -> %s" % (exe, sibling))
-        new_meta = dict(meta)
-        new_meta["mode"] = "dx12"
-        games = dict(cfg.get("games") or {})
-        if exe in games:
-            old_entry = games.pop(exe)
-            old_entry["mode"] = "dx12"
-            games[sibling] = old_entry
-            cfg.set("games", games)
-        return sibling, new_meta
-
-    @staticmethod
-    def launch_target(exe, meta=None):
-        meta = meta or {}
-        target = meta.get("launch_exe") or exe
-        if target != exe and not os.path.exists(target):
-            if os.path.exists(exe):
-                return exe
-        return target if os.path.exists(target) else exe
-
     def game_deploy(self, exe):
         meta = (self.cfg.get("games") or {}).get(exe)
         if not meta:
@@ -847,50 +793,39 @@ class M13Controller:
         return True, "%s disabled, originals restored" % meta["name"]
 
     def game_launch(self, exe):
-        meta = (self.cfg.get("games") or {}).get(exe)
-        if not meta:
-            return False, "add the game first"
-        log_fn = None
-        if self.worker and getattr(self.worker, "on_result", None):
-            log_fn = lambda m: self.worker.on_result(True, m)
-        resolved_exe, resolved_meta = self._resolve_witcher3_dx12(
-            exe, meta, self.cfg, log_fn=log_fn)
-        if resolved_exe != exe:
-            exe = resolved_exe
-            meta = resolved_meta
-        d = Deployer(os.path.dirname(exe))
-        if d.mode_status(meta["mode"], meta["arch"]) != "deployed":
-            ok, dep_msg = self.game_deploy(exe)
-            if not ok:
-                return False, dep_msg
-        daemon_note = None
-        if meta.get("arch") == "x86":
-            if not self.daemon.running:
-                ok, msg = self.daemon_start()
-                if not ok and "already" not in msg:
-                    return False, msg
-        elif self.daemon.running:
-            ok, stop_msg = self._ensure_daemon_stopped(log_fn=log_fn)
-            if not ok:
-                return False, stop_msg
-            daemon_note = stop_msg
-        target = self.launch_target(exe, meta)
-        if target != exe and not os.path.exists(target):
-            print("[controller] launch_exe not found, falling back to main exe: %s" % exe, flush=True)
-            target = exe
-        scale = self.cfg.get("scale")
-        blend = self.cfg.get("blend")
-        ok, msg = gamelaunch.launch_game(target, meta["mode"],
-                                         scale=scale, blend=blend,
-                                         cfg=self.cfg)
-        if ok:
-            self.launched_exes.add(os.path.abspath(target).lower())
-            self._active_game_exe = exe
-            if daemon_note:
-                msg = "%s | %s" % (daemon_note, msg)
-            if target.lower() != exe.lower():
-                msg = "%s (via %s)" % (msg, os.path.basename(target))
-        return ok, msg
+        """Synchronous launch (kept for tests/scripts). The UI calls
+        launch_game_async so a blocked step never stalls the ActionWorker
+        queue."""
+        return self.launcher.launch(exe)
+
+    def launch_game_async(self, exe, register=None):
+        """UI path: launches run on their own thread with their own guard,
+        off the shared action queue."""
+        if self.launcher.busy():
+            self._report_result(False,
+                                "a game launch is already in progress")
+            return
+
+        def _run():
+            ok, msg = self.launcher.launch(exe, register=register)
+            self._report_result(ok, msg)
+
+        threading.Thread(target=_run, daemon=True, name="m13-launch").start()
+
+    def _report_result(self, ok, msg):
+        w = self.worker
+        if w and getattr(w, "on_result", None):
+            try:
+                w.on_result(ok, msg)
+                return
+            except Exception:
+                pass
+        print(msg, flush=True)
+
+    def note_launched(self, exe, target):
+        """Bookkeeping after a successful spawn (was inlined in game_launch)."""
+        self.launched_exes.add(os.path.abspath(target).lower())
+        self._active_game_exe = exe
 
     # ------------------------------------------------------- freeze support --
     def freeze_supported(self):

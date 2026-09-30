@@ -234,14 +234,14 @@ class GamesTab:
         if not exe:
             self.ui.log("mgr", tr("pick_game"))
             return
+        reg = None
         if exe not in (self.ctl.cfg.get("games") or {}):
             launch = None
             for g in self.scanned:
                 if g.exe == exe:
                     launch = g.launch_exe if g.via_wrapper else None
-            self.ctl.submit(self._enable_worker, exe, self._chosen_mode(),
-                            launch)
-        self.ctl.submit(self.ctl.game_launch, exe)
+            reg = {"mode": self._chosen_mode(), "launch_exe": launch}
+        self.ctl.launch_game_async(exe, register=reg)
 
     def _disable(self):
         exe = self.selected_exe()

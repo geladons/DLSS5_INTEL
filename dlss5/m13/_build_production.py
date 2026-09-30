@@ -28,9 +28,9 @@ WEIGHTS_SRC = os.path.join(_REPO, "work", "mlxw",
 
 PKG_FILES = ["__init__.py", "config.py", "daemonctl.py", "deploy.py",
              "gamelaunch.py", "gamescan.py", "gamescache.py", "i18n.py", "icons.py",
-             "logtail.py", "overlay.py", "paths.py", "phase30.py", "processes.py",
-             "screenmode.py", "splash.py", "controller.py", "ui.py",
-             "ui_games.py", "m13.pyw", "icon.ico"]
+             "launcher.py", "logtail.py", "overlay.py", "paths.py", "phase30.py",
+             "processes.py", "screenmode.py", "splash.py", "controller.py",
+             "ui.py", "ui_games.py", "worker.py", "m13.pyw", "icon.ico"]
 
 
 _M11D_DIR = os.path.join(_DLSS5, "m11d", "build", "Release")

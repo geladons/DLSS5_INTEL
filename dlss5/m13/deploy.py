@@ -189,21 +189,10 @@ class Deployer:
             _elevated_copy(self.game_dir, need_elevation)
             for _src, dll in need_elevation:
                 out[dll] = self.status(dll, mode_dll_source(mode, arch, dll))
-
-        # Dual-renderer sync: e.g. The Witcher 3 Next-Gen has sister dirs bin\x64 and bin\x64_dx12
-        parent = os.path.dirname(self.game_dir)
-        base = os.path.basename(self.game_dir).lower()
-        if base == "x64_dx12" and os.path.isdir(os.path.join(parent, "x64")):
-            try:
-                Deployer(os.path.join(parent, "x64")).deploy_mode("dx11", arch)
-            except Exception:
-                pass
-        elif base == "x64" and os.path.isdir(os.path.join(parent, "x64_dx12")):
-            try:
-                Deployer(os.path.join(parent, "x64_dx12")).deploy_mode("dx12", arch)
-            except Exception:
-                pass
-
+        # NOTE: no dual-renderer sister-dir sync here (removed Stage 25):
+        # auto-deploying our dxgi proxy into a sibling x64_dx12 dir crashed
+        # Witcher 3 on the first processed present. Deploy only what was
+        # asked; undeploy_mode still cleans sister dirs left by old builds.
         return out
 
     def undeploy_mode(self, mode, arch):

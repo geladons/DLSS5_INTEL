@@ -106,6 +106,14 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
   Lifecycle is auto-managed by `m13`: starts for x86 games, stops after the
   x86 exit grace period, and is reclaimed immediately before an x64 launch.
 - m13: DLSS 5 Manager GUI (`m13.pyw`) & In-Game Overlay (`CTRL+ALT+G`).
+  - Launch: `launcher.py` GameLauncher runs each launch on its own
+    "m13-launch" thread as timed steps (guard_busy, register, resolve,
+    guard_running, deploy, daemon, spawn); one `[launch] game=.. step=..
+    ok=..` line per step in manager_err.log. Never mutates config; refuses a
+    second launch, an already-running game, or a second managed game.
+    `worker.py`: ActionWorker queue + WorkerSupervisor watchdog (job > 150 s
+    -> fresh worker on the same queue). Deploy never touches sister dirs
+    (no bin\x64 <-> bin\x64_dx12 sync).
   - Presets: Native (1.0), Quality (0.67), Balanced (0.58), Performance (0.50),
     Ultra Performance (0.33), and Sharpness (0.0..1.0).
   - Overlay: Topmost non-minimizing overlay with Photo-Mode Freeze on open,
