@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <memory>
 #include <string>
 #include <vector>
@@ -83,6 +84,16 @@ public:
             return true;
         }
 
+        // Init-failure latch: this code runs INSIDE game processes, so a
+        // failed init must not be retried per frame (each attempt is a
+        // vkCreateInstance + full weights parse - a multi-second hitch and a
+        // churn of failed Vulkan objects). The latch releases only when the
+        // requested resolution/scale actually changes (same place where
+        // initialized_/havePrev_ are reset on a real config change).
+        if (init_failed_ && curW_ == w && curH_ == h && curScale_ == scale_) {
+            return false;
+        }
+
         if (initialized_) {
             std::printf("[dlss5_c_api] config changed (res %ux%u -> %ux%u, scale %.2f -> %.2f): re-initializing\n",
                         curW_, curH_, w, h, static_cast<double>(curScale_), static_cast<double>(scale_));
@@ -90,6 +101,7 @@ public:
             initialized_ = false;
             havePrev_ = false;
         }
+        init_failed_ = false;   // new config (or first attempt): allow one fresh try
 
         d5c::EngineConfig cfg{};
         cfg.canvasW = w;
@@ -112,9 +124,28 @@ public:
         cfg.vkCfg.appName = "dlss5_inprocess";
         cfg.profPath = "";
 
-        if (!engine_.init(cfg)) {
+        // engine.init can both return false and throw (weights/shader load
+        // and Vulkan create failures are std::runtime_error now - a library
+        // must never exit() the host game). Catch here so the latch below
+        // covers BOTH failure modes and processFrame still returns -1.
+        bool initOk = false;
+        try {
+            initOk = engine_.init(cfg);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "[dlss5_c_api] engine.init threw for %ux%u (weights: %s): %s\n",
+                         w, h, weightsPath_.c_str(), e.what());
+        } catch (...) {
+            std::fprintf(stderr, "[dlss5_c_api] engine.init threw for %ux%u (weights: %s)\n",
+                         w, h, weightsPath_.c_str());
+        }
+        if (!initOk) {
             std::fprintf(stderr, "[dlss5_c_api] engine.init failed for %ux%u (weights: %s)\n",
                          w, h, weightsPath_.c_str());
+            engine_.shutdown();          // release any partially-created Vulkan state
+            curW_ = w;
+            curH_ = h;
+            curScale_ = scale_;          // remember the config that failed
+            init_failed_ = true;
             return false;
         }
 
@@ -371,6 +402,7 @@ private:
     uint32_t curW_ = 0;
     uint32_t curH_ = 0;
     bool initialized_ = false;
+    bool init_failed_ = false;   // latched until dimensions/scale change
     bool frameGenEnabled_ = false;
     std::vector<uint8_t> prevProcessed_;
     bool havePrev_ = false;

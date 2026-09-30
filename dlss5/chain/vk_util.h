@@ -21,13 +21,20 @@
 #include <cstring>
 #include <cstdlib>
 #include <fstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace d5c {
 
-// VK_CHECK variant for module code: init paths return false, runtime paths
-// that cannot recover exit (same doctrine as m8b VK_CHECK/VK_FATAL).
+// VK_CHECK variant for module code: init paths return false (D5C_VK_RET).
+// D5C_VK_FATAL is used where the function cannot signal failure through its
+// return value (handle/void returns). Since d5c_chain.dll now runs INSIDE
+// game processes (m11-layer x64, m12-dxgi), a library must never kill its
+// host: FATAL throws std::runtime_error, which unwinds to the C ABI
+// try/catch in chain_c_api.cpp and surfaces as a nonzero return. In the
+// standalone m11d the same throw escapes main -> terminate -> nonzero exit,
+// i.e. a real error exit, not a silent 0.
 #define D5C_VK_RET(x)                                                           \
     do {                                                                        \
         VkResult res_ = (x);                                                    \
@@ -42,9 +49,12 @@ namespace d5c {
     do {                                                                        \
         VkResult res_ = (x);                                                    \
         if (res_ != VK_SUCCESS) {                                               \
-            std::fprintf(stderr, "[VK-FAIL] %s -> %d at %s:%d\n", #x, (int)res_, \
-                         __FILE__, __LINE__);                                   \
-            std::exit(1);                                                       \
+            char d5cmsg_[256];                                                  \
+            std::snprintf(d5cmsg_, sizeof d5cmsg_,                               \
+                          "[VK-FAIL] %s -> %d at %s:%d", #x, (int)res_,          \
+                          __FILE__, __LINE__);                                  \
+            std::fprintf(stderr, "%s\n", d5cmsg_);                              \
+            throw std::runtime_error(d5cmsg_);                                  \
         }                                                                       \
     } while (0)
 
@@ -82,7 +92,8 @@ inline VkBuffer CreateBuf(const VkCtx& c, uint64_t bytes, VkBufferUsageFlags usa
         idx = FindMemType(c, req.memoryTypeBits,
                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     }
-    if (idx == UINT32_MAX) { std::fprintf(stderr, "[FAIL] no memory type for buffer\n"); std::exit(1); }
+    if (idx == UINT32_MAX) { std::fprintf(stderr, "[FAIL] no memory type for buffer\n");
+                             throw std::runtime_error("no memory type for buffer"); }
     VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     mai.allocationSize = req.size;
     mai.memoryTypeIndex = idx;
@@ -131,11 +142,13 @@ inline VkImageView CreateView(const VkCtx& c, VkImage img, VkFormat fmt) {
 
 inline VkShaderModule LoadSpv(const VkCtx& c, const std::string& file) {
     std::ifstream f(file, std::ios::binary | std::ios::ate);
-    if (!f) { std::fprintf(stderr, "[FAIL] cannot open %s\n", file.c_str()); std::exit(1); }
+    if (!f) { std::fprintf(stderr, "[FAIL] cannot open %s\n", file.c_str());
+              throw std::runtime_error("cannot open " + file); }
     auto sz = f.tellg();
     f.seekg(0, std::ios::beg);
     std::vector<char> code((size_t)sz);
-    if (!f.read(code.data(), sz)) { std::fprintf(stderr, "[FAIL] read spv\n"); std::exit(1); }
+    if (!f.read(code.data(), sz)) { std::fprintf(stderr, "[FAIL] read spv\n");
+              throw std::runtime_error("read spv " + file); }
     VkShaderModuleCreateInfo smci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     smci.codeSize = (size_t)sz;
     smci.pCode = reinterpret_cast<const uint32_t*>(code.data());

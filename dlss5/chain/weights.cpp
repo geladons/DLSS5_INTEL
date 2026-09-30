@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 
 namespace d5c {
 
@@ -51,15 +52,21 @@ static int readFile(const std::string& path, std::vector<char>& out) {
 }
 
 static void stParse(const std::string& path, WeightsFile& wf) {
-    if (readFile(path, wf.bytes)) { std::fprintf(stderr, "cannot read %s\n", path.c_str()); std::exit(1); }
-    if (wf.bytes.size() < 8) { std::fprintf(stderr, "safetensors too small\n"); std::exit(1); }
+    // Load-path failures throw (never exit): d5c_chain.dll runs inside game
+    // processes; the C ABI catch converts these to a nonzero return.
+    if (readFile(path, wf.bytes)) { std::fprintf(stderr, "cannot read %s\n", path.c_str());
+        throw std::runtime_error(std::string("cannot read ") + path); }
+    if (wf.bytes.size() < 8) { std::fprintf(stderr, "safetensors too small\n");
+        throw std::runtime_error("safetensors too small"); }
     uint64_t hlen;
     std::memcpy(&hlen, wf.bytes.data(), 8);
-    if (8 + hlen > wf.bytes.size()) { std::fprintf(stderr, "bad header len\n"); std::exit(1); }
+    if (8 + hlen > wf.bytes.size()) { std::fprintf(stderr, "bad header len\n");
+        throw std::runtime_error("bad header len"); }
     const char* p = wf.bytes.data() + 8;
     const char* end = p + hlen;
     auto ws = [&]() { while (p < end && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) ++p; };
-    auto expect = [&](char c) { ws(); if (p >= end || *p++ != c) { std::fprintf(stderr, "JSON: expected %c\n", c); std::exit(1); } };
+    auto expect = [&](char c) { ws(); if (p >= end || *p++ != c) { std::fprintf(stderr, "JSON: expected %c\n", c);
+        throw std::runtime_error(std::string("JSON: expected ") + c); } };
     auto string = [&]() -> std::string {
         ws(); expect('"');
         std::string s;
@@ -389,7 +396,8 @@ void WeightsStore::preprocessInto(char* sp,
         auto it = poff.find(n);
         if (it == poff.end()) { std::fprintf(stderr, "missing vec tensor %s\n", n.c_str()); return; }
         auto vo = vecOff.find(n);
-        if (vo == vecOff.end()) { std::fprintf(stderr, "vecOff slot missing for %s\n", n.c_str()); std::exit(1); }
+        if (vo == vecOff.end()) { std::fprintf(stderr, "vecOff slot missing for %s\n", n.c_str());
+            throw std::runtime_error("vecOff slot missing for " + n); }
         const Tensor& t = wf.tensors.at(n);
         const uint16_t* s = (const uint16_t*)(sp + it->second);
         float* d = (float*)(sp + vo->second);
@@ -422,7 +430,8 @@ void WeightsStore::preprocessInto(char* sp,
         const Tensor& t = wf.tensors.at(n);
         const float* s = (const float*)(sp + poff.at(n));
         auto vo = vecOff.find(n + ".q32");
-        if (vo == vecOff.end()) { std::fprintf(stderr, "vecOff slot missing for %s.q32\n", n.c_str()); std::exit(1); }
+        if (vo == vecOff.end()) { std::fprintf(stderr, "vecOff slot missing for %s.q32\n", n.c_str());
+            throw std::runtime_error("vecOff slot missing for " + n + ".q32"); }
         float* d = (float*)(sp + vo->second);
         float sq = std::sqrt(32.0f);
         for (uint64_t j = 0; j < t.numel(); ++j) d[j] = s[j] * sq;

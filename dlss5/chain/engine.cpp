@@ -200,7 +200,9 @@ bool ChainEngine::createFrontEnd() {
     const ArenaOffsets& O = arena_.off;
 
     imgIn_ = CreateImage2D(c, W_, H_, VK_FORMAT_B8G8R8A8_UNORM,
-                           VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, &memImgIn_);
+                           VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                           VK_IMAGE_USAGE_TRANSFER_SRC_BIT,   // Stage 25: imgIn_ -> bufPrevRaw_ copy
+                           &memImgIn_);
     imgInView_ = CreateView(c, imgIn_, VK_FORMAT_B8G8R8A8_UNORM);
     const uint64_t uploadBytes = (uint64_t)W_ * H_ * 4 * 2;
     bufUpload_ = CreateBuf(c, uploadBytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,

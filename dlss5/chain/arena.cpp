@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <stdexcept>
 
 namespace d5c {
 
@@ -13,7 +14,9 @@ static uint32_t chainMemType(const VkCtx& c, VkMemoryPropertyFlags want) {
     for (uint32_t i = 0; i < c.memProps.memoryTypeCount; ++i)
         if ((c.memProps.memoryTypes[i].propertyFlags & want) == want) return i;
     std::fprintf(stderr, "no memory type for flags 0x%x\n", want);
-    std::exit(1);
+    char msg[96];
+    std::snprintf(msg, sizeof msg, "no memory type for flags 0x%x", want);
+    throw std::runtime_error(msg);   // in-process library: never exit()
 }
 
 void chainAllocDev(const VkCtx& c, VkDeviceSize size, ChainBuf& b) {
