@@ -78,6 +78,12 @@ DLSS5_API void dlss5_set_color_strength(void* handle, float color_strength);
 DLSS5_API int dlss5_interpolate_frame(void* handle, uint32_t w, uint32_t h,
                                       const void* frame0_bgra, const void* frame1_bgra,
                                       void* out_interp_bgra, float factor);
+// Frame generation (1:2 cadence): builds a generated frame from the current
+// raw present using the engine's own copy of the last processed frame and its
+// raw input (residual transfer along raw->raw motion). Only cur_raw is uploaded.
+// Returns 0 on success, non-zero if no processed frame exists yet or size mismatch.
+DLSS5_API int dlss5_framegen_transfer(void* handle, uint32_t w, uint32_t h,
+                                      const void* cur_raw_bgra, void* out_bgra);
 DLSS5_API void dlss5_set_framegen(void* handle, int enable);
 DLSS5_API int dlss5_get_framegen(void* handle);
 DLSS5_API float dlss5_get_framegen_gpu_ms(void* handle);
@@ -111,6 +117,8 @@ typedef void (*PFN_dlss5_set_color_strength)(void* handle, float color_strength)
 typedef int (*PFN_dlss5_interpolate_frame)(void* handle, uint32_t w, uint32_t h,
                                            const void* frame0_bgra, const void* frame1_bgra,
                                            void* out_interp_bgra, float factor);
+typedef int (*PFN_dlss5_framegen_transfer)(void* handle, uint32_t w, uint32_t h,
+                                           const void* cur_raw_bgra, void* out_bgra);
 typedef void (*PFN_dlss5_set_framegen)(void* handle, int enable);
 typedef int (*PFN_dlss5_get_framegen)(void* handle);
 typedef float (*PFN_dlss5_get_framegen_gpu_ms)(void* handle);

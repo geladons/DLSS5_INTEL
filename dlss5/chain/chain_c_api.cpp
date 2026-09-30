@@ -198,6 +198,15 @@ public:
         return ok ? 0 : -1;
     }
 
+    int framegenTransfer(uint32_t w, uint32_t h, const void* cur, void* out) {
+        if (!ensure(w, h)) {
+            return -1;
+        }
+        d5c::FrameStats stats{};
+        bool ok = engine_.transferFrame(w, h, cur, out, &stats);
+        return ok ? 0 : -1;
+    }
+
     void setFrameGen(int enable) {
         frameGenEnabled_ = (enable != 0);
         if (!frameGenEnabled_) {
@@ -531,6 +540,19 @@ DLSS5_API int dlss5_interpolate_frame(void* handle, uint32_t w, uint32_t h,
     try {
         auto* ctx = static_cast<EngineContext*>(handle);
         return ctx->interpolateFrame(w, h, frame0_bgra, frame1_bgra, out_interp_bgra, factor);
+    } catch (...) {
+        return -1;
+    }
+}
+
+DLSS5_API int dlss5_framegen_transfer(void* handle, uint32_t w, uint32_t h,
+                                      const void* cur_raw_bgra, void* out_bgra) {
+    if (!handle || !cur_raw_bgra || !out_bgra || !w || !h) {
+        return -1;
+    }
+    try {
+        auto* ctx = static_cast<EngineContext*>(handle);
+        return ctx->framegenTransfer(w, h, cur_raw_bgra, out_bgra);
     } catch (...) {
         return -1;
     }

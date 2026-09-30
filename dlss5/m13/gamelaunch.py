@@ -188,6 +188,14 @@ def launch_game(exe_path, mode, scale=None, gain=None, blend=None, cfg=None, sha
     env["DLSS5_FRAMEGEN"] = "1" if fg_val else "0"
     env["NR_LAYER_FRAMEGEN"] = "1" if fg_val else "0"
 
+    # FG runs in-process inside the x64 engine; the x86 TCP/daemon path has
+    # no engine handle, so the generated frames silently pass through native.
+    if fg_val and cfg is not None and hasattr(cfg, "get"):
+        meta = (cfg.get("games") or {}).get(exe_path) or {}
+        if isinstance(meta, dict) and meta.get("arch") == "x86":
+            print("[launch] framegen requested but unavailable for x86 "
+                  "(daemon path)", flush=True)
+
     if scale is not None:
         s_val = str(scale)
         env["NR_LAYER_SCALE"] = s_val

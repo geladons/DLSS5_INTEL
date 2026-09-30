@@ -94,6 +94,11 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
     previous one reuses the last processed result (NR_LAYER_UI_MASK=0 disables;
     legacy env name). Phase30 `auto_mask` is the VENDOR skin/structure
     conditioning parameter (feature ch 12-14), unrelated to HUD masking.
+  - Frame generation (`nr_framegen.h/.c`, NrFrameGen): with FG on and the
+    in-process x64 engine loaded the layer processes every 2nd present and
+    GENERATES the one in between via `dlss5_framegen_transfer` (1:2 cadence,
+    no added latency). x86/daemon path: FG unavailable, logged once. Watch
+    `fg stats: presents/processed/generated/native` in %TEMP%\nr_layer_win.log.
 - m12-dxgi: DirectX 12 present hook (GTA V Enhanced). Dynamically loads
   `d5c_chain.dll` via C ABI to process present buffers in-process (0 ms TCP lag).
 - chain: THE model as an OOP module (`d5c::ChainEngine`). Exported via clean
@@ -102,6 +107,12 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
     128-bit vectorized memory ops, epilogue residual add fusion.
   - Bounded contrast-adaptive sharpening (CAS) in `encode.comp` (`pc.c[0]`).
   - Deterministic noise seed pinned (`p.b[0] = 1`) to eliminate flickering.
+  - Frame generation = residual transfer (`framegen.comp` mode 1,
+    `dlss5_framegen_transfer`): generated = cur_raw + warp(prev_processed -
+    prev_raw, motion(prev_raw -> cur_raw)). Engine owns prev state
+    (`bufPrevFrame_`/`bufPrevRaw_`). Mode 0 (`dlss5_interpolate_frame`) is
+    the legacy F0/F1 interpolation, unused by the layer. No XeSS-FG: it needs
+    engine motion vectors/depth and is D3D12-only - a present hook has neither.
 - m11d: DLSSNR frame daemon for 32-bit x86 titles (TCP 127.0.0.1:48990).
   Lifecycle is auto-managed by `m13`: starts for x86 games, stops after the
   x86 exit grace period, and is reclaimed immediately before an x64 launch.

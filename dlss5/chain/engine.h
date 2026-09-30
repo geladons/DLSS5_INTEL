@@ -18,6 +18,7 @@
 #include "phase30.h"
 
 #include <string>
+#include <chrono>
 
 namespace d5c {
 
@@ -53,6 +54,12 @@ public:
                       FrameStats* stats = nullptr);
     bool interpolateFrame(uint32_t w, uint32_t h, const void* f0, const void* f1,
                           void* out, float factor = 0.5f, FrameStats* stats = nullptr);
+    // 1:2 frame generation: builds a generated frame from the current raw
+    // present using the engine's own copy of the last processed frame and its
+    // raw input (residual transfer along raw->raw motion). Only curRaw is
+    // uploaded; the prev processed/raw pair is refreshed by processFrame.
+    bool transferFrame(uint32_t w, uint32_t h, const void* curRaw,
+                       void* out, FrameStats* stats = nullptr);
     double lastFrameGenGpuMs() const { return lastFrameGenGpuMs_; }
     void shutdown();
 
@@ -84,6 +91,12 @@ public:
 private:
     bool createFrontEnd();        // buffers/images/descriptors/transport pipelines
     void recordFrame(long frameIndex);  // into cmd (not submitted yet)
+    // framegen tail: timestamps + dispatch + readback copies into cmd.
+    // rollPrev copies bufCurrFrame_ into bufPrevFrame_ (interpolate only).
+    void recordFrameGenTail(const struct Push& p, bool rollPrev);
+    bool submitAndReadback(void* out, size_t bytes,
+                           std::chrono::steady_clock::time_point t0,
+                           FrameStats* stats);
     void recordDebugCopies();     // frame==1 chain-path readback into bufDbg
     void writeDebugDumps();       // map bufDbg, write live_*.{bin,f16}
     void barrierAll();
@@ -126,15 +139,18 @@ private:
                    memHist_ = VK_NULL_HANDLE, memRbFinal_ = VK_NULL_HANDLE,
                    memDbg_ = VK_NULL_HANDLE, memImgFinal_ = VK_NULL_HANDLE,
                    memLastP_ = VK_NULL_HANDLE, memFbStats_ = VK_NULL_HANDLE, memHp_ = VK_NULL_HANDLE,
-                   memPrevFrame_ = VK_NULL_HANDLE, memCurrFrame_ = VK_NULL_HANDLE, memInterpOut_ = VK_NULL_HANDLE;
+                   memPrevFrame_ = VK_NULL_HANDLE, memCurrFrame_ = VK_NULL_HANDLE, memInterpOut_ = VK_NULL_HANDLE,
+                   memPrevRaw_ = VK_NULL_HANDLE;
     VkImage imgIn_ = VK_NULL_HANDLE, imgFinal_ = VK_NULL_HANDLE;
     VkImageView imgInView_ = VK_NULL_HANDLE, viewFinal_ = VK_NULL_HANDLE;
     VkBuffer bufUpload_ = VK_NULL_HANDLE, bufRgb_ = VK_NULL_HANDLE, bufMax_ = VK_NULL_HANDLE,
              bufT_ = VK_NULL_HANDLE, bufFin_ = VK_NULL_HANDLE, bufNr_ = VK_NULL_HANDLE,
              bufHist_ = VK_NULL_HANDLE, bufRbFinal_ = VK_NULL_HANDLE, bufDbg_ = VK_NULL_HANDLE,
              bufLastPresented_ = VK_NULL_HANDLE, bufFbStats_ = VK_NULL_HANDLE, bufHp_ = VK_NULL_HANDLE,
-             bufPrevFrame_ = VK_NULL_HANDLE, bufCurrFrame_ = VK_NULL_HANDLE, bufInterpOut_ = VK_NULL_HANDLE;
+             bufPrevFrame_ = VK_NULL_HANDLE, bufCurrFrame_ = VK_NULL_HANDLE, bufInterpOut_ = VK_NULL_HANDLE,
+             bufPrevRaw_ = VK_NULL_HANDLE;
     double lastFrameGenGpuMs_ = 0.0;
+    bool havePrevProcessed_ = false;   // set after a successful processFrame
     void* uploadPtr_ = nullptr;
     void* rbFinalPtr_ = nullptr;             // persistently mapped readback
 

@@ -20,10 +20,15 @@ _S = {
     "scale_balanced": {"en": "Balanced (58%)", "ru": "Баланс (58%)"},
     "scale_perf": {"en": "Performance (50%)", "ru": "Производительность (50%)"},
     "scale_ultra": {"en": "Ultra Performance (33%)", "ru": "Ультра производительность (33%)"},
-    "framegen": {"en": "Frame Generation", "ru": "Генерация кадров (FSR 3.1)"},
+    "framegen": {"en": "Frame Generation (1:2, x64 only)",
+                 "ru": "Генерация кадров (1:2, только x64)"},
     "framegen_hint": {
-        "en": "Doubles perceived FPS with optical flow interpolation",
-        "ru": "Удваивает FPS с помощью оптического потока"},
+        "en": "Every 2nd frame is neural-processed, the frame between is "
+              "generated from it (motion-compensated). Not available for x86 "
+              "titles (GTA IV).",
+        "ru": "Каждый 2-й кадр обрабатывается нейросетью, промежуточный "
+              "генерируется из него (с компенсацией движения). Недоступно для "
+              "x86-игр (GTA IV)."},
     "sharpness": {"en": "Sharpness", "ru": "Резкость (RCAS)"},
     "autosetup": {"en": "Auto-setup:", "ru": "Автонастройка:"},
     "step_weights": {"en": "Weights", "ru": "Веса"},

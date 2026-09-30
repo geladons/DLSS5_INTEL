@@ -14,12 +14,23 @@ if errorlevel 1 (
 set SRC=%REPO%\dlss5\m11-layer
 set OUT=%SRC%\x86
 if not exist %OUT% mkdir %OUT%
-cl /nologo /std:c11 /O2 /I"C:\VulkanSDK\1.4.357.0\Include" /I"%REPO%\dlss5\chain" ^
-   "%SRC%\nr_layer_win.c" /Fo"%OUT%\nr_layer_win32.obj" ^
-   /link /DLL /DEF:"%SRC%\nr_layer_win.def" ws2_32.lib user32.lib ^
+cl /nologo /std:c11 /O2 /c /I"C:\VulkanSDK\1.4.357.0\Include" /I"%REPO%\dlss5\chain" ^
+   "%SRC%\nr_layer_win.c" /Fo"%OUT%\nr_layer_win32.obj" 2>&1
+if errorlevel 1 (
+    echo [FAIL] cl x86 nr_layer_win
+    exit /b 1
+)
+cl /nologo /std:c11 /O2 /c /I"C:\VulkanSDK\1.4.357.0\Include" /I"%REPO%\dlss5\chain" ^
+   "%SRC%\nr_framegen.c" /Fo"%OUT%\nr_framegen.obj" 2>&1
+if errorlevel 1 (
+    echo [FAIL] cl x86 nr_framegen
+    exit /b 1
+)
+link /nologo /DLL /DEF:"%SRC%\nr_layer_win.def" ws2_32.lib user32.lib ^
+   "%OUT%\nr_layer_win32.obj" "%OUT%\nr_framegen.obj" ^
    /OUT:"%OUT%\nr_layer_win32.dll" /PDB:"%OUT%\nr_layer_win32.pdb" 2>&1
 if errorlevel 1 (
-    echo [FAIL] cl x86
+    echo [FAIL] link x86
     exit /b 1
 )
 echo [OK] x86 layer: %OUT%\nr_layer_win32.dll

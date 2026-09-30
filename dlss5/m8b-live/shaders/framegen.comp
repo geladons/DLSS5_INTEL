@@ -6,9 +6,16 @@
 //
 // Push constants:
 //   a = (canvasW, canvasH, searchRadius, searchStep)
-//   b = (mode, 0, 0, 0)
+//   b = (mode, 0, 0, 0)        mode 0 = interpolate F0/F1, 1 = residual transfer
 //   c = (factor, occlThreshold, 0, 0)
 //   d = (0, 0, 0, 0)
+//
+// Mode 1 (residual transfer, 1:2 frame-generation cadence):
+//   generated = cur + warp(prevProcessed - prevRaw, motion(prevRaw -> cur))
+//   The DLSS 5 detail (residual) is carried along the raw-to-raw motion;
+//   occlusion falls back to the current raw frame.
+//   frameId: 0 = prevProcessed (binding 1), 1 = cur raw (binding 2),
+//            2 = prevRaw (binding 4)
 // ============================================================================
 #extension GL_GOOGLE_include_directive : require
 #include "publish.glsl"
@@ -18,6 +25,7 @@ layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 layout(std430, set = 0, binding = 1) readonly buffer PrevFrame { uint bufPrev[]; };
 layout(std430, set = 0, binding = 2) readonly buffer CurrFrame { uint bufCurr[]; };
 layout(std430, set = 0, binding = 3) writeonly buffer OutFrame { uint bufOut[]; };
+layout(std430, set = 0, binding = 4) readonly buffer PrevRaw { uint bufPrevRaw[]; };
 
 layout(push_constant) uniform Push {
     ivec4 a;
@@ -30,7 +38,8 @@ vec4 getPixel(int x, int y, int frameId) {
     x = clamp(x, 0, pc.a.x - 1);
     y = clamp(y, 0, pc.a.y - 1);
     uint idx = uint(y * pc.a.x + x);
-    uint raw = (frameId == 0) ? bufPrev[idx] : bufCurr[idx];
+    uint raw = (frameId == 0) ? bufPrev[idx]
+             : (frameId == 1) ? bufCurr[idx] : bufPrevRaw[idx];
     float b = float(raw & 0xFFu) * (1.0 / 255.0);
     float g = float((raw >> 8) & 0xFFu) * (1.0 / 255.0);
     float r = float((raw >> 16) & 0xFFu) * (1.0 / 255.0);
@@ -156,9 +165,92 @@ vec2 findMotion(ivec2 pos) {
     return bestOffset;
 }
 
+// One-sided block match for mode 1: find offset d such that
+// prevRaw(pos+d) best matches cur(pos). Cost = rgb length diff + luma diff
+// + 0.001 * |d|1; early exit on a static pixel.
+vec2 findTransferMotion(ivec2 pos) {
+    vec4 cur = getPixel(pos.x, pos.y, 1);
+    float lCur = getLuma(cur.rgb);
+
+    vec4 pv = getPixel(pos.x, pos.y, 2);
+    float minErr = abs(getLuma(pv.rgb) - lCur) + length(pv.rgb - cur.rgb) * 0.5;
+    vec2 bestOffset = vec2(0.0);
+
+    if (minErr < 0.012) {
+        return vec2(0.0);
+    }
+
+    // Coarse diamond search, 2x the interpolate radii (+-16 axial, +-8
+    // axial+diagonal so e.g. a 6 px shift is reachable via -8 + fine +2)
+    const ivec2 coarseCandidates[12] = ivec2[](
+        ivec2(-16, 0), ivec2(16, 0), ivec2(0, -16), ivec2(0, 16),
+        ivec2(-8, 0), ivec2(8, 0), ivec2(0, -8), ivec2(0, 8),
+        ivec2(-8, -8), ivec2(8, -8), ivec2(-8, 8), ivec2(8, 8)
+    );
+
+    for (int i = 0; i < 12; ++i) {
+        ivec2 d = coarseCandidates[i];
+        vec4 s0 = getPixel(pos.x + d.x, pos.y + d.y, 2);
+        float err = length(s0.rgb - cur.rgb) + abs(getLuma(s0.rgb) - lCur)
+                  + float(abs(d.x) + abs(d.y)) * 0.001;
+        if (err < minErr) {
+            minErr = err;
+            bestOffset = vec2(d);
+        }
+    }
+
+    // Fine +-2 / +-1 refinement around the best coarse candidate
+    const ivec2 fineCandidates[8] = ivec2[](
+        ivec2(-2, 0), ivec2(2, 0), ivec2(0, -2), ivec2(0, 2),
+        ivec2(-1, -1), ivec2(1, -1), ivec2(-1, 1), ivec2(1, 1)
+    );
+
+    vec2 base = bestOffset;
+    for (int i = 0; i < 8; ++i) {
+        ivec2 d = fineCandidates[i];
+        vec2 cand = base + vec2(d);
+        vec4 s0 = getPixel(pos.x + int(cand.x), pos.y + int(cand.y), 2);
+        float err = length(s0.rgb - cur.rgb) + abs(getLuma(s0.rgb) - lCur)
+                  + float(abs(int(cand.x)) + abs(int(cand.y))) * 0.001;
+        if (err < minErr) {
+            minErr = err;
+            bestOffset = cand;
+        }
+    }
+
+    return bestOffset;
+}
+
+// Mode 1: generated = cur + (prevProcessed - prevRaw) warped by the
+// raw->raw motion; occluded areas fall back to cur.
+void transferPixel(ivec2 pos) {
+    float occlThreshold = pc.c.y > 0.0 ? pc.c.y : 0.20;
+
+    vec4 cur = getPixel(pos.x, pos.y, 1);
+    vec2 motion = findTransferMotion(pos);
+    vec2 srcPos = vec2(pos) + motion;
+
+    vec4 prevProc = sampleBilinear(srcPos, 0);
+    vec4 prevRaw = sampleBilinear(srcPos, 2);
+    vec3 resid = prevProc.rgb - prevRaw.rgb;
+
+    vec3 diff = abs(prevRaw.rgb - cur.rgb);
+    float maxDiff = max(diff.r, max(diff.g, diff.b));
+    float occl = smoothstep(occlThreshold * 0.75, occlThreshold * 1.5, maxDiff);
+
+    vec3 outRgb = clamp(cur.rgb + resid * (1.0 - occl), 0.0, 1.0);
+    uint outIdx = uint(pos.y * pc.a.x + pos.x);
+    bufOut[outIdx] = packBGRA(vec4(outRgb, cur.a));
+}
+
 void main() {
     ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
     if (pos.x >= pc.a.x || pos.y >= pc.a.y) return;
+
+    if (pc.b.x == 1) {
+        transferPixel(pos);
+        return;
+    }
 
     float factor = (pc.c.x > 0.0 && pc.c.x < 1.0) ? pc.c.x : 0.5;
     float occlThreshold = pc.c.y > 0.0 ? pc.c.y : 0.20;

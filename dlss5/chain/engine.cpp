@@ -299,6 +299,11 @@ bool ChainEngine::createFrontEnd() {
     bufInterpOut_ = CreateBuf(c, (uint64_t)W_ * H_ * 4,
                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memInterpOut_);
+    // FrameGen residual transfer: raw input of the last processed frame
+    // (binding 4). Written by processFrame, read by transferFrame.
+    bufPrevRaw_ = CreateBuf(c, (uint64_t)W_ * H_ * 4,
+                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memPrevRaw_);
 
     if (cfg_.renderScale < 1.0f) {
         bufNetRgb_ = CreateBuf(c, (uint64_t)netW_ * netH_ * 3 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
@@ -405,6 +410,7 @@ bool ChainEngine::createFrontEnd() {
     writeBuf(setFrameGen_, 1, bufPrevFrame_, (uint64_t)W_ * H_ * 4);
     writeBuf(setFrameGen_, 2, bufCurrFrame_, (uint64_t)W_ * H_ * 4);
     writeBuf(setFrameGen_, 3, bufInterpOut_, (uint64_t)W_ * H_ * 4);
+    writeBuf(setFrameGen_, 4, bufPrevRaw_, (uint64_t)W_ * H_ * 4);
 
     std::printf("[mem] front-end up: canvas %ux%u, region %ux%u at (%u,%u), extent %ux%u\n",
                 W_, H_, regionW_, regionH_, cfg_.regionLeft, cfg_.regionTop, netW_, netH_);
@@ -735,6 +741,20 @@ void ChainEngine::recordFrame(long frameIndex) {
         if (bufPrevFrame_) {
             vkCmdCopyImageToBuffer(cmd_, imgFinal_, VK_IMAGE_LAYOUT_GENERAL, bufPrevFrame_, 1, &rgn);
         }
+        if (bufPrevRaw_) {
+            // imgIn_ (raw input) -> bufPrevRaw_ for the residual-transfer
+            // framegen pass; imgIn_ is GENERAL and last read by decode.
+            VkImageMemoryBarrier vbIn{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+            vbIn.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            vbIn.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            vbIn.image = imgIn_;
+            vbIn.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            vbIn.oldLayout = VK_IMAGE_LAYOUT_GENERAL; vbIn.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+            vbIn.srcAccessMask = VK_ACCESS_SHADER_READ_BIT; vbIn.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &vbIn);
+            vkCmdCopyImageToBuffer(cmd_, imgIn_, VK_IMAGE_LAYOUT_GENERAL, bufPrevRaw_, 1, &rgn);
+        }
         VkMemoryBarrier hb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         hb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; hb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
         vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -823,6 +843,7 @@ bool ChainEngine::processFrame(const uint8_t* bgraIn, uint8_t* bgraOut, long fra
     if (prof_.enabled()) prof_.collect(c.dev, tsPeriodNs_, frameIndex);
 
     std::memcpy(bgraOut, rbFinalPtr_, (size_t)W_ * H_ * 4);
+    havePrevProcessed_ = true;   // bufPrevFrame_/bufPrevRaw_ now hold a pair
     if (cfg_.debugDumps && frameIndex == 1) writeDebugDumps();
 
     if (stats) {
@@ -840,6 +861,106 @@ bool ChainEngine::processFrame(const uint8_t* bgraIn, uint8_t* bgraOut, long fra
     return true;
 }
 
+// ---------------------------------------------------------- framegen ------
+// Records (into cmd_, already begun): timestamps + framegen dispatch +
+// output barrier + readback copies. rollPrev additionally rolls
+// bufCurrFrame_ into bufPrevFrame_ (interpolate cadence only; the residual
+// transfer path keeps prev state anchored to the last processed frame).
+void ChainEngine::recordFrameGenTail(const Push& p, bool rollPrev) {
+    const size_t frameBytes = (size_t)W_ * H_ * 4;
+
+    vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 0);
+
+    vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeFrameGen_);
+    vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLayout_, 0, 1,
+                            &setFrameGen_, 0, nullptr);
+    vkCmdPushConstants(cmd_, pipeLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(Push), &p);
+
+    vkCmdDispatch(cmd_, (W_ + 15) / 16, (H_ + 15) / 16, 1);
+
+    vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 1);
+
+    // Barrier: compute shader write -> transfer read
+    VkBufferMemoryBarrier outBarrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+    outBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    outBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    outBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    outBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    outBarrier.buffer = bufInterpOut_;
+    outBarrier.offset = 0;
+    outBarrier.size = VK_WHOLE_SIZE;
+    vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, nullptr, 1, &outBarrier, 0, nullptr);
+
+    // Copy generated buffer -> host readback buffer
+    VkBufferCopy cpOut{0, 0, (VkDeviceSize)frameBytes};
+    vkCmdCopyBuffer(cmd_, bufInterpOut_, bufRbFinal_, 1, &cpOut);
+
+    if (rollPrev) {
+        // Keep bufPrevFrame_ updated with bufCurrFrame_
+        VkBufferCopy cpPrev{0, 0, (VkDeviceSize)frameBytes};
+        vkCmdCopyBuffer(cmd_, bufCurrFrame_, bufPrevFrame_, 1, &cpPrev);
+    }
+
+    // Barrier: transfer write -> host read
+    VkMemoryBarrier hb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    hb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    hb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &hb, 0, nullptr, 0, nullptr);
+}
+
+// Ends cmd_, submits, waits, then copies the readback into out and collects
+// the framegen GPU timestamp. Shared by interpolateFrame/transferFrame.
+bool ChainEngine::submitAndReadback(void* out, size_t bytes,
+                                    std::chrono::steady_clock::time_point t0,
+                                    FrameStats* stats) {
+    const VkCtx& c = vkc_.vk;
+    D5C_VK_RET(vkEndCommandBuffer(cmd_));
+
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd_;
+    D5C_VK_RET(vkQueueSubmit(c.queue, 1, &si, fence_));
+    D5C_VK_RET(vkWaitForFences(c.dev, 1, &fence_, VK_TRUE, UINT64_MAX));
+    vkResetFences(c.dev, 1, &fence_);
+
+    std::memcpy(out, rbFinalPtr_, bytes);
+
+    uint64_t ts[2]{};
+    VkResult qr = vkGetQueryPoolResults(c.dev, tsPool_, 0, 2, sizeof(ts), ts,
+                                        sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+    if (qr == VK_SUCCESS) {
+        lastFrameGenGpuMs_ = static_cast<double>(ts[1] - ts[0]) * static_cast<double>(tsPeriodNs_) / 1e6;
+        if (stats) {
+            stats->gpuTotalMs = lastFrameGenGpuMs_;
+        }
+    }
+
+    if (stats) {
+        stats->wallMs = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - t0).count();
+    }
+
+    return true;
+}
+
+// Upload barrier: transfer write -> compute shader read for a framegen buffer.
+static void barrierUpToShader(VkCommandBuffer cmd, VkBuffer buf) {
+    VkBufferMemoryBarrier b{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+    b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.buffer = buf;
+    b.offset = 0;
+    b.size = VK_WHOLE_SIZE;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         0, 0, nullptr, 1, &b, 0, nullptr);
+}
+
 // -------------------------------------------------------- interpolate -----
 bool ChainEngine::interpolateFrame(uint32_t w, uint32_t h, const void* f0, const void* f1,
                                    void* out, float factor, FrameStats* stats) {
@@ -847,7 +968,6 @@ bool ChainEngine::interpolateFrame(uint32_t w, uint32_t h, const void* f0, const
     if (w != W_ || h != H_) return false;
     if (!pipeFrameGen_) return false;
 
-    const VkCtx& c = vkc_.vk;
     auto t0 = std::chrono::steady_clock::now();
 
     const size_t frameBytes = (size_t)W_ * H_ * 4;
@@ -873,36 +993,8 @@ bool ChainEngine::interpolateFrame(uint32_t w, uint32_t h, const void* f0, const
     VkBufferCopy cp1{(VkDeviceSize)frameBytes, 0, (VkDeviceSize)frameBytes};
     vkCmdCopyBuffer(cmd_, bufUpload_, bufCurrFrame_, 1, &cp1);
 
-    // Memory barriers: transfer write -> compute shader read
-    VkBufferMemoryBarrier upBarriers[2]{};
-    uint32_t barrierCount = 0;
-    if (f0) {
-        upBarriers[barrierCount].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-        upBarriers[barrierCount].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        upBarriers[barrierCount].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        upBarriers[barrierCount].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        upBarriers[barrierCount].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        upBarriers[barrierCount].buffer = bufPrevFrame_;
-        upBarriers[barrierCount].offset = 0;
-        upBarriers[barrierCount].size = VK_WHOLE_SIZE;
-        barrierCount++;
-    }
-    upBarriers[barrierCount].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-    upBarriers[barrierCount].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    upBarriers[barrierCount].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    upBarriers[barrierCount].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    upBarriers[barrierCount].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    upBarriers[barrierCount].buffer = bufCurrFrame_;
-    upBarriers[barrierCount].offset = 0;
-    upBarriers[barrierCount].size = VK_WHOLE_SIZE;
-    barrierCount++;
-
-    vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         0, 0, nullptr, barrierCount, upBarriers, 0, nullptr);
-
-    // Dispatch FrameGen compute pass
-    vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 0);
+    if (f0) barrierUpToShader(cmd_, bufPrevFrame_);
+    barrierUpToShader(cmd_, bufCurrFrame_);
 
     Push p{};
     p.a[0] = static_cast<int32_t>(W_);
@@ -911,74 +1003,47 @@ bool ChainEngine::interpolateFrame(uint32_t w, uint32_t h, const void* f0, const
     p.a[3] = 2; // search step
     p.c[0] = factor;
     p.c[1] = 0.20f; // occlusion threshold
+    recordFrameGenTail(p, true);
 
-    vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeFrameGen_);
-    vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLayout_, 0, 1,
-                            &setFrameGen_, 0, nullptr);
-    vkCmdPushConstants(cmd_, pipeLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(Push), &p);
+    return submitAndReadback(out, frameBytes, t0, stats);
+}
 
-    vkCmdDispatch(cmd_, (W_ + 15) / 16, (H_ + 15) / 16, 1);
+// ----------------------------------------------------------- transfer -----
+// 1:2 cadence generated frame: cur raw in, residual of the last processed
+// frame carried along the raw->raw motion (framegen.comp mode 1).
+bool ChainEngine::transferFrame(uint32_t w, uint32_t h, const void* curRaw,
+                                void* out, FrameStats* stats) {
+    if (!w || !h || !curRaw || !out) return false;
+    if (w != W_ || h != H_) return false;
+    if (!pipeFrameGen_ || !havePrevProcessed_) return false;
 
-    vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 1);
+    auto t0 = std::chrono::steady_clock::now();
 
-    // Barrier: compute shader write -> transfer read
-    VkBufferMemoryBarrier outBarrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
-    outBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-    outBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    outBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    outBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    outBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    outBarrier.buffer = bufInterpOut_;
-    outBarrier.offset = 0;
-    outBarrier.size = VK_WHOLE_SIZE;
-    vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         0, 0, nullptr, 1, &outBarrier, 0, nullptr);
+    const size_t frameBytes = (size_t)W_ * H_ * 4;
+    uint8_t* up1 = static_cast<uint8_t*>(uploadPtr_) + frameBytes;
 
-    // Copy interpolated buffer -> host readback buffer
-    VkBufferCopy cpOut{0, 0, (VkDeviceSize)frameBytes};
-    vkCmdCopyBuffer(cmd_, bufInterpOut_, bufRbFinal_, 1, &cpOut);
+    std::memcpy(up1, curRaw, frameBytes);   // only cur raw is uploaded
 
-    // Keep bufPrevFrame_ updated with bufCurrFrame_
-    VkBufferCopy cpPrev{0, 0, (VkDeviceSize)frameBytes};
-    vkCmdCopyBuffer(cmd_, bufCurrFrame_, bufPrevFrame_, 1, &cpPrev);
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    D5C_VK_RET(vkBeginCommandBuffer(cmd_, &bi));
 
-    // Barrier: transfer write -> host read
-    VkMemoryBarrier hb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-    hb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    hb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    hb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-    vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &hb, 0, nullptr, 0, nullptr);
+    vkCmdResetQueryPool(cmd_, tsPool_, 0, 2);
 
-    D5C_VK_RET(vkEndCommandBuffer(cmd_));
+    VkBufferCopy cp1{(VkDeviceSize)frameBytes, 0, (VkDeviceSize)frameBytes};
+    vkCmdCopyBuffer(cmd_, bufUpload_, bufCurrFrame_, 1, &cp1);
+    barrierUpToShader(cmd_, bufCurrFrame_);
 
-    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    si.commandBufferCount = 1;
-    si.pCommandBuffers = &cmd_;
-    D5C_VK_RET(vkQueueSubmit(c.queue, 1, &si, fence_));
-    D5C_VK_RET(vkWaitForFences(c.dev, 1, &fence_, VK_TRUE, UINT64_MAX));
-    vkResetFences(c.dev, 1, &fence_);
+    Push p{};
+    p.a[0] = static_cast<int32_t>(W_);
+    p.a[1] = static_cast<int32_t>(H_);
+    p.a[2] = 16;   // search radius (2x the interpolate radius)
+    p.a[3] = 2;    // search step
+    p.b[0] = 1;    // mode 1 = residual transfer
+    p.c[1] = 0.20f; // occlusion threshold
+    recordFrameGenTail(p, false);   // prev stays anchored to processed frame
 
-    std::memcpy(out, rbFinalPtr_, frameBytes);
-
-    uint64_t ts[2]{};
-    VkResult qr = vkGetQueryPoolResults(c.dev, tsPool_, 0, 2, sizeof(ts), ts,
-                                        sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
-    if (qr == VK_SUCCESS) {
-        lastFrameGenGpuMs_ = static_cast<double>(ts[1] - ts[0]) * static_cast<double>(tsPeriodNs_) / 1e6;
-        if (stats) {
-            stats->gpuTotalMs = lastFrameGenGpuMs_;
-        }
-    }
-
-    if (stats) {
-        stats->wallMs = std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - t0).count();
-    }
-
-    return true;
+    return submitAndReadback(out, frameBytes, t0, stats);
 }
 
 // ----------------------------------------------------------- teardown -----
@@ -1002,18 +1067,23 @@ void ChainEngine::shutdown() {
     dsLayout_ = VK_NULL_HANDLE;
     for (VkBuffer b : {bufRgb_, bufMax_, bufT_, bufFin_, bufNr_, bufRbFinal_, bufDbg_,
                        bufUpload_, bufLastPresented_, bufFbStats_, bufHp_, bufHist_,
-                       bufNetRgb_, bufFinLow_, bufPrevFrame_, bufCurrFrame_, bufInterpOut_})
+                       bufNetRgb_, bufFinLow_, bufPrevFrame_, bufCurrFrame_, bufInterpOut_,
+                       bufPrevRaw_})
         if (b) vkDestroyBuffer(c.dev, b, nullptr);
     bufRgb_ = bufMax_ = bufT_ = bufFin_ = bufNr_ = bufRbFinal_ = bufDbg_ =
         bufUpload_ = bufLastPresented_ = bufFbStats_ = bufHp_ = bufHist_ =
-        bufNetRgb_ = bufFinLow_ = bufPrevFrame_ = bufCurrFrame_ = bufInterpOut_ = VK_NULL_HANDLE;
+        bufNetRgb_ = bufFinLow_ = bufPrevFrame_ = bufCurrFrame_ = bufInterpOut_ =
+        bufPrevRaw_ = VK_NULL_HANDLE;
     for (VkDeviceMemory m : {memRgb_, memMax_, memT_, memFin_, memNr_, memRbFinal_, memDbg_,
                              memImgFinal_, memImgIn_, memUpload_, memLastP_, memFbStats_, memHp_, memHist_,
-                             memNetRgb_, memFinLow_, memPrevFrame_, memCurrFrame_, memInterpOut_})
+                             memNetRgb_, memFinLow_, memPrevFrame_, memCurrFrame_, memInterpOut_,
+                             memPrevRaw_})
         if (m) vkFreeMemory(c.dev, m, nullptr);
     memRgb_ = memMax_ = memT_ = memFin_ = memNr_ = memRbFinal_ = memDbg_ =
         memImgFinal_ = memImgIn_ = memUpload_ = memLastP_ = memFbStats_ = memHp_ = memHist_ =
-        memNetRgb_ = memFinLow_ = memPrevFrame_ = memCurrFrame_ = memInterpOut_ = VK_NULL_HANDLE;
+        memNetRgb_ = memFinLow_ = memPrevFrame_ = memCurrFrame_ = memInterpOut_ =
+        memPrevRaw_ = VK_NULL_HANDLE;
+    havePrevProcessed_ = false;
     if (imgInView_) vkDestroyImageView(c.dev, imgInView_, nullptr);
     if (viewFinal_) vkDestroyImageView(c.dev, viewFinal_, nullptr);
     if (imgIn_) vkDestroyImage(c.dev, imgIn_, nullptr);
