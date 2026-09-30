@@ -26,7 +26,8 @@ DEST = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else \
 WEIGHTS_SRC = os.path.join(_REPO, "work", "mlxw",
                            "dlssnr-logical.safetensors")
 
-PKG_FILES = ["__init__.py", "config.py", "daemonctl.py", "deploy.py",
+PKG_FILES = ["__init__.py", "cleaner.py", "config.py", "daemonctl.py",
+             "deploy.py",
              "gamelaunch.py", "gamescan.py", "gamescache.py", "i18n.py", "icons.py",
              "launcher.py", "logtail.py", "overlay.py", "overlay_win32.py",
              "paths.py", "phase30.py",

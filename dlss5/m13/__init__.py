@@ -14,6 +14,8 @@
 #   screenmode.py m8b-live overlay (screen mode) start/stop
 #   launcher.py   GameLauncher: guarded game launch as explicit timed steps
 #   worker.py     ActionWorker action queue + WorkerSupervisor watchdog
+#   cleaner.py    "Remove all traces": TraceScanner inventory + Cleaner
+#                 removal (game dlls, HKCU layers, daemon, flags/logs, config)
 #   logtail.py    threaded log file tails into the UI
 #   overlay.py    frameless in-game control overlay (hotkey, pause, gain)
 #   overlay_win32.py  Win32 plumbing for the overlay (no-activate, cursor,

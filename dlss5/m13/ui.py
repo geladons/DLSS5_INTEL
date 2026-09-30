@@ -25,7 +25,7 @@
 import os
 import queue
 import tkinter as tk
-from tkinter import filedialog, ttk
+from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
 from .controller import M13Controller
@@ -345,6 +345,13 @@ class ManagerUI:
                                      style="Muted.TLabel")
         self.layers_info.pack(side="left", padx=10)
 
+        row2b = ttk.Frame(t)
+        row2b.pack(anchor="w", pady=4)
+        ttk.Button(row2b, text=tr("clean_btn"), style="Danger.TButton",
+                   command=self._clean_traces).pack(side="left")
+        ttk.Label(row2b, text=tr("clean_hint"),
+                  style="Muted.TLabel").pack(side="left", padx=10)
+
         lang = ttk.Frame(t)
         lang.pack(anchor="w", pady=6)
         ttk.Label(lang, text=tr("language_label")).pack(side="left")
@@ -426,6 +433,58 @@ class ManagerUI:
 
     def _daemon_start(self):
         self.ctl.submit(self.ctl.daemon_start)
+
+    # ------------------------------------------------------- clean traces --
+    def _clean_traces(self):
+        """'Remove all traces' button: refuse while a game runs, scan on the
+        worker, then confirm on the Tk thread."""
+        if self.ctl.active_game_pid() is not None:
+            messagebox.showwarning(tr("clean_title"), tr("clean_running"))
+            return
+        self.log("mgr", tr("clean_scanning"))
+        self.ctl.submit(self._clean_scan)
+
+    def _clean_scan(self):
+        """Worker job: inventory all traces (dll hashing is real I/O - never
+        on the Tk thread), then bounce back for the confirmation dialog."""
+        try:
+            from .cleaner import TraceScanner
+            traces = TraceScanner(self.ctl.cfg).scan()
+        except Exception as e:
+            return False, "clean scan failed: %s" % e
+        self.logq.put(("__call__", lambda: self._clean_confirm(traces)))
+        return True, tr("clean_scan_done", len(traces))
+
+    def _clean_confirm(self, traces):
+        """Tk thread: count summary -> first confirm, then the optional
+        'also my settings' confirm, then the removal job on the worker."""
+        from .cleaner import count_summary
+        c = count_summary(traces)
+        n_game = c.get("game_dll", 0) + c.get("game_backup", 0)
+        note = tr("clean_foreign_note", c["foreign"]) if c.get("foreign") \
+            else ""
+        if not messagebox.askyesno(
+                tr("clean_title"),
+                tr("clean_confirm", n_game, c.get("registry", 0),
+                   c.get("temp_file", 0), note)):
+            return
+        include_cfg = messagebox.askyesno(tr("clean_title"),
+                                          tr("clean_ask_config"))
+        self.ctl.submit(self._clean_remove, traces, include_cfg)
+
+    def _clean_remove(self, traces, include_cfg):
+        """Worker job: delete/restore everything the scan found. Each step
+        logs a [clean] line through the log hub; the summary lands in the
+        log pane via the worker result callback."""
+        from .cleaner import Cleaner
+
+        def _log(m):
+            print(m, flush=True)
+            self.ctl._worker_log(m)
+
+        ok, summary = Cleaner(self.ctl.cfg, log=_log).remove(
+            traces, include_config=include_cfg)
+        return ok, tr("clean_done", summary)
 
 
     def _on_phase30_change(self, key, val):
@@ -527,6 +586,14 @@ class ManagerUI:
         if batch:
             self.logtxt.config(state="normal")
             for tag, line in batch:
+                if tag == "__call__":
+                    # deferred UI callback marshalled from a worker job
+                    try:
+                        line()
+                    except Exception as e:
+                        self.logtxt.insert(
+                            "end", "[mgr] ui callback error: %s\n" % e, "mgr")
+                    continue
                 self.logtxt.insert("end", "[%s] %s\n" % (tag, line), tag)
             self.logtxt.see("end")
             if int(self.logtxt.index("end-1c").split(".")[0]) > 2000:

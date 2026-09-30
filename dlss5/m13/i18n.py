@@ -127,6 +127,34 @@ _S = {
     "hotkey_note": {"en": "Overlay hotkey: %s (change in config.json)",
                     "ru": "Горячая клавиша оверлея: %s (меняется в config.json)"},
     "config_note": {"en": "Config: %s", "ru": "Конфиг: %s"},
+    # ---- remove all traces (cleaner) --------------------------------------
+    "clean_btn": {"en": "Remove all traces...",
+                  "ru": "Удалить все следы..."},
+    "clean_hint": {
+        "en": "undeploy game DLLs, unregister Vulkan layers, wipe flags/logs",
+        "ru": "убрать DLL из игр, снять слои Vulkan, стереть флаги и логи"},
+    "clean_title": {"en": "Remove all traces", "ru": "Удаление всех следов"},
+    "clean_confirm": {
+        "en": "Found %d game file(s), %d registry value(s), %d temp "
+              "file(s)%s.\nRemove them?",
+        "ru": "Найдено: файлов в играх %d, значений реестра %d, временных "
+              "файлов %d%s.\nУдалить?"},
+    "clean_foreign_note": {
+        "en": "; %d foreign file(s) will be left in place",
+        "ru": "; чужих файлов %d - останутся на месте"},
+    "clean_ask_config": {
+        "en": "Also remove the saved configuration\n(games list, weights "
+              "path, settings)?",
+        "ru": "Также удалить сохранённую конфигурацию\n(список игр, путь к "
+              "весам, настройки)?"},
+    "clean_done": {"en": "trace removal: %s", "ru": "удаление следов: %s"},
+    "clean_running": {
+        "en": "A managed game is still running - close it first.",
+        "ru": "Управляемая игра ещё запущена - сначала закрой её."},
+    "clean_scanning": {"en": "scanning for traces...",
+                       "ru": "ищу следы..."},
+    "clean_scan_done": {"en": "scan done: %d trace(s) found",
+                        "ru": "сканирование: найдено следов %d"},
     # ---- games tab --------------------------------------------------------
     "rescan": {"en": "Rescan Games", "ru": "Пересканировать игры"},
     "add_manual": {"en": "Add exe manually...", "ru": "Добавить exe вручную..."},
