@@ -1,5 +1,82 @@
 # DEV_STATE.md - where we are (updated 2026-09-30 by Devin)
 
+## Stage 26: Release Hardening - In-Process Crash Root Cause, GTA IV Flicker, Cleaner, Dead Code (2026-09-30)
+Field report from the owner: Witcher 3 (dx11 AND dx12), Metro Exodus and
+RDR2 die at launch; GTA IV menu strobes on mouse movement; GTA V won't
+enable ("foreign dll"); no way to remove program traces.
+- ROOT CAUSE of every x64 game crash (forensics over m12_dxgi.log +
+  nr_layer_win.log): no manager code path ever propagated the weights
+  path or shader dir to launched games - only the m11d daemon got
+  --weights. The in-process d5c_chain resolved neither inside the game
+  folder (production\weights is unreachable by its modDir probes), and
+  weights.cpp called std::exit(1) INSIDE the game process on the first
+  processed present (stderr is DEVNULL - logs just end at
+  "dllmain process detach"). No real in-process game frame has ever
+  completed in production; the path only ever ran in the dev harness
+  where work\mlxw resolves. Commits 9114b00 + 56fa6ce.
+  - chain (9114b00): all 11 exit(1) sites on load/init paths ->
+    std::runtime_error, converted to nonzero returns at the C ABI catch
+    -> layer/m12 fall back to native instead of killing the host game;
+    engine_.init wrapped in ensure() + init_failed_ latch (a failed init
+    is never retried per frame; releases on a real config change);
+    imgIn_ gains VK_IMAGE_USAGE_TRANSFER_SRC_BIT (spec violation in the
+    Stage-25 bufPrevRaw_ copy). New test_graceful_fail.py: missing
+    weights -> -1 x3, process survives, latch holds, valid context still
+    runs.
+  - m13 (56fa6ce): gamelaunch.engine_env() sets DLSS5_WEIGHTS_PATH/
+    NR_LAYER_WEIGHTS (cfg weights_path, else first *.safetensors in a
+    known weights dir) and DLSS5_SHADER_DIR/NR_LAYER_SHADERS per mode
+    (dx12 -> the deployed d5c_chain.dll source dir = runtime\m12;
+    dx9/dx11/vulkan -> the x64 layer dir; a dir without gemm.spv is never
+    used). controller seeds the same keys into os.environ. Launch log
+    shows env_weights=/env_shaders=.
+- GTA IV menu flicker (x86 TCP daemon path) - commit 24ea38a: a failed
+  exchange() left the RAW frame while neighbours showed processed output
+  (native<->processed strobing). New nr_degrade.h/.c flap control: a
+  transient failure re-blits the last same-extent processed frame for up
+  to 8 consecutive fails, past that the daemon is "down" -> native until
+  it answers again (never-started daemon is native from frame 1). The
+  TCP reply now lands in data->mapped - a timed-out recv can no longer
+  tear the holdable frame in data->result. Degenerate gate: swapchains
+  <64 px on either axis (GTA IV's 160x28 menu strip) pass native without
+  any daemon round-trip, killing the ~5.7 s engine re-init churn on
+  800x600<->160x28 alternation.
+- Cleaner (commit 26c250d): Settings -> "Remove all traces..." runs
+  cleaner.py TraceScanner (per-game deployed dlls incl. generalized
+  x64<->x64_dx12 sisters, *.m13bak, byte-identical ours-detection, HKCU
+  implicit-layer values, daemon, temp flags/knobs/logs, config dir) and
+  Cleaner.remove() with backup restore + elevated path; foreign dlls are
+  reported, never deleted. This is the "dirty install" answer: it retires
+  the stale Witcher x64_dx12 pair, GTA SA's bogus x64 dx12 dlls and the
+  Metro/RDR2 .m13bak piles that forensic sweeps found.
+- GTA V "foreign dll" (in 56fa6ce): only cosmetic - Enable was never
+  blocked and deploy() parks foreign dlls as .m13bak; the state label
+  now says so. Plus config dedupe on load (normcase+normpath; a record
+  with launch_exe wins): real config 10 -> 8 entries (gta_sa dx9+dx12
+  slash-duplicates, GTA5 x2); legacy-key migration compares normalized
+  keys so it stops re-adding the dupe.
+- Dead code (commit 9ab65d6): vendored AMD FSR 1.0 EASU/RCAS set (never
+  in any build - superseded by our bounded CAS in encode.comp),
+  standin.comp + m8/round_test.comp leftovers, unused m13 imports.
+  Attempts are documented in CHANGELOG "Removed", not hidden.
+- Validated: chain tests all PASS (graceful_fail/noise_seed/framegen/
+  framegen_transfer/scale_reconstruction); m13 green incl. test_env 5/5,
+  test_cleaner 6/6, test_launcher 11/11 (MagicMock import restored);
+  selftest INT8 39.38 / FP16 44.67 dB; golden drift identical to the
+  documented pre-existing one. Rebuilt + deployed (sha1-verified):
+  d5c_chain.dll bc04d94a, m11d.exe 69c9f9f5, nr_layer_win.dll 80aacf6b,
+  nr_layer_win32.dll 86d15d0f, m13 py files.
+- OWNER RE-TEST owed: (1) relaunch Witcher 3 / Metro / RDR2 - the chain
+  should now init in-process; watch m12_dxgi.log / nr_layer_win.log for
+  the first "processed" line (or a graceful "engine.init threw" if a dir
+  lacks shaders); (2) GTA IV menu - no strobe; log shows "degenerate
+  swapchain 160x28; passing through" and no per-frame "daemon did not
+  answer" spam; (3) run Remove all traces once to retire stale dlls
+  (incl. the Witcher x64_dx12 pair), then re-Enable the games;
+  (4) Witcher bin\x64 config entry still carries mode dx9 (old
+  auto-switch corruption) - set DX11; (5) GTA V Enhanced: Enable now
+  backs up the foreign dxgi.dll.
+
 ## Stage 25: Release-Blocker Batch (2026-09-30, DONE - live GTA IV/RDR2 sign-off owed by the owner)
 Plan: `.kilo/plans/1790747135611-release-blocker-launch-quality-overlay.md` (Tasks A-G, one commit per task).
 - Task A DONE - deterministic noise seed (defect 4, shimmer on static content). `dlss5/chain/engine.cpp` pins `p.b[0] = 1` in both feature paths (native and scaled); the Stage-21 `frameIndex & 0x7fffffff` seed redrew the vendor noise every present. `frameIndex` is still used for profiling and frame-1 debug dumps; `chain_c_api.h` doc updated.

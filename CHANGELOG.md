@@ -34,6 +34,27 @@ user-visible milestones.
 - In-game overlay never takes the game's foreground (exclusive-fullscreen
   games no longer minimize); photo-mode freeze and focus steal are opt-in
   (`overlay_freeze`, `overlay_focus`, both default off).
+- x64 games (Witcher 3, Metro Exodus, RDR2) no longer die on the first
+  processed frame: the manager now passes the weights path and shader
+  directory to every launch (`DLSS5_WEIGHTS_PATH`, `DLSS5_SHADER_DIR` and
+  NR_LAYER_* aliases - previously only the daemon got `--weights`), and
+  the chain reports init failures through the C ABI instead of calling
+  `exit()` inside the host game; a failed init is latched, not retried
+  per frame.
+- GTA IV (x86 daemon path) no longer strobes processed<->native frames on
+  daemon timeouts: transient failures hold the last processed frame of the
+  same size, a never-answering daemon stays native, and degenerate
+  sub-64 px swapchains (menu strips) bypass the daemon entirely.
+- GTA V "foreign DLLs" confusion: the state label now explains Enable
+  backs foreign dlls up; duplicate game entries that differed only by
+  path separators are merged on config load.
+
+### Added
+- Settings -> "Remove all traces...": undeploys our dlls from every
+  configured game (restoring parked originals, including sibling dirs),
+  unregisters the Vulkan layers, stops the daemon, clears temp
+  flags/logs, and optionally removes saved configuration. Foreign dlls
+  are reported but never deleted.
 
 ### Changed
 - `nr_layer_win.c` logs `fg stats: presents/processed/generated/native`;
