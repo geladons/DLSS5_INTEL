@@ -1,5 +1,7 @@
 #version 460
 // ============================================================================
+// SPDX-License-Identifier: Apache-2.0
+// Derived from dlss-nr-on-intel (Apache-2.0); upstream notice retained.
 // M3 STAND-IN LEARNED BLOCK  --  *** STAND-IN ***  *** NOT THE REAL NETWORK ***
 //
 // The real graph here is the recovered 71-block U-Net (5 Swin encoder stages,

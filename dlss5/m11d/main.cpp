@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // ============================================================================
 // m11d - DLSSNR frame daemon (M11): TCP server on 127.0.0.1 (default 48990)
 // driving the real 71-block DLSS 5 U-Net via dlss5/chain (ChainEngine).

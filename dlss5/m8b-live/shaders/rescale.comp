@@ -1,5 +1,7 @@
 #version 460
 // ============================================================================
+// SPDX-License-Identifier: Apache-2.0
+// Derived from dlss-nr-on-intel (Apache-2.0); upstream notice retained.
 // M3 rescale — ONE axis of the reference's separable bilinear resize.
 // PORT of the `axis()` inner half of resize() in src/layer/nr_daemon.py:238-255
 // (coordinates/weights formula identical; the reference's NumPy table values

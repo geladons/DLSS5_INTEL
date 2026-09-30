@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // dllmain.cpp - entry point of the m12 dxgi proxy.
 #include "m12_hook.h"
 #include "m12_dx12.h"

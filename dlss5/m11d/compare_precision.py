@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 import os, sys
 import numpy as np
 

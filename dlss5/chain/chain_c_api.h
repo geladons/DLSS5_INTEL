@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // ============================================================================
 // dlss5/chain - C API for in-process DLSS 5 engine integration.
 // Exposes a clean extern "C" ABI so consumers (like nr_layer_win) can drive

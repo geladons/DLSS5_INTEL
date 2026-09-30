@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // m12_dx12.h - per-swapchain D3D12 present processor for the m12 dxgi proxy.
 //
 // Called from the Present hook before the real Present. On live frames it

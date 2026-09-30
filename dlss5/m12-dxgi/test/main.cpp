@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // m12_test main.cpp - DX12 validation app for the m12 dxgi proxy.
 //
 // Renders a known byte-exact gradient, presents N frames through a normal

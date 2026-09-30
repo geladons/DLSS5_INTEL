@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # ============================================================================
 # m13.ui_games - the Games tab: found games as ICON CARDS (owner feedback:
 # "a list of 180 exe files is unreadable - show the actual games as icons").

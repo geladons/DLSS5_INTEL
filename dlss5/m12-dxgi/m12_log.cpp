@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // m12_log.cpp - tiny file logger for the m12 dxgi proxy (ASCII only).
 // Pure kernel32 (CreateFile/WriteFile): this DLL loads as a dependency of
 // arbitrary games, and the CRT-backed logger crashed in that context, so

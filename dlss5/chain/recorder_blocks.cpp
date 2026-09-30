@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // ============================================================================
 // dlss5/chain — ChainRecorder: block recorders + the 71-block U-Net walk.
 // VERBATIM port of the m8b-live lambdas (recordWindowAttn/recordWindowBlock/

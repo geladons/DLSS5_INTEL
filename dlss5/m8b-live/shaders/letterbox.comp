@@ -1,5 +1,7 @@
 #version 460
 // ============================================================================
+// SPDX-License-Identifier: Apache-2.0
+// Derived from dlss-nr-on-intel (Apache-2.0); upstream notice retained.
 // M3 letterbox reduction — per-row / per-column max over the float RGB frame.
 // Feeds the host-side port of active_region() (reference
 // src/layer/nr_daemon.py:261-296). The reference runs this scan on the host

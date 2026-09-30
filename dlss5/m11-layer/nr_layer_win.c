@@ -1,5 +1,7 @@
 /*
  * nr_layer_win - Windows port of nr_layer.c (dlss-nr-on-intel, src/layer).
+ * SPDX-License-Identifier: Apache-2.0
+ * Derived from dlss-nr-on-intel (Apache-2.0); upstream notice retained.
  *
  * A Vulkan implicit layer that sits at vkQueuePresentKHR: forces
  * TRANSFER_SRC|DST onto swapchain images at vkCreateSwapchainKHR, copies the

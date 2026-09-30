@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # ============================================================================
 # m13.phase30 - NVIDIA Phase30 vendor tuning controls.
 #

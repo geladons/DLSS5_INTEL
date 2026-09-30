@@ -1,5 +1,7 @@
 #version 460
 // ============================================================================
+// SPDX-License-Identifier: Apache-2.0
+// Derived from dlss-nr-on-intel (Apache-2.0); upstream notice retained.
 // M3 encode — float RGB -> B8G8R8A8 bytes, alpha FORCED opaque (M8B fix).
 // PORT of nr_encode8(), src/ref/nr_image.c:46-63 (bgra=1 path):
 //   value = value==value ? unit(value) : 0      (NaN -> 0, unit = clamp01)

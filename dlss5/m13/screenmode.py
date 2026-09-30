@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # ============================================================================
 # m13.screenmode - the m8b-live overlay (screen mode) lifecycle.
 #

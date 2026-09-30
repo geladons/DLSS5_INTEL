@@ -1,5 +1,7 @@
 #version 460
 // ============================================================================
+// SPDX-License-Identifier: Apache-2.0
+// Derived from dlss-nr-on-intel (Apache-2.0); upstream notice retained.
 // M3 decode — B8G8R8A8 storage image -> float RGB in [0,1], packed 3 floats/px.
 // PORT of reference nr_decode8(..., bgra=1): src/ref/nr_image.c:36-44.
 //   DXGI desktop capture is B8G8R8A8 -> bgra=1: R=src[2], G=src[1], B=src[0].

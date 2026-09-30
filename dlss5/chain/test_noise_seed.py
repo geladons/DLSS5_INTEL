@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 # ============================================================================
 # DLSS 5 regression test: pinned vendor noise seed.
 # Processes the SAME input frame with different frame_index values and checks

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # ============================================================================
 # m13.deploy - DLL deploy/undeploy for the injection paths + HKCU Vulkan
 # layer registration.

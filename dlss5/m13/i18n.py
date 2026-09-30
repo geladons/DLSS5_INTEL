@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # ============================================================================
 # m13.i18n - UI strings. English is the primary language, Russian optional
 # (Settings -> Language; stored in config.json as "language": en|ru).

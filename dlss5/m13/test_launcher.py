@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # ============================================================================
 # test_launcher.py - Stage 25 Task C unit tests for GameLauncher,
 # launch_game_async, Deployer sister-dir isolation and WorkerSupervisor.

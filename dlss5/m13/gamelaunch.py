@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # ============================================================================
 # m13.gamelaunch - detached game launching with the injection env, and
 # FILE-BASED pause/resume/freeze channels.

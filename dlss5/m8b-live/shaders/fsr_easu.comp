@@ -1,4 +1,6 @@
 #version 460
+// SPDX-License-Identifier: Apache-2.0
+// Derived from AMD FidelityFX FSR 1.0 (MIT); upstream notice retained.
 #extension GL_GOOGLE_include_directive : require
 
 // AMD FSR 1.0 EASU (Edge Adaptive Spatial Upsampling)

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Analyze per-kernel bench CSV: compute per-family TF/s and time breakdown."""
 import csv, sys, collections
 

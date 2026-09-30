@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # ============================================================================
 # m13.launcher - GameLauncher: runs ONE game launch as explicit, timed,
 # individually guarded steps (register -> resolve -> guard_running ->

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // probe.cpp - minimal loader diagnostic for the m12 dxgi proxy.
 // Loads the proxy from its staged directory and reports the exact error.
 #include <windows.h>

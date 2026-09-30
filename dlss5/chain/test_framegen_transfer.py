@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 # ============================================================================
 # DLSS 5 Stage 4: Frame Generation residual-transfer test (1:2 cadence).
 # Tests dlss5_framegen_transfer on Intel Arc Pro B50:

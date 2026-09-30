@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // m12_dx12.cpp - per-swapchain D3D12 present processor (see m12_dx12.h).
 #include "m12_dx12.h"
 

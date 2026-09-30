@@ -25,6 +25,15 @@ host quirks).
    `main.cpp` for a new concern. New file-scope globals are not allowed;
    state travels in structs/classes passed by reference.
 
+## License of contributions
+
+The project is licensed under the Apache License 2.0 (see LICENSE and
+NOTICE). By submitting a pull request you agree that your contribution is
+licensed under the same terms (Apache-2.0, Section 5) and you certify the
+Developer Certificate of Origin (https://developercertificate.org/): add a
+`Signed-off-by:` trailer to every commit (`git commit -s`). Code derived from
+other projects must keep its original notices and be Apache-2.0-compatible.
+
 ## Building
 
 Full guide (toolchain, every module, bundle assembly, troubleshooting):

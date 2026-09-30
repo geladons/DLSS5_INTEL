@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /* ============================================================================
  * nr_framegen.c - frame-generation cadence bookkeeping (see nr_framegen.h).
  * ==========================================================================*/

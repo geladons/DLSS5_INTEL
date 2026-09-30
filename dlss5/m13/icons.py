@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # ============================================================================
 # m13.icons - extract the icon of an exe as a tk PhotoImage (stdlib only:
 # SHGetFileInfoW -> HICON -> 32bpp DIB -> zlib-packed PNG -> PhotoImage).

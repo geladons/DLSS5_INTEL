@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /* ============================================================================
  * nr_framegen.h - frame-generation cadence bookkeeping for the present layer.
  * Pure state + counters; the layer calls these once per present and routes

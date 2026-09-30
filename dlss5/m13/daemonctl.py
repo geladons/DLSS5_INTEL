@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # ============================================================================
 # m13.daemonctl - NRCT control-channel client for the m11d daemon.
 #

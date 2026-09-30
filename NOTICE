@@ -1,0 +1,20 @@
+DLSS5_INTEL - real DLSS 5 (DLSSNR 71-block graph) running on Intel Arc via Vulkan
+Copyright (c) 2026 DLSS5_INTEL project owner (github.com/geladons)
+https://github.com/geladons/DLSS5_INTEL
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not
+use this project except in compliance with the License. See LICENSE.
+
+This product includes software derived from dlss-nr-on-intel by UzbekUnknown
+(https://github.com/UzbekUnknown/dlss-nr-on-intel), Apache License 2.0:
+the Vulkan present layer port (dlss5/m11-layer/nr_layer_win.c), the shared
+numerics contract publish.glsl (verbatim copies under dlss5/*/shaders/) and
+the decode/encode/features/rescale transport shaders ported from its C/NumPy
+reference. Their original notices are retained in the file headers.
+
+DXVK (https://github.com/doitsujin/dxvk) binaries are fetched at build time
+and redistributed unchanged under the zlib license (c) DXVK authors.
+
+Revisions up to and including public commit cf04e26 were released under the
+MIT License; every later revision is Apache-2.0. No NVIDIA source code or
+model weights are included or distributed.

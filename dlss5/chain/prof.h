@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // ============================================================================
 // dlss5/chain — ChainProf: optional per-dispatch GPU profiling (M10).
 // One timestamp per dispatched kernel at COMPUTE_SHADER stage; deltas between

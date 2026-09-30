@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 # ============================================================================
 # DLSS 5 Stage 4: Frame Generation (FSR 3.1 / Optical Flow) Test Suite
 # Tests dlss5_interpolate_frame on Intel Arc Pro B50:

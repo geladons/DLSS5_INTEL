@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // m12_client.h - TCP exchange with the m11d daemon.
 // Wire protocol identical to m11-layer/nr_layer_win.c:
 //   16-byte header {magic, w, h, format} (uint32 LE) + w*h*4 BGRA payload,

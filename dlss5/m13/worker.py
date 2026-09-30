@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # ============================================================================
 # m13.worker - the async action queue (moved out of controller.py) plus the
 # watchdog that keeps it responsive. One ActionWorker thread runs every

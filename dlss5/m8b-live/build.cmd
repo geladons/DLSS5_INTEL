@@ -1,4 +1,5 @@
 @echo off
+:: SPDX-License-Identifier: Apache-2.0
 setlocal
 rem M8B-LIVE: configure + build only. Run orchestration is separate
 rem (runm8b.cmd) so multiple runs append to docs\m8b-live.log.

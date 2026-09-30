@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # DLSS 5 Manager entry point - run with pythonw (no console window):
 #   "%USERPROFILE%\AppData\Local\Programs\Python\Python312\pythonw.exe" m13.pyw
 # or via "DLSS5 Manager.vbs" / M13.cmd next to this file.

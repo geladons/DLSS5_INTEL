@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // ============================================================================
 // dlss5/chain — WeightsStore: DLSSNR safetensors parse + pack layout +
 // load-time preprocessing (branched-FFN fuse-fold, attn_bias fragment

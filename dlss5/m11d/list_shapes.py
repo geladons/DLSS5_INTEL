@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 import csv, collections, sys
 
 def list_shapes(path):

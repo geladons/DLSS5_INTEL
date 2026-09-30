@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // m12_hotkeys.h - owner hotkeys for the m12 dxgi proxy.
 //
 // CTRL+ALT+X: toggle processing pause - flips the same %TEMP%\m12_pause.flag

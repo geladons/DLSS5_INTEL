@@ -1,4 +1,5 @@
 @echo off
+:: SPDX-License-Identifier: Apache-2.0
 set "REPO=%~dp0\..\.."
 rem DLSS 5 Manager (M13) - stdlib-tkinter app on the user Python 3.12.
 rem Nothing installs, nothing elevates; HKCU registration only.

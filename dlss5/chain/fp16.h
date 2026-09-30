@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // ============================================================================
 // dlss5/chain — host-side f16 <-> f32 conversion (F16C fast path).
 // Extracted VERBATIM from dlss5/m8b-live/main.cpp (M11 refactor).

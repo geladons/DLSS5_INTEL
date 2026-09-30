@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // m12_hook.cpp - COM vtable hooking for the m12 dxgi proxy.
 //
 // The proxy hooks the three CreateSwapChain* entry points and the swapchain

@@ -260,4 +260,4 @@ GPU/driver and the game API are the first things we need.
 
 ## License
 
-[MIT](LICENSE)
+[Apache-2.0](LICENSE) — see also [NOTICE](NOTICE). Revisions up to public commit cf04e26 were MIT; everything later is Apache-2.0.

@@ -1,4 +1,5 @@
 @echo off
+:: SPDX-License-Identifier: Apache-2.0
 setlocal
 rem M12-DXGI: configure + build the DXGI present proxy.
 rem Same VS-discovery fallback as m11-layer (COM discovery is broken here).

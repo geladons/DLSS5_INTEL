@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // ============================================================================
 // dlss5/chain — shared low-level Vulkan helpers for the DLSSNR chain modules.
 // Extracted VERBATIM from dlss5/m8b-live/main.cpp (2026-09-22, M11 refactor).

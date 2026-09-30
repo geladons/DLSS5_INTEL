@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Stage 5 Unit Tests: UI Presets, Frame Generation Controls, Packaging
 import os
 import sys

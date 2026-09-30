@@ -1,4 +1,5 @@
 @echo off
+:: SPDX-License-Identifier: Apache-2.0
 setlocal
 rem Standalone runner for DLSS 5 framegen residual-transfer test
 cd /d "%~dp0"

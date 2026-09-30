@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # ============================================================================
 # m13.overlay_win32 - Win32 plumbing for the in-game overlay.
 # Window style flags, no-activate, cursor freeing and the robust foreground

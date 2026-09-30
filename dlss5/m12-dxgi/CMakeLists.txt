@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # m12-dxgi: DXGI proxy that ships DX12 present frames to the m11d daemon.
 # Build via build.cmd (VS generator with NMake fallback, per AGENTS.md).
 cmake_minimum_required(VERSION 3.20)

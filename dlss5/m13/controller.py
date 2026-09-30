@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # ============================================================================
 # m13.controller - the glue between the UI and the core modules. All side
 # effects (processes, TCP, files, registry) go through here; widgets stay

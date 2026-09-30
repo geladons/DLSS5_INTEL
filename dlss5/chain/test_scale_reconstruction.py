@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 # ============================================================================
 # DLSS 5: render-scale reconstruction test (Task E).
 # The scaled path (<1.0) must reconstruct detail: final = native_full +

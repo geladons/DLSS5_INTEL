@@ -1,4 +1,5 @@
 @echo off
+:: SPDX-License-Identifier: Apache-2.0
 setlocal
 rem M8B-LIVE run wrapper: appends a run (args passed through %*) to
 rem docs\m8b-live.log. Run from anywhere; exe runs in its Release dir

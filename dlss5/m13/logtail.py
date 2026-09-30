@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # ============================================================================
 # m13.logtail - threaded line tails of the component logs into UI callbacks.
 #

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // m12_hotkeys.h - owner hotkeys for the m12 dxgi proxy (see m12_hotkeys.h).
 #include "m12_hotkeys.h"
 

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # ============================================================================
 # m13.ui - DLSS 5 Manager main window (tkinter, stdlib only, dark theme).
 #

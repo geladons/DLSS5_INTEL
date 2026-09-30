@@ -1,4 +1,5 @@
 @echo off
+:: SPDX-License-Identifier: Apache-2.0
 setlocal
 set "REPO=%~dp0\..\..\.."
 rem M12 test app build (same VS-discovery fallback as the proxy itself).

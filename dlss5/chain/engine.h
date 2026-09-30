@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // ============================================================================
 // dlss5/chain — ChainEngine: the full absolute (echo-free) DLSSNR pipeline.
 //   BGRA frame in -> decode -> vendor features -> featpack -> 71-block chain

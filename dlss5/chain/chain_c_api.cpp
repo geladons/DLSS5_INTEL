@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // ============================================================================
 // dlss5/chain - C API implementation wrapping d5c::ChainEngine.
 // Encapsulates engine lifecycle, lazy initialization, resolution tracking,

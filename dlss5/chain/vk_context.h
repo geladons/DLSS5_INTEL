@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // ============================================================================
 // dlss5/chain — VkContext: Vulkan instance + LUID-matched (or first-capable)
 // device with the M8a requirement set (coopmat 8x16x16 f16xf16->f32, BDA,

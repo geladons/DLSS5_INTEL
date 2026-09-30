@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // ============================================================================
 // dlss5/chain — ChainRecorder: pipeline setup + per-kernel dispatchers.
 // ============================================================================

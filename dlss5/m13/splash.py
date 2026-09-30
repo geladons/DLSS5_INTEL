@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # ============================================================================
 # m13.splash - the startup splash (owner asked for an easter egg at launch).
 # A frameless mini-window with a pulsing neural-net doodle, rotating tongue

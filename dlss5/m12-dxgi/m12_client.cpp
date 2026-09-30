@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // m12_client.cpp - TCP exchange with the m11d daemon (see m12_client.h).
 #include "m12_client.h"
 

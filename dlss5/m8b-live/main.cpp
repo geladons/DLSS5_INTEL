@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // ============================================================================
 // M8B-LIVE — the real DLSS 5 graph live on the desktop (DLSS5_INTEL)
 //

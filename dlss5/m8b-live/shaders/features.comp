@@ -1,5 +1,7 @@
 #version 460
 // ============================================================================
+// SPDX-License-Identifier: Apache-2.0
+// Derived from dlss-nr-on-intel (Apache-2.0); upstream notice retained.
 // M3 feature assembly — the 16-channel network input volume, one pixel/thread.
 // PORT of nr_features(), src/ref/nr_image.c:84-112 (the C transcription of
 // MLX-DLSS make_features + apply_history; the NumPy original is the vendored

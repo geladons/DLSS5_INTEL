@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # ============================================================================
 # m13.gamescan - find REAL installed games (not every exe on the drive) and
 # pick the right injection mode.

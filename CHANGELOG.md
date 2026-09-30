@@ -6,6 +6,10 @@ user-visible milestones.
 
 ## Unreleased — Stage 25 release-blocker batch (2026-09-30)
 
+### Licensing
+- Relicensed from MIT to Apache-2.0 (LICENSE, NOTICE, SPDX headers). Public
+  revisions up to cf04e26 stay MIT.
+
 ### Fixed
 - Temporal shimmer on static content: vendor noise seed pinned (was keyed
   by frame index); regression test `chain/test_noise_seed.py`.

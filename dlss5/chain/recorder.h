@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // ============================================================================
 // dlss5/chain — ChainRecorder: the 71-block DLSSNR U-Net command recording.
 // Chain pipelines (push-constant/BDA, descriptor-less) + per-block record

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # ============================================================================
 # m13.overlay - in-game control overlay (hotkey, default CTRL+ALT+G).
 # Frameless, always-on-top, semi-transparent panel centered over the screen.

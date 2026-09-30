@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // ============================================================================
 // dlss5/chain — ChainArena: the chunked device arena for the 71-block chain.
 // Slot layout (per-scale extents) + vector side-table slots + pack region at

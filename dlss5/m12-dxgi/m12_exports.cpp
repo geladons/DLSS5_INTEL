@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // m12_exports.cpp - export surface of the m12 dxgi proxy.
 //
 // CreateDXGIFactory/1/2 are forwarded to the system dxgi.dll (loaded by its
