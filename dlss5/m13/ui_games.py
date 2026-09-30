@@ -325,6 +325,8 @@ class GamesTab:
                 elif meta["dll"] == "deployed":
                     state, color = tr("state_enabled"), ACCENT
                 elif meta["dll"] in ("foreign", "partial"):
+                    # Cosmetic warning only, never a blocker: deploy()
+                    # parks foreign dlls as .m13bak before writing ours.
                     state, color = tr("state_foreign"), RED
                 else:
                     state, color = tr("state_added"), MUTED

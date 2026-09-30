@@ -25,6 +25,8 @@
 import os
 import subprocess
 
+from . import deploy
+from . import paths
 from .phase30 import phase30_env_dict, write_phase30_knobs
 
 DX9_TRIGGER = os.path.join(os.environ.get("TEMP", "."), "m13_dx9_trigger.flag")
@@ -46,6 +48,97 @@ def _flag_set(path, present):
             os.remove(path)
         except OSError:
             pass
+
+
+# -------------------------------------------- engine env (weights/shaders) --
+# The in-process d5c_chain.dll (loaded by the m12 dxgi proxy for dx12 and by
+# nr_layer_win.dll for dx11/vulkan) resolves weights + shaders from the ENV
+# FIRST - chain_c_api.cpp consults DLSS5_WEIGHTS_PATH / NR_LAYER_WEIGHTS and
+# DLSS5_SHADER_DIR / NR_LAYER_SHADERS - and only then probes dirs relative to
+# its own module dir. Those probes fail when the consumer dll runs injected
+# inside a game folder, so the env keys are mandatory for every managed
+# launch. On the x86 daemon path (dx9) they are simply unused: daemon_start
+# passes --weights to m11d.exe itself.
+def weights_path_for(cfg=None):
+    """Absolute path of the .safetensors the chain must load: the
+    configured "weights_path" when set, else the first *.safetensors in
+    a known weights dir (same rule as ctl._autodetect_weights), else
+    the canonical filename in the bundle dir (a missing file surfaces
+    as the chain's own 'weights not found' error, same as today).
+    paths.find("weights") returns the bundle dir even in the dev tree
+    (dir keys return the first candidate unconditionally), so the dev
+    location work\\mlxw is probed as well."""
+    if cfg is not None and hasattr(cfg, "get"):
+        p = cfg.get("weights_path")
+        if p:
+            return p
+    dirs = [paths.find("weights"),
+            os.path.join(paths.REPO, "work", "mlxw")]
+    seen = set()
+    for wdir in dirs:
+        if not wdir or wdir in seen:
+            continue
+        seen.add(wdir)
+        try:
+            names = [n for n in os.listdir(wdir)
+                     if n.endswith(".safetensors")]
+        except OSError:
+            continue
+        if not names:
+            continue
+        if "dlssnr-logical.safetensors" in names:
+            return os.path.join(wdir, "dlssnr-logical.safetensors")
+        return os.path.join(wdir, sorted(names)[0])
+    return os.path.join(dirs[0], "dlssnr-logical.safetensors")
+
+
+def shader_dir_for(mode=None, arch="x64"):
+    """Directory holding the *.spv set this mode's in-process d5c_chain
+    consumer loads:
+      dx12            -> dirname of the deployed d5c_chain.dll source
+                         (mode_dll_source -> runtime\\m12 / the dev m12
+                         build dir - both ship the full spv set)
+      dx9/dx11/vulkan -> dirname of the x64 layer manifest
+                         (runtime\\layer\\x64 ships spv next to the
+                         d5c_chain.dll nr_layer_win.dll loads; the x86
+                         daemon path ignores the env entirely)
+      mode=None       -> first valid dir across consumers (env seeding)
+    Returns None when no candidate holds gemm.spv - never point the
+    chain at a dir without shaders (its own modDir probe is a better
+    fallback than a wrong explicit dir)."""
+    m12_dir = os.path.dirname(
+        deploy.mode_dll_source("dx12", arch, "d5c_chain.dll"))
+    layer_dir = os.path.dirname(deploy.MANIFEST_X64)
+    m11d_dir = os.path.dirname(paths.find("m11d_exe"))
+    if mode == "dx12":
+        cands = (m12_dir, layer_dir, m11d_dir)
+    elif mode in ("dx9", "dx11", "vulkan"):
+        cands = (layer_dir, m12_dir, m11d_dir)
+    else:
+        cands = (m12_dir, layer_dir, m11d_dir)
+    seen = set()
+    for d in cands:
+        if not d or d in seen:
+            continue
+        seen.add(d)
+        if os.path.exists(os.path.join(d, "gemm.spv")):
+            return d
+    return None
+
+
+def engine_env(cfg=None, mode=None, arch="x64"):
+    """The env pairs above as a dict ready for env.update / os.environ.
+    mode=None picks the first valid shader dir (process-env seeding)."""
+    out = {}
+    w = weights_path_for(cfg)
+    if w:
+        out["DLSS5_WEIGHTS_PATH"] = w
+        out["NR_LAYER_WEIGHTS"] = w
+    s = shader_dir_for(mode, arch)
+    if s:
+        out["DLSS5_SHADER_DIR"] = s
+        out["NR_LAYER_SHADERS"] = s
+    return out
 
 
 def _launch(exe_path, env_extra=None):
@@ -232,6 +325,20 @@ def launch_game(exe_path, mode, scale=None, gain=None, blend=None, cfg=None, sha
     if p30:
         env.update(phase30_env_dict(p30))
         write_phase30_knobs(p30)
+
+    # Weights + shader locations for the in-process d5c_chain (see the
+    # engine_env block above) - every injection mode, unconditionally.
+    arch = "x64"
+    if cfg is not None and hasattr(cfg, "get"):
+        gmeta = (cfg.get("games") or {}).get(exe_path) or {}
+        if isinstance(gmeta, dict) and gmeta.get("arch"):
+            arch = gmeta["arch"]
+    ee = engine_env(cfg, mode, arch)
+    env.update(ee)
+    print("[launch] game=%s env_weights=%s env_shaders=%s"
+          % (os.path.basename(exe_path),
+             ee.get("DLSS5_WEIGHTS_PATH") or "(unset)",
+             ee.get("DLSS5_SHADER_DIR") or "(unset)"), flush=True)
 
     return _launch(exe_path, env)
 

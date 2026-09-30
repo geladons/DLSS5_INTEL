@@ -45,6 +45,43 @@ DEFAULTS = {
 }
 
 
+def _dedupe_games(games):
+    """Merge games-dict entries that collide after path normalization
+    (os.path.normcase(os.path.normpath(p))) - duplicates landed because
+    keys were raw path strings (D:/x vs D:\\x, different case).
+
+    Collision rule: prefer the record with a non-empty launch_exe (the
+    launcher wrapper is the "more data" case), else keep the FIRST.
+    Keys are stored in normpath form - canonical separators but ORIGINAL
+    case; a normcase'd key would silently miss every reader that looks
+    games up by os.path.abspath-style paths.
+
+    Pure function, no I/O. Returns (deduped_dict, dropped_keys)."""
+    order = []                     # first-seen normalized keys
+    best = {}                      # normkey -> [stored_key, meta]
+    dropped = []
+    for exe, meta in (games or {}).items():
+        if not isinstance(meta, dict):
+            meta = {}
+        norm = os.path.normcase(os.path.normpath(exe))
+        key = os.path.normpath(exe)
+        cur = best.get(norm)
+        if cur is None:
+            order.append(norm)
+            best[norm] = [key, meta]
+            continue
+        if not cur[1].get("launch_exe") and meta.get("launch_exe"):
+            dropped.append(cur[0])          # later record wins
+            best[norm] = [key, meta]
+        else:
+            dropped.append(key)             # keep the first
+    out = {}
+    for norm in order:
+        key, meta = best[norm]
+        out[key] = meta
+    return out, dropped
+
+
 class Config:
     """JSON-backed config; attribute access via cfg.get/set + save()."""
 
@@ -62,6 +99,13 @@ class Config:
                                   if k in DEFAULTS})
         except (OSError, ValueError):
             pass   # first run or corrupt file -> defaults
+        games = self.data.get("games")
+        if isinstance(games, dict):
+            deduped, dropped = _dedupe_games(games)
+            if dropped:
+                print("[config] dropped %d duplicate game entrie(s): %s"
+                      % (len(dropped), ", ".join(dropped)), flush=True)
+            self.data["games"] = deduped
 
     def save(self):
         os.makedirs(os.path.dirname(self.path), exist_ok=True)

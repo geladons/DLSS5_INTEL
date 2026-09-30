@@ -214,6 +214,10 @@ class M13Controller:
         p30 = self.cfg.get_phase30()
         os.environ.update(phase30_env_dict(p30))
         write_phase30_knobs(p30)
+        # Seed weights/shader dirs for the in-process d5c_chain: launched
+        # games get the per-mode values via env_extra in launch_game; the
+        # process env covers any consumer inheriting our environment.
+        os.environ.update(gamelaunch.engine_env(self.cfg))
 
         self.monitor.start()
 
@@ -225,13 +229,20 @@ class M13Controller:
         still runs. Dead paths are dropped."""
         games = dict(self.cfg.get("games") or {})
         changed = False
+        # games keys are normpath'd on load (config._dedupe_games) - the
+        # legacy keys still hold raw strings, so compare normalized or the
+        # same game would be re-added as a slash-duplicate every start.
+        norm_keys = {os.path.normcase(os.path.normpath(k)) for k in games}
         for key, mode in (("dx9_game", "dx9"), ("dx12_game", "dx12")):
             exe = self.cfg.get(key)
-            if exe and exe not in games:
-                games[exe] = {"mode": mode,
-                              "arch": "x86" if mode == "dx9" else "x64",
-                              "name": os.path.splitext(
-                                  os.path.basename(exe))[0]}
+            if exe and os.path.normcase(os.path.normpath(exe)) \
+                    not in norm_keys:
+                games[os.path.normpath(exe)] = {
+                    "mode": mode,
+                    "arch": "x86" if mode == "dx9" else "x64",
+                    "name": os.path.splitext(
+                        os.path.basename(exe))[0]}
+                norm_keys.add(os.path.normcase(os.path.normpath(exe)))
                 changed = True
         from . import gamescan
         for exe in list(games):
