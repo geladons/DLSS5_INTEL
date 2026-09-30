@@ -34,9 +34,9 @@ expect today:
 | DX12 games (own `dxgi.dll` proxy) | ✅ Works mechanically — validated on windowed DX12 titles |
 | Auto-deploy of the right DLLs per game | ✅ Works — API auto-detection, per-mode DLL set, one UAC prompt for Program Files games |
 | Auto game discovery | ✅ Works — Steam / Epic / GOG manifests + full-drive scan, PE-based API detection (finds real games, not every `.exe`) |
-| In-game overlay (sliders on a frozen frame) | ✅ Works — focus steal, cursor unclip (`AttachThreadInput`), photo-mode freeze (`CTRL+ALT+G`), non-minimizing overlay |
+| In-game overlay (`CTRL+ALT+G`) | ✅ Works — Game Bar style: topmost, never takes the game's foreground (no minimize), cursor unclip (`AttachThreadInput`); photo-mode freeze and focus steal are opt-in settings |
 | Screen / window mode (whole desktop) | 🟡 Works, but slow and rough — fine for streaming demos, not for daily use |
-| **FPS & Performance** | 🟡 **Targeting Performance 50% preset + FrameGen.** Full 71-block chain is ~210 ms @ 960x576 (scale 0.50) and ~547 ms selftest / 767 ms steady @ 1080p native on Arc Pro B50 (down from 867 ms in v0.2, -320 ms reduction). Frame generation executes in 0.39 ms. See [docs/BENCHMARKS.md](docs/BENCHMARKS.md) |
+| **FPS & Performance** | 🟡 **Targeting Performance 50% preset + FrameGen.** Full 71-block chain is ~210 ms @ 960x576 (scale 0.50) and ~547 ms selftest / 767 ms steady @ 1080p native on Arc Pro B50 (down from 867 ms in v0.2, -320 ms reduction). Frame generation is a real 1:2 cadence (every 2nd frame through the network, the frame between generated from it by motion-compensated residual transfer, ~0.05 ms @ 640x384; x64 in-process only). See [docs/BENCHMARKS.md](docs/BENCHMARKS.md) |
 | Pause / resume | ✅ `CTRL+ALT+X` — full game FPS while paused |
 
 The performance roadmap and optimization history are documented in
@@ -49,7 +49,7 @@ the correctness of the neural path is validated bit-exactly against PyTorch gold
 - **Hardware Ground-Truth on Intel Arc Pro B50 (Vulkan 1.4.348, XMX Xe2):**
   - **Scale 0.50 (960x576 extent):** **210.2 ms steady** (247.3 ms cold, down from 232.8 ms in v0.2) across all 71 blocks.
   - **Scale 1.00 (1080p native 1920x1088 extent):** **547.0 ms selftest / 767.5 ms steady** (down from 867.2 ms in v0.2, **-320.2 ms total reduction**).
-  - **Adaptive FrameGen (Optical Flow):** **0.39 ms** (~2500 FPS theoretical compute throughput).
+  - **FrameGen (1:2 residual transfer):** every 2nd present is neural-processed, the present in between = native + motion-warped DLSS 5 residual of the last processed frame (`framegen.comp` mode 1, ~0.05 ms @ 640x384). No extra latency, no extra present; static scenes reproduce the processed frame bit-exactly. x64 in-process path only.
   - **In-Process Front-End Transport:** **1.5 - 2.5 ms** (0 ms socket lag via direct C ABI).
   - **Numerical Accuracy:** **45.05 dB PSNR vs FP16 reference** (100.00% bit-exact across optimizations, 0 NaNs / 0 Infs).
 - **Core v0.3 Breakthroughs — "Bytes Instead of TF/s":**
@@ -69,7 +69,7 @@ the correctness of the neural path is validated bit-exactly against PyTorch gold
      - Bundles quantized INT8 weights pack (`dlssnr-int8.bin`) alongside FP16 safetensors with SHA-1 verification.
      - Automatically patches Vulkan layer manifests (`VkLayer_dlssnr_win*.json`) with absolute runtime paths.
 - **Why 0.50 Scale (Performance Preset) Is the Intended Real-Time Path:**
-  Rendering at 50% scale reduces spatial token count by 4x. In v0.3, steady execution is down to 210 ms. Coupled with **Adaptive GPU FrameGen (0.39 ms)**, 2x frame interpolation converts raw output into a responsive, fluid 1080p presentation with edge sharpness preserved.
+  Rendering at 50% scale reduces spatial token count by 4x. In v0.3, steady execution is down to 210 ms. The network runs at 50% and only its RESIDUAL is upscaled and added onto the full-resolution native frame (`compose` delta output + `encode` residual reconstruction), so native text/HUD/edge detail is preserved instead of a bilinear blow-up. Coupled with the 1:2 FrameGen cadence this doubles presented frames per network pass.
 - Detailed kernel family profiling, speedup history, and metric reconciliation: see [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ## Before / after
