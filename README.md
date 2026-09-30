@@ -206,16 +206,29 @@ in-game interiors.
 ## Credits & Attribution
 
 ### Upstream & Derived Code
-The Vulkan present-capture layer is ported from
+The project started in 2026-09 from the transport layer of
 [dlss-nr-on-intel](https://github.com/UzbekUnknown/dlss-nr-on-intel) by
-**UzbekUnknown** (Apache-2.0 — attribution in the derived file headers):
+**UzbekUnknown** (Apache-2.0). That code is still in use today and keeps its
+original notices (see also [NOTICE](NOTICE)):
 
 - `dlss5/m11-layer/nr_layer_win.c` — Windows port of `src/layer/nr_layer.c`
-- `publish.glsl` (under `dlss5/`) — byte-verbatim copy of `src/gpu/publish.glsl`
+  (the `vkQueuePresentKHR` intercept; since then heavily extended: in-process
+  C ABI path, frame-generation cadence, exact-repeat reuse, TCP fail-fast)
+- `publish.glsl` (copies under `dlss5/*/shaders/`) — byte-verbatim
+  `src/gpu/publish.glsl`, the vendor rounding-point contract
+- `decode` / `encode` / `features` / `rescale` transport shaders — ports of
+  `src/ref/nr_image.c` / `nr_daemon.py` numerics (CAS, residual
+  reconstruction and the accumulate mode in `encode`/`compose` are ours)
 - `golden.py` (in `m7-graph-proto` / `m8-full-chain`) — reference semantics
   based on `src/ref/nr_model.py`
 
-All other code in this repository is original.
+Everything else is original to this repository: the 71-block DLSSNR graph
+executor (`dlss5/chain`: `d5c::ChainEngine`, cooperative-matrix GEMM, fused
+flash attention, INT8 path, vectorized pool, arena allocator), the
+frame-generation residual transfer (`framegen.comp` mode 1), the render-scale
+residual reconstruction, the frame daemon `m11d`, the DX12 proxy `m12-dxgi`,
+the screen/window app `m8b-live` and the whole `m13` manager (launcher,
+deployer, overlay, game scanner).
 
 ### Design References & Inspiration
 Architectural concepts and pipeline designs referenced during research
@@ -234,11 +247,17 @@ No code was copied from the projects above.
 ### Third-Party Dependencies
 - **[DXVK](https://github.com/doitsujin/dxvk)** — D3D9–11 to Vulkan
   translation (fetched at build time, © DXVK authors, zlib license).
+- **AMD FidelityFX FSR 1.0** headers (`dlss5/m8b-live/shaders/fsr/`, MIT,
+  © 2021 Advanced Micro Devices) — vendored for the EASU/RCAS experiments;
+  not part of the shipped pipeline.
 
 ### Development
 - **Architecture & Maintainer:** Project owner
 - **AI Pair-Programming:** Code generation, test harnesses, and documentation
-  assisted by **Kimi K2.8** and **Kimi K3** (Moonshot AI), under human direction.
+  assisted, under human direction and review, by **Kimi K2.8** and **Kimi K3**
+  (Moonshot AI), **Gemini 3.8 Flash** (Google), **Claude Opus 4.5** and
+  **Claude Fable 5.1** (Anthropic), **Qwen 3.8 Max** (Alibaba) and **SWE-2**
+  (Cognition, via Devin).
 
 
 ## Contributing

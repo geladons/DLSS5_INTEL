@@ -172,18 +172,30 @@ GTA Online, всё с ядерным античитом) — DLL-инъекци�
 
 ## Благодарности и атрибуция
 
-### Заимствованный код
-Слой захвата кадра на Vulkan (present-capture layer) портирован из проекта
-[dlss-nr-on-intel](https://github.com/UzbekUnknown/dlss-nr-on-intel)
-автора **UzbekUnknown** (Apache-2.0 — атрибуция указана в шапках
-производных файлов):
+### Апстрим и производный код
+Проект начался в сентябре 2026 с транспортного слоя
+[dlss-nr-on-intel](https://github.com/UzbekUnknown/dlss-nr-on-intel) автора
+**UzbekUnknown** (Apache-2.0). Этот код используется до сих пор и сохраняет
+оригинальные уведомления (см. также [NOTICE](NOTICE)):
 
 - `dlss5/m11-layer/nr_layer_win.c` — порт `src/layer/nr_layer.c` на Windows
-- `publish.glsl` (внутри `dlss5/`) — byte-verbatim копия `src/gpu/publish.glsl`
+  (перехват `vkQueuePresentKHR`; с тех пор сильно расширен: in-process C ABI,
+  каденс генерации кадров, переиспользование повторных кадров, fail-fast TCP)
+- `publish.glsl` (копии в `dlss5/*/shaders/`) — byte-verbatim
+  `src/gpu/publish.glsl`, контракт точек округления вендора
+- транспортные шейдеры `decode` / `encode` / `features` / `rescale` — порты
+  численной части `src/ref/nr_image.c` / `nr_daemon.py` (CAS, residual-
+  реконструкция и accumulate-режим в `encode`/`compose` — наши)
 - `golden.py` (в `m7-graph-proto` / `m8-full-chain`) — семантика референса
   на основе `src/ref/nr_model.py`
 
-Весь остальной код этого репозитория — оригинальный.
+Всё остальное — оригинальный код этого репозитория: исполнитель 71-блочного
+графа DLSSNR (`dlss5/chain`: `d5c::ChainEngine`, GEMM на cooperative matrix,
+fused flash attention, INT8-путь, векторизованный pool, arena-аллокатор),
+генерация кадров переносом residual (`framegen.comp` mode 1),
+residual-реконструкция при render scale < 1, демон `m11d`, DX12-прокси
+`m12-dxgi`, screen/window-приложение `m8b-live` и весь менеджер `m13`
+(лаунчер, деплой, оверлей, сканер игр).
 
 ### Дизайн-референсы и вдохновение
 Архитектурные концепции и идеи пайплайна, изученные в ходе ресёрча
@@ -202,12 +214,17 @@ GTA Online, всё с ядерным античитом) — DLL-инъекци�
 ### Сторонние зависимости
 - **[DXVK](https://github.com/doitsujin/dxvk)** — трансляция D3D9–11 в Vulkan
   (бинарники скачиваются при сборке, © авторы DXVK, лицензия zlib).
+- **AMD FidelityFX FSR 1.0** — заголовки (`dlss5/m8b-live/shaders/fsr/`, MIT,
+  © 2021 Advanced Micro Devices), завендорены для экспериментов EASU/RCAS;
+  в поставляемый пайплайн не входят.
 
 ### Разработка
 - **Архитектура и сопровождение:** владелец проекта
 - **ИИ-парное программирование:** генерация кода, тестовые стенды и
-  документация с участием **Kimi K2.8** и **Kimi K3** (Moonshot AI) под
-  руководством человека.
+  документация под руководством и ревью человека с участием **Kimi K2.8** и
+  **Kimi K3** (Moonshot AI), **Gemini 3.8 Flash** (Google), **Claude Opus 4.5**
+  и **Claude Fable 5.1** (Anthropic), **Qwen 3.8 Max** (Alibaba) и **SWE-2**
+  (Cognition, через Devin).
 
 ## Контрибуция
 
