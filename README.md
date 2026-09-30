@@ -69,7 +69,7 @@ the correctness of the neural path is validated bit-exactly against PyTorch gold
      - Bundles quantized INT8 weights pack (`dlssnr-int8.bin`) alongside FP16 safetensors with SHA-1 verification.
      - Automatically patches Vulkan layer manifests (`VkLayer_dlssnr_win*.json`) with absolute runtime paths.
 - **Why 0.50 Scale (Performance Preset) Is the Intended Real-Time Path:**
-  Rendering at 50% scale reduces spatial token count by 4x. In v0.3, steady execution is down to 210 ms. Coupled with **Adaptive GPU FrameGen (0.39 ms)**, 2x frame interpolation converts raw output into a responsive, fluid 1080p presentation with intact HUD masking and edge sharpness.
+  Rendering at 50% scale reduces spatial token count by 4x. In v0.3, steady execution is down to 210 ms. Coupled with **Adaptive GPU FrameGen (0.39 ms)**, 2x frame interpolation converts raw output into a responsive, fluid 1080p presentation with edge sharpness preserved.
 - Detailed kernel family profiling, speedup history, and metric reconciliation: see [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ## Before / after

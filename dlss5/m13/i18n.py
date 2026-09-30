@@ -216,10 +216,10 @@ _S = {
         "en": "Skin and surface texture (-1.0..2.0, public baseline -1.0)",
         "ru": "Фильтрация текстур и структуры кожи (-1.0..2.0, базовое значение -1.0)"},
     "p30_skin_follow": {"en": "Follow", "ru": "Авто"},
-    "p30_auto_mask": {"en": "Auto Skin/UI Mask", "ru": "Авто-маска (UI / кожа)"},
+    "p30_auto_mask": {"en": "Auto Skin Mask (vendor)", "ru": "Авто-маска кожи (вендор)"},
     "p30_auto_mask_tip": {
-        "en": "Optional skin/UI conditioning (public baseline OFF)",
-        "ru": "Дополнительная настройка кожи/UI (в исходном профиле выключена)"},
+        "en": "Vendor skin/structure conditioning (feature ch 12-14); public baseline OFF. Not a HUD mask.",
+        "ru": "Вендорская настройка кожи/структуры (каналы 12-14); в исходном профиле выключена. Это не HUD-маска."},
     "p30_style_index": {"en": "Render Style", "ru": "Стиль рендера"},
     "p30_style_index_tip": {
         "en": "Neural processing style preset (0 = Default, 1 = Natural, 2 = Cinematic)",

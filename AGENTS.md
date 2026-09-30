@@ -88,12 +88,12 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
     and executes directly in-process on host-visible staging buffers (0 ms
     socket lag, no background daemon).
   - x86 games (GTA IV via DXVK): connects over TCP (127.0.0.1:48990) to `m11d.exe`.
-  - HUD masking is config-driven and gated on the phase30 `auto_mask` flag: when enabled, the manager writes per-game rect/ellipse regions
-    (normalized coords) to %TEMP%\m13_hudmask.cfg (NR_LAYER_HUDMASK override); the
-    layer hot-reloads the file every frame. Toggling auto_mask off deletes the file (no positional masking). The overlay auto_mask checkbox applies the toggle live without a game restart.
-    HUD layouts/fonts vary per game, so there are NO compiled-in regions;
-    other static scene pixels remain neural-processed, and exact repeats reuse the
-    last result.
+  - NO HUD/positional masking (removed Stage 25 - field test showed it covered
+    game content and looked worse than no mask). Every pixel is neural-processed;
+    the only passthrough is exact-repeat reuse: a frame byte-identical to the
+    previous one reuses the last processed result (NR_LAYER_UI_MASK=0 disables;
+    legacy env name). Phase30 `auto_mask` is the VENDOR skin/structure
+    conditioning parameter (feature ch 12-14), unrelated to HUD masking.
 - m12-dxgi: DirectX 12 present hook (GTA V Enhanced). Dynamically loads
   `d5c_chain.dll` via C ABI to process present buffers in-process (0 ms TCP lag).
 - chain: THE model as an OOP module (`d5c::ChainEngine`). Exported via clean

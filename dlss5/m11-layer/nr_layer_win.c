@@ -31,7 +31,8 @@
  *   NR_LAYER_CAPTURE  write the next captured frame (header+pixels) here
  *   NR_LAYER_EVERY N  capture every Nth present even without a trigger
  *   NR_LAYER_SYNC     "semaphore" = present-semaphore ring; default = idle
- *   NR_LAYER_UI_MASK  1 = send a held-still mask with the frame
+ *   NR_LAYER_UI_MASK  0 = disable exact-repeat reuse of the last processed
+ *                     result (default on; legacy name)
  *
  * Build: see CMakeLists.txt (x64; x86 build needed for 32-bit games).
  */
@@ -83,8 +84,6 @@ typedef struct device_data {
     VkSemaphore present_signal;
     int present_plain;
     int have_earlier;
-    unsigned char *outgoing;
-    VkDeviceSize outgoing_size;
     unsigned char *raw;          /* freeze mode: the held UNPROCESSED frame */
     VkDeviceSize raw_size;
     int raw_held;
@@ -142,19 +141,7 @@ static const char *freeze_path;
 static const char *reproc_path;
 static char default_freeze_path[MAX_PATH];
 static char default_reproc_path[MAX_PATH];
-static char g_hud_cfg_path[MAX_PATH];
-static FILETIME g_hud_cfg_stamp;
-static int g_hud_cfg_exists;
-#define NR_MAX_HUD_REGIONS 32
-typedef struct hud_region {
-    int is_ellipse;
-    float x, y, w, h;
-} hud_region;
-static hud_region g_hud_regions[NR_MAX_HUD_REGIONS];
-static int g_hud_region_count;
-static void init_hud_cfg_path(void);
-static void load_hud_mask_config(int force_log);
-static int ui_mask;
+static int static_reuse;
 static int no_patch;            /* NR_LAYER_NOPATCH=1: leave swapchains alone */
 static volatile LONG g_paused;  /* CTRL+ALT+X: passthrough, full fps */
 static volatile LONG g_off;     /* CTRL+ALT+Q: layer off for good */
@@ -794,10 +781,8 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
         freeze_path = getenv("NR_LAYER_FREEZE");
         reproc_path = getenv("NR_LAYER_REPROC");
         init_freeze_paths();
-        init_hud_cfg_path();
-        load_hud_mask_config(1);
         const char *mask = getenv("NR_LAYER_UI_MASK");
-        ui_mask = (!mask || strcmp(mask, "0") != 0);
+        static_reuse = (!mask || strcmp(mask, "0") != 0);
         const char *every = getenv("NR_LAYER_EVERY");
         capture_every = every ? strtol(every, NULL, 10) : 0;
         const char *sync = getenv("NR_LAYER_SYNC");
@@ -820,9 +805,9 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
         nr_log("[nr_layer] active; port=%ld trigger=%s capture=%s every=%ld",
              nr_port, trigger_path ? trigger_path : "(none)",
              capture_path ? capture_path : "(off)", capture_every);
-        if (ui_mask)
-            nr_log("[nr_layer] ui mask on: the first present after the trigger "
-                 "is kept to find what held still");
+        if (static_reuse)
+            nr_log("[nr_layer] static reuse on: exact-repeat frames reuse "
+                 "the last processed result");
         ensure_inprocess();
     }
     return r;
@@ -989,7 +974,6 @@ static void release_device(device_data *data)
     }
     free(data->result);
     free(data->earlier);
-    free(data->outgoing);
     free(data->raw);
     free(data->interp);
     free(data->prev_processed);
@@ -1295,136 +1279,6 @@ static int transfer(device_data *data, swapchain_data *chain, VkQueue queue,
     return 0;
 }
 
-/* The HUD mask is game-specific: HUD layouts, fonts and text positions
- * vary per title, so no fixed regions are compiled in. Regions come from
- * %TEMP%\m13_hudmask.cfg (override: NR_LAYER_HUDMASK), written by the
- * manager per game. Format, one region per line, coords normalized 0..1:
- *   rect X Y W H
- *   ellipse CX CY RX RY
- * No config file -> no positional masking at all. The file is reloaded
- * live when its mtime changes (hud_cfg_tick), so the manager can retune
- * regions while the game is running. */
-
-static void init_hud_cfg_path(void)
-{
-    if (g_hud_cfg_path[0] != '\0') return;
-    const char *env = getenv("NR_LAYER_HUDMASK");
-    if (env && env[0]) {
-        strncpy(g_hud_cfg_path, env, sizeof(g_hud_cfg_path) - 1);
-        g_hud_cfg_path[sizeof(g_hud_cfg_path) - 1] = '\0';
-        return;
-    }
-    char temp_dir[MAX_PATH];
-    DWORD len = GetTempPathA(sizeof(temp_dir), temp_dir);
-    if (len > 0 && len < sizeof(temp_dir)) {
-        if (temp_dir[len - 1] != '\\' && temp_dir[len - 1] != '/')
-            snprintf(g_hud_cfg_path, sizeof(g_hud_cfg_path), "%s\\m13_hudmask.cfg", temp_dir);
-        else
-            snprintf(g_hud_cfg_path, sizeof(g_hud_cfg_path), "%sm13_hudmask.cfg", temp_dir);
-    } else {
-        const char *t = getenv("TEMP");
-        snprintf(g_hud_cfg_path, sizeof(g_hud_cfg_path), "%s\\m13_hudmask.cfg", t ? t : ".");
-    }
-}
-
-static void load_hud_mask_config(int force_log)
-{
-    g_hud_region_count = 0;
-    g_hud_cfg_exists = 0;
-    memset(&g_hud_cfg_stamp, 0, sizeof g_hud_cfg_stamp);
-    WIN32_FILE_ATTRIBUTE_DATA attr;
-    if (GetFileAttributesExA(g_hud_cfg_path, GetFileExInfoStandard, &attr)) {
-        g_hud_cfg_exists = 1;
-        g_hud_cfg_stamp = attr.ftLastWriteTime;
-    }
-    FILE *f = fopen(g_hud_cfg_path, "r");
-    if (!f) {
-        if (force_log)
-            nr_log("[nr_layer] no hud mask config (%s); positional masking off",
-                   g_hud_cfg_path);
-        return;
-    }
-    char line[256];
-    while (g_hud_region_count < NR_MAX_HUD_REGIONS && fgets(line, sizeof line, f)) {
-        char kind[16];
-        float a, b, c, d;
-        if (sscanf(line, " %15s %f %f %f %f", kind, &a, &b, &c, &d) != 5)
-            continue;
-        hud_region *r = &g_hud_regions[g_hud_region_count];
-        if (!strcmp(kind, "rect")) r->is_ellipse = 0;
-        else if (!strcmp(kind, "ellipse")) r->is_ellipse = 1;
-        else continue;
-        if (a < 0.0f) a = 0.0f; if (a > 1.0f) a = 1.0f;
-        if (b < 0.0f) b = 0.0f; if (b > 1.0f) b = 1.0f;
-        if (c < 0.0f) c = 0.0f; if (c > 1.0f) c = 1.0f;
-        if (d < 0.0f) d = 0.0f; if (d > 1.0f) d = 1.0f;
-        r->x = a; r->y = b; r->w = c; r->h = d;
-        g_hud_region_count++;
-    }
-    fclose(f);
-    if (force_log || g_hud_region_count > 0)
-        nr_log("[nr_layer] hud mask config: %d region(s) from %s",
-               g_hud_region_count, g_hud_cfg_path);
-}
-
-static void hud_cfg_tick(void)
-{
-    if (!g_hud_cfg_path[0]) return;
-    WIN32_FILE_ATTRIBUTE_DATA attr;
-    int exists = GetFileAttributesExA(g_hud_cfg_path, GetFileExInfoStandard, &attr) != 0;
-    if (exists != g_hud_cfg_exists ||
-        (exists && CompareFileTime(&attr.ftLastWriteTime, &g_hud_cfg_stamp) != 0))
-        load_hud_mask_config(0);
-}
-
-static int likely_hud_region(uint32_t x, uint32_t y,
-                             uint32_t width, uint32_t height)
-{
-    if (g_hud_region_count <= 0 || width == 0 || height == 0)
-        return 0;
-    float fx = (float)x / (float)width;
-    float fy = (float)y / (float)height;
-    for (int i = 0; i < g_hud_region_count; i++) {
-        const hud_region *r = &g_hud_regions[i];
-        if (r->is_ellipse) {
-            if (r->w <= 0.0f || r->h <= 0.0f) continue;
-            float dx = (fx - r->x) / r->w;
-            float dy = (fy - r->y) / r->h;
-            if (dx * dx + dy * dy <= 1.0f) return 1;
-        } else {
-            if (fx >= r->x && fx < r->x + r->w &&
-                fy >= r->y && fy < r->y + r->h)
-                return 1;
-        }
-    }
-    return 0;
-}
-
-/* A pixel must be both unchanged and inside a likely fixed HUD region. */
-static uint32_t settled(const unsigned char *now, const unsigned char *before,
-                        uint32_t width, uint32_t height, uint32_t pixels,
-                        unsigned char *mask, uint32_t *held_hud)
-{
-    hud_cfg_tick();
-    uint32_t held = 0;
-    *held_hud = 0;
-    for (uint32_t i = 0; i < pixels; i++) {
-        const unsigned char *a = now + 4 * i, *b = before + 4 * i;
-        int moved = abs(a[0] - b[0]) + abs(a[1] - b[1]) + abs(a[2] - b[2]) > 12;
-        uint32_t x = i % width, y = i / width;
-        int keep_native = !moved && likely_hud_region(x, y, width, height);
-        mask[i] = keep_native ? 0xFFu : 0u;
-        held += !moved;
-        *held_hud += keep_native;
-    }
-    return held;
-}
-
-static int mask_worth_sending(uint32_t held, uint32_t pixels)
-{
-    return held > (pixels / 100);
-}
-
 /* NR_LAYER_CAPTURE_OUT: dump header+processed result for A/B stills. */
 static void dump_capture(const char *path, const uint32_t *header,
                          const unsigned char *pixels, VkDeviceSize size)
@@ -1444,40 +1298,16 @@ static int process_frame(device_data *data, swapchain_data *chain,
     if (ensure_resources(data, needed)) return -1;
     if (transfer(data, chain, queue, index, 0)) return -1;
 
-    uint32_t pixels = chain->extent.width * chain->extent.height;
-    int masked = 0;
-    if (ui_mask && data->have_earlier && data->earlier_size >= needed) {
-        if (data->outgoing_size < needed + pixels) {
-            unsigned char *grown = (unsigned char *)realloc(data->outgoing,
-                                                            (size_t)needed + pixels);
-            if (!grown) return -1;
-            data->outgoing = grown;
-            data->outgoing_size = needed + pixels;
-        }
-        memcpy(data->outgoing, data->mapped, (size_t)needed);
-        uint32_t held_hud = 0;
-        uint32_t held = settled(data->mapped, data->earlier,
-                    chain->extent.width, chain->extent.height,
-                                pixels, data->outgoing + needed, &held_hud);
-        if (held >= (uint32_t)((uint64_t)pixels * 85 / 100)) {
-            masked = mask_worth_sending(held_hud, pixels);
-            if (memcmp(data->mapped, data->earlier, (size_t)needed) == 0 &&
-                data->have_prev_processed && data->prev_processed &&
-                data->prev_processed_size >= needed && data->result &&
-                data->result_size >= needed) {
-                memcpy(data->mapped, data->prev_processed, (size_t)needed);
-                memcpy(data->result, data->prev_processed, (size_t)needed);
-                return 0;
-            }
-                 nr_log("[nr_layer] static frame detected (%u%% held; %u%% HUD mask)",
-                     (unsigned)(100ull * held / pixels),
-                     (unsigned)(100ull * held_hud / pixels));
-        } else {
-                 masked = mask_worth_sending(held_hud, pixels);
-                 nr_log("[nr_layer] scene %u%% held; HUD mask %u%% %s",
-                     100u * held / pixels, 100u * held_hud / pixels,
-                     masked ? "sent" : "refused");
-        }
+    /* Exact-repeat reuse: a frame identical to the previous one reuses the
+     * last processed result instead of running the chain again. */
+    if (static_reuse && data->have_earlier && data->earlier_size >= needed &&
+        memcmp(data->mapped, data->earlier, (size_t)needed) == 0 &&
+        data->have_prev_processed && data->prev_processed &&
+        data->prev_processed_size >= needed && data->result &&
+        data->result_size >= needed) {
+        memcpy(data->mapped, data->prev_processed, (size_t)needed);
+        memcpy(data->result, data->prev_processed, (size_t)needed);
+        return 0;
     }
 
     /* Save native input into data->earlier before processing */
@@ -1491,7 +1321,7 @@ static int process_frame(device_data *data, swapchain_data *chain,
     data->have_earlier = 1;
     data->earlier_size = needed;
 
-    uint32_t header[4] = { masked ? 0x314E524Eu : 0x304E524Eu, chain->extent.width,
+    uint32_t header[4] = { 0x304E524Eu, chain->extent.width,
                            chain->extent.height, (uint32_t)chain->format };
     if (capture_path) {
         FILE *file = fopen(capture_path, "wb");
@@ -1508,16 +1338,6 @@ static int process_frame(device_data *data, swapchain_data *chain,
         int r = pfn_dlss5_process_frame(g_engine, chain->extent.width, chain->extent.height,
                                         data->mapped, data->mapped, (long)frame_counter);
         if (r == 0) {
-            if (masked && data->outgoing) {
-                const unsigned char *mask = data->outgoing + needed;
-                const uint32_t *native_px = (const uint32_t *)data->earlier;
-                uint32_t *out_px = (uint32_t *)data->mapped;
-                for (uint32_t i = 0; i < pixels; i++) {
-                    if (mask[i] != 0) {
-                        out_px[i] = native_px[i];
-                    }
-                }
-            }
             if (data->result && data->result_size >= needed) {
                 memcpy(data->result, data->mapped, (size_t)needed);
             }
@@ -1531,18 +1351,6 @@ static int process_frame(device_data *data, swapchain_data *chain,
 
     /* No daemon configured: capture-only mode (frame passes through). */
     if (!nr_port) return -1;
-    if (masked) {
-        if (exchange(header, sizeof header, data->outgoing,
-                     (size_t)needed + pixels, data->result, (size_t)needed)) {
-            nr_log("[nr_layer] the daemon did not answer; frame unchanged");
-            return -1;
-        }
-        memcpy(data->mapped, data->result, (size_t)needed);
-        dump_capture(capture_out_path, header, data->result, needed);
-        nr_log("[nr_layer] processed %ux%u with a ui mask",
-             chain->extent.width, chain->extent.height);
-        return 0;
-    }
     if (exchange(header, sizeof header, data->mapped, (size_t)needed, data->result,
                  (size_t)needed)) {
         nr_log("[nr_layer] the daemon did not answer; frame unchanged");

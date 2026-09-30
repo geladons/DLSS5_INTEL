@@ -14,6 +14,7 @@
 # ============================================================================
 import os
 import queue
+import tempfile
 import threading
 import time
 
@@ -220,6 +221,7 @@ class M13Controller:
     def __init__(self, cfg=None):
         self.cfg = cfg or config_mod.Config()
         self._migrate_legacy_games()
+        self._remove_legacy_hudmask_file()
         os.makedirs(os.path.dirname(M11D_LOG), exist_ok=True)
         self.daemon = ManagedProcess("m11d.exe", M11D_EXE, M11D_CWD, M11D_LOG)
         self.screen = ScreenMode()
@@ -283,8 +285,19 @@ class M13Controller:
                 meta["arch"] = g.arch or meta.get("arch")
                 games[g.exe] = meta
             changed = True
+        for exe in games:
+            if "hudmask" in games[exe]:
+                del games[exe]["hudmask"]
+                changed = True
         if changed:
             self.cfg.set("games", games)
+
+    def _remove_legacy_hudmask_file(self):
+        """Stage-24 positional HUD mask is gone; drop its leftover config."""
+        try:
+            os.remove(os.path.join(tempfile.gettempdir(), "m13_hudmask.cfg"))
+        except OSError:
+            pass
 
     # ------------------------------------------------------- auto setup ----
     def autosetup(self):

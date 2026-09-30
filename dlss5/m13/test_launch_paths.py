@@ -174,4 +174,70 @@ with tempfile.TemporaryDirectory() as td:
         ctl.shutdown()
 
 
+print("\n=== Test E: launch env carries no NR_LAYER_HUDMASK (auto_mask on/off) ===")
+with tempfile.TemporaryDirectory() as td:
+    dummy = os.path.join(td, "game.exe")
+    with open(dummy, "w") as f:
+        f.write("dummy")
+    hudmask_cfg = os.path.join(tempfile.gettempdir(), "m13_hudmask.cfg")
+    try:
+        os.remove(hudmask_cfg)
+    except OSError:
+        pass
+    for auto_mask in (False, True):
+        captured = {}
+
+        def fake_launch(exe_path, env_extra=None):
+            captured["env"] = dict(env_extra or {})
+            return True, "launched pid 1"
+
+        class _Cfg(dict):
+            def get_phase30(self, exe=None):
+                return {"intensity": 1.0, "local_tone": 1.0,
+                        "local_structure": 1.0, "skin_structure": -1.0,
+                        "auto_mask": auto_mask, "style_index": 0,
+                        "color_strength": 1.0}
+
+        with patch("m13.gamelaunch._launch", side_effect=fake_launch), \
+             patch("m13.gamelaunch._flag_set"), \
+             patch("m13.gamelaunch.freeze_set"):
+            ok, msg = gamelaunch.launch_game(dummy, "dx11", cfg=_Cfg())
+            assert ok, "launch_game failed: %s" % msg
+            env = captured["env"]
+            assert "NR_LAYER_HUDMASK" not in env, \
+                "NR_LAYER_HUDMASK must not be set (auto_mask=%s)" % auto_mask
+            assert env.get("NR_LAYER_UI_MASK") == "1", "static reuse env must stay on"
+            assert not os.path.exists(hudmask_cfg), \
+                "auto_mask=%s must not create %s" % (auto_mask, hudmask_cfg)
+            print("  no NR_LAYER_HUDMASK and no m13_hudmask.cfg (auto_mask=%s) [PASS]" % auto_mask)
+
+
+print("\n=== Test F: legacy hudmask games key + stale m13_hudmask.cfg cleanup ===")
+with tempfile.TemporaryDirectory() as td:
+    dummy = os.path.join(td, "game.exe")
+    with open(dummy, "w") as f:
+        f.write("dummy")
+    fake_temp = os.path.join(td, "faketemp")
+    os.makedirs(fake_temp)
+    stale_cfg = os.path.join(fake_temp, "m13_hudmask.cfg")
+    with open(stale_cfg, "w") as f:
+        f.write("rect 0 0 0.1 0.1\n")
+    cfg_file = os.path.join(td, "test_cfg.json")
+    cfg = Config(cfg_file)
+    cfg.set("games", {
+        dummy: {"mode": "vulkan", "arch": "x64", "name": "TestX64",
+                "hudmask": [{"shape": "rect", "x": 0, "y": 0, "w": 0.1, "h": 0.1}]},
+    })
+    with patch("m13.controller.tempfile.gettempdir", return_value=fake_temp):
+        ctl = M13Controller(cfg)
+    try:
+        games = cfg.get("games")
+        assert dummy in games, "existing game entry should survive migration"
+        assert "hudmask" not in games[dummy], "hudmask key should be stripped"
+        assert not os.path.exists(stale_cfg), "stale m13_hudmask.cfg should be deleted on init"
+        print("  hudmask games key stripped and stale cfg deleted [PASS]")
+    finally:
+        ctl.shutdown()
+
+
 print("\nALL LAUNCH PATH TESTS PASSED!")
