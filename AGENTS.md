@@ -131,9 +131,12 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
     (no bin\x64 <-> bin\x64_dx12 sync).
   - Presets: Native (1.0), Quality (0.67), Balanced (0.58), Performance (0.50),
     Ultra Performance (0.33), and Sharpness (0.0..1.0).
-  - Overlay: Topmost non-minimizing overlay with Photo-Mode Freeze on open,
-    automatic mouse capture release (`AttachThreadInput` + `ReleaseCapture`),
-    and automatic window geometry restoration (`<FocusIn>` minsize 1024x760).
+  - Overlay (`overlay.py` + `overlay_win32.py`): Game Bar semantics - topmost
+    WS_EX_NOACTIVATE panel that never takes the foreground (Tk takefocus
+    stripped; `focus_set` is what steals focus on this host). Photo-Mode
+    freeze (`overlay_freeze`) and focus stealing (`overlay_focus`) are
+    OPT-IN, default off. Cursor release (`AttachThreadInput` +
+    `ReleaseCapture`) on open; log `[overlay] shown ... fg_before/fg_after`.
 - Weights: work\mlxw\dlssnr-logical.safetensors (proprietary, NOT in git;
   649 tensors, 71 blocks, resident ~325 MB VRAM). Loader m6.
 

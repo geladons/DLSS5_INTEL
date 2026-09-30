@@ -2,11 +2,18 @@
 # m13.overlay - in-game control overlay (hotkey, default CTRL+ALT+G).
 # Frameless, always-on-top, semi-transparent panel centered over the screen.
 #
-# MOUSE & FOCUS:
-# The topmost panel takes foreground focus while visible, releases the game's
-# cursor clipping, and returns focus to the game when hidden.
+# MOUSE & FOCUS (Game Bar style):
+# The panel appears topmost over the game WITHOUT taking the foreground -
+# no activation, no minimize, no flash (WS_EX_NOACTIVATE + deiconify only;
+# verified against GetForegroundWindow by _probe_noactivate.py). Foreground
+# stealing is OPT-IN via cfg overlay_focus: only then does the overlay run
+# _force_foreground/focus_force and return focus on hide. Tk takefocus is
+# stripped from the widget tree while focus mode is off so a click can never
+# route into Tk's focus command (focus_set activates the toplevel -> steals
+# the game's foreground -> exclusive-fullscreen games minimize).
 #
-# PHOTO MODE: open the overlay -> the frame FREEZES (the layer/proxy holds
+# PHOTO MODE (opt-in, cfg overlay_freeze): open the overlay -> the frame
+# FREEZES (the layer/proxy holds
 # the raw frame and re-blits its processed result, the game keeps running
 # underneath). Turn the gain/blend/scale/sharpness knob -> knob push +
 # reprocess flag bump -> the SAME original frame is reprocessed and the frozen
@@ -27,17 +34,16 @@ from . import gamelaunch
 from .i18n import (tr, scale_preset_labels, scale_to_preset_label,
                    preset_label_to_scale)
 from .phase30 import Phase30Panel
+from .overlay_win32 import (_u32, GWL_EXSTYLE, WS_EX_TOPMOST,  # noqa: F401
+                            WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+                            _set_noactivate, _free_cursor, _input_jiggle,
+                            _force_foreground)
 
 VK = {"control": 0x11, "ctrl": 0x11, "alt": 0x12, "shift": 0x10}
 POLL_MS = 120
 DEBOUNCE_MS = 250
 STATUS_MS = 500
 CURSOR_KEEP_MS = 32
-
-GWL_EXSTYLE = -20
-WS_EX_TOPMOST = 0x00000008
-WS_EX_NOACTIVATE = 0x08000000
-WS_EX_TOOLWINDOW = 0x00000080
 
 # dark theme (shared palette with ui.py)
 BG = "#0d1017"
@@ -49,10 +55,6 @@ ACCENT = "#5b8cff"
 GREEN = "#3fb950"
 RED = "#f85149"
 AMBER = "#d29922"
-
-_u32 = ctypes.windll.user32
-SW_RESTORE = 9
-IDC_ARROW = 32512
 
 
 def parse_hotkey(spec):
@@ -105,94 +107,6 @@ class HotkeyPoller:
         tk_widget.after(self.poll_ms, self.poll)
 
 
-def _set_noactivate(hwnd, on=True):
-    try:
-        style = _u32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
-        style |= WS_EX_TOPMOST | WS_EX_TOOLWINDOW
-        if on:
-            style |= WS_EX_NOACTIVATE
-        else:
-            style &= ~WS_EX_NOACTIVATE
-        _u32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style)
-    except (ValueError, OSError):
-        pass
-
-
-def _free_cursor():
-    """Force the OS cursor out of the game's grip: release the clip
-    rectangle, release capture, raise the show counter, set a normal arrow."""
-    try:
-        _u32.ReleaseCapture()
-        _u32.ClipCursor(None)
-        for _ in range(10):
-            if _u32.ShowCursor(True) >= 0:
-                break
-        arrow = _u32.LoadCursorW(None, IDC_ARROW)
-        if arrow:
-            _u32.SetCursor(arrow)
-
-        # Also release clipping, capture, and unhide cursor on the foreground game thread
-        fg = _u32.GetForegroundWindow()
-        if fg:
-            fg_tid = _u32.GetWindowThreadProcessId(fg, None)
-            cur_tid = ctypes.windll.kernel32.GetCurrentThreadId()
-            if fg_tid and fg_tid != cur_tid:
-                if _u32.AttachThreadInput(cur_tid, fg_tid, True):
-                    try:
-                        _u32.ReleaseCapture()
-                        _u32.ClipCursor(None)
-                        for _ in range(10):
-                            if _u32.ShowCursor(True) >= 0:
-                                break
-                        if arrow:
-                            _u32.SetCursor(arrow)
-                    finally:
-                        _u32.AttachThreadInput(cur_tid, fg_tid, False)
-    except (ValueError, OSError):
-        pass
-
-
-class _INPUT(ctypes.Structure):
-    """SendInput MOUSEINPUT shim (x64 layout)."""
-    _fields_ = [("type", ctypes.c_ulong), ("dx", ctypes.c_long),
-                ("dy", ctypes.c_long), ("mouseData", ctypes.c_ulong),
-                ("dwFlags", ctypes.c_ulong), ("time", ctypes.c_ulong),
-                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
-
-
-def _input_jiggle():
-    """A zero-move SendInput: having 'just received input' is what lets a
-    background process win SetForegroundWindow (the foreground lock)."""
-    try:
-        inp = _INPUT(0, 0, 0, 0, 0x0001, 0, None)   # MOUSEEVENTF_MOVE by 0,0
-        _u32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
-    except (ValueError, OSError):
-        pass
-
-
-def _force_foreground(hwnd):
-    """Robust foreground steal: AttachThreadInput dance around
-    SetForegroundWindow/BringWindowToTop after an input jiggle."""
-    _input_jiggle()
-    try:
-        fg = _u32.GetForegroundWindow()
-        cur_tid = ctypes.windll.kernel32.GetCurrentThreadId()
-        fg_tid = _u32.GetWindowThreadProcessId(fg, None) if fg else 0
-        attached = False
-        if fg_tid and fg_tid != cur_tid:
-            attached = bool(_u32.AttachThreadInput(cur_tid, fg_tid, True))
-        try:
-            _u32.BringWindowToTop(hwnd)
-            _u32.SetForegroundWindow(hwnd)
-            _u32.SetActiveWindow(hwnd)
-            _u32.SetFocus(hwnd)
-        finally:
-            if attached:
-                _u32.AttachThreadInput(cur_tid, fg_tid, False)
-    except (ValueError, OSError):
-        pass
-
-
 class ControlOverlay:
     """Frameless always-on-top control panel floating over the game."""
 
@@ -219,6 +133,7 @@ class ControlOverlay:
         self._after_id_sharpness = None  # debounce timer for sharpness
         self._game_hwnd = None       # foreground restore target
         self._focus_mode = False     # we took the foreground this session
+        self._tf_saved = None        # original takefocus per widget
         self._build()
         self.poller = HotkeyPoller(ctl.cfg.get("overlay_hotkey"), self.toggle)
         self.poller.attach(master)
@@ -599,13 +514,42 @@ class ControlOverlay:
         self.win.configure(cursor="arrow")
         self.win.attributes("-topmost", True)
         self.win.lift()
-        self.win.focus_set()
+        if bool(self.ctl.cfg.get("overlay_focus")):
+            self.win.focus_set()
+            self._focus_mode = True
         self._warp_cursor()
-        self._focus_mode = True
         self.win.after(100, _free_cursor)
         self.win.after(350, _free_cursor)
         self.win.after(700, _free_cursor)
         self._cursor_keeper()
+
+    def _walk_widgets(self):
+        stack = [self.win]
+        while stack:
+            w = stack.pop()
+            yield w
+            try:
+                stack.extend(w.winfo_children())
+            except tk.TclError:
+                pass
+
+    def _set_takefocus(self, enabled):
+        """Focus hygiene: with overlay_focus off, strip takefocus from every
+        widget so a click can never route into Tk's focus command (Tk focus
+        -> TkpChangeFocus -> SetFocus activates the toplevel and steals the
+        game's foreground). Originals are restored when focus mode is on."""
+        if self._tf_saved is None:
+            self._tf_saved = {}
+            for w in self._walk_widgets():
+                try:
+                    self._tf_saved[w] = w.cget("takefocus")
+                except tk.TclError:
+                    pass
+        for w, orig in self._tf_saved.items():
+            try:
+                w.configure(takefocus=orig if enabled else 0)
+            except tk.TclError:
+                pass
 
     def _warp_cursor(self):
         """Park the OS cursor over the panel so the user SEES it at once
@@ -686,13 +630,21 @@ class ControlOverlay:
                 pass
 
         focus_enabled = bool(self.ctl.cfg.get("overlay_focus"))
+        freeze_enabled = bool(self.ctl.cfg.get("overlay_freeze"))
+        try:
+            fg_before = _u32.GetForegroundWindow() or 0
+        except (ValueError, OSError):
+            fg_before = 0
 
-        # Freeze the game on open; keep it running behind the panel.
-        gamelaunch.freeze_set(True)
-        self._freeze_flags = True
-        self.freeze_lbl.config(text=tr("ov_freeze_on"), fg=AMBER)
-        self.on_log("[overlay] frame frozen; %s" % (
-            "overlay focus enabled" if focus_enabled else "game focus unchanged"))
+        # Frame freeze is opt-in (cfg overlay_freeze); the game keeps
+        # running behind the panel either way. hide() unfreezes regardless.
+        if freeze_enabled:
+            gamelaunch.freeze_set(True)
+            self._freeze_flags = True
+            self.freeze_lbl.config(text=tr("ov_freeze_on"), fg=AMBER)
+        else:
+            self._freeze_flags = False
+            self.freeze_lbl.config(text="")
 
         # Free the cursor, release capture on both threads, set arrow cursor
         _u32.ReleaseCapture()
@@ -705,17 +657,31 @@ class ControlOverlay:
         except (tk.TclError, ValueError):
             hwnd = None
 
-        # Display the panel; only steal focus when explicitly enabled.
+        # Display the panel topmost WITHOUT taking the foreground
+        # (deiconify/lift do not activate on this host - see
+        # _probe_noactivate.py). Only steal focus when explicitly enabled.
         self.win.deiconify()
         self.win.configure(cursor="arrow")
         self.win.attributes("-topmost", True)
         self.win.lift()
+        self._set_takefocus(focus_enabled)
         if focus_enabled and hwnd is not None:
             _force_foreground(hwnd)
             self.win.focus_force()
             self._focus_mode = True
         else:
             self._focus_mode = False
+
+        def _log_shown():
+            try:
+                fg_after = _u32.GetForegroundWindow() or 0
+            except (ValueError, OSError):
+                fg_after = 0
+            self.on_log("[overlay] shown freeze=%d focus=%d "
+                        "fg_before=0x%x fg_after=0x%x" % (
+                            freeze_enabled, focus_enabled,
+                            fg_before, fg_after))
+        self.win.after(50, _log_shown)
 
         self._warp_cursor()
         self.win.after(100, _free_cursor)

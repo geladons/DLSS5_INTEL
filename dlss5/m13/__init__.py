@@ -16,6 +16,8 @@
 #   worker.py     ActionWorker action queue + WorkerSupervisor watchdog
 #   logtail.py    threaded log file tails into the UI
 #   overlay.py    frameless in-game control overlay (hotkey, pause, gain)
+#   overlay_win32.py  Win32 plumbing for the overlay (no-activate, cursor,
+#                 foreground steal when overlay_focus is on)
 #   ui.py         main window (dark theme; zero I/O on the Tk thread -
 #                 StateMonitor probes, ActionWorker mutates)
 # ============================================================================

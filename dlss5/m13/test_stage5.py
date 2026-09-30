@@ -313,34 +313,83 @@ try:
             ov = overlay.ControlOverlay(tk_root, c_ctl, on_log=lambda m: None)
             assert ov.win.cget("cursor") == "arrow", "Overlay window cursor != arrow"
 
-            # Default mode freezes the game without taking foreground focus.
+            def _tree(w):
+                out = [w]
+                for ch in w.winfo_children():
+                    out.extend(_tree(ch))
+                return out
+
+            # F1: overlay_freeze False -> show() never freezes; label empty.
             with patch("m13.overlay._set_noactivate") as noactivate, \
-                 patch("m13.overlay._force_foreground") as force_foreground:
+                 patch("m13.overlay._force_foreground"), \
+                 patch.object(gamelaunch, "freeze_set") as m_freeze:
                 ov.show()
                 noactivate.assert_called_once()
                 assert noactivate.call_args[0][1] is True
-                force_foreground.assert_not_called()
-            assert gamelaunch.freeze_active() is True, "gamelaunch.freeze_active() not True after show()"
-            assert ov._freeze_flags is True, "ov._freeze_flags not True after show()"
+                assert not any(ca.args and ca.args[0] is True
+                               for ca in m_freeze.call_args_list), \
+                    "freeze_set(True) called with overlay_freeze=False"
+            assert ov.freeze_lbl.cget("text") == "", "freeze label not empty"
+            assert ov._freeze_flags is False, "ov._freeze_flags set without opt-in"
             assert ov._focus_mode is False, "default overlay unexpectedly took focus"
-            print("  overlay.show() freezes without stealing foreground focus [PASS]")
-
-            # Test hide() triggers freeze_set(False) and clears focus_mode
             ov.hide()
-            assert gamelaunch.freeze_active() is False, "gamelaunch.freeze_active() not False after hide()"
-            assert ov._freeze_flags is False, "ov._freeze_flags not False after hide()"
-            assert ov._focus_mode is False, "ov._focus_mode not False after hide()"
-            print("  overlay.hide() unfreezes game and clears focus [PASS]")
+            print("  F1 overlay_freeze=False: show() never freezes, label empty [PASS]")
 
+            # F2: overlay_freeze True -> freeze on show, release on hide.
+            c.set("overlay_freeze", True)
+            with patch("m13.overlay._set_noactivate"), \
+                 patch.object(gamelaunch, "freeze_set") as m_freeze:
+                ov.show()
+                m_freeze.assert_called_once_with(True)
+                ov.hide()
+                m_freeze.assert_any_call(False)
+            print("  F2 overlay_freeze=True: freeze on show, release on hide [PASS]")
+            c.set("overlay_freeze", False)
+
+            # F3: overlay_focus False -> no activation path runs at all and
+            # every widget's takefocus is stripped.
+            with patch("m13.overlay._force_foreground") as m_ff, \
+                 patch.object(ov.win, "focus_force") as m_fc, \
+                 patch.object(overlay._u32, "SetForegroundWindow") as m_sfw:
+                ov.show()
+                m_ff.assert_not_called()
+                m_fc.assert_not_called()
+                m_sfw.assert_not_called()
+            assert ov._focus_mode is False
+            for w in _tree(ov.win):
+                try:
+                    tf = w.cget("takefocus")
+                except tk.TclError:
+                    continue
+                assert tf in ("0", 0, False), \
+                    "widget %s kept takefocus=%r" % (w, tf)
+            print("  F3 overlay_focus=False: no steal calls, takefocus stripped [PASS]")
+            ov.hide()
+
+            # F4: overlay_focus True -> foreground taken once and returned
+            # to the game hwnd on hide.
             c.set("overlay_focus", True)
-            with patch("m13.overlay._set_noactivate") as noactivate, \
-                 patch("m13.overlay._force_foreground") as force_foreground:
+            with patch.object(c_ctl, "active_game_pid", return_value=1234), \
+                 patch("m13.overlay.hwnd_for_pid", return_value=0xABC), \
+                 patch("m13.overlay._set_noactivate") as noactivate, \
+                 patch("m13.overlay._force_foreground") as m_ff, \
+                 patch.object(overlay._u32, "SetForegroundWindow") as m_sfw:
                 ov.show()
                 noactivate.assert_called_once()
                 assert noactivate.call_args[0][1] is False
-                force_foreground.assert_called_once()
-            assert ov._focus_mode is True
-            ov.hide()
+                m_ff.assert_called_once()
+                assert ov._focus_mode is True
+                ov.hide()
+                m_sfw.assert_called_with(0xABC)
+            print("  F4 overlay_focus=True: steal on show, restore on hide [PASS]")
+            c.set("overlay_focus", False)
+
+            # F5: _take_focus() without overlay_focus is inert.
+            with patch.object(ov.win, "focus_set") as m_fs:
+                ov._take_focus()
+                m_fs.assert_not_called()
+            assert ov._focus_mode is False
+            print("  F5 _take_focus() inert when overlay_focus=False [PASS]")
         finally:
             c_ctl.shutdown()
 finally:
