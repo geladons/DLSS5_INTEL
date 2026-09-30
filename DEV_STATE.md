@@ -1,4 +1,12 @@
-# DEV_STATE.md - where we are (updated 2026-09-30 by Antigravity)
+# DEV_STATE.md - where we are (updated 2026-09-30 by Devin)
+
+## Stage 25: Release-Blocker Batch (2026-09-30, in progress)
+Plan: `.kilo/plans/1790747135611-release-blocker-launch-quality-overlay.md` (Tasks A-G, one commit per task).
+- Task A DONE - deterministic noise seed (defect 4, shimmer on static content). `dlss5/chain/engine.cpp` pins `p.b[0] = 1` in both feature paths (native and scaled); the Stage-21 `frameIndex & 0x7fffffff` seed redrew the vendor noise every present. `frameIndex` is still used for profiling and frame-1 debug dumps; `chain_c_api.h` doc updated.
+  - New regression test `dlss5/chain/test_noise_seed.py` (+ `.cmd`): same 640x384 input at frame_index 1/2/12345, scale 1.0 and 0.5, outputs must be bit-identical. Pre-fix production DLL (sha1 ac55c0af) FAILS (max abs diff 17-25, ~620-650k differing bytes); rebuilt DLL PASSES (0 diff). `test_framegen.py` PASS.
+  - Frame-1 selftest (D5C_NO_INT8=1) is byte-identical between the pre-fix production m11d and the new build (live_head.bin, live_featV.bin, selftest_out.bmp same sha1) - expected, frame_index 1 == pinned seed.
+  - OPEN (pre-existing, not from this change): `_validate.py` golden check FAILS on BOTH builds - head meandiff 0.008795/0.008141/0.008777 vs expected 0.008265/0.007924/0.008648 (featV maxdiff 0.00195). The expected constants date from before the Phase30 graph integration (ba7be4f) and the INT8 work; with the INT8 pack auto-loaded the drift is larger (PSNR 39.38 vs 44.67 dB). Goldens/expectations need re-baselining or a root-cause pass.
+  - Rebuilt m11d + d5c_chain, x64 layer, m12 (x86 layer and m8b-live do not link the chain). Deployed `d5c_chain.dll` (sha1 b3a76af4) to production runtime\m11d, runtime\m12, runtime\layer\x64 - SHA-1 verified.
 
 ## Stage 24: Release-Blocker Fixes (2026-09-30)
 - GTA IV face holes fixed: tightened HUD preset to ~4-5% frame coverage (ellipse minimap 0.075,0.92 r0.055x0.075; rect status 0.88,0.00 0.12x0.18; rect subtitles 0.25,0.93 0.50x0.06; rect objective 0.00,0.00 0.25x0.10). HUD mask write now gated on phase30 `auto_mask` flag in gamelaunch.py -- when False, writes empty regions so the layer disables positional masking.

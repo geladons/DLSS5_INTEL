@@ -1,5 +1,5 @@
 // ============================================================================
-// dlss5/chain — ChainEngine implementation (see engine.h).
+// dlss5/chain - ChainEngine implementation (see engine.h).
 // ============================================================================
 #include "engine.h"
 #include "fp16.h"
@@ -477,10 +477,8 @@ void ChainEngine::recordFrame(long frameIndex) {
             Push p{};
             p.a[0] = (int32_t)netW_; p.a[1] = (int32_t)netH_;
             p.a[2] = (int32_t)regionW_; p.a[3] = (int32_t)regionH_;
-            // Match the public feature path: noise is keyed by frameIndex even
-            // when temporal history is disabled. Frozen-frame reprocesses reuse
-            // the same frame index and therefore the same noise input.
-            p.b[0] = (int32_t)(frameIndex & 0x7fffffff);
+            // Pinned vendor noise seed: a per-frame seed redraws noise every frame and shimmers static content.
+            p.b[0] = 1;
             p.b[1] = (int32_t)rl; p.b[2] = (int32_t)rt; p.b[3] = (int32_t)W_;
             p.c[0] = p30Ctrl[0]; // ch 10: style
             p.c[1] = p30Ctrl[1]; // ch 11: tone
@@ -607,10 +605,8 @@ void ChainEngine::recordFrame(long frameIndex) {
             cfg_.phase30.computeFeatureControls(p30Ctrl);
             p.a[0] = (int32_t)netW_; p.a[1] = (int32_t)netH_;
             p.a[2] = (int32_t)netW_; p.a[3] = (int32_t)netH_;
-            // Match the public feature path: noise is keyed by frameIndex even
-            // when temporal history is disabled. Frozen-frame reprocesses reuse
-            // the same frame index and therefore the same noise input.
-            p.b[0] = (int32_t)(frameIndex & 0x7fffffff);
+            // Pinned vendor noise seed: a per-frame seed redraws noise every frame and shimmers static content.
+            p.b[0] = 1;
             p.b[1] = 0; p.b[2] = 0; p.b[3] = (int32_t)netW_;
             p.c[0] = p30Ctrl[0]; // ch 10: style
             p.c[1] = p30Ctrl[1]; // ch 11: tone

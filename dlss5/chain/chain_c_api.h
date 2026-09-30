@@ -44,7 +44,7 @@ DLSS5_API void dlss5_destroy(void* handle);
 //   w, h: frame width and height in pixels
 //   in_bgra: source pixel buffer (w * h * 4 bytes)
 //   out_bgra: destination pixel buffer (w * h * 4 bytes; can be == in_bgra)
-//   frame_index: presentation frame counter (used for vendor noise seed)
+//   frame_index: presentation frame counter (profiling/dump naming; the vendor noise seed is pinned)
 // Returns 0 on success, non-zero on failure.
 DLSS5_API int dlss5_process_frame(void* handle, uint32_t w, uint32_t h,
                                   const void* in_bgra, void* out_bgra,
