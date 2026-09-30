@@ -659,6 +659,8 @@ void ChainEngine::recordFrame(long frameIndex) {
             p.c[3] = cfg_.phase30.intensity;
             p.d[0] = cfg_.phase30.colorStrength;
             p.d[1] = 1.0f;
+            p.d[2] = 1.0f;  // delta output: bufFinLow_ carries the SIGNED
+                            // residual, upscaled and added to full-res native
             push(p);
             if (prof_.enabled()) prof_.markBegin(cmd_);
             vkCmdDispatch(cmd_, ((uint64_t)netW_ * netH_ + 255) / 256, 1, 1);
@@ -712,7 +714,8 @@ void ChainEngine::recordFrame(long frameIndex) {
             vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeEncode_);
             p.a[0] = (int32_t)W_; p.a[1] = (int32_t)H_; p.a[2] = (int32_t)rl; p.a[3] = (int32_t)rt;
             p.b[0] = (int32_t)regionW_; p.b[1] = (int32_t)regionH_; p.b[2] = 0;
-            p.b[3] = 0;                   // absolute (direct color)
+            p.b[3] = 2;                   // residual reconstruction:
+                                          // region px = native + upscaled delta
             p.c[0] = cfg_.sharpness;
             push(p);
             if (prof_.enabled()) prof_.markBegin(cmd_);

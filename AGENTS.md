@@ -106,6 +106,10 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
   - Kernel optimizations on Arc B50: GEMM loop unrolling, Q/K/V kernel fusion,
     128-bit vectorized memory ops, epilogue residual add fusion.
   - Bounded contrast-adaptive sharpening (CAS) in `encode.comp` (`pc.c[0]`).
+  - Render scale < 1.0 = residual reconstruction: the net runs at netW x netH,
+    `compose` emits the SIGNED delta (d.z), the delta is bilinearly upscaled
+    and `encode` mode b.w = 2 adds it onto the full-res native. Native detail
+    is never replaced by a low-res blow-up. Scale 1.0 path is separate.
   - Deterministic noise seed pinned (`p.b[0] = 1`) to eliminate flickering.
   - Frame generation = residual transfer (`framegen.comp` mode 1,
     `dlss5_framegen_transfer`): generated = cur_raw + warp(prev_processed -

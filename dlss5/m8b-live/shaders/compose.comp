@@ -20,8 +20,12 @@
 //   push a = (fullStridePx, regionTop, regionLeft, netW)
 //        b = (regionW, regionH, 0, 0)
 //        c = (maxDelta01, accumulateMode, gain, blend)
+//        d = (colorStrength, colorStrengthOn, deltaOutput, 0)
 //   M13 knob #2: blend = the vendor recipe's mix factor (was hardcoded 1.0).
 //   gain scales the residual BEFORE clamp; blend mixes AFTER: 0 = source.
+//   deltaOutput (d.z > 0.5, Phase30 branch only): fin carries the SIGNED
+//   residual (finalv - source) so render-scale paths can bilinearly upscale
+//   the residual and add it onto the full-res native in encode.
 // ============================================================================
 #extension GL_GOOGLE_include_directive : require
 #include "publish.glsl"
@@ -137,7 +141,8 @@ void main() {
         vec3 finalv = clamp(source + intensity * adjDelta, 0.0, 1.0);
 
         for (uint c = 0u; c < 3u; ++c) {
-            fin[p * 3u + c] = finalv[c];
+            fin[p * 3u + c] = (pc.d.z > 0.5) ? (finalv[c] - source[c])
+                                             : finalv[c];
             nro[p * 3u + c] = pred[c];
         }
     }

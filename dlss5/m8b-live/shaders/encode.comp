@@ -25,6 +25,11 @@
 // byte is lastPresented(byte) + delta, clamped to [0,255] — i.e. the presented
 // frame moves at most +/-maxDelta per channel per processed frame, which is
 // what makes the overlay feedback loop bounded. b.w = 0 = legacy direct color.
+// b.w = 2 = residual reconstruction (b.z == 0 full-frame path only): `fin`
+// carries the upscaled SIGNED residual (compose delta output), so in-region
+// colour = clamp(native_full[px] + residual[rp], 0, 1) — the render-scale
+// path keeps every native high-frequency detail instead of presenting a
+// bilinear blow-up of the low-res compose result.
 // ============================================================================
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 layout(rgba8, set = 0, binding = 0) uniform readonly image2D imgIn;   // native (alpha)
@@ -40,6 +45,18 @@ float enc(float value) {
     return float(int(value * 255.0 + 0.5)) / 255.0;   // C cast truncates after +0.5
 }
 
+// Region pixel colour: mode 0/1 returns fin (absolute colour); mode 2 adds
+// the signed upscaled residual onto the full-res native pixel.
+vec3 regionColor(int rx, int ry) {
+    uint rp = uint(ry) * uint(pc.b.x) + uint(rx);
+    vec3 f = vec3(fin[rp * 3u], fin[rp * 3u + 1u], fin[rp * 3u + 2u]);
+    if (pc.b.w == 2) {
+        uint np = uint(ry + pc.a.w) * uint(pc.a.x) + uint(rx + pc.a.z);
+        f = vec3(nat[np * 3u], nat[np * 3u + 1u], nat[np * 3u + 2u]) + f;
+    }
+    return clamp(f, 0.0, 1.0);
+}
+
 void main() {
     ivec2 xy = ivec2(gl_GlobalInvocationID.xy);
     ivec2 sz = imageSize(imgOut);
@@ -51,7 +68,7 @@ void main() {
                      // window); never propagate capture alpha into the final
                      // image. (Desktop captures happen to be A=255 anyway.)
 
-    if (pc.b.z == 0 && pc.b.w != 0) {                   // ACCUMULATE (feedback cancellation)
+    if (pc.b.z == 0 && pc.b.w == 1) {                   // ACCUMULATE (feedback cancellation)
         bool inRegion = xy.x >= left && xy.x < left + pc.b.x &&
                         xy.y >= top  && xy.y < top  + pc.b.y;
         vec3 d;                                          // R,G,B deltas
@@ -82,22 +99,17 @@ void main() {
             int ry = xy.y - top;
             int rw = pc.b.x;
             int rh = pc.b.y;
-            uint rp = uint(ry) * uint(rw) + uint(rx);
-            vec3 c = vec3(fin[rp * 3u], fin[rp * 3u + 1u], fin[rp * 3u + 2u]);
+            vec3 c = regionColor(rx, ry);
             if (pc.c[0] > 0.0f) {
                 // Robust Contrast-Adaptive Edge Sharpening (bounded by local 3x3 min/max)
                 int up_y = max(ry - 1, 0);
                 int dn_y = min(ry + 1, rh - 1);
                 int lt_x = max(rx - 1, 0);
                 int rt_x = min(rx + 1, rw - 1);
-                uint up_idx = (uint(up_y) * uint(rw) + uint(rx)) * 3u;
-                uint dn_idx = (uint(dn_y) * uint(rw) + uint(rx)) * 3u;
-                uint lt_idx = (uint(ry) * uint(rw) + uint(lt_x)) * 3u;
-                uint rt_idx = (uint(ry) * uint(rw) + uint(rt_x)) * 3u;
-                vec3 up = vec3(fin[up_idx], fin[up_idx + 1u], fin[up_idx + 2u]);
-                vec3 dn = vec3(fin[dn_idx], fin[dn_idx + 1u], fin[dn_idx + 2u]);
-                vec3 lt = vec3(fin[lt_idx], fin[lt_idx + 1u], fin[lt_idx + 2u]);
-                vec3 rt = vec3(fin[rt_idx], fin[rt_idx + 1u], fin[rt_idx + 2u]);
+                vec3 up = regionColor(rx, up_y);
+                vec3 dn = regionColor(rx, dn_y);
+                vec3 lt = regionColor(lt_x, ry);
+                vec3 rt = regionColor(rt_x, ry);
 
                 vec3 blur = (up + dn + lt + rt) * 0.25;
                 vec3 hp = c - blur;
