@@ -88,9 +88,9 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
     and executes directly in-process on host-visible staging buffers (0 ms
     socket lag, no background daemon).
   - x86 games (GTA IV via DXVK): connects over TCP (127.0.0.1:48990) to `m11d.exe`.
-  - HUD masking is config-driven: the manager writes per-game rect/ellipse regions
+  - HUD masking is config-driven and gated on the phase30 `auto_mask` flag: when enabled, the manager writes per-game rect/ellipse regions
     (normalized coords) to %TEMP%\m13_hudmask.cfg (NR_LAYER_HUDMASK override); the
-    layer hot-reloads the file every frame. No config file = no positional masking.
+    layer hot-reloads the file every frame. Toggling auto_mask off deletes the file (no positional masking). The overlay auto_mask checkbox applies the toggle live without a game restart.
     HUD layouts/fonts vary per game, so there are NO compiled-in regions;
     other static scene pixels remain neural-processed, and exact repeats reuse the
     last result.

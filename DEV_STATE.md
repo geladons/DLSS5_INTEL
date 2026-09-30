@@ -1,4 +1,12 @@
-# DEV_STATE.md - where we are (updated 2026-09-29 by Antigravity)
+# DEV_STATE.md - where we are (updated 2026-09-30 by Antigravity)
+
+## Stage 24: Release-Blocker Fixes (2026-09-30)
+- GTA IV face holes fixed: tightened HUD preset to ~4-5% frame coverage (ellipse minimap 0.075,0.92 r0.055x0.075; rect status 0.88,0.00 0.12x0.18; rect subtitles 0.25,0.93 0.50x0.06; rect objective 0.00,0.00 0.25x0.10). HUD mask write now gated on phase30 `auto_mask` flag in gamelaunch.py -- when False, writes empty regions so the layer disables positional masking.
+- Live mask toggle: overlay `_on_phase30_change` now calls `_apply_live_mask_toggle` when `key == "auto_mask"`. Toggling the checkbox writes/deletes `%TEMP%\m13_hudmask.cfg` immediately; the running layer hot-reloads it next frame without a game restart. If no game is active, logs that the mask will apply on next launch.
+- Duplicate scale/framegen controls removed from manager header row; they now live only in the Settings tab LabelFrame. Phase30 panel stays in both Settings and overlay by design.
+- Witcher 3 launch: `_resolve_witcher3_dx12` auto-switches bin\x64 -> bin\x64_dx12 sibling and flips mode dx11->dx12 when the dx12 executable exists.
+- RDR2/x64 launch: daemon force-stop fallback (graceful -> 6s poll -> stop_pid(force=True) -> 3s poll) prevents stale m11d from blocking x64 chain load. Launcher.exe missing fallback: `launch_target` uses main exe when `launch_exe` key is absent.
+- Tests: test_hudmask 13/13 PASS, test_phase30_cache 12/12 PASS, test_launch_paths ALL PASS. All m13 imports clean. Deployed to production bundle with SHA1 verification (31 .py files match). Layer DLLs (x86 nr_layer_win32.dll, x64 nr_layer_win.dll) verified present in production\runtime\layer\ -- not rebuilt (unchanged C code).
 
 ## Stage 23: Config-Driven Per-Game HUD Mask Architecture (2026-09-29)
 - Analysis conclusion: the Stage-21/22 fixed `likely_hud_region` bands were architecturally wrong - HUD element positions, fonts and text sizes vary per game and per screen mode, so any compiled-in constants either miss real HUD text or eat game content (faces). Replaced with a flexible per-context configuration.
