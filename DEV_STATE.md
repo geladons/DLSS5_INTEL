@@ -1669,3 +1669,42 @@ DDA capture of the 800x600 windowed launcher menu (600 snapshots @50 presents)
   dialogs respond fine - it is the GTA IV menu being picky, not the host.
   Capture+analysis tooling itself is proven: it caught the splice on a STATIC
   menu where the old mean-diff verdict said "no strong flicker".
+
+## 2026-10-04 (later) Root cause FOUND + FIXED + VERIFIED: GDI repaint splices
+
+The splice mechanism is NOT inside the Vulkan path at all: every input event
+(click, mouse move over the window) or a posted WM_PAINT/WM_ERASEBKGND makes
+the render HWND briefly show a stale non-Vulkan surface - DWM composites it
+for one frame between our presents. Confirmed by posting WM_PAINT into the
+game hwnd -> deterministic one-frame splice, layer log 100% clean.
+
+Fix (commit bed9811): nr_CreateWin32SurfaceKHR intercept subclasses the
+surface HWND; guard drains WM_PAINT (Begin/EndPaint only validates the
+region) and suppresses WM_ERASEBKGND. Kill switch NR_LAYER_GDI_GUARD=0.
+Plus: process_frame failure now re-presents the held processed result of
+matching extent instead of raw, and every silent raw path is logged.
+
+VERIFIED live: 200 DDA frames under click+sweep+WM_PAINT storm ->
+0 ping-pong splices, 0 jitter, luma step 0.00 (was 22/600 before).
+Layer log: 68400 presents, zero raw-outs after daemon warmup.
+Caveat: verified on the STATIC MENU only; loading-screen/gameplay leg
+still needs a real user click (see below).
+
+Daemon hardening (commit d04aecb): m11d had died silently mid-session
+(~frame 238, no exit path in the accept loop = unhandled fault, likely
+ICD). init/shutdown/processFrame now run under __try/__except; a fault
+becomes a logged frame failure (input echo) instead of a silent exit.
+
+Manager fix (commit d80e7f5): m11d used to leak (~500MB+VRAM) after the
+manager closed - shutdown() now reaps it unless an x86 game is running.
+
+MCP input loop (windows-mcp): Screenshot->Move->Click works mechanically
+(cursor lands on exact pixels, App switch focuses the window) but the
+GTA IV launcher menu still ignores ALL synthetic clicks - DirectInput
+reads only physical-device deltas. PLAY cannot be auto-clicked; a real
+user click through Sunshine is required to reach the loading screen.
+
+Open items: (a) reproduce on a MOVING scene (loading screen) to confirm
+the fix covers gameplay; (b) observe whether SEH logs anything if the
+daemon fault recurs; (c) noise/face-smear quality at scale 0.33 is a
+separate model-quality question, not a transport bug.
