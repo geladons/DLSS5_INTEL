@@ -1755,3 +1755,35 @@ question: daemon ~60-75ms/frame at 800x600x0.33 while presents want ~7x
 that rate -> paced held-frame mixing = visible judder on a moving scene
 even with zero splices. The 320x320 min network extent (102400 tokens) is
 a suspected fixed floor; per-scale extent/cost table still owed.
+
+## 2026-10-04 (E2E verification of audit fixes) GTA IV live run, new build
+
+Setup: daemon first (correct CWD = its own dir - shaderDir=".\\" is
+CWD-relative, a wrong CWD faulted engine init with SEH 0xc0000005; the new
+death witness caught it cleanly), then GTA IV windowed 800x600.
+
+Verified live on the deployed production build:
+
+- PAUSE CHANNEL WORKS (was dead): deleting %TEMP%\m13_dx9_trigger.flag
+  froze the layer's presents counter at 48000 for the whole pause window;
+  restoring it resumed processing with a "processed 800x600" burst. The m13
+  Pause button / dx9_pause() is functional now.
+- BOUNDED CONNECT: during daemon warmup the layer logged paced raw-outs at
+  ~1.5s instead of stalling ~21s in connect() - no render-thread hang.
+- DAEMON FAIL-FAST VERIFIED: engine init fault -> "[m11d] SEH 0xc0000005
+  inside engine.init" -> "engine down - closing, no reply" -> layer falls
+  back to raw with a logged path. No fake echo, no silent death.
+- SPLICE REGRESSION on the new build: 200 DDA snapshots under a
+  WM_PAINT/WM_ERASEBKGND + mouse-sweep storm + TWO pause/resume toggles ->
+  0.00 px jitter, luma max-step 1.44, 0 oscillation, 1 flagged frame =
+  the intentional processed->raw transition at a pause toggle.
+- HOTKEY: no RegisterHotKey "unavailable" line - the GetAsyncKeyState
+  poller arms unconditionally (m8blive collision gone by construction).
+
+Honest remaining gap: daemon throughput is ~70ms/frame at 800x600x0.33
+(~14 fps ceiling). The game presents ~4x faster; paced frames re-blit the
+held result - fine on a static menu, but on a MOVING scene held-frame
+mixing is still visible judder. Engine init also OOMs (vkCreateDevice -2)
+or AVs when VRAM is contended - daemon must init BEFORE the game's VK
+footprint grows. The one-klick loading-screen verification is still owed
+(needs a physical Sunshine click; DirectInput ignores synthetic input).
