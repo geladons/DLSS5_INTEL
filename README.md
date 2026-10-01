@@ -72,6 +72,33 @@ the correctness of the neural path is validated bit-exactly against PyTorch gold
   Rendering at 50% scale reduces spatial token count by 4x. In v0.3, steady execution is down to 210 ms. The network runs at 50% and only its RESIDUAL is upscaled and added onto the full-resolution native frame (`compose` delta output + `encode` residual reconstruction), so native text/HUD/edge detail is preserved instead of a bilinear blow-up. Coupled with the 1:2 FrameGen cadence this doubles presented frames per network pass.
 - Detailed kernel family profiling, speedup history, and metric reconciliation: see [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
+## What's new vs `v0.1-demo`
+
+`v0.1-demo` (2026-09-25) was the first public snapshot: it proved the
+transport worked end-to-end — layer, DXVK routes, DX12 proxy, daemon,
+screen mode, manager — but it was slower, TCP-only, and had no working
+frame generation. The current snapshot keeps the same surface (same bundle
+layout, same knobs, same workflows) and changes the internals:
+
+| Area | `v0.1-demo` | Current snapshot |
+|---|---|---|
+| x64 games (Vulkan/DX12) | every frame round-tripped over TCP to `m11d` (127.0.0.1:47990) | `d5c_chain.dll` loads in-process via the C ABI — no socket, ~1.5–2.5 ms transport; TCP stays as fallback |
+| x86 (32-bit) games | TCP daemon path | unchanged in principle (the daemon still serves them), now with flap control: transient daemon failures hold the last processed frame instead of strobing native↔processed, degenerate sub-64 px swapchains bypass the daemon |
+| Daemon port | `47990` | **`48990`** — Sunshine occupies 47990 on the bench host (old docs/diagrams still show 47990; the current default everywhere is 48990) |
+| Frame generation | implemented but effectively never fired, and when it did it blended processed with raw frames | real 1:2 cadence on the x64 in-process layer: every 2nd present is neural, the in-between frame is `framegen.comp` mode-1 residual transfer (~0.05 ms @640x384). DX12 still uses the legacy interpolator; the x86/TCP path has no FG |
+| Render scale < 1.0 | low-res output enlarged to full screen | residual reconstruction: the net runs at reduced extent, its signed delta is upscaled and added onto the native full-res frame — HUD/text detail is preserved |
+| Temporal stability | vendor noise seed keyed by frame index → shimmer on static content | pinned deterministic seed (`test_noise_seed.py` regression test) |
+| In-game overlay | could steal the game's foreground/minimize exclusive-fullscreen; opening it froze the frame | `WS_EX_NOACTIVATE` topmost panel that never takes focus; freeze (`overlay_freeze`) and focus steal (`overlay_focus`) are opt-in, off by default |
+| Manager robustness | a stuck job could freeze the UI; x64 games could die on first frame when weights/shader env vars were missing | `ActionWorker` + `WorkerSupervisor` watchdog (150 s job timeout); `GameLauncher` timed steps; `DLSS5_WEIGHTS_PATH`/`DLSS5_SHADER_DIR` exported to every launch; chain init failures are caught and latched instead of `exit()`ing the game |
+| Media tab | — | offline photo/video processing through the chain at native scale (ffmpeg-backed video remux, batch queue, live before/after preview) |
+| Cleanup | manual | Settings → "Remove all traces": undeploys DLLs restoring backups, unregisters layers, stops the daemon, clears flags/logs/config; foreign DLLs reported, never deleted |
+| Performance (Arc Pro B50) | ~135 ms @500x500; ~0.9–1.1 s at 1080p-class | ~210 ms steady @960x576 (scale 0.50) and 547 ms selftest / 767.5 ms steady @1920x1088 with the INT8 fused kernels (attn fusion + vectorized pool) — see [docs/BENCHMARKS.md](docs/BENCHMARKS.md) |
+| Phase30 tuning | two knobs (gain, blend) | the full tuning set is live: intensity, local tone/structure, skin structure, auto-mask, style index, color strength (NRCT cmds 1–11 / `dlss5_set_phase30`) |
+| License | MIT | Apache-2.0 (public revisions through `cf04e26` remain MIT) |
+
+Full per-module detail: [docs/TECHNICAL.md](docs/TECHNICAL.md).
+Engineering log: [DEV_STATE.md](DEV_STATE.md). Changelog: [CHANGELOG.md](CHANGELOG.md).
+
 ## Before / after
 
 Every frame below is an unretouched full-screen capture of **GTA IV** running
@@ -99,7 +126,7 @@ All 7 pairs (menu, 4 loading screens, 2 in-game) are in
 
 ```
 game frame ──present──► ┌ Vulkan implicit layer / DXGI proxy / DDA capture ┐
-                        │ 16-byte header + BGRA payload, TCP 127.0.0.1:47990 │
+                        │ 16-byte header + BGRA payload, TCP 127.0.0.1:48990 │
                         └──────────────► m11d daemon ◄───────────────────────┘
                                        decode → features → featpack
                                        → 71-block DLSSNR chain (~GEMM-bound)
