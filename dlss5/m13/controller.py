@@ -140,8 +140,14 @@ class StateMonitor(threading.Thread):
         if has_running_x86:
             self._x86_empty_ticks = 0
             self._x86_seen = True
-        else:
+        elif ctl.daemon.running:
             self._x86_empty_ticks = getattr(self, "_x86_empty_ticks", 0) + 1
+        else:
+            # No daemon to protect: stale tick debt from a daemonless gap must
+            # not instantly reap a daemon that appears mid-launch, before the
+            # game's process shows up in the snapshot.
+            self._x86_empty_ticks = 0
+            self._x86_seen = False
 
         exited_games = self._prev_running_games - currently_running
         if exited_games and not currently_running:
