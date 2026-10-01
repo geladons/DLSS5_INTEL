@@ -370,3 +370,102 @@ def _row_sample(row, w, w2, step):
     for x in range(w2):
         out[x * 4:x * 4 + 4] = row[x * step * 4:x * step * 4 + 4]
     return bytes(out)
+
+
+# ----------------------------------------------------------------------------
+# viewport sampling + RGB PNG (the zoomable Media-tab viewer)
+# ----------------------------------------------------------------------------
+def view_sample(w, h, bgra, zoom, cx, cy, cw, ch, bg=(0, 0, 0)):
+    """Render a BGRA image into a cw x ch viewport -> cw*ch*3 RGB bytes.
+
+    `zoom` = screen pixels per image pixel. `(cx, cy)` = the image point
+    NORMALIZED to 0..1 that sits at the viewport centre. Pixels mapping
+    outside the image are filled with `bg` (r, g, b); the source alpha is
+    composited over `bg` so a transparent engine output never shows black.
+
+    Sampling convention: canvas pixel centres map to image coordinates via
+    ``ix = x0 + (x + 0.5) / zoom - 0.5``, so integer zoom 1.0 reproduces the
+    source bit-exactly (no half-texel blur). Bilinear with numpy; without
+    numpy a plain nearest-neighbour loop (correct, just slower)."""
+    if cw <= 0 or ch <= 0 or w <= 0 or h <= 0:
+        return b""
+    x0 = cx * w - cw / (2.0 * zoom)
+    y0 = cy * h - ch / (2.0 * zoom)
+    if _np is not None:
+        xs = x0 + (_np.arange(cw, dtype=_np.float64) + 0.5) / zoom - 0.5
+        ys = y0 + (_np.arange(ch, dtype=_np.float64) + 0.5) / zoom - 0.5
+        # a source pixel j covers [j-0.5, j+0.5) - outside that is background
+        mx = (xs >= -0.5) & (xs < w - 0.5)
+        my = (ys >= -0.5) & (ys < h - 0.5)
+        xc = _np.clip(xs, 0.0, w - 1.0)
+        yc = _np.clip(ys, 0.0, h - 1.0)
+        xi = xc.astype(_np.intp)
+        yi = yc.astype(_np.intp)
+        xi1 = _np.minimum(xi + 1, w - 1)
+        yi1 = _np.minimum(yi + 1, h - 1)
+        fx = (xc - xi)[None, :, None]
+        fy = (yc - yi)[:, None, None]
+        a = _np.frombuffer(bgra, dtype=_np.uint8).reshape(h, w, 4)
+        i00 = a[yi][:, xi].astype(_np.float32)
+        i01 = a[yi][:, xi1].astype(_np.float32)
+        i10 = a[yi1][:, xi].astype(_np.float32)
+        i11 = a[yi1][:, xi1].astype(_np.float32)
+        out = (i00 * (1.0 - fx) * (1.0 - fy) + i01 * fx * (1.0 - fy) +
+               i10 * (1.0 - fx) * fy + i11 * fx * fy)
+        alpha = out[:, :, 3:4] / 255.0
+        bgf = _np.asarray(bg, dtype=_np.float32).reshape(1, 1, 3)
+        # BGR -> RGB while compositing the alpha channel over the background
+        rgb = out[:, :, [2, 1, 0]] * alpha + bgf * (1.0 - alpha)
+        mask = (my[:, None] & mx[None, :])[:, :, None]
+        rgb = _np.where(mask, rgb, bgf)
+        return _np.ascontiguousarray(rgb).astype(_np.uint8).tobytes()
+    # ---- pure-python nearest fallback (numpy is present on the host) ----
+    out = bytearray(cw * ch * 3)
+    stride = w * 4
+    xs = [x0 + (x + 0.5) / zoom - 0.5 for x in range(cw)]
+    xi = [min(max(int(v + 0.5), 0), w - 1) for v in xs]
+    xok = [-0.5 <= v < w - 0.5 for v in xs]
+    pos = 0
+    for y in range(ch):
+        v = y0 + (y + 0.5) / zoom - 0.5
+        yok = -0.5 <= v < h - 0.5
+        yi = min(max(int(v + 0.5), 0), h - 1)
+        base = yi * stride
+        for x in range(cw):
+            if not (yok and xok[x]):
+                out[pos] = bg[0]
+                out[pos + 1] = bg[1]
+                out[pos + 2] = bg[2]
+            else:
+                i = base + xi[x] * 4
+                al = bgra[i + 3]
+                if al >= 255:
+                    out[pos] = bgra[i + 2]
+                    out[pos + 1] = bgra[i + 1]
+                    out[pos + 2] = bgra[i]
+                else:                       # composite alpha over bg
+                    inv = 255 - al
+                    out[pos] = (bgra[i + 2] * al + bg[0] * inv) // 255
+                    out[pos + 1] = (bgra[i + 1] * al + bg[1] * inv) // 255
+                    out[pos + 2] = (bgra[i] * al + bg[2] * inv) // 255
+            pos += 3
+    return bytes(out)
+
+
+def png_encode_rgb(w, h, rgb, level=1):
+    """RGB bytes -> PNG (color type 2, filter-0 rows). Defaults to zlib
+    level 1: this feeds interactive zoom frames, not archival saves."""
+    stride = w * 3
+    raw = bytearray()
+    for y in range(h):
+        raw.append(0)
+        raw += rgb[y * stride:(y + 1) * stride]
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
+    return (PNG_SIG + _chunk(b"IHDR", ihdr) +
+            _chunk(b"IDAT", zlib.compress(bytes(raw), level)) +
+            _chunk(b"IEND", b""))
+
+
+def png_b64_rgb(w, h, rgb, level=1):
+    """RGB bytes -> base64 PNG for tk.PhotoImage(data=...)."""
+    return base64.b64encode(png_encode_rgb(w, h, rgb, level)).decode("ascii")

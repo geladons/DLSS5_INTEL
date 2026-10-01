@@ -315,6 +315,23 @@ _S = {
     "media_engine_hint": {
         "en": "sliders reprocess the selected photo live",
         "ru": "ползунки живо переобрабатывают выбранное фото"},
+    "media_apply": {"en": "Apply", "ru": "Применить"},
+    "media_save": {"en": "Save...", "ru": "Сохранить..."},
+    "media_saved": {"en": "saved: %s", "ru": "сохранено: %s"},
+    "media_save_photo_only": {
+        "en": "Save works on the selected photo - use Process all for videos",
+        "ru": "Сохранение работает для выбранного фото - видео обрабатываются "
+              "через «Обработать все»"},
+    "media_save_wait": {
+        "en": "wait for the preview to finish first",
+        "ru": "сначала дождись конца превью"},
+    "media_processing": {"en": "processing...", "ru": "обработка..."},
+    "media_preview_approx": {
+        "en": "preview @%dx%d (approx)", "ru": "превью @%dx%d (приблизительно)"},
+    "media_preview_size": {"en": "preview @%dx%d", "ru": "превью @%dx%d"},
+    "media_zoom_fit": {
+        "en": "wheel: zoom | drag: pan | double-click: fit",
+        "ru": "колесо: зум | тяни мышью: панорама | двойной клик: вписать"},
 }
 
 SPLASH_LINES = {

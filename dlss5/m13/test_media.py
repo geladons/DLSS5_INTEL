@@ -23,6 +23,8 @@ sys.path.insert(0, _DLSS5)
 from m13 import media_img
 from m13.media import (EngineSession, Ffmpeg, SavePolicy,
                        MediaQueue, MediaError)
+
+_MEDIA_SUITE_RAN = False    # flipped only if every script check reaches EOM
 from m13.media_video import VideoJob
 from m13.media_img import (png_encode, png_decode, bmp_encode, bmp_decode,
                            PhotoIO, ImageError, _paeth)
@@ -474,4 +476,102 @@ with tempfile.TemporaryDirectory() as td:
         assert "ffmpeg" in str(e)
 print("  JPEG without ffmpeg -> ImageError [PASS]")
 
+
+# ============================================================================
+# Preview helpers: view_sample / png_b64_rgb / preview-res + i18n + config
+# (the zoomable Before/After viewer renders through view_sample; ui_media
+# itself needs Tk and is exercised manually - the pure halves live here.
+# NOTE: MediaTab._set_image changed contract from (label, png_b64) to
+# (ZoomView, w, h, bgra) - nothing outside ui_media.py ever called it.)
+# ============================================================================
+print("\n=== Test G: view_sample, png_b64_rgb, preview_max, i18n keys ===")
+
+from m13.media_img import (view_sample, png_b64_rgb, downscale_nearest)
+from m13 import i18n
+from m13.config import DEFAULTS
+import base64
+
+# gradient BGRA: B=10+x, G=20+y, R=30, A=255
+GW, GH = 8, 6
+gb = bytearray()
+for _y in range(GH):
+    for _x in range(GW):
+        gb += bytes([10 + _x, 20 + _y, 30, 255])
+gb = bytes(gb)
+
+# 1:1 identity: zoom 1, centred, viewport == image size -> EXACT pixels
+rgb = view_sample(GW, GH, gb, 1.0, 0.5, 0.5, GW, GH, bg=(1, 2, 3))
+assert len(rgb) == GW * GH * 3
+for _y in range(GH):
+    for _x in range(GW):
+        i = (_y * GW + _x) * 3
+        assert rgb[i] == 30 and rgb[i + 1] == 20 + _y and \
+            rgb[i + 2] == 10 + _x, "1:1 sample mismatch @%d,%d" % (_x, _y)
+
+# zoomed 4x at the centre stays inside the image (no bg corners)
+rgb2 = view_sample(GW, GH, gb, 4.0, 0.5, 0.5, GW, GH, bg=(1, 2, 3))
+assert len(rgb2) == GW * GH * 3 and not rgb2.startswith(b"\x01\x02\x03" * 8)
+
+# panned fully off-image -> solid background
+rgb3 = view_sample(GW, GH, gb, 1.0, -5.0, -5.0, GW, GH, bg=(1, 2, 3))
+assert rgb3 == bytes([1, 2, 3]) * (GW * GH)
+
+# pure-python nearest fallback agrees on a 1:1 mapping
+keep = media_img._np
+try:
+    media_img._np = None
+    rgb4 = view_sample(GW, GH, gb, 1.0, 0.5, 0.5, GW, GH, bg=(1, 2, 3))
+    assert rgb4 == rgb, "fallback view_sample != numpy at 1:1"
+finally:
+    media_img._np = keep
+print("  view_sample: 1:1 exact, zoom stays in-image, pan-out = bg [PASS]")
+
+# png_b64_rgb decodes back through the stdlib PNG decoder (ctype 2)
+w2, h2, dec = png_decode(base64.b64decode(png_b64_rgb(GW, GH, rgb)))
+assert (w2, h2) == (GW, GH)
+assert dec[0::4] == rgb[2::3] and dec[1::4] == rgb[1::3] and \
+    dec[2::4] == rgb[0::3] and dec[3::4] == b"\xff" * (GW * GH)
+print("  png_b64_rgb -> png_decode roundtrip [PASS]")
+
+# preview-res math: media_preview_max bounds the LONGEST dim (nearest
+# integer step, aspect kept); 0 disables (full-res handled in ui_media)
+w5, h5, small5 = downscale_nearest(64, 32, _img(64, 32), 16, 16)
+assert (w5, h5) == (16, 8), (w5, h5)
+w6, h6, _s = downscale_nearest(40, 22, _img(40, 22), 1024, 1024)
+assert (w6, h6) == (40, 22)                      # smaller than max: untouched
+assert DEFAULTS.get("media_preview_max") == 1024, \
+    "media_preview_max default must be 1024"
+print("  preview downscale bounded by media_preview_max=%d [PASS]"
+      % DEFAULTS["media_preview_max"])
+
+# every new i18n key resolves in BOTH languages (never falls back to key)
+for _lang in ("en", "ru"):
+    i18n.set_language(_lang)
+    for _k in ("media_apply", "media_save", "media_saved",
+               "media_save_photo_only", "media_save_wait",
+               "media_processing", "media_preview_approx",
+               "media_preview_size", "media_zoom_fit"):
+        _t = i18n.tr(_k, 640, 480) if _k == "media_preview_approx" else \
+            i18n.tr(_k, "X") if _k == "media_saved" else i18n.tr(_k)
+        assert _t and _t != _k, "%s missing for %s" % (_k, _lang)
+i18n.set_language("en")
+print("  i18n keys resolve in en+ru [PASS]")
+
+# ui_media module-level invariants (no Tk instantiated - import only)
+from m13 import ui_media
+assert ui_media.DEBOUNCE_MS == 600, "debounce must be ~600 ms"
+assert hasattr(ui_media, "ZoomView") and hasattr(ui_media, "_ViewState")
+assert ui_media._ViewState.REL_MIN == 0.25 and \
+    ui_media._ViewState.REL_MAX == 8.0
+print("  ui_media: DEBOUNCE_MS=600, ZoomView/_ViewState present [PASS]")
+
 print("\nALL MEDIA TESTS PASSED!")
+
+_MEDIA_SUITE_RAN = True
+
+
+def test_media_suite():
+    """pytest shim: this file is a script-style suite - all checks run at
+    import/collection time (a failed assert becomes a collection error).
+    Reaching this function means every section already passed."""
+    assert _MEDIA_SUITE_RAN
