@@ -134,6 +134,39 @@ static bool writeAll(SOCKET s, const uint8_t* src, size_t n) {
     return true;
 }
 
+// ------------------------------------------------------- crash hardening --
+// A fault inside the Vulkan ICD / engine (driver AV, etc.) must not kill the
+// daemon silently: translate it into a logged frame failure so the caller can
+// echo the input and keep serving. POD-only frames: no C++ unwinding inside
+// __try (MSVC rule), objects are passed in by pointer.
+static bool sehProcessFrame(d5c::ChainEngine* eng, const uint8_t* in,
+                            uint8_t* out, uint32_t frame, d5c::FrameStats* st) {
+    __try {
+        return eng->processFrame(in, out, frame, st);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        std::fprintf(stderr, "[m11d] SEH 0x%08lx inside processFrame (frame %u) - engine state may be dirty\n",
+                     (unsigned long)GetExceptionCode(), (unsigned)frame);
+        return false;
+    }
+}
+static bool sehEngineInit(d5c::ChainEngine* eng, const d5c::EngineConfig* cfg) {
+    __try {
+        return eng->init(*cfg);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        std::fprintf(stderr, "[m11d] SEH 0x%08lx inside engine.init\n",
+                     (unsigned long)GetExceptionCode());
+        return false;
+    }
+}
+static void sehEngineShutdown(d5c::ChainEngine* eng) {
+    __try {
+        eng->shutdown();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        std::fprintf(stderr, "[m11d] SEH 0x%08lx inside engine.shutdown\n",
+                     (unsigned long)GetExceptionCode());
+    }
+}
+
 // ------------------------------------------------------------------ main --
 int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
@@ -238,7 +271,7 @@ int main(int argc, char** argv) {
         if (curW || curH) {
             std::printf("[m11d] config change (%ux%u -> %ux%u, scale %.2f -> %.2f): engine re-init\n",
                         curW, curH, w, h, (double)engine.renderScale(), (double)scale);
-            engine.shutdown();
+            sehEngineShutdown(&engine);
         }
         d5c::EngineConfig cfg{};
         cfg.canvasW = w; cfg.canvasH = h;
@@ -253,7 +286,7 @@ int main(int argc, char** argv) {
         cfg.vkCfg.appName = "m11d";
         cfg.profPath = benchProf;   // empty = profiling off (production default)
         // headless: no surface/swapchain extensions, first coopmat-capable device
-        if (!engine.init(cfg)) {
+        if (!sehEngineInit(&engine, &cfg)) {
             std::fprintf(stderr, "[FAIL] engine init for %ux%u\n", w, h);
             return false;
         }
@@ -573,7 +606,7 @@ int main(int argc, char** argv) {
             auto t0 = std::chrono::steady_clock::now();
 
             // Clean forward processing for every frame via DLSS 5 engine
-            bool ok = engine.processFrame(inBuf.data(), outBuf.data(), frameCounter, &st);
+            bool ok = sehProcessFrame(&engine, inBuf.data(), outBuf.data(), frameCounter, &st);
             double wall = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - t0).count();
             if (ok) {
