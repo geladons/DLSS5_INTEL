@@ -13,6 +13,22 @@
 # route into Tk's focus command (focus_set activates the toplevel -> steals
 # the game's foreground -> exclusive-fullscreen games minimize).
 #
+# NON-ACTIVATION INVARIANT (exclusive-fullscreen safe open path):
+#   1. WS_EX_NOACTIVATE is applied to the top-level HWND in __init__ while
+#      the window is still WITHDRAWN and again at the top of show() BEFORE
+#      anything that could map the window - a transient map without the
+#      style is the only way the open path can steal the game's foreground.
+#   2. show() never calls focus_set/focus_force/SetForegroundWindow unless
+#      cfg overlay_focus is on; Tk deiconify/lift/-topmost are followed by an
+#      explicit ShowWindow(SW_SHOWNOACTIVATE) + SetWindowPos(NOACTIVATE) so
+#      the displayed state never depends on Tk internals honoring the style.
+#   3. hide() restores foreground to the game ONLY when this session took it
+#      (focus mode); otherwise hide() never touches the game window.
+#   4. Clicks: takefocus is stripped from the whole widget tree so a mouse
+#      click can never route into Tk focus -> toplevel activation.
+# Live evidence: every show() logs "[overlay] shown ... exstyle=0x..
+# fg_before/fg_after" (sampled ~50 ms after the map).
+#
 # PHOTO MODE (opt-in, cfg overlay_freeze): open the overlay -> the frame
 # FREEZES (the layer/proxy holds
 # the raw frame and re-blits its processed result, the game keeps running
@@ -38,7 +54,8 @@ from .phase30 import Phase30Panel
 from .overlay_win32 import (_u32, GWL_EXSTYLE, WS_EX_TOPMOST,  # noqa: F401
                             WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
                             _set_noactivate, _free_cursor, _input_jiggle,
-                            _force_foreground)
+                            _force_foreground, _toplevel_hwnd, _exstyle,
+                            _show_noactivate)
 
 VK = {"control": 0x11, "ctrl": 0x11, "alt": 0x12, "shift": 0x10}
 POLL_MS = 120
@@ -125,6 +142,13 @@ class ControlOverlay:
         self.win.resizable(False, False)
         self.win.protocol("WM_DELETE_WINDOW", self.hide)
         self.win.withdraw()
+        # NON-ACTIVATION INVARIANT (1): the top-level HWND gets
+        # WS_EX_NOACTIVATE NOW, while the window is still withdrawn, so no
+        # later map (deiconify, geometry replay, Tk internals) can ever see
+        # an activatable window - even for a single frame.
+        hwnd0 = _toplevel_hwnd(self.win)
+        if hwnd0:
+            _set_noactivate(hwnd0, True)
         self._after_id = None
         self._drag = None
         self._frozen_pid = None      # fallback freeze: suspended game pid
@@ -208,12 +232,24 @@ class ControlOverlay:
         self.scale_cb.bind("<<ComboboxSelected>>", self._scale_selected)
 
         def _fix_popdown(_e):
+            # The combobox popdown is a fresh Tk toplevel that does NOT
+            # inherit our WS_EX_NOACTIVATE - showing it plain would be an
+            # activation vector against exclusive-fullscreen games.
             try:
                 popdown = self.win.tk.eval(
                     "ttk::combobox::PopdownWindow %s" % self.scale_cb)
                 self.win.tk.eval("wm attributes %s -topmost 1" % popdown)
             except Exception:
-                pass
+                return
+
+            def _noactivate_popdown():
+                try:
+                    ph = self.win.tk.eval("wm frame %s" % popdown)
+                    _set_noactivate(int(ph, 16), True)
+                except Exception:
+                    pass
+            _noactivate_popdown()          # now, if the HWND already exists
+            self.win.after_idle(_noactivate_popdown)  # else right after map
         self.scale_cb.bind("<Button-1>", _fix_popdown, add="+")
 
         self.fg_var = tk.BooleanVar(value=bool(self.ctl.cfg.get("frame_gen")))
@@ -607,6 +643,21 @@ class ControlOverlay:
             self.show()
 
     def show(self):
+        focus_enabled = bool(self.ctl.cfg.get("overlay_focus"))
+        freeze_enabled = bool(self.ctl.cfg.get("overlay_freeze"))
+        try:
+            fg_before = _u32.GetForegroundWindow() or 0
+        except (ValueError, OSError):
+            fg_before = 0
+
+        # NON-ACTIVATION INVARIANT (1+2): resolve the top-level HWND and
+        # (re)apply WS_EX_NOACTIVATE BEFORE anything that can map the window
+        # (geometry/deiconify). The style was already set in __init__ while
+        # withdrawn; this covers a Tk rebuild of the HWND and is idempotent.
+        hwnd = _toplevel_hwnd(self.win)
+        if hwnd is not None:
+            _set_noactivate(hwnd, not focus_enabled)
+
         self._center()
         self.scale_var.set(scale_to_preset_label(self.ctl.cfg.get("scale")))
         self.fg_var.set(bool(self.ctl.cfg.get("frame_gen")))
@@ -618,24 +669,17 @@ class ControlOverlay:
         game_mode = mode in ("dx9", "dx11", "dx12", "vulkan")
 
         # Remember the game window so hide() can hand the foreground back
+        # (only used when focus mode was enabled for this session).
         pid = self.ctl.active_game_pid()
         if pid:
             self._game_hwnd = hwnd_for_pid(pid)
         else:
             try:
                 fg = _u32.GetForegroundWindow()
-                ov_hwnd = int(self.win.wm_frame(), 16)
-                if fg and fg != ov_hwnd:
+                if fg and fg != hwnd:
                     self._game_hwnd = fg
             except Exception:
                 pass
-
-        focus_enabled = bool(self.ctl.cfg.get("overlay_focus"))
-        freeze_enabled = bool(self.ctl.cfg.get("overlay_freeze"))
-        try:
-            fg_before = _u32.GetForegroundWindow() or 0
-        except (ValueError, OSError):
-            fg_before = 0
 
         # Frame freeze is opt-in (cfg overlay_freeze); the game keeps
         # running behind the panel either way. hide() unfreezes regardless.
@@ -652,19 +696,17 @@ class ControlOverlay:
         _u32.ClipCursor(None)
         _free_cursor()
 
-        try:
-            hwnd = int(self.win.wm_frame(), 16)
-            _set_noactivate(hwnd, not focus_enabled)
-        except (tk.TclError, ValueError):
-            hwnd = None
-
-        # Display the panel topmost WITHOUT taking the foreground
-        # (deiconify/lift do not activate on this host - see
-        # _probe_noactivate.py). Only steal focus when explicitly enabled.
+        # Display the panel topmost WITHOUT taking the foreground. Tk's
+        # deiconify honors WS_EX_NOACTIVATE on this host (probe: foreground
+        # unchanged); _show_noactivate is the explicit win32 equivalent
+        # (SW_SHOWNOACTIVATE + SWP_NOACTIVATE) so the mapped state never
+        # depends on Tk internals. No lift(): SetWindowPos(HWND_TOPMOST,
+        # SWP_NOACTIVATE) is the deterministic topmost re-assert.
         self.win.deiconify()
         self.win.configure(cursor="arrow")
         self.win.attributes("-topmost", True)
-        self.win.lift()
+        if not focus_enabled and hwnd is not None:
+            _show_noactivate(hwnd)
         self._set_takefocus(focus_enabled)
         if focus_enabled and hwnd is not None:
             _force_foreground(hwnd)
@@ -678,9 +720,10 @@ class ControlOverlay:
                 fg_after = _u32.GetForegroundWindow() or 0
             except (ValueError, OSError):
                 fg_after = 0
-            self.on_log("[overlay] shown freeze=%d focus=%d "
-                        "fg_before=0x%x fg_after=0x%x" % (
-                            freeze_enabled, focus_enabled,
+            self.on_log("[overlay] shown freeze=%d focus=%d hwnd=0x%x "
+                        "exstyle=0x%x fg_before=0x%x fg_after=0x%x" % (
+                            freeze_enabled, focus_enabled, hwnd or 0,
+                            _exstyle(hwnd) if hwnd else 0,
                             fg_before, fg_after))
         self.win.after(50, _log_shown)
 

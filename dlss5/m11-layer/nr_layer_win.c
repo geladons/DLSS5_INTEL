@@ -100,6 +100,11 @@ typedef struct device_data {
     unsigned char *raw;          /* freeze mode: the held UNPROCESSED frame */
     VkDeviceSize raw_size;
     int raw_held;
+    VkSwapchainKHR raw_chain;    /* SINGLE-LATCH: the swapchain the held raw
+                                * frame was captured from. While frozen, ONLY
+                                * this chain may touch raw/result; all other
+                                * presented chains pass through native. */
+    uint32_t raw_w, raw_h;       /* extent the held frame was captured at */
     FILETIME reproc_stamp;       /* last seen NR_LAYER_REPROC mtime */
     int reproc_seen;
     unsigned char *interp;
@@ -1038,6 +1043,18 @@ VKAPI_ATTR void VKAPI_CALL nr_DestroySwapchainKHR(VkDevice device, VkSwapchainKH
             devices[i].holding = 0;
             devices[i].holding_chain = VK_NULL_HANDLE;
         }
+    /* Same for the freeze latch: the held raw frame belongs to exactly one
+     * swapchain. If that chain dies while frozen, drop the held state so the
+     * next present re-captures the new primary instead of re-blitting a dead
+     * chain's frame (or worse, latching onto a menu strip). */
+    for (int i = 0; i < 8; i++)
+        if (devices[i].raw_held && devices[i].raw_chain == swapchain) {
+            devices[i].raw_held = 0;
+            devices[i].raw_chain = VK_NULL_HANDLE;
+            devices[i].result_valid = 0;
+            nr_log("[nr_layer] frozen primary swapchain destroyed; "
+                   "held frame dropped");
+        }
     unlock();
     if (data && data->destroy_swapchain)
         data->destroy_swapchain(device, swapchain, allocator);
@@ -1460,12 +1477,24 @@ static int reproc_changed(device_data *data)
     return 0;
 }
 
-/* Send the held raw frame to the daemon; reply lands in data->result. */
+/* Send the held raw frame to the daemon; reply lands in data->result via a
+ * scratch buffer. The HELD extent (raw_w/raw_h/raw_size) is authoritative -
+ * the caller only reaches us for the latched swapchain, but keying on the
+ * captured extent instead of the presented chain's keeps a mid-freeze
+ * swapchain surprise from ever resizing the wrong buffer.
+ *
+ * TCP integrity: the reply is received into data->mapped (the staging
+ * buffer; the caller overwrites it with the result right after) or a heap
+ * scratch when staging is too small, and is memcpy'd into data->result ONLY
+ * on a complete exchange. A timed-out/partial recv therefore can never tear
+ * the last good result the frozen loop keeps re-blitting - the same
+ * discipline process_frame uses since Task 26. */
 static int resend_raw(device_data *data, swapchain_data *chain)
 {
     ensure_inprocess();
     update_live_knobs();
-    VkDeviceSize needed = (VkDeviceSize)chain->extent.width * chain->extent.height * 4;
+    VkDeviceSize needed = data->raw_size;
+    if (!data->raw || !needed || !data->raw_w || !data->raw_h) return -1;
     if (!data->result || data->result_size < needed) {
         unsigned char *grown = (unsigned char *)realloc(data->result, (size_t)needed);
         if (!grown) return -1;
@@ -1473,26 +1502,37 @@ static int resend_raw(device_data *data, swapchain_data *chain)
         data->result_size = needed;
     }
     if (g_inprocess_active && pfn_dlss5_process_frame && g_engine) {
-        int r = pfn_dlss5_process_frame(g_engine, chain->extent.width, chain->extent.height,
+        int r = pfn_dlss5_process_frame(g_engine, data->raw_w, data->raw_h,
                                         data->raw, data->result, (long)frame_counter);
         if (r == 0) {
-            data->result_w = chain->extent.width;
-            data->result_h = chain->extent.height;
+            data->result_w = data->raw_w;
+            data->result_h = data->raw_h;
             data->result_valid = 1;
             nr_log("[nr_layer] in-process reprocessed held raw frame (live knob turn)");
             return 0;
         }
     }
 
-    uint32_t header[4] = { 0x304E524Eu, chain->extent.width,
-                           chain->extent.height, (uint32_t)chain->format };
-    if (exchange(header, sizeof header, data->raw, (size_t)data->raw_size,
-                 data->result, (size_t)data->raw_size)) {
-        nr_log("[nr_layer] reprocess: the daemon did not answer");
+    uint32_t header[4] = { 0x304E524Eu, data->raw_w, data->raw_h,
+                           (uint32_t)chain->format };
+    unsigned char *reply;
+    int reply_is_staging = data->mapped && data->staging_size >= needed;
+    if (reply_is_staging)
+        reply = (unsigned char *)data->mapped;
+    else
+        reply = (unsigned char *)malloc((size_t)needed);
+    if (!reply) return -1;
+    if (exchange(header, sizeof header, data->raw, (size_t)needed,
+                 reply, (size_t)needed)) {
+        if (!reply_is_staging) free(reply);
+        nr_log("[nr_layer] reprocess: the daemon did not answer "
+               "(previous result kept)");
         return -1;
     }
-    data->result_w = chain->extent.width;
-    data->result_h = chain->extent.height;
+    memcpy(data->result, reply, (size_t)needed);
+    if (!reply_is_staging) free(reply);
+    data->result_w = data->raw_w;
+    data->result_h = data->raw_h;
     data->result_valid = 1;
     nr_log("[nr_layer] reprocessed the held frame (live knob turn)");
     return 0;
@@ -1517,6 +1557,11 @@ static int freeze_capture(device_data *data, swapchain_data *chain,
     memcpy(data->raw, data->mapped, (size_t)needed);
     data->raw_size = needed;
     data->raw_held = 1;
+    /* SINGLE-LATCH: this swapchain owns the frozen frame until unfreeze or
+     * swapchain destroy; no other presented chain may overwrite raw. */
+    data->raw_chain = chain->swapchain;
+    data->raw_w = chain->extent.width;
+    data->raw_h = chain->extent.height;
     if (resend_raw(data, chain)) {
         memcpy(data->result, data->raw, (size_t)needed);
         data->result_w = chain->extent.width;
@@ -1582,7 +1627,50 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
     int frozen = freeze_path && _access(freeze_path, 0) == 0;
     if (!frozen) {
         data->raw_held = 0;
+        data->raw_chain = VK_NULL_HANDLE;
         data->reproc_seen = 0;
+    }
+
+    /* SINGLE-LATCH freeze: the held raw frame belongs to exactly ONE
+     * primary swapchain. Freeze targets only the largest NON-DEGENERATE
+     * chain among those presented; every other swapchain in the same pass
+     * goes out native and can never overwrite data->raw/result. Without the
+     * latch a multi-swapchain game (GTA IV presents a 160x28 menu strip next
+     * to the 800x600 frame) overwrote the held frame with whatever presented
+     * at a different extent first. Once latched the latch is sticky: a
+     * present that does not carry the frozen chain passes fully native. */
+    swapchain_data *freeze_primary = NULL;
+    if (frozen) {
+        if (data->raw_held && !find_swapchain(data->raw_chain)) {
+            /* Latched chain vanished without us seeing the destroy: drop the
+             * held frame so this present re-captures the new primary. */
+            data->raw_held = 0;
+            data->raw_chain = VK_NULL_HANDLE;
+            data->result_valid = 0;
+        }
+        VkDeviceSize best = 0;
+        for (uint32_t j = 0; j < info->swapchainCount; j++) {
+            swapchain_data *c = find_swapchain(info->pSwapchains[j]);
+            if (!c || info->pImageIndices[j] >= c->image_count) continue;
+            int deg_log = NR_DEGRADE_LOG_NONE;
+            if (nr_degrade_is_degenerate(&g_dg, c->extent.width,
+                                         c->extent.height, &deg_log)) {
+                if (deg_log == NR_DEGRADE_LOG_DEGENERATE)
+                    nr_log("[nr_layer] degenerate swapchain %ux%u; passing "
+                           "through", c->extent.width, c->extent.height);
+                continue;
+            }
+            if (data->raw_held) {
+                if (c->swapchain == data->raw_chain) {
+                    freeze_primary = c;
+                    break;
+                }
+            } else {
+                VkDeviceSize sz = (VkDeviceSize)c->extent.width
+                                * c->extent.height * 4;
+                if (sz > best) { best = sz; freeze_primary = c; }
+            }
+        }
     }
 
     for (uint32_t i = 0; i < info->swapchainCount; i++) {
@@ -1593,8 +1681,11 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                           * chain->extent.height * 4;
 
         if (frozen) {
-            /* Photo mode: hold the frozen frame; reprocess on demand. */
-            if (!data->raw_held || data->raw_size != want) {
+            /* Photo mode: hold the frozen frame; reprocess on demand.
+             * Only the latched primary chain is served; non-primary chains
+             * (degenerate strips or secondary surfaces) present native. */
+            if (chain != freeze_primary) continue;
+            if (!data->raw_held) {
                 if (freeze_capture(data, chain, queue, index) == 0)
                     transfer(data, chain, queue, index, 1);
             } else {
@@ -1604,7 +1695,8 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                         nr_log("[nr_layer] reprocess failed; keeping the "
                                "previous result");
                 }
-                if (data->result_size == want) {
+                if (data->result_valid && data->result_size == want
+                    && data->mapped && data->staging_size >= want) {
                     memcpy(data->mapped, data->result,
                            (size_t)data->result_size);
                     transfer(data, chain, queue, index, 1);

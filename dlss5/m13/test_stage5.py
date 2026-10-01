@@ -220,7 +220,7 @@ with tempfile.TemporaryDirectory() as td:
                 mock_dstop.assert_called_once()
                 mock_lg.assert_called_once_with(
                     dummy_x64, "dx11", scale=0.58, blend=0.75,
-                    cfg=ctl.cfg)
+                    cfg=ctl.cfg, launch_args=[])
                 print("  controller.game_launch x64: lingering daemon stopped + config propagated [PASS]")
 
         # Test 32-bit game launch: SHOULD call daemon_start when daemon not running
@@ -232,7 +232,8 @@ with tempfile.TemporaryDirectory() as td:
             assert ok, "game_launch x86 failed: %s" % msg
             mock_dstart.assert_called_once()
             mock_lg.assert_called_once_with(dummy_x86, "dx9", scale=0.58,
-                                            blend=0.75, cfg=ctl.cfg)
+                                            blend=0.75, cfg=ctl.cfg,
+                                            launch_args=[])
             print("  controller.game_launch x86: TCP daemon fallback (daemon_start called) [PASS]")
 
     finally:
@@ -390,6 +391,63 @@ try:
                 m_fs.assert_not_called()
             assert ov._focus_mode is False
             print("  F5 _take_focus() inert when overlay_focus=False [PASS]")
+
+            # F6: WS_EX_NOACTIVATE is applied to the top-level HWND at
+            # __init__ time - while the window is still withdrawn, i.e.
+            # BEFORE the first map (the ordering that lets the very first
+            # deiconify run non-activating).
+            calls = []
+            with patch("m13.overlay._set_noactivate",
+                       side_effect=lambda h, on=True: calls.append((h, on))):
+                ov2 = overlay.ControlOverlay(tk_root, c_ctl,
+                                             on_log=lambda m: None)
+            assert calls and calls[0][1] is True, \
+                "no creation-time _set_noactivate(hwnd, True): %r" % calls
+            assert calls[0][0], "creation-time hwnd resolved to 0"
+            # keep ov2 alive: its HotkeyPoller `after` callbacks must not
+            # fire toggle() on a destroyed toplevel; tk_root.destroy() cleans.
+            print("  F6 _set_noactivate applied while withdrawn in __init__ [PASS]")
+
+            # F7: in show() the style is (re)applied BEFORE deiconify maps
+            # the window, and the win32 show path uses the explicit
+            # non-activating ShowWindow/SetWindowPos pair.
+            order = []
+            with patch("m13.overlay._set_noactivate",
+                       side_effect=lambda *a: order.append("noactivate")), \
+                 patch("m13.overlay._show_noactivate",
+                       side_effect=lambda *a: order.append("show_noactivate")), \
+                 patch.object(ov.win, "deiconify",
+                              side_effect=lambda: order.append("deiconify")):
+                ov.show()
+            assert "noactivate" in order and "deiconify" in order, order
+            assert order.index("noactivate") < order.index("deiconify"), \
+                "WS_EX_NOACTIVATE applied AFTER deiconify: %r" % order
+            assert "show_noactivate" in order, \
+                "explicit _show_noactivate missing from open path"
+            print("  F7 show(): noactivate before deiconify, "
+                  "SW_SHOWNOACTIVATE path used [PASS]")
+            ov.hide()
+
+            # F8: focus mode on -> _show_noactivate skipped (the intentional
+            # steal replaces it), noactivate applied with on=False.
+            c.set("overlay_focus", True)
+            with patch("m13.overlay._set_noactivate") as m_na, \
+                 patch("m13.overlay._show_noactivate") as m_sn, \
+                 patch("m13.overlay._force_foreground"), \
+                 patch.object(ov.win, "focus_force"):
+                ov.show()
+            assert m_na.call_args[0][1] is False
+            m_sn.assert_not_called()
+            ov.hide()
+            c.set("overlay_focus", False)
+            print("  F8 overlay_focus=True: steal path unchanged [PASS]")
+
+            # F9: _toplevel_hwnd resolves the outermost HWND (climbs to
+            # GA_ROOT) so the style lands on the window Windows activates.
+            h = overlay._toplevel_hwnd(ov.win)
+            assert h and h == int(ov.win.wm_frame(), 16), \
+                "_toplevel_hwnd mismatch: %r vs %r" % (h, ov.win.wm_frame())
+            print("  F9 _toplevel_hwnd resolves the top-level HWND [PASS]")
         finally:
             c_ctl.shutdown()
 finally:
