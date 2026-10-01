@@ -40,6 +40,15 @@ REPROC_FLAG = os.path.join(os.environ.get("TEMP", "."), "m13_reproc.flag")
 WINDOW_ARGS = ("-windowed", "-window")
 
 
+def _cfg_value(cfg, key, default):
+    """cfg may be a Config, a plain dict (tests), or None."""
+    if cfg is not None and hasattr(cfg, "get"):
+        v = cfg.get(key)
+        if v is not None:
+            return v
+    return default
+
+
 def _flag_exists(path):
     return os.path.exists(path)
 
@@ -332,7 +341,19 @@ def launch_game(exe_path, mode, scale=None, gain=None, blend=None, cfg=None, sha
         }
     if p30:
         env.update(phase30_env_dict(p30))
-        write_phase30_knobs(p30)
+        # The knob file is the live channel for an in-process game (its env
+        # never changes after spawn): seed it with the same values this
+        # launch puts into the env so the two agree from the first present.
+        blob = dict(p30)
+        blob["gain"] = float(gain if gain is not None
+                             else _cfg_value(cfg, "gain", 1.0))
+        blob["blend"] = float(blend if blend is not None
+                              else _cfg_value(cfg, "blend", 1.0))
+        blob["scale"] = float(scale if scale is not None
+                              else _cfg_value(cfg, "scale", 1.0))
+        blob["sharpness"] = float(sharp_val)
+        blob["frame_gen"] = 1 if fg_val else 0
+        write_phase30_knobs(blob)
 
     # Weights + shader locations for the in-process d5c_chain (see the
     # engine_env block above) - every injection mode, unconditionally.

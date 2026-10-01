@@ -36,6 +36,13 @@
  *   NR_LAYER_UI_MASK  0 = disable exact-repeat reuse of the last processed
  *                     result (default on; legacy name)
  *
+ * Live knobs: %TEMP%\m13_phase30_knobs.json is rewritten by the m13 manager
+ * on every knob change. A running game's env is frozen at launch, so the
+ * layer polls that file (mtime, ~250 ms) and pushes scale/gain/blend/
+ * sharpness/frame_gen into the in-process engine - the env vars above stay
+ * the launch-time baseline. The chain itself polls the same file for the 7
+ * vendor phase30 params.
+ *
  * Daemon flap control (TCP path, nr_degrade.h): a transport-level exchange
  * failure (connected, but the daemon did not answer) re-blits the last
  * processed frame of the same extent - a raw frame is never inserted into a
@@ -254,9 +261,23 @@ static float g_cur_skin_structure = -999.0f;
 static int g_cur_auto_mask = -1;
 static int g_cur_style_index = -1;
 static float g_cur_color_strength = -1.0f;
+static int g_cur_framegen = -1;
+
+/* Live knob file (%TEMP%\m13_phase30_knobs.json): the manager rewrites it
+ * on every knob change and a running child's env is frozen at launch, so
+ * the file is the live override channel for the in-process engine while
+ * the env reads in update_live_knobs stay the launch baseline. Once the
+ * file supplied a value it owns the knob - g_knob_seen gates the matching
+ * env blocks so the static env cannot push back over a file-driven value. */
+static char g_knob_path[MAX_PATH];
+static FILETIME g_knob_stamp;
+static int g_knob_seen;
+static ULONGLONG g_knob_next_poll;
 
 static int is_framegen_enabled(void)
 {
+    /* The knob file is the live override once it supplied a value. */
+    if (g_cur_framegen >= 0) return g_cur_framegen;
     const char *fg = getenv("NR_LAYER_FRAMEGEN");
     if (!fg) fg = getenv("DLSS5_FRAMEGEN");
     if (fg) {
@@ -269,75 +290,225 @@ static int is_framegen_enabled(void)
     return 0;
 }
 
-static void update_live_knobs(void)
+static const char *knob_file_path(void)
 {
-    if (!g_engine) return;
+    if (!g_knob_path[0]) {
+        DWORD len = GetTempPathA(sizeof(g_knob_path), g_knob_path);
+        if (len > 0 && len < sizeof(g_knob_path)) {
+            size_t l = strlen(g_knob_path);
+            if (g_knob_path[l - 1] != '\\' && g_knob_path[l - 1] != '/')
+                strncat(g_knob_path, "\\", sizeof(g_knob_path) - l - 1);
+            strncat(g_knob_path, "m13_phase30_knobs.json",
+                    sizeof(g_knob_path) - strlen(g_knob_path) - 1);
+        } else {
+            const char *t = getenv("TEMP");
+            _snprintf(g_knob_path, sizeof(g_knob_path),
+                      "%s\\m13_phase30_knobs.json", t ? t : ".");
+            g_knob_path[sizeof(g_knob_path) - 1] = 0;
+        }
+    }
+    return g_knob_path;
+}
 
-    const char *scale_s = getenv("NR_LAYER_SCALE");
-    if (!scale_s) scale_s = getenv("DLSS5_SCALE");
-    if (scale_s) {
-        float val = (float)atof(scale_s);
+/* Minimal JSON scalar scan: find "key", then ':', then the token up to a
+ * ',', '}' or line end - same idea as extractJsonField in the chain's
+ * phase30.cpp (the knob file is ~300 bytes; a real parser is overkill).
+ * Returns 1 and fills `out` when the key is present. */
+static int knob_json_value(const char *json, const char *key,
+                           char *out, size_t out_sz)
+{
+    char needle[64];
+    const char *p;
+    size_t n = 0;
+    _snprintf(needle, sizeof(needle), "\"%s\"", key);
+    needle[sizeof(needle) - 1] = 0;
+    p = strstr(json, needle);
+    if (!p) return 0;
+    p = strchr(p + strlen(needle), ':');
+    if (!p) return 0;
+    p++;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    if (*p == '"') p++;
+    while (p[n] && p[n] != ',' && p[n] != '}' && p[n] != '"' &&
+           p[n] != '\r' && p[n] != '\n' && n + 1 < out_sz)
+        n++;
+    while (n && (p[n - 1] == ' ' || p[n - 1] == '\t')) n--;
+    if (!n) return 0;
+    memcpy(out, p, n);
+    out[n] = 0;
+    return 1;
+}
+
+/* Re-read the knob file when its mtime changed; the attribute fetch is
+ * throttled to once per ~250 ms (force=1 bypasses it - the freeze/reprocess
+ * path wants the new value on THIS frame). Pushes changed values into the
+ * in-process engine; a successful read marks the file as the authority
+ * (g_knob_seen), which gates the env baseline blocks below. */
+static void poll_knob_file(int force)
+{
+    static char buf[4096];
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    FILE *f;
+    size_t n;
+    ULONGLONG now;
+    char tok[64];
+    if (!g_engine) return;
+    now = GetTickCount64();
+    if (!force && now < g_knob_next_poll) return;
+    g_knob_next_poll = now + 250;
+    if (!GetFileAttributesExA(knob_file_path(), GetFileExInfoStandard, &fa))
+        return;
+    if (g_knob_seen
+        && fa.ftLastWriteTime.dwLowDateTime == g_knob_stamp.dwLowDateTime
+        && fa.ftLastWriteTime.dwHighDateTime == g_knob_stamp.dwHighDateTime)
+        return;
+    f = fopen(knob_file_path(), "rb");
+    if (!f) return;
+    n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = 0;
+    g_knob_stamp = fa.ftLastWriteTime;
+    if (!g_knob_seen)
+        nr_log("[nr_layer] live knob file: %s", knob_file_path());
+    g_knob_seen = 1;
+
+    if (knob_json_value(buf, "scale", tok, sizeof(tok))) {
+        float val = (float)atof(tok);
         float diff = val - g_cur_scale;
         if (diff < 0.0f) diff = -diff;
         if (val > 0.0f && diff > 1e-4f) {
             g_cur_scale = val;
             if (pfn_dlss5_set_scale) {
                 pfn_dlss5_set_scale(g_engine, val);
-                nr_log("[nr_layer] live scale updated: %.2f", val);
+                nr_log("[nr_layer] live scale updated: %.2f (knob file)", val);
             }
         }
     }
-
-    const char *gain_s = getenv("NR_LAYER_GAIN");
-    if (!gain_s) gain_s = getenv("DLSS5_GAIN");
-    if (gain_s) {
-        float val = (float)atof(gain_s);
+    if (knob_json_value(buf, "gain", tok, sizeof(tok))) {
+        float val = (float)atof(tok);
         float diff = val - g_cur_gain;
         if (diff < 0.0f) diff = -diff;
         if (val >= 0.0f && diff > 1e-4f) {
             g_cur_gain = val;
             if (pfn_dlss5_set_gain) {
                 pfn_dlss5_set_gain(g_engine, val);
-                nr_log("[nr_layer] live gain updated: %.2f", val);
+                nr_log("[nr_layer] live gain updated: %.2f (knob file)", val);
             }
         }
     }
-
-    const char *blend_s = getenv("NR_LAYER_BLEND");
-    if (!blend_s) blend_s = getenv("DLSS5_BLEND");
-    if (blend_s) {
-        float val = (float)atof(blend_s);
+    if (knob_json_value(buf, "blend", tok, sizeof(tok))) {
+        float val = (float)atof(tok);
         float diff = val - g_cur_blend;
         if (diff < 0.0f) diff = -diff;
         if (val >= 0.0f && val <= 1.0f && diff > 1e-4f) {
             g_cur_blend = val;
             if (pfn_dlss5_set_blend) {
                 pfn_dlss5_set_blend(g_engine, val);
-                nr_log("[nr_layer] live blend updated: %.2f", val);
+                nr_log("[nr_layer] live blend updated: %.2f (knob file)", val);
             }
         }
     }
-
-    const char *sharp_s = getenv("NR_LAYER_SHARPNESS");
-    if (!sharp_s) sharp_s = getenv("DLSS5_SHARPNESS");
-    if (sharp_s) {
-        float val = (float)atof(sharp_s);
+    if (knob_json_value(buf, "sharpness", tok, sizeof(tok))) {
+        float val = (float)atof(tok);
         float diff = val - g_cur_sharpness;
         if (diff < 0.0f) diff = -diff;
         if (val >= 0.0f && diff > 1e-4f) {
             g_cur_sharpness = val;
             if (pfn_dlss5_set_sharpness) {
                 pfn_dlss5_set_sharpness(g_engine, val);
-                nr_log("[nr_layer] live sharpness updated: %.2f", val);
+                nr_log("[nr_layer] live sharpness updated: %.2f (knob file)",
+                       val);
             }
         }
     }
+    if (knob_json_value(buf, "frame_gen", tok, sizeof(tok))) {
+        int val = (tok[0] == '1' || !strcmp(tok, "true")) ? 1 : 0;
+        if (val != g_cur_framegen) {
+            g_cur_framegen = val;
+            if (pfn_dlss5_set_framegen) {
+                pfn_dlss5_set_framegen(g_engine, val);
+                nr_log("[nr_layer] live framegen updated: %d (knob file)",
+                       val);
+            }
+        }
+    }
+}
 
-    const char *fg_s = getenv("NR_LAYER_FRAMEGEN");
-    if (!fg_s) fg_s = getenv("DLSS5_FRAMEGEN");
-    if (fg_s && pfn_dlss5_set_framegen) {
-        int enable = (fg_s[0] == '1' || !strcmp(fg_s, "true") || !strcmp(fg_s, "on")) ? 1 : 0;
-        pfn_dlss5_set_framegen(g_engine, enable);
+static void update_live_knobs(int force_file)
+{
+    if (!g_engine) return;
+
+    /* Live channel first: once the knob file has been read it owns the
+     * engine knobs; the env reads below stay the launch baseline. */
+    poll_knob_file(force_file);
+
+    if (!g_knob_seen) {
+        const char *scale_s = getenv("NR_LAYER_SCALE");
+        if (!scale_s) scale_s = getenv("DLSS5_SCALE");
+        if (scale_s) {
+            float val = (float)atof(scale_s);
+            float diff = val - g_cur_scale;
+            if (diff < 0.0f) diff = -diff;
+            if (val > 0.0f && diff > 1e-4f) {
+                g_cur_scale = val;
+                if (pfn_dlss5_set_scale) {
+                    pfn_dlss5_set_scale(g_engine, val);
+                    nr_log("[nr_layer] live scale updated: %.2f", val);
+                }
+            }
+        }
+
+        const char *gain_s = getenv("NR_LAYER_GAIN");
+        if (!gain_s) gain_s = getenv("DLSS5_GAIN");
+        if (gain_s) {
+            float val = (float)atof(gain_s);
+            float diff = val - g_cur_gain;
+            if (diff < 0.0f) diff = -diff;
+            if (val >= 0.0f && diff > 1e-4f) {
+                g_cur_gain = val;
+                if (pfn_dlss5_set_gain) {
+                    pfn_dlss5_set_gain(g_engine, val);
+                    nr_log("[nr_layer] live gain updated: %.2f", val);
+                }
+            }
+        }
+
+        const char *blend_s = getenv("NR_LAYER_BLEND");
+        if (!blend_s) blend_s = getenv("DLSS5_BLEND");
+        if (blend_s) {
+            float val = (float)atof(blend_s);
+            float diff = val - g_cur_blend;
+            if (diff < 0.0f) diff = -diff;
+            if (val >= 0.0f && val <= 1.0f && diff > 1e-4f) {
+                g_cur_blend = val;
+                if (pfn_dlss5_set_blend) {
+                    pfn_dlss5_set_blend(g_engine, val);
+                    nr_log("[nr_layer] live blend updated: %.2f", val);
+                }
+            }
+        }
+
+        const char *sharp_s = getenv("NR_LAYER_SHARPNESS");
+        if (!sharp_s) sharp_s = getenv("DLSS5_SHARPNESS");
+        if (sharp_s) {
+            float val = (float)atof(sharp_s);
+            float diff = val - g_cur_sharpness;
+            if (diff < 0.0f) diff = -diff;
+            if (val >= 0.0f && diff > 1e-4f) {
+                g_cur_sharpness = val;
+                if (pfn_dlss5_set_sharpness) {
+                    pfn_dlss5_set_sharpness(g_engine, val);
+                    nr_log("[nr_layer] live sharpness updated: %.2f", val);
+                }
+            }
+        }
+
+        const char *fg_s = getenv("NR_LAYER_FRAMEGEN");
+        if (!fg_s) fg_s = getenv("DLSS5_FRAMEGEN");
+        if (fg_s && pfn_dlss5_set_framegen) {
+            int enable = (fg_s[0] == '1' || !strcmp(fg_s, "true") || !strcmp(fg_s, "on")) ? 1 : 0;
+            pfn_dlss5_set_framegen(g_engine, enable);
+        }
     }
 
     const char *intensity_s = getenv("NR_LAYER_INTENSITY");
@@ -1522,7 +1693,9 @@ static int reproc_changed(device_data *data)
 static int resend_raw(device_data *data, swapchain_data *chain)
 {
     ensure_inprocess();
-    update_live_knobs();
+    /* Forced poll: a reprocess must run with the just-written knob values,
+     * not the values from up to 250 ms ago. */
+    update_live_knobs(1);
     VkDeviceSize needed = data->raw_size;
     if (!data->raw || !needed || !data->raw_w || !data->raw_h) return -1;
     if (!data->result || data->result_size < needed) {
@@ -1656,7 +1829,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
 
     hotkeys_ensure();
     ensure_inprocess();
-    update_live_knobs();
+    update_live_knobs(0);
     init_freeze_paths();
 
     int frozen = freeze_path && _access(freeze_path, 0) == 0;
@@ -1725,7 +1898,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                     transfer(data, chain, queue, index, 1);
             } else {
                 if (reproc_changed(data)) {
-                    update_live_knobs();
+                    update_live_knobs(1);
                     if (resend_raw(data, chain) != 0)
                         nr_log("[nr_layer] reprocess failed; keeping the "
                                "previous result");
@@ -1920,6 +2093,13 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
         pfn_dlss5_set_color_strength = NULL;
         g_inprocess_active = 0;
         g_inprocess_attempted = 0;
+        /* A fresh engine must see the knob file again: drop the cached
+         * "current" values so the next poll pushes the file state. */
+        g_knob_seen = 0;
+        memset(&g_knob_stamp, 0, sizeof(g_knob_stamp));
+        g_knob_next_poll = 0;
+        g_cur_framegen = -1;
+        g_cur_scale = g_cur_gain = g_cur_blend = g_cur_sharpness = -1.0f;
         if (g_lock_ready) { DeleteCriticalSection(&g_lock); g_lock_ready = 0; }
     }
     return TRUE;

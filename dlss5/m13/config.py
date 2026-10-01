@@ -47,6 +47,9 @@ DEFAULTS = {
                                  # alongside the source (subdir "dlss5")
     "media_save_mode": "subdir", # ask | always | subdir
     "media_video_preset": "mp4", # video output container (h264 mp4)
+    "media_preview_max": 1024,   # max image dimension fed to the engine for
+                                 # PREVIEWS (0 = full-res, slow); Save and
+                                 # Process all always run at full resolution
 }
 
 
@@ -177,10 +180,14 @@ class Config:
     def reset_phase30(self, exe=None):
         """Reset Phase 30 settings to defaults."""
         try:
-            from .phase30 import PHASE30_DEFAULTS
+            from .phase30 import PHASE30_DEFAULTS, PHASE30_VENDOR_KEYS
         except (ImportError, ValueError):
-            from phase30 import PHASE30_DEFAULTS
-        self.set_phase30(PHASE30_DEFAULTS, exe=exe)
+            from phase30 import PHASE30_DEFAULTS, PHASE30_VENDOR_KEYS
+        # Vendor knobs only: PHASE30_DEFAULTS now also lists the engine
+        # knobs carried in the live knob file, but a Phase30 reset must not
+        # touch scale/blend/sharpness/frame_gen.
+        self.set_phase30({k: PHASE30_DEFAULTS[k] for k in PHASE30_VENDOR_KEYS},
+                         exe=exe)
 
 
     @property

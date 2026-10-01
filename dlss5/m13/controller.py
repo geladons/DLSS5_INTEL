@@ -213,7 +213,7 @@ class M13Controller:
         os.environ["DLSS5_SHARPNESS"] = str(float(self.cfg.get("sharpness") or 0.8))
         p30 = self.cfg.get_phase30()
         os.environ.update(phase30_env_dict(p30))
-        write_phase30_knobs(p30)
+        write_phase30_knobs(self._knob_blob(p30))
         # Seed weights/shader dirs for the in-process d5c_chain: launched
         # games get the per-mode values via env_extra in launch_game; the
         # process env covers any consumer inheriting our environment.
@@ -395,6 +395,19 @@ class M13Controller:
     def daemon_stop(self):
         return self.daemon.stop()
 
+    def _knob_blob(self, p30):
+        """Phase30 dict plus the live engine knobs. The knob file is the
+        only channel a RUNNING in-process game can see (its env froze at
+        launch), so every write carries the current scale/gain/blend/
+        sharpness/frame_gen next to the 7 vendor params."""
+        blob = dict(p30)
+        blob["gain"] = float(self.cfg.get("gain") or 1.0)
+        blob["blend"] = float(self.cfg.get("blend") or 1.0)
+        blob["scale"] = float(self.cfg.get("scale") or 0.50)
+        blob["sharpness"] = float(self.cfg.get("sharpness") or 0.8)
+        blob["frame_gen"] = 1 if self.cfg.get("frame_gen") else 0
+        return blob
+
     # --------------------------------------------------------------- gain --
     def set_gain(self, gain):
         """Live gain push. Daemon up: NRCT, next processed frame; if a game
@@ -407,7 +420,7 @@ class M13Controller:
         self.cfg.set("intensity", gain)
         p30 = self.cfg.get_phase30()
         os.environ.update(phase30_env_dict(p30))
-        write_phase30_knobs(p30)
+        write_phase30_knobs(self._knob_blob(p30))
         if self.daemon.running:
             try:
                 g, _ = self.client.set_gain(gain)
@@ -440,6 +453,9 @@ class M13Controller:
         os.environ["DLSS5_BLEND"] = b_val
         os.environ["NR_LAYER_BLEND"] = b_val
         os.environ["M12_BLEND"] = b_val
+        # Knob file BEFORE any reproc bump: the in-process layer polls it as
+        # the live channel, and a frozen-frame reprocess must see this value.
+        write_phase30_knobs(self._knob_blob(self.cfg.get_phase30()))
         if self.daemon.running:
             try:
                 self.client.set_blend(blend)
@@ -473,6 +489,9 @@ class M13Controller:
         os.environ["DLSS5_SCALE"] = s_val
         os.environ["NR_LAYER_SCALE"] = s_val
         os.environ["M12_SCALE"] = s_val
+        # Knob file BEFORE any reproc bump (see set_blend); dlss5_set_scale
+        # re-inits the engine on the next process_frame - that is intended.
+        write_phase30_knobs(self._knob_blob(self.cfg.get_phase30()))
         if self.daemon.running:
             try:
                 self.client.set_scale(scale)
@@ -502,6 +521,8 @@ class M13Controller:
         enable = bool(enable)
         self.cfg.set("frame_gen", enable)
         os.environ["DLSS5_FRAMEGEN"] = "1" if enable else "0"
+        # Knob file BEFORE any reproc bump (see set_blend).
+        write_phase30_knobs(self._knob_blob(self.cfg.get_phase30()))
         if self.daemon.running:
             try:
                 self.client.set_framegen(enable)
@@ -523,6 +544,9 @@ class M13Controller:
         val = max(0.0, min(1.0, float(val)))
         self.cfg.set("sharpness", val)
         os.environ["DLSS5_SHARPNESS"] = str(val)
+        os.environ["NR_LAYER_SHARPNESS"] = str(val)
+        # Knob file BEFORE any reproc bump (see set_blend).
+        write_phase30_knobs(self._knob_blob(self.cfg.get_phase30()))
         if gamelaunch.freeze_active():
             gamelaunch.reproc_bump()
         return True, "sharpness -> %.2f" % val
@@ -537,7 +561,7 @@ class M13Controller:
         self.cfg.set_phase30({"local_tone": val}, exe=exe)
         p30 = self.cfg.get_phase30(exe)
         os.environ.update(phase30_env_dict(p30))
-        write_phase30_knobs(p30)
+        write_phase30_knobs(self._knob_blob(p30))
         if self.daemon.running:
             try:
                 self.client.set_local_tone(val)
@@ -553,7 +577,7 @@ class M13Controller:
         self.cfg.set_phase30({"local_structure": val}, exe=exe)
         p30 = self.cfg.get_phase30(exe)
         os.environ.update(phase30_env_dict(p30))
-        write_phase30_knobs(p30)
+        write_phase30_knobs(self._knob_blob(p30))
         if self.daemon.running:
             try:
                 self.client.set_local_structure(val)
@@ -569,7 +593,7 @@ class M13Controller:
         self.cfg.set_phase30({"skin_structure": val}, exe=exe)
         p30 = self.cfg.get_phase30(exe)
         os.environ.update(phase30_env_dict(p30))
-        write_phase30_knobs(p30)
+        write_phase30_knobs(self._knob_blob(p30))
         if self.daemon.running:
             try:
                 self.client.set_skin_structure(val)
@@ -585,7 +609,7 @@ class M13Controller:
         self.cfg.set_phase30({"auto_mask": val}, exe=exe)
         p30 = self.cfg.get_phase30(exe)
         os.environ.update(phase30_env_dict(p30))
-        write_phase30_knobs(p30)
+        write_phase30_knobs(self._knob_blob(p30))
         if self.daemon.running:
             try:
                 self.client.set_auto_mask(val)
@@ -602,7 +626,7 @@ class M13Controller:
         self.cfg.set_phase30({"style_index": val}, exe=exe)
         p30 = self.cfg.get_phase30(exe)
         os.environ.update(phase30_env_dict(p30))
-        write_phase30_knobs(p30)
+        write_phase30_knobs(self._knob_blob(p30))
         if self.daemon.running:
             try:
                 self.client.set_style_index(val)
@@ -618,7 +642,7 @@ class M13Controller:
         self.cfg.set_phase30({"color_strength": val}, exe=exe)
         p30 = self.cfg.get_phase30(exe)
         os.environ.update(phase30_env_dict(p30))
-        write_phase30_knobs(p30)
+        write_phase30_knobs(self._knob_blob(p30))
         if self.daemon.running:
             try:
                 self.client.set_color_strength(val)
@@ -633,7 +657,7 @@ class M13Controller:
         self.cfg.set_phase30(params, exe=exe)
         p30 = self.cfg.get_phase30(exe)
         os.environ.update(phase30_env_dict(p30))
-        write_phase30_knobs(p30)
+        write_phase30_knobs(self._knob_blob(p30))
         if self.daemon.running:
             for k, v in params.items():
                 try:
@@ -662,7 +686,7 @@ class M13Controller:
         self.cfg.reset_phase30(exe=exe)
         p30 = self.cfg.get_phase30(exe)
         os.environ.update(phase30_env_dict(p30))
-        write_phase30_knobs(p30)
+        write_phase30_knobs(self._knob_blob(p30))
         if self.daemon.running:
             try:
                 self.client.set_gain(p30["intensity"])

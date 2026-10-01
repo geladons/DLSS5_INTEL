@@ -12,6 +12,11 @@
 #   6. style_index: 0, 1, 2 (default 0: Default, 1: Natural, 2: Cinematic)
 #   7. color_strength: 0.0 - 2.0 (default 1.0)
 #
+# The knob file also carries the engine knobs gain/blend/scale/sharpness/
+# frame_gen: a RUNNING game cannot see env changes, so the in-process
+# consumers (m11-layer, m12-dxgi) poll the file as the live channel while
+# env stays the launch-time baseline.
+#
 # Handles persistence, env mapping, knob file writing, and UI panel rendering.
 # ============================================================================
 import json
@@ -33,7 +38,24 @@ PHASE30_DEFAULTS = {
     "auto_mask": False,
     "style_index": 0,
     "color_strength": 1.0,
+    # Engine-level knobs written into the same file (see module docstring).
+    # write_phase30_knobs backfills any the caller did not supply, so the
+    # file always carries the full set.
+    "gain": 1.0,
+    "blend": 1.0,
+    "scale": 1.0,
+    "sharpness": 0.8,
+    "frame_gen": 1,
 }
+
+# The 7 compose-side vendor knobs (the Phase30Panel set). Everything else in
+# PHASE30_DEFAULTS is a pass-through engine knob for the live file - reset
+# paths and the panel keep to the vendor list so "Reset" does not also reset
+# render scale / blend / frame generation.
+PHASE30_VENDOR_KEYS = (
+    "intensity", "local_tone", "local_structure", "skin_structure",
+    "auto_mask", "style_index", "color_strength",
+)
 
 PHASE30_KNOB_FILE = os.path.join(os.environ.get("TEMP", "."), "m13_phase30_knobs.json")
 

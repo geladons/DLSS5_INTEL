@@ -55,6 +55,7 @@ static PFN_dlss5_process_frame pfn_dlss5_process_frame = NULL;
 static PFN_dlss5_set_scale pfn_dlss5_set_scale = NULL;
 static PFN_dlss5_set_gain pfn_dlss5_set_gain = NULL;
 static PFN_dlss5_set_blend pfn_dlss5_set_blend = NULL;
+static PFN_dlss5_set_sharpness pfn_dlss5_set_sharpness = NULL;
 static PFN_dlss5_interpolate_frame pfn_dlss5_interpolate_frame = NULL;
 static PFN_dlss5_set_framegen pfn_dlss5_set_framegen = NULL;
 static PFN_dlss5_get_framegen pfn_dlss5_get_framegen = NULL;
@@ -72,8 +73,26 @@ static LONG g_proc_count = 0;
 static CRITICAL_SECTION g_inproc_cs;
 static LONG g_inproc_cs_init = 0;
 
+// ---------------------------------------------------------------------------
+// Live knob file (%TEMP%\m13_phase30_knobs.json): same contract as the m11
+// Vulkan layer - the manager rewrites it on every knob change and a running
+// child's env is frozen at launch, so the file is the live override channel
+// while the env reads stay the launch baseline. Once the file supplied a
+// value it owns the knob: g_knob_seen gates the env pushes in sendRaw().
+// ---------------------------------------------------------------------------
+static FILETIME g_knob_stamp = {};
+static int g_knob_seen = 0;
+static ULONGLONG g_knob_next_poll = 0;
+static int g_cur_framegen = -1;
+static float g_cur_gain = -1.0f;
+static float g_cur_blend = -1.0f;
+static float g_cur_scale = -1.0f;
+static float g_cur_sharpness = -1.0f;
+
 static bool is_framegen_enabled()
 {
+    // The knob file is the live override once it supplied a value.
+    if (g_cur_framegen >= 0) return g_cur_framegen == 1;
     const char *fg = getenv("M12_FRAMEGEN");
     if (!fg) fg = getenv("DLSS5_FRAMEGEN");
     if (fg) {
@@ -84,6 +103,142 @@ static bool is_framegen_enabled()
         return pfn_dlss5_get_framegen(g_engine) == 1;
     }
     return false;
+}
+
+static const char *knob_file_path()
+{
+    static char path[MAX_PATH];
+    if (!path[0]) {
+        DWORD len = GetTempPathA(sizeof(path), path);
+        if (len > 0 && len < sizeof(path)) {
+            size_t l = strlen(path);
+            if (path[l - 1] != '\\' && path[l - 1] != '/')
+                strncat_s(path, "\\", 1);
+            strncat_s(path, "m13_phase30_knobs.json", _TRUNCATE);
+        } else {
+            const char *t = getenv("TEMP");
+            _snprintf_s(path, sizeof(path), _TRUNCATE,
+                        "%s\\m13_phase30_knobs.json", t ? t : ".");
+        }
+    }
+    return path;
+}
+
+// Minimal JSON scalar scan: find "key", then ':', then the token up to a
+// ',', '}' or line end - same idea as extractJsonField in the chain's
+// phase30.cpp (the knob file is ~300 bytes; a real parser is overkill).
+static bool knob_json_value(const char *json, const char *key,
+                            char *out, size_t out_sz)
+{
+    char needle[64];
+    _snprintf_s(needle, sizeof(needle), _TRUNCATE, "\"%s\"", key);
+    const char *p = strstr(json, needle);
+    if (!p) return false;
+    p = strchr(p + strlen(needle), ':');
+    if (!p) return false;
+    p++;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    if (*p == '"') p++;
+    size_t n = 0;
+    while (p[n] && p[n] != ',' && p[n] != '}' && p[n] != '"' &&
+           p[n] != '\r' && p[n] != '\n' && n + 1 < out_sz) n++;
+    while (n && (p[n - 1] == ' ' || p[n - 1] == '\t')) n--;
+    if (!n) return false;
+    memcpy(out, p, n);
+    out[n] = 0;
+    return true;
+}
+
+// Re-read the knob file when its mtime changed (the attribute fetch is
+// throttled to once per ~250 ms; callers may zero g_knob_next_poll to force
+// a read - the freeze/reprocess path wants the new value on THIS frame).
+// Pushes changed values into the in-process engine; a successful read marks
+// the file as the authority (g_knob_seen), which gates the env pushes.
+static void poll_knob_file()
+{
+    static char buf[4096];
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (!g_engine) return;
+    ULONGLONG now = GetTickCount64();
+    if (now < g_knob_next_poll) return;
+    g_knob_next_poll = now + 250;
+    if (!GetFileAttributesExA(knob_file_path(), GetFileExInfoStandard, &fa))
+        return;
+    if (g_knob_seen
+        && fa.ftLastWriteTime.dwLowDateTime == g_knob_stamp.dwLowDateTime
+        && fa.ftLastWriteTime.dwHighDateTime == g_knob_stamp.dwHighDateTime)
+        return;
+    FILE *f = NULL;
+    if (fopen_s(&f, knob_file_path(), "rb") != 0 || !f) return;
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = 0;
+    g_knob_stamp = fa.ftLastWriteTime;
+    if (!g_knob_seen)
+        m12_logf("[m12_dxgi] live knob file: %s", knob_file_path());
+    g_knob_seen = 1;
+    char tok[64];
+
+    if (knob_json_value(buf, "scale", tok, sizeof(tok))) {
+        float val = (float)atof(tok);
+        float diff = val - g_cur_scale;
+        if (diff < 0.0f) diff = -diff;
+        if (val > 0.0f && diff > 1e-4f) {
+            g_cur_scale = val;
+            if (pfn_dlss5_set_scale) {
+                pfn_dlss5_set_scale(g_engine, val);
+                m12_logf("[m12_dxgi] live scale updated: %.2f (knob file)", val);
+            }
+        }
+    }
+    if (knob_json_value(buf, "gain", tok, sizeof(tok))) {
+        float val = (float)atof(tok);
+        float diff = val - g_cur_gain;
+        if (diff < 0.0f) diff = -diff;
+        if (val >= 0.0f && diff > 1e-4f) {
+            g_cur_gain = val;
+            if (pfn_dlss5_set_gain) {
+                pfn_dlss5_set_gain(g_engine, val);
+                m12_logf("[m12_dxgi] live gain updated: %.2f (knob file)", val);
+            }
+        }
+    }
+    if (knob_json_value(buf, "blend", tok, sizeof(tok))) {
+        float val = (float)atof(tok);
+        float diff = val - g_cur_blend;
+        if (diff < 0.0f) diff = -diff;
+        if (val >= 0.0f && val <= 1.0f && diff > 1e-4f) {
+            g_cur_blend = val;
+            if (pfn_dlss5_set_blend) {
+                pfn_dlss5_set_blend(g_engine, val);
+                m12_logf("[m12_dxgi] live blend updated: %.2f (knob file)", val);
+            }
+        }
+    }
+    if (knob_json_value(buf, "sharpness", tok, sizeof(tok))) {
+        float val = (float)atof(tok);
+        float diff = val - g_cur_sharpness;
+        if (diff < 0.0f) diff = -diff;
+        if (val >= 0.0f && diff > 1e-4f) {
+            g_cur_sharpness = val;
+            if (pfn_dlss5_set_sharpness) {
+                pfn_dlss5_set_sharpness(g_engine, val);
+                m12_logf("[m12_dxgi] live sharpness updated: %.2f (knob file)",
+                         val);
+            }
+        }
+    }
+    if (knob_json_value(buf, "frame_gen", tok, sizeof(tok))) {
+        int val = (tok[0] == '1' || !strcmp(tok, "true")) ? 1 : 0;
+        if (val != g_cur_framegen) {
+            g_cur_framegen = val;
+            if (pfn_dlss5_set_framegen) {
+                pfn_dlss5_set_framegen(g_engine, val);
+                m12_logf("[m12_dxgi] live framegen updated: %d (knob file)",
+                         val);
+            }
+        }
+    }
 }
 
 static void ensure_inprocess_cs()
@@ -202,6 +357,7 @@ static void ensure_inprocess()
     pfn_dlss5_set_scale = (PFN_dlss5_set_scale)GetProcAddress(hDll, "dlss5_set_scale");
     pfn_dlss5_set_gain = (PFN_dlss5_set_gain)GetProcAddress(hDll, "dlss5_set_gain");
     pfn_dlss5_set_blend = (PFN_dlss5_set_blend)GetProcAddress(hDll, "dlss5_set_blend");
+    pfn_dlss5_set_sharpness = (PFN_dlss5_set_sharpness)GetProcAddress(hDll, "dlss5_set_sharpness");
     pfn_dlss5_interpolate_frame = (PFN_dlss5_interpolate_frame)GetProcAddress(hDll, "dlss5_interpolate_frame");
     pfn_dlss5_set_framegen = (PFN_dlss5_set_framegen)GetProcAddress(hDll, "dlss5_set_framegen");
     pfn_dlss5_get_framegen = (PFN_dlss5_get_framegen)GetProcAddress(hDll, "dlss5_get_framegen");
@@ -340,6 +496,7 @@ void m12_dx12_shutdown_inprocess()
     pfn_dlss5_set_scale = NULL;
     pfn_dlss5_set_gain = NULL;
     pfn_dlss5_set_blend = NULL;
+    pfn_dlss5_set_sharpness = NULL;
     pfn_dlss5_interpolate_frame = NULL;
     pfn_dlss5_set_framegen = NULL;
     pfn_dlss5_get_framegen = NULL;
@@ -353,6 +510,13 @@ void m12_dx12_shutdown_inprocess()
     pfn_dlss5_set_color_strength = NULL;
     g_inprocess_active = 0;
     g_inprocess_attempted = 0;
+    /* A fresh engine must see the knob file again: drop the cached "current"
+     * values so the first poll after recreate pushes the file state. */
+    g_knob_seen = 0;
+    g_knob_stamp = FILETIME{};
+    g_knob_next_poll = 0;
+    g_cur_framegen = -1;
+    g_cur_gain = g_cur_blend = g_cur_scale = g_cur_sharpness = -1.0f;
     LeaveCriticalSection(&g_inproc_cs);
 }
 
@@ -592,10 +756,15 @@ bool M12Dx12Processor::sendRaw()
     ensure_inprocess();
 
     if (g_inprocess_active && pfn_dlss5_process_frame && g_engine) {
-        const char *gain_s = getenv("M12_GAIN");
-        if (!gain_s) gain_s = getenv("NR_LAYER_GAIN");
-        if (gain_s && pfn_dlss5_set_gain) {
-            pfn_dlss5_set_gain(g_engine, (float)atof(gain_s));
+        /* The knob file is the live channel; the env gain push below stays
+         * the launch baseline and is skipped once the file owns the knob. */
+        poll_knob_file();
+        if (!g_knob_seen) {
+            const char *gain_s = getenv("M12_GAIN");
+            if (!gain_s) gain_s = getenv("NR_LAYER_GAIN");
+            if (gain_s && pfn_dlss5_set_gain) {
+                pfn_dlss5_set_gain(g_engine, (float)atof(gain_s));
+            }
         }
 
         std::vector<BYTE> reply(raw_.size());
@@ -798,10 +967,12 @@ void M12Dx12Processor::onPresent()
         if (!raw_held_ || raw_.size() != (std::size_t)width_ * height_ * 4) {
             if (grabRaw(bb.Get())) {
                 raw_held_ = true;
+                g_knob_next_poll = 0;   // freeze grab: freshest knobs now
                 sendRaw();
                 m12_logf("frame frozen; knob turns reprocess the original");
             }
         } else if (reprocChanged()) {
+            g_knob_next_poll = 0;   // knob turn -> apply on THIS reprocess
             sendRaw();
         }
         if (have_processed_) blitToBackbuffer(bb.Get());
