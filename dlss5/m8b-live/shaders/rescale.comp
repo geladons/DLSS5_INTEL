@@ -2,8 +2,16 @@
 // ============================================================================
 // SPDX-License-Identifier: Apache-2.0
 // Derived from dlss-nr-on-intel (Apache-2.0); upstream notice retained.
-// M3 rescale — ONE axis of the reference's separable bilinear resize.
-// PORT of the `axis()` inner half of resize() in src/layer/nr_daemon.py:238-255
+// M3 rescale — ONE axis of the reference's separable resize.
+// Two modes by direction, chosen per pass on extentIn vs extentOut:
+//   downscale (extentIn > extentOut): box/area filter -- output texel covers
+//     r = extentIn/extentOut input texels, each source texel weighted by its
+//     edge-space interval overlap. Removes the input aliasing a two-tap
+//     bilinear produces at scale < 1 (aliased net features at <= 0.5).
+//   upscale / 1:1 (extentIn <= extentOut): the reference bilinear below,
+//     unchanged -- this includes the residual-delta upscale.
+// The bilinear half is a PORT of the `axis()` inner half of resize() in
+// src/layer/nr_daemon.py:238-255
 // (coordinates/weights formula identical; the reference's NumPy table values
 // low/high/weight are reproduced in-shader in fp32 — same arithmetic as the
 // precomputed tables consumed by nr_resize_axis, src/ref/nr_image.c:114-145,
@@ -86,6 +94,31 @@ void main() {
         baseHi = inOff + gy * inStride + uint(high);
     }
     uint outBase = gy * uint(pc.b.y) + gx;
+
+    if (extentIn > extentOut) {
+        // Downscale: box/area filter. Output texel `along` covers the input
+        // edge-space interval [lo, hi) = [along*r, along*r + r); input texel
+        // j spans [j, j+1) -- consistent with the centre formula above
+        // (texel j centre = j + 0.5). Weight = interval overlap / r, so the
+        // taps sum to 1. j clamped to [0, extentIn-1]: edge replicate.
+        float r   = extentIn / extentOut;
+        float lo  = along * r;
+        float hi  = lo + r;
+        float inv = 1.0 / r;
+        for (uint c = 0u; c < ch; ++c) {
+            float acc = 0.0;
+            for (int j = int(floor(lo)); float(j) < hi; ++j) {
+                float wj = (min(float(j) + 1.0, hi) - max(float(j), lo)) * inv;
+                int jc = int(clamp(float(j), 0.0, extentIn - 1.0));
+                uint baseJ = (pc.b.z == 0)
+                    ? inOff + uint(jc) * inStride + gx
+                    : inOff + gy * inStride + uint(jc);
+                acc += rd(srcB, baseJ * ch + c) * wj;
+            }
+            wr(dstB, outBase * ch + c, acc);
+        }
+        return;
+    }
 
     for (uint c = 0u; c < ch; ++c) {
         float loS = rd(srcB, baseLo * ch + c);

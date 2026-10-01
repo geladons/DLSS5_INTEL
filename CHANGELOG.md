@@ -35,6 +35,9 @@ user-visible milestones.
 - Manager window now opens at 1280x900 with all controls visible (measured
   widget-tree requirement was 1725x1017 vs the old 1024x760); Settings tab
   scrolls; media tab keeps its control columns at narrow widths.
+- chain: net input downscale is now box-filtered (anti-aliased); residual
+  upscale stays bilinear. Was: bilinear downscale -> aliased features at
+  scale<=0.5.
 
 ## Unreleased — Stage 25 release-blocker batch (2026-09-30)
 
