@@ -1639,3 +1639,33 @@ window mode.
   verify readbacks out\m8b_frame_{10,30,60}.bmp; ground truth of the DESKTOP =
   m1dda snapshots.
 - --wiggle-idle re-arm suspect (DEV_STATE history) - untested this session.
+
+## 2026-10-04 GTA IV flicker hunt - CONFIRMED stale-frame splices (tools detect it)
+
+Owner report: heavy flicker/shake + noise + face smear in GTA IV (x86, DXVK,
+daemon path, scale=0.33 gain=1.65 blend=1.0, frame_gen unavailable).
+DDA capture of the 800x600 windowed launcher menu (600 snapshots @50 presents)
++ Temp/gta4_flicker_v2.py ping-pong detector:
+
+- Output alternates between TWO bit-identical states: A = processed result
+  (x488), B = a foreign frame (x22) spliced as single frames between two
+  identical A frames (|A->B| = |B->A| = 12.80 mean, |A->A| = 0.00 exactly).
+- B is ~19% softer (laplacian 16.9 vs 20.9): looks like a raw/unprocessed or
+  stale frame. On a static menu it is subtle; on a moving loading screen each
+  splice = a visible pop/jerk -> matches "vse mertsает i drozhit".
+- NOT a daemon flap (only one logged timeout at startup), NOT FG cadence
+  (effective every=1), NOT the degenerate gate (<64px only).
+- Prime suspects (both UNLOGGED):
+  a) transfer() write-back return value ignored at nr_layer_win.c ~line 1935 -
+     a failed copy leaves the raw/stale swapchain image to be presented while
+     stats still count the frame as processed.
+  b) data->earlier/result/staging are DEVICE-wide while GTA IV runs a second
+     (160x28 degenerate) swapchain; shared state across chains can poison the
+     reuse path.
+- Fix direction: log+account every transfer() failure; make per-swapchain
+  earlier/result state; never present untransferred content mid-stream.
+- DirectInput launcher: ignores ALL synthetic input (SendInput abs/delta,
+  mouse_event, PostMessage WM_LBUTTON*, scan-code keys, MCP click). Win32
+  dialogs respond fine - it is the GTA IV menu being picky, not the host.
+  Capture+analysis tooling itself is proven: it caught the splice on a STATIC
+  menu where the old mean-diff verdict said "no strong flicker".
