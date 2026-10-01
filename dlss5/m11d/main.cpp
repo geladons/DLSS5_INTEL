@@ -42,6 +42,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
+#include <csignal>
+#include <exception>
 #include <string>
 #include <vector>
 
@@ -167,9 +170,41 @@ static void sehEngineShutdown(d5c::ChainEngine* eng) {
     }
 }
 
+// ------------------------------------------------------- death witnesses --
+// The daemon's historical crashes were 0xc0000409 fail-fasts (CRT abort /
+// terminate / invalid-param / pure-virtual), which bypass SEH and leave no
+// trace. These handlers stamp the failure class into the log before dying so
+// the next silent death names itself. _set_purecall_handler /
+// _set_invalid_parameter_handler are process-wide.
+static void nr_terminate_handler() {
+    std::fprintf(stderr, "[m11d] FATAL: std::terminate called (unhandled exception or noexcept violation)\n");
+    std::abort();
+}
+static void nr_purecall_handler() {
+    std::fprintf(stderr, "[m11d] FATAL: pure virtual function call\n");
+    std::abort();
+}
+static void nr_invalid_param_handler(const wchar_t* expr, const wchar_t* func,
+                                     const wchar_t* file, unsigned int line,
+                                     uintptr_t) {
+    std::fprintf(stderr, "[m11d] FATAL: invalid CRT parameter %S %S %S:%u\n",
+                 expr ? expr : L"-", func ? func : L"-", file ? file : L"-", line);
+    std::abort();
+}
+static void nr_abort_signal(int) {
+    std::fprintf(stderr, "[m11d] FATAL: abort()\n");
+}
+static void install_death_witnesses() {
+    std::set_terminate(nr_terminate_handler);
+    _set_purecall_handler(nr_purecall_handler);
+    _set_invalid_parameter_handler(nr_invalid_param_handler);
+    std::signal(SIGABRT, nr_abort_signal);
+}
+
 // ------------------------------------------------------------------ main --
 int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
+    install_death_witnesses();
     int port = 48990;
     const char* port_env = std::getenv("NR_LAYER_PORT");
     if (!port_env) port_env = std::getenv("DLSS5_PORT");
@@ -628,11 +663,14 @@ int main(int argc, char** argv) {
                 std::printf("[m11d] frame %ld %ux%u%s in %.1f ms (chain %.1f)\n",
                             frameCounter, w, h, masked ? " +mask" : "", wall, st.chainMs);
             } else {
-                std::fprintf(stderr, "[m11d] processFrame FAILED - echoing input\n");
-                writeAll(s, inBuf.data(), px * 4);
+                // Do NOT echo the input: a "successful" raw reply is presented
+                // as a processed frame by the layer - a quality strobe.
+                // Closing without a reply makes the layer treat this as a
+                // transport failure and hold the last processed frame.
+                std::fprintf(stderr, "[m11d] processFrame FAILED - closing, no reply\n");
             }
         } else {
-            writeAll(s, inBuf.data(), px * 4);   // engine down: pass through
+            std::fprintf(stderr, "[m11d] engine down - closing, no reply\n");
         }
         closesocket(s);
     }
