@@ -92,9 +92,11 @@ def _show_noactivate(hwnd):
         pass
 
 
-def _free_cursor():
+def _free_cursor(target_hwnd=None):
     """Force the OS cursor out of the game's grip: release the clip
-    rectangle, release capture, raise the show counter, set a normal arrow."""
+    rectangle, release capture, raise the show counter, set a normal arrow.
+    target_hwnd: the game window whose thread state needs freeing -
+    defaults to the foreground window when the caller does not know it."""
     try:
         _u32.ReleaseCapture()
         _u32.ClipCursor(None)
@@ -105,8 +107,9 @@ def _free_cursor():
         if arrow:
             _u32.SetCursor(arrow)
 
-        # Also release clipping, capture, and unhide cursor on the foreground game thread
-        fg = _u32.GetForegroundWindow()
+        # Also release clipping, capture, and unhide cursor on the game's
+        # thread (foreground is only a guess when target_hwnd is unknown).
+        fg = target_hwnd or _u32.GetForegroundWindow()
         if fg:
             fg_tid = _u32.GetWindowThreadProcessId(fg, None)
             cur_tid = ctypes.windll.kernel32.GetCurrentThreadId()

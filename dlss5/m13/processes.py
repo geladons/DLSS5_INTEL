@@ -73,7 +73,9 @@ _USER32 = ctypes.windll.user32
 
 
 def hwnd_for_pid(pid):
-    """First visible top-level window owned by pid (for foreground restore)."""
+    """Largest visible top-level window owned by pid (for foreground
+    restore / cursor targeting). Games like GTA IV own several top-levels
+    (launcher, social club, renderer) - the big one is the render window."""
     found = []
     WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND,
                                      wintypes.LPARAM)
@@ -87,10 +89,18 @@ def hwnd_for_pid(pid):
         _USER32.GetWindowThreadProcessId(hwnd, ctypes.byref(p))
         if p.value == pid:
             found.append(hwnd)
-            return False
         return True
     _USER32.EnumWindows(WNDENUMPROC(cb), 0)
-    return found[0] if found else None
+    if not found:
+        return None
+    best, best_area = found[0], -1
+    for hwnd in found:
+        rect = wintypes.RECT()
+        if _USER32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            area = (rect.right - rect.left) * (rect.bottom - rect.top)
+            if area > best_area:
+                best, best_area = hwnd, area
+    return best
 
 
 def stop_pid(pid, force=True):

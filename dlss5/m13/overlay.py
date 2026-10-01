@@ -46,7 +46,7 @@ import tkinter as tk
 from ctypes import wintypes
 from tkinter import ttk
 
-from .processes import suspend_pid, resume_pid, hwnd_for_pid
+from .processes import hwnd_for_pid
 from . import gamelaunch
 from .i18n import (tr, scale_preset_labels, scale_to_preset_label,
                    preset_label_to_scale)
@@ -151,13 +151,13 @@ class ControlOverlay:
             _set_noactivate(hwnd0, True)
         self._after_id = None
         self._drag = None
-        self._frozen_pid = None      # fallback freeze: suspended game pid
         self._freeze_flags = False   # primary freeze: layer/proxy flags
         self._pending_push = None    # (value, time) of an in-flight push
         self._after_id_blend = None  # debounce timer for the blend knob
         self._after_id_sharpness = None  # debounce timer for sharpness
         self._game_hwnd = None       # foreground restore target
         self._focus_mode = False     # we took the foreground this session
+        self._jail_cursor = True     # recompute per show(): fullscreen only
         self._tf_saved = None        # original takefocus per widget
         self._build()
         self.poller = HotkeyPoller(ctl.cfg.get("overlay_hotkey"), self.toggle)
@@ -547,7 +547,7 @@ class ControlOverlay:
     def _take_focus(self):
         _u32.ReleaseCapture()
         _u32.ClipCursor(None)
-        _free_cursor()
+        _free_cursor(self._game_hwnd)
         self.win.configure(cursor="arrow")
         self.win.attributes("-topmost", True)
         self.win.lift()
@@ -555,9 +555,10 @@ class ControlOverlay:
             self.win.focus_set()
             self._focus_mode = True
         self._warp_cursor()
-        self.win.after(100, _free_cursor)
-        self.win.after(350, _free_cursor)
-        self.win.after(700, _free_cursor)
+        gh = self._game_hwnd
+        self.win.after(100, lambda: _free_cursor(gh))
+        self.win.after(350, lambda: _free_cursor(gh))
+        self.win.after(700, lambda: _free_cursor(gh))
         self._cursor_keeper()
 
     def _walk_widgets(self):
@@ -588,9 +589,29 @@ class ControlOverlay:
             except tk.TclError:
                 pass
 
+    def _game_covers_screen(self):
+        """True when the game window spans ~the whole monitor. That is the
+        only case where an escaped click could minimize the game / escape
+        into an invisible desktop - so it is also the only case where the
+        cursor jail (and the open-time cursor warp) earns its keep."""
+        gh = getattr(self, "_game_hwnd", None)
+        if not gh:
+            return False
+        rect = wintypes.RECT()
+        if not _u32.GetWindowRect(gh, ctypes.byref(rect)):
+            return False
+        gw = rect.right - rect.left
+        ghh = rect.bottom - rect.top
+        return (gw >= self.win.winfo_screenwidth() * 0.9
+                and ghh >= self.win.winfo_screenheight() * 0.9)
+
     def _warp_cursor(self):
         """Park the OS cursor over the panel so the user SEES it at once
-        (many games pin the invisible cursor to the screen center)."""
+        (fullscreen games pin the invisible cursor to the screen center).
+        Windowed games show a live cursor already - warping would just
+        yank the pointer away from wherever the user left it."""
+        if not self._jail_cursor:
+            return
         try:
             self.win.update_idletasks()
             x = self.win.winfo_rootx() + self.win.winfo_width() // 2
@@ -600,12 +621,15 @@ class ControlOverlay:
             pass
 
     def _cursor_keeper(self):
-        """While the panel is open, keep the cursor free: FPS games re-apply
-        ClipCursor/ShowCursor(false) on every frame, one-shot is not enough."""
+        """While the panel is open, keep the cursor free: games re-apply
+        ClipCursor/ShowCursor(false) on every frame, one-shot is not
+        enough. The hard jail (teleport back into the panel) only runs for
+        a fullscreen game; windowed mode leaves the cursor free so the
+        user can click outside the panel."""
         if not self.win.winfo_viewable():
             return
-        _free_cursor()
-        if not self._focus_mode:
+        _free_cursor(self._game_hwnd)
+        if not self._focus_mode and self._jail_cursor:
             self._keep_cursor_over_panel()
         self.win.after(CURSOR_KEEP_MS, self._cursor_keeper)
 
@@ -658,18 +682,10 @@ class ControlOverlay:
         if hwnd is not None:
             _set_noactivate(hwnd, not focus_enabled)
 
-        self._center()
-        self.scale_var.set(scale_to_preset_label(self.ctl.cfg.get("scale")))
-        self.fg_var.set(bool(self.ctl.cfg.get("frame_gen")))
-        sh = float(self.ctl.cfg.get("sharpness") or 0.8)
-        self.sharpness_var.set(sh)
-        self.sharpness_val.config(text="%.2f" % sh)
-        snap = self.ctl.snapshot()
-        mode = snap.get("active_mode")
-        game_mode = mode in ("dx9", "dx11", "dx12", "vulkan")
-
         # Remember the game window so hide() can hand the foreground back
-        # (only used when focus mode was enabled for this session).
+        # (only used when focus mode was enabled for this session) - and so
+        # _center() can anchor the panel over a WINDOWED game instead of
+        # landing on the middle of the monitor miles away from it.
         pid = self.ctl.active_game_pid()
         if pid:
             self._game_hwnd = hwnd_for_pid(pid)
@@ -680,6 +696,19 @@ class ControlOverlay:
                     self._game_hwnd = fg
             except Exception:
                 pass
+
+        self._center()
+        # Jail the cursor only when the game owns the whole screen;
+        # windowed mode keeps the pointer free (and skips the warp).
+        self._jail_cursor = self._game_covers_screen()
+        self.scale_var.set(scale_to_preset_label(self.ctl.cfg.get("scale")))
+        self.fg_var.set(bool(self.ctl.cfg.get("frame_gen")))
+        sh = float(self.ctl.cfg.get("sharpness") or 0.8)
+        self.sharpness_var.set(sh)
+        self.sharpness_val.config(text="%.2f" % sh)
+        snap = self.ctl.snapshot()
+        mode = snap.get("active_mode")
+        game_mode = mode in ("dx9", "dx11", "dx12", "vulkan")
 
         # Frame freeze is opt-in (cfg overlay_freeze); the game keeps
         # running behind the panel either way. hide() unfreezes regardless.
@@ -694,7 +723,7 @@ class ControlOverlay:
         # Free the cursor, release capture on both threads, set arrow cursor
         _u32.ReleaseCapture()
         _u32.ClipCursor(None)
-        _free_cursor()
+        _free_cursor(self._game_hwnd)
 
         # Display the panel topmost WITHOUT taking the foreground. Tk's
         # deiconify honors WS_EX_NOACTIVATE on this host (probe: foreground
@@ -728,9 +757,10 @@ class ControlOverlay:
         self.win.after(50, _log_shown)
 
         self._warp_cursor()
-        self.win.after(100, _free_cursor)
-        self.win.after(350, _free_cursor)
-        self.win.after(700, _free_cursor)
+        gh = self._game_hwnd
+        self.win.after(100, lambda: _free_cursor(gh))
+        self.win.after(350, lambda: _free_cursor(gh))
+        self.win.after(700, lambda: _free_cursor(gh))
         self._cursor_keeper()
 
         if self.ap_var.get() and game_mode and not gamelaunch.mode_paused(mode):
@@ -745,14 +775,25 @@ class ControlOverlay:
         if self._freeze_flags:
             self._freeze_flags = False
             self.on_log("[overlay] freeze released - game continues")
-        if self._frozen_pid is not None:
-            ok, msg = resume_pid(self._frozen_pid)
-            self.on_log("[overlay] %s" % msg)
-            self._frozen_pid = None
 
     def _center(self):
+        """Center on the game window when one is known (windowed games put
+        the play area away from screen-center); fall back to the screen."""
         sw = self.win.winfo_screenwidth()
         sh = self.win.winfo_screenheight()
+        rect = wintypes.RECT()
+        gh = getattr(self, "_game_hwnd", None)
+        if gh and _u32.GetWindowRect(gh, ctypes.byref(rect)):
+            gw = rect.right - rect.left
+            ghh = rect.bottom - rect.top
+            if gw > 0 and ghh > 0:
+                x = rect.left + max(0, (gw - self.WIDTH) // 2)
+                y = rect.top + max(0, (ghh - self.HEIGHT) // 2)
+                x = min(max(0, x), max(0, sw - self.WIDTH))
+                y = min(max(0, y), max(0, sh - self.HEIGHT))
+                self.win.geometry(
+                    "%dx%d+%d+%d" % (self.WIDTH, self.HEIGHT, x, y))
+                return
         x = max(0, (sw - self.WIDTH) // 2)
         y = max(0, (sh - self.HEIGHT) // 3)
         self.win.geometry("%dx%d+%d+%d" % (self.WIDTH, self.HEIGHT, x, y))
