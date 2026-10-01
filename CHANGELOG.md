@@ -48,8 +48,20 @@ user-visible milestones.
 - GTA V "foreign DLLs" confusion: the state label now explains Enable
   backs foreign dlls up; duplicate game entries that differed only by
   path separators are merged on config load.
+- Overlay no longer activates on show even transiently (WS_EX_NOACTIVATE
+  applied before first map, SW_SHOWNOACTIVATE, popdown covered); GTA IV
+  minimize root cause was `overlay_focus:true` in config - reset it.
+- Frozen-frame live tuning on multi-swapchain games (GTA IV menu strip):
+  freeze now latches the largest real swapchain only; knob reprocesses
+  target the captured extent; reproc bumps fire after the daemon push.
 
 ### Added
+- **Media tab** — offline photo/video processing through the chain at
+  native scale: photo before/after preview with the live overlay knob
+  set, video decode->process->remux keeping fps and audio (ffmpeg,
+  downloadable from the tab), batch queue, save policies.
+- Per-game **"Window (try)"** checkbox next to Play (-windowed -window),
+  plus a free-form per-game `launch_args` field in the game meta.
 - Settings -> "Remove all traces...": undeploys our dlls from every
   configured game (restoring parked originals, including sibling dirs),
   unregisters the Vulkan layers, stops the daemon, clears temp

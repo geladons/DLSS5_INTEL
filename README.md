@@ -136,6 +136,14 @@ Full details, module map and the performance breakdown:
   in-game overlay; per-slider reset; persisted per config
 - **Photo mode** — `CTRL+ALT+G` freezes the raw frame, every knob turn
   reprocesses the *original* frame live, close to continue the game
+- **Media tab** — offline DLSS 5 for files: drop photos (PNG/BMP, JPEG
+  when ffmpeg is present) or videos; the same slider set re-renders a
+  selected photo live with before/after preview; videos are decoded
+  frame-by-frame, processed at native scale and remuxed with the original
+  fps and audio. Batch queue + "try windowed" launch checkbox per game
+- **Remove all traces** — Settings button undeploys our DLLs from every
+  configured game (restoring originals), unregisters the Vulkan layers,
+  stops the daemon and clears flags/logs
 - Hotkeys: `CTRL+ALT+G` overlay · `CTRL+ALT+X` pause/resume processing ·
   `CTRL+ALT+Q` unload the layer
 - EN/RU interface
@@ -165,6 +173,12 @@ Full details, module map and the performance breakdown:
 4. *Games* tab → pick a game card → **Enable DLSS 5** (one UAC prompt for
    Program Files games) → **Play**.
 5. In game: `CTRL+ALT+G` for the frozen-frame control panel.
+
+**Media workflow:** open a video, grab a couple of screenshots, drop them
+into the *Media* tab, tune the sliders on the photo (live before/after),
+then queue the video — it renders with those settings. Batch mode
+processes a whole folder of photos or several videos in one run. Video
+encode needs `ffmpeg` — the tab can download it on demand.
 
 **Anti-cheat warning:** do **not** enable this in online games (PUBG, CS2,
 GTA Online, anything with a kernel anti-cheat) — DLL injection can be read as

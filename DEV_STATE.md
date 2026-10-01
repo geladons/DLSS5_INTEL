@@ -77,6 +77,33 @@ enable ("foreign dll"); no way to remove program traces.
   auto-switch corruption) - set DX11; (5) GTA V Enhanced: Enable now
   backs up the foreign dxgi.dll.
 
+### Stage 26b (same evening) - overlay/freeze closure + new features
+- Overlay minimize ROOT CAUSE found: config had overlay_focus:true - the
+  opt-in steal path was doing exactly what it was designed to do
+  (SetForegroundWindow). Reset to false in the live config; hardening
+  landed anyway (3c9096e): NOACTIVATE before first map + after deiconify,
+  SW_SHOWNOACTIVATE instead of lift, popdown covered; empirical
+  SetWinEventHook probe shows zero foreground events.
+- Freeze latch fix in the same commit: multi-swapchain games (GTA IV's
+  160x28 menu strip) overwrote the held frame - now the primary (largest
+  non-degenerate) chain owns the freeze; reproc targets the captured
+  extent; resend_raw TCP reply lands in mapped/scratch (timeout can't
+  tear result).
+- reproc ordering (6ae4b54): every setter now bumps REPROC after the
+  daemon knob push (was before = resend raced the old value); set_gain
+  finally bumps on the no-daemon path too (x64 frozen frame never
+  reprocessed before).
+- Window checkbox (7501280): per-game "window" flag -> -windowed -window,
+  or free-form launch_args; honest "try" label.
+- Media tab (0edcea8): media.py/media_img.py/media_video.py/ui_media.py -
+  photos (PNG/BMP, JPEG via ffmpeg) + videos (ffmpeg decode -> per-frame
+  chain at scale 1.0 -> remux w/ audio+fps), batch queue, live sliders on
+  photo preview, save policies; ffmpeg resolves bundle->PATH->download
+  button. Real-engine smoke: init+frame 3.6 s on B50.
+- Known gaps carried: daemon has no NRCT for sharpness (frozen TCP
+  reprocess uses launch-time sharpness); ui.py _on_focus_in can pop the
+  manager over the game only when overlay_focus is on (now off).
+
 ## Stage 25: Release-Blocker Batch (2026-09-30, DONE - live GTA IV/RDR2 sign-off owed by the owner)
 Plan: `.kilo/plans/1790747135611-release-blocker-launch-quality-overlay.md` (Tasks A-G, one commit per task).
 - Task A DONE - deterministic noise seed (defect 4, shimmer on static content). `dlss5/chain/engine.cpp` pins `p.b[0] = 1` in both feature paths (native and scaled); the Stage-21 `frameIndex & 0x7fffffff` seed redrew the vendor noise every present. `frameIndex` is still used for profiling and frame-1 debug dumps; `chain_c_api.h` doc updated.
