@@ -30,3 +30,8 @@ dlss5/m12-dxgi/evidence/
 dlss5/m13/_ui_shot.png
 *.spv
 *.spvasm
+
+# agent/session state (local only)
+.kilo/
+_relicense/
+nul

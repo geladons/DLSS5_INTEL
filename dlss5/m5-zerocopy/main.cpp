@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // ============================================================================
 // M5-ZEROCOPY live overlay — DLSS5_INTEL
 //

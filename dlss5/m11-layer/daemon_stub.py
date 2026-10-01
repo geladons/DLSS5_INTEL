@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # M11 dummy daemon: TCP roundtrip stub for nr_layer_win.
 # Reads header(16B: magic,w,h,fmt) + w*h*4 pixels, boosts green, replies.
 # Proves the layer's write-back path before the real chain daemon exists.

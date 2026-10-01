@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // 32-bit Vulkan instance probe: loads vulkan-1.dll directly and creates a
 // bare instance, so we can see (via VK_LOADER_DEBUG=all) whether implicit
 // layers activate in a non-DXVK 32-bit process. Links nothing: everything

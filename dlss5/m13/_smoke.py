@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Part 2 smoke test: config roundtrip, deployer to a temp dir, registry
 # read-only checks, game-launch flag channels, process probes. No UI, no
 # game starts. Run: python _smoke.py

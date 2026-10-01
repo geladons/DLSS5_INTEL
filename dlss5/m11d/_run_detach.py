@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Detached launcher for m11d (bench/selftest). Foreground GPU hangs wedge the
 # tool, so the child runs in its own process group with stdout to a log file
 # and we poll the log. Decisive signal is the expected tail line in the log

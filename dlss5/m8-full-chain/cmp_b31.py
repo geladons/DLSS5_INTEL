@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 #!/usr/bin/env python3
 """cmp_b31.py - stage-by-stage golden vs GPU dbg31_* dump compare for block 31."""
 from pathlib import Path

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 #!/usr/bin/env python3
 """diff two dbg_b0raw.bin dumps to see which region changed."""
 import sys

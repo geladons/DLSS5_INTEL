@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # UI smoke: build the whole main window, run poll/drain cycles, exercise the
 # overlay + gain push path against the LIVE daemon (actions are async via the
 # worker thread now, so we pump the loop and then verify via NRCT directly).

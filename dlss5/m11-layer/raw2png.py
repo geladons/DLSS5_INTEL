@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 #!/usr/bin/env python
 """Convert a layer raw capture (16-byte header + BGRA) to PNG.
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // ============================================================================
 // tools/test_int8_loader.cpp — Verification test for INT8 weights loader
 // ============================================================================

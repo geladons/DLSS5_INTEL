@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // ============================================================================
 // M7 graph prototype for Intel Arc Pro B50  --  DLSS5_INTEL
 //

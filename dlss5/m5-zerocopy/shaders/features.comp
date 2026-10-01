@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #version 460
 // ============================================================================
 // M3 feature assembly — the 16-channel network input volume, one pixel/thread.

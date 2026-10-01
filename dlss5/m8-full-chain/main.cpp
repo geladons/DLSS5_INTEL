@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // ============================================================================
 // M8 full-chain prototype for Intel Arc Pro B50  --  DLSS5_INTEL  (M8a)
 //

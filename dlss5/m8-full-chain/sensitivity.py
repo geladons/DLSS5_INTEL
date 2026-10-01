@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 #!/usr/bin/env python3
 """sensitivity.py - how much does the global family amplify GEMM ordering noise?
 Golden-fp32 vs golden-with-float64-accumulated GEMMs: per-block pub bitmatch."""

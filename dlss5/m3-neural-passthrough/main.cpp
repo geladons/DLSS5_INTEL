@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // ============================================================================
 // M3 neural pass slice — DLSS5_INTEL
 //

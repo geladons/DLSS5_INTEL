@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 #!/usr/bin/env python3
 """cmp_b3.py — per-stage golden-vs-GPU compare for a stem window block.
 

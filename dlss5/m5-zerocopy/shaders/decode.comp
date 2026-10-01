@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #version 460
 // ============================================================================
 // M3 decode — B8G8R8A8 storage image -> float RGB in [0,1], packed 3 floats/px.

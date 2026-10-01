@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // ============================================================================
 // M4-SIMPLE live overlay — DLSS5_INTEL
 //

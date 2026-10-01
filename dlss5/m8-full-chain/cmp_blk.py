@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 #!/usr/bin/env python3
 """cmp_blk.py — correct per-stage compare for stem block N.
 

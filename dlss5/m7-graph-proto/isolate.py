@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 #!/usr/bin/env python3
 """isolate.py — M7b run3: feed GPU-dumped proj through golden's cosine_publish,
 compare bitwise vs GPU-dumped q16/k16/v16 in BOTH memory orders. Splits blame:

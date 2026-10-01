@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Control-channel validation for m11d (M13 part 1).
 # Starts nothing itself - expects a fresh m11d on 127.0.0.1:48990.
 # Checks: STATUS/SETGAIN roundtrip, and that a gain change takes effect on

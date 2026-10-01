@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Detached GTA IV launcher with the m11 layer capture env set.
 # Usage: python _gta4_start.py <mode>   mode: live1 | live4 | uimask
 from pathlib import Path

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #version 460
 // ============================================================================
 // M3 letterbox reduction — per-row / per-column max over the float RGB frame.

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 import numpy as np
 q = np.zeros((32, 288, 32))
 s = np.matmul(q, q.swapaxes(-1, -2))

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Generate icon.ico: the DLSS5 diamond logo (accent on deep-navy).
 import os
 from PIL import Image, ImageDraw

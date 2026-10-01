@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 #!/usr/bin/env python3
 """quant2.py — verify >1-e4m3-step flips are confined to the subnormal region."""
 from pathlib import Path

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Minimal 32-bit D3D9Ex present/reset-loop test app for the DXVK + m11-layer
 // path. Built x86; with DXVK's d3d9.dll next to the exe it becomes a 32-bit
 // Vulkan process, so the 32-bit implicit layer hands each present to m11d.

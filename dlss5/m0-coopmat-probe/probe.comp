@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // M0 cooperative-matrix probe shader (GL_KHR_cooperative_matrix).
 // Shape constants M/N/K and SUBGROUP_SIZE are injected by the build via
 // glslangValidator -D flags to match the runtime-enumerated device config.

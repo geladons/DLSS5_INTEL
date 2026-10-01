@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Screenshot driver (validation only, not shipped): real ManagerUI with the
 # overlay visible, holds still ~10 s while an external process grabs the
 # screen, then writes a marker and exits.

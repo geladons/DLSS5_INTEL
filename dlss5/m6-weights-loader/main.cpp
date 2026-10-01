@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // ============================================================================
 // M6a safetensors weights loader for Intel Arc Pro B50  --  DLSS5_INTEL
 //

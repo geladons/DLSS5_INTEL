@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #version 460
 // ============================================================================
 // M3 encode — float RGB -> B8G8R8A8 bytes, alpha preserved from the raw frame.

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 #!/usr/bin/env python3
 from pathlib import Path
 _REPO = Path(__file__).resolve().parents[2]

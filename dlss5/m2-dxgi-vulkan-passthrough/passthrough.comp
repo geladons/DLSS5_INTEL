@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #version 460
 #extension GL_KHR_cooperative_matrix : enable
 // M2 passthrough+invert: out.rgb = 255 - in.rgb (alpha preserved).

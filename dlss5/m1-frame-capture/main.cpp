@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // M1 frame capture — DXGI Desktop Duplication (DDA) proof on Intel Arc Pro B50.
 //
 // C++17, raw DXGI/D3D11, deps: Windows SDK only (dxgi.lib, d3d11.lib).

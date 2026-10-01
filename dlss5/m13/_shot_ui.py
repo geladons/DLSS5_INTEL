@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # One-shot UI screenshot: main window after the scan, saved to work/.
 import os
 import sys

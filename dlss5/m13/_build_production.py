@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # ============================================================================
 # m13._build_production - assemble a self-contained production bundle the
 # owner can run from anywhere (default: %USERPROFILE%\Desktop\production).

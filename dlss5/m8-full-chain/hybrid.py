@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 #!/usr/bin/env python3
 """hybrid.py - golden decoder fed with the GPU's ACTUAL b38 dump.
 If decoder/head then match the GPU dumps ~100%, all their divergence is

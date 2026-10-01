@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # ============================================================================
 # m13 - DLSS 5 Manager (M13 productization): stdlib-only tkinter manager for
 # the validated injection paths (m11d daemon + m11 Vulkan layer, m12-dxgi

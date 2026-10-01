@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // ============================================================================
 // M0 cooperative-matrix (XMX) probe for Intel Arc Pro B50  --  DLSS5_INTEL
 //

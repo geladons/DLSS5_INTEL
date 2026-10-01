@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Validation vs torch goldens per HANDOFF_M10 (internal numpy, NOT cmp_live.py).
 # Usage: python _validate.py <out_dir_with_live_dumps>
 from pathlib import Path

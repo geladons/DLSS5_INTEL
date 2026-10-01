@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #version 450
 // ============================================================================
 // M8b featpack — bridge the live features stage into the DLSSNR chain input.

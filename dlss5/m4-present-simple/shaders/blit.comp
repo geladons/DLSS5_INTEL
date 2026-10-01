@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // M4 final blit: composite (imgFinal, B8G8R8A8) -> swapchain image.
 // Byte-identical passthrough; both images are 8-bit UNORM RGBA-family with
 // matching channel order (BGRA surface format chosen at swapchain creation),

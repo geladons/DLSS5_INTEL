@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 #!/usr/bin/env python3
 """golden.py — M7b NumPy golden for global block 31 + GPU dump comparison.
 

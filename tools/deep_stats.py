@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 import csv, statistics
 
 for res, path in [('960x576', 'dlss5/m11d/bench_busy_idle_960.csv'), ('1080p', 'dlss5/m11d/bench_busy_idle_1080p.csv')]:

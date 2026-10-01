@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // ============================================================================
 // M2 D3D11(DDA) -> Vulkan external-memory interop passthrough  --  DLSS5_INTEL
 //

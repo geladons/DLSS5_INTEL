@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 #!/usr/bin/env python3
 """quant.py — M7b run3: honest outlier forensics after the layout fix."""
 from pathlib import Path
