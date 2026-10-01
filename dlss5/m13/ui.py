@@ -39,6 +39,16 @@ from .ui_games import GamesTab
 
 POLL_MS = 500
 
+# Window geometry: every tab's control rows must fit INSIDE the startup
+# width (pack clips any widget that does not fit - that was the "controls
+# are invisible until near-fullscreen" bug). Values are verified against
+# winfo_reqwidth() dumps of the live widget tree.
+WIN_W, WIN_H = 1280, 900
+MIN_W, MIN_H = 980, 720
+# Cap for paragraph-style labels so they wrap instead of forcing the
+# window wider (was wraplength=900, which alone nearly ate the window).
+WRAP_PX = 820
+
 BG = "#0d1017"
 PANEL = "#161a23"
 PANEL2 = "#1f2430"
@@ -76,8 +86,8 @@ class ManagerUI:
         except tk.TclError:
             pass
         self.root.title(tr("app_title"))
-        self.root.geometry("1024x760")
-        self.root.minsize(1024, 760)
+        self.root.geometry("%dx%d" % (WIN_W, WIN_H))
+        self.root.minsize(MIN_W, MIN_H)
         self.root.configure(bg=BG)
         self.root.bind("<FocusIn>", self._on_focus_in)
         self.logq = queue.Queue()
@@ -271,7 +281,7 @@ class ManagerUI:
         tk.Label(t, text="Direct DDA Vulkan Overlay (m8blive.exe) - Direct GPU Pipeline (No TCP Daemon)",
                  bg=BG, fg=ACCENT, font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(0, 4))
         ttk.Label(t, text=tr("screen_note"),
-                  style="Muted.TLabel", wraplength=900,
+                  style="Muted.TLabel", wraplength=WRAP_PX,
                   justify="left").pack(anchor="w")
         row = ttk.Frame(t)
         row.pack(anchor="w", pady=8)
@@ -297,7 +307,7 @@ class ManagerUI:
         self.screen_info.pack(anchor="w", pady=6)
         self.screen_tail = ttk.Label(
             t, text=tr("screen_warmup"),
-            style="Muted.TLabel", wraplength=900, justify="left")
+            style="Muted.TLabel", wraplength=WRAP_PX, justify="left")
         self.screen_tail.pack(anchor="w")
 
     def _screen_start(self):
@@ -315,21 +325,61 @@ class ManagerUI:
         try:
             from .ui_media import MediaTab
             self.media_tab = MediaTab(self, nb)
+            self._media_pack_priority()
         except Exception as e:
             self.media_tab = None
             self.log("mgr", "media tab unavailable: %s" % e)
 
+    def _media_pack_priority(self):
+        """The media tab is 3 columns (queue | previews | knobs) summing
+        wider than the window. pack() clips LATER slaves first, and the
+        knob column packs last - so on a narrower window it vanished
+        entirely ("controls invisible"). Re-pack the flexible preview
+        column last: it absorbs the deficit (its canvases shrink) while
+        the fixed control columns stay visible. No-op if the media
+        layout ever changes shape."""
+        try:
+            main = self.media_tab.frame.winfo_children()[0]
+            center = main.winfo_children()[1]
+            info = center.pack_info()
+            # only touch the flexible middle column (fill=both, expand)
+            if str(info.get("side")) != "left" \
+                    or str(info.get("fill")) != "both" \
+                    or not int(info.get("expand") or 0):
+                return
+            center.pack_forget()
+            center.pack(**info)      # same opts, now last in pack order
+        except (tk.TclError, IndexError, AttributeError, TypeError,
+                ValueError):
+            pass
+
     # ------------------------------------------------------- Settings tab --
     def _tab_settings(self, nb):
-        t = ttk.Frame(nb, padding=10)
-        nb.add(t, text=tr("tab_settings"))
+        """Settings is the TALL tab (the Phase30 panel alone is ~270 px) -
+        it lives inside a scrollable canvas so the window does not have to
+        grow to ~1020 px high just to show its bottom rows."""
+        outer = ttk.Frame(nb)
+        nb.add(outer, text=tr("tab_settings"))
+        canvas = tk.Canvas(outer, bg=BG, highlightthickness=0, height=420)
+        vsb = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        t = ttk.Frame(canvas, padding=10)
+        inner = canvas.create_window((0, 0), window=t, anchor="nw")
+        t.bind("<Configure>", lambda _e: canvas.configure(
+            scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(
+            inner, width=e.width))
+        canvas.bind_all("<MouseWheel>", self._settings_wheel)
+        self.settings_canvas = canvas
         row = ttk.Frame(t)
         row.pack(anchor="w", pady=4, fill="x")
         ttk.Label(row, text=tr("weights_label")).pack(side="left")
         self.weights_var = tk.StringVar(
             value=self.ctl.cfg.get("weights_path") or "")
         ttk.Entry(row, textvariable=self.weights_var,
-                  width=64).pack(side="left", padx=6)
+                  width=44).pack(side="left", padx=6)
 
         def browse_weights():
             p = filedialog.askopenfilename(
@@ -384,19 +434,24 @@ class ManagerUI:
 
         eng = ttk.LabelFrame(t, text=tr("scale"), padding=8)
         eng.pack(fill="x", pady=6)
-        ttk.Label(eng, text=tr("scale")).pack(side="left", padx=(0, 6))
+        eng_row = ttk.Frame(eng)
+        eng_row.pack(fill="x")
+        ttk.Label(eng_row, text=tr("scale")).pack(side="left", padx=(0, 6))
         self.scale_cb = ttk.Combobox(
-            eng, textvariable=self.scale_var, width=24, state="readonly",
+            eng_row, textvariable=self.scale_var, width=24, state="readonly",
             values=scale_preset_labels())
         self.scale_cb.pack(side="left", padx=(0, 14))
         self.scale_cb.bind("<<ComboboxSelected>>", self._scale_selected)
         self.framegen_chk = ttk.Checkbutton(
-            eng, text=tr("framegen"), variable=self.framegen_var,
+            eng_row, text=tr("framegen"), variable=self.framegen_var,
             command=self._framegen_toggled)
-        self.framegen_chk.pack(side="left", padx=(0, 14))
+        self.framegen_chk.pack(side="left")
+        # the explanation is a paragraph - it gets its own wrapped line;
+        # packed bare side="right" it forced the whole tab ~800 px wider
         self.fg_hint = ttk.Label(eng, text=tr("framegen_hint"),
-                                 style="Muted.TLabel")
-        self.fg_hint.pack(side="right")
+                                 style="Muted.TLabel", wraplength=WRAP_PX,
+                                 justify="left")
+        self.fg_hint.pack(anchor="w", pady=(4, 0))
 
         opts = ttk.Frame(t)
         opts.pack(anchor="w", pady=6)
@@ -436,7 +491,8 @@ class ManagerUI:
                              self.ctl.cfg.get("overlay_hotkey")),
                   style="Muted.TLabel").pack(anchor="w", pady=(10, 2))
         ttk.Label(t, text=tr("config_note", self.ctl.cfg.path),
-                  style="Muted.TLabel").pack(anchor="w")
+                  style="Muted.TLabel", wraplength=WRAP_PX,
+                  justify="left").pack(anchor="w")
 
     # ----------------------------------------------------------- actions ---
     def _on_action_result(self, ok, msg):
@@ -616,13 +672,23 @@ class ManagerUI:
     def log(self, tag, msg):
         self.logq.put((tag, msg))
 
+    def _settings_wheel(self, e):
+        """Mouse wheel over the scrollable Settings tab (same pattern as
+        GamesTab._wheel - guarded so it only scrolls while shown)."""
+        try:
+            if self.settings_canvas.winfo_viewable():
+                self.settings_canvas.yview_scroll(
+                    int(-1 * (e.delta / 120)), "units")
+        except tk.TclError:
+            pass
+
     def _on_focus_in(self, event=None):
         """When returning to desktop from an exclusive fullscreen game (e.g. 800x600),
-        Windows may shrink the UI window. Restore 1024x760 immediately."""
+        Windows may shrink the UI window. Restore the startup size immediately."""
         if event is not None and event.widget != self.root:
             return
-        if self.root.winfo_width() < 1000 or self.root.winfo_height() < 740:
-            self.root.geometry("1024x760")
+        if self.root.winfo_width() < MIN_W or self.root.winfo_height() < MIN_H:
+            self.root.geometry("%dx%d" % (WIN_W, WIN_H))
             self.root.update_idletasks()
             if hasattr(self, "games_tab") and self.games_tab:
                 self.games_tab.cards_fill()

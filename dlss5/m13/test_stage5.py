@@ -505,10 +505,11 @@ dummy_ui = DummyUI()
 dummy_ui.root.winfo_width.return_value = 800
 dummy_ui.root.winfo_height.return_value = 600
 dummy_ui._on_focus_in()
-dummy_ui.root.geometry.assert_called_with("1024x760")
+dummy_ui.root.geometry.assert_called_with("%dx%d" % (ui.WIN_W, ui.WIN_H))
 dummy_ui.root.update_idletasks.assert_called_once()
 dummy_ui.games_tab.cards_fill.assert_called_once()
-print("  ui._on_focus_in detects shrunken window and restores 1024x760 layout [PASS]")
+print("  ui._on_focus_in detects shrunken window and restores %dx%d layout [PASS]"
+      % (ui.WIN_W, ui.WIN_H))
 
 # 7.4 Test Screen Mode strings and clarity
 from m13.i18n import tr

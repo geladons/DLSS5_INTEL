@@ -186,7 +186,7 @@ class GamesTab:
                    command=self._remove).pack(side="left")
         ttk.Label(t, text=tr("anticheat_warn"),
                   style="Muted.TLabel", foreground=AMBER,
-                  wraplength=860).pack(anchor="w", pady=(6, 0))
+                  wraplength=800).pack(anchor="w", pady=(6, 0))
 
     def _wheel(self, e):
         try:
