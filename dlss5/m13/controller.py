@@ -327,6 +327,22 @@ class M13Controller:
             self.worker.stop()
         if self.supervisor:
             self.supervisor.stop()
+        self._daemon_shutdown()
+
+    def _daemon_shutdown(self):
+        """Reap the x86 daemon on manager exit. It is only kept when an x86
+        game is still running: killing it mid-game freezes that game's
+        picture on the held frame, and the monitor that normally reaps it
+        stops with the manager, so without this the daemon (VRAM arena +
+        ~500 MB) leaks until reboot."""
+        if not self.daemon.running:
+            return
+        for exe, meta in (self.cfg.get("games") or {}).items():
+            if meta.get("arch") == "x86" and find_pid(os.path.basename(exe)):
+                print("[controller] x86 game still running; daemon left up",
+                      flush=True)
+                return
+        self._ensure_daemon_stopped()
 
     def _worker_log(self, msg):
         """Forward a mid-action note to the UI log when a worker exists."""

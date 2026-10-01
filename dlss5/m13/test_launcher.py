@@ -378,5 +378,45 @@ class TestWorkerSupervisor(unittest.TestCase):
         new_worker.join(10)
 
 
+class TestDaemonShutdown(LauncherBase):
+    """shutdown() must reap the m11d daemon when no x86 game consumes it
+    (the manager-close leak), but leave it alone while an x86 game runs -
+    killing it mid-game freezes that game's picture on the held frame."""
+
+    def _fake_daemon(self):
+        class _D:
+            def __init__(self):
+                self.pid = 4242
+                self.stopped = 0
+            @property
+            def running(self):
+                return self.stopped == 0
+            def stop(self):
+                self.stopped += 1
+                return True, "stopped"
+        return _D()
+
+    def test_shutdown_stops_idle_daemon(self):
+        self.ctl.daemon = self._fake_daemon()
+        exe = self._mk("gtaiv.exe", mode="dx9", arch="x86")
+        with patch("m13.controller.find_pid", return_value=None):
+            self.ctl._daemon_shutdown()
+        self.assertEqual(self.ctl.daemon.stopped, 1)
+
+    def test_shutdown_keeps_daemon_while_x86_game_runs(self):
+        self.ctl.daemon = self._fake_daemon()
+        exe = self._mk("gtaiv.exe", mode="dx9", arch="x86")
+        with patch("m13.controller.find_pid", return_value=777):
+            self.ctl._daemon_shutdown()
+        self.assertEqual(self.ctl.daemon.stopped, 0)
+
+    def test_shutdown_no_daemon_is_noop(self):
+        d = self._fake_daemon()
+        d.stop()                     # already dead
+        self.ctl.daemon = d
+        self.ctl._daemon_shutdown()  # must not raise or double-stop
+        self.assertEqual(d.stopped, 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
