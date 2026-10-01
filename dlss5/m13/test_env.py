@@ -136,7 +136,7 @@ with tempfile.TemporaryDirectory() as td:
     exe = _w(os.path.join(td, "game.exe"), b"e")
     captured = {}
 
-    def fake_launch(exe_path, env_extra=None):
+    def fake_launch(exe_path, env_extra=None, args=None):
         captured["env"] = dict(env_extra or {})
         return True, "launched pid 1"
 

@@ -424,6 +424,12 @@ class M13Controller:
                         float(self.cfg.get("scale") or 0.50),
                         bool(self.cfg.get("frame_gen")))
             return True, "gain -> %.3f (live, screen mode)" % gain
+        if gamelaunch.freeze_active():
+            # No daemon to race: the knob file/env are already written.
+            # Covers the x64 in-process frozen frame (was never bumped).
+            gamelaunch.reproc_bump()
+            return True, ("gain -> %.3f (frozen frame reprocessing)"
+                          % gain)
         return False, "daemon down - gain saved for next start"
 
     def set_blend(self, blend):
@@ -434,14 +440,14 @@ class M13Controller:
         os.environ["DLSS5_BLEND"] = b_val
         os.environ["NR_LAYER_BLEND"] = b_val
         os.environ["M12_BLEND"] = b_val
-        if gamelaunch.freeze_active():
-            gamelaunch.reproc_bump()
         if self.daemon.running:
             try:
                 self.client.set_blend(blend)
             except DaemonError as e:
                 return False, "blend saved but daemon push failed: %s" % e
             if gamelaunch.freeze_active():
+                # AFTER the NRCT push: a resend must see the new value.
+                gamelaunch.reproc_bump()
                 return True, ("blend -> %.3f (live; frozen frame "
                               "reprocessing)" % blend)
             return True, "blend -> %.3f (live)" % blend
@@ -452,6 +458,7 @@ class M13Controller:
                         bool(self.cfg.get("frame_gen")))
             return True, "blend -> %.3f (live, screen mode)" % blend
         if gamelaunch.freeze_active():
+            gamelaunch.reproc_bump()
             return True, ("blend -> %.3f (live; frozen frame "
                           "reprocessing)" % blend)
         return True, "blend -> %.3f" % blend
@@ -466,13 +473,16 @@ class M13Controller:
         os.environ["DLSS5_SCALE"] = s_val
         os.environ["NR_LAYER_SCALE"] = s_val
         os.environ["M12_SCALE"] = s_val
-        if gamelaunch.freeze_active():
-            gamelaunch.reproc_bump()
         if self.daemon.running:
             try:
                 self.client.set_scale(scale)
             except DaemonError as e:
                 return False, "scale saved but daemon push failed: %s" % e
+            if gamelaunch.freeze_active():
+                # AFTER the NRCT push: a resend must see the new value.
+                gamelaunch.reproc_bump()
+                return True, ("scale -> %.2f (live; frozen frame "
+                              "reprocessing)" % scale)
             return True, "scale -> %.2f (live)" % scale
         if self.screen.running:
             from .screenmode import write_knobs
@@ -481,6 +491,10 @@ class M13Controller:
                         scale,
                         bool(self.cfg.get("frame_gen")))
             return True, "scale -> %.2f (live, screen mode)" % scale
+        if gamelaunch.freeze_active():
+            gamelaunch.reproc_bump()
+            return True, ("scale -> %.2f (frozen frame reprocessing)"
+                          % scale)
         return True, "scale -> %.2f" % scale
 
     def set_framegen(self, enable):
@@ -488,8 +502,6 @@ class M13Controller:
         enable = bool(enable)
         self.cfg.set("frame_gen", enable)
         os.environ["DLSS5_FRAMEGEN"] = "1" if enable else "0"
-        if gamelaunch.freeze_active():
-            gamelaunch.reproc_bump()
         if self.daemon.running:
             try:
                 self.client.set_framegen(enable)
@@ -502,6 +514,8 @@ class M13Controller:
                         float(self.cfg.get("scale") or 0.50),
                         enable)
             return True, "framegen -> %s (live, screen mode)" % ("ON" if enable else "OFF")
+        if gamelaunch.freeze_active():
+            gamelaunch.reproc_bump()
         return True, "framegen -> %s" % ("ON" if enable else "OFF")
 
     def set_sharpness(self, val):
@@ -524,13 +538,14 @@ class M13Controller:
         p30 = self.cfg.get_phase30(exe)
         os.environ.update(phase30_env_dict(p30))
         write_phase30_knobs(p30)
-        if gamelaunch.freeze_active():
-            gamelaunch.reproc_bump()
         if self.daemon.running:
             try:
                 self.client.set_local_tone(val)
             except Exception:
                 pass
+        if gamelaunch.freeze_active():
+            # AFTER the NRCT push: a resend must see the new value.
+            gamelaunch.reproc_bump()
         return True, "local_tone -> %.2f" % val
 
     def set_local_structure(self, val, exe=None):
@@ -539,13 +554,14 @@ class M13Controller:
         p30 = self.cfg.get_phase30(exe)
         os.environ.update(phase30_env_dict(p30))
         write_phase30_knobs(p30)
-        if gamelaunch.freeze_active():
-            gamelaunch.reproc_bump()
         if self.daemon.running:
             try:
                 self.client.set_local_structure(val)
             except Exception:
                 pass
+        if gamelaunch.freeze_active():
+            # AFTER the NRCT push: a resend must see the new value.
+            gamelaunch.reproc_bump()
         return True, "local_structure -> %.2f" % val
 
     def set_skin_structure(self, val, exe=None):
@@ -554,13 +570,14 @@ class M13Controller:
         p30 = self.cfg.get_phase30(exe)
         os.environ.update(phase30_env_dict(p30))
         write_phase30_knobs(p30)
-        if gamelaunch.freeze_active():
-            gamelaunch.reproc_bump()
         if self.daemon.running:
             try:
                 self.client.set_skin_structure(val)
             except Exception:
                 pass
+        if gamelaunch.freeze_active():
+            # AFTER the NRCT push: a resend must see the new value.
+            gamelaunch.reproc_bump()
         return True, "skin_structure -> %.2f" % val
 
     def set_auto_mask(self, val, exe=None):
@@ -569,13 +586,14 @@ class M13Controller:
         p30 = self.cfg.get_phase30(exe)
         os.environ.update(phase30_env_dict(p30))
         write_phase30_knobs(p30)
-        if gamelaunch.freeze_active():
-            gamelaunch.reproc_bump()
         if self.daemon.running:
             try:
                 self.client.set_auto_mask(val)
             except Exception:
                 pass
+        if gamelaunch.freeze_active():
+            # AFTER the NRCT push: a resend must see the new value.
+            gamelaunch.reproc_bump()
         return True, "auto_mask -> %s" % ("ON" if val else "OFF")
 
     def set_style_index(self, val, exe=None):
@@ -585,13 +603,14 @@ class M13Controller:
         p30 = self.cfg.get_phase30(exe)
         os.environ.update(phase30_env_dict(p30))
         write_phase30_knobs(p30)
-        if gamelaunch.freeze_active():
-            gamelaunch.reproc_bump()
         if self.daemon.running:
             try:
                 self.client.set_style_index(val)
             except Exception:
                 pass
+        if gamelaunch.freeze_active():
+            # AFTER the NRCT push: a resend must see the new value.
+            gamelaunch.reproc_bump()
         return True, "style_index -> %d" % val
 
     def set_color_strength(self, val, exe=None):
@@ -600,13 +619,14 @@ class M13Controller:
         p30 = self.cfg.get_phase30(exe)
         os.environ.update(phase30_env_dict(p30))
         write_phase30_knobs(p30)
-        if gamelaunch.freeze_active():
-            gamelaunch.reproc_bump()
         if self.daemon.running:
             try:
                 self.client.set_color_strength(val)
             except Exception:
                 pass
+        if gamelaunch.freeze_active():
+            # AFTER the NRCT push: a resend must see the new value.
+            gamelaunch.reproc_bump()
         return True, "color_strength -> %.2f" % val
 
     def set_phase30(self, params, exe=None):
@@ -614,8 +634,6 @@ class M13Controller:
         p30 = self.cfg.get_phase30(exe)
         os.environ.update(phase30_env_dict(p30))
         write_phase30_knobs(p30)
-        if gamelaunch.freeze_active():
-            gamelaunch.reproc_bump()
         if self.daemon.running:
             for k, v in params.items():
                 try:
@@ -635,6 +653,9 @@ class M13Controller:
                         self.client.set_color_strength(float(v))
                 except Exception:
                     pass
+        if gamelaunch.freeze_active():
+            # AFTER the NRCT push: a resend must see the new value.
+            gamelaunch.reproc_bump()
         return True, "Phase30 parameters updated"
 
     def reset_phase30(self, exe=None):
@@ -642,13 +663,14 @@ class M13Controller:
         p30 = self.cfg.get_phase30(exe)
         os.environ.update(phase30_env_dict(p30))
         write_phase30_knobs(p30)
-        if gamelaunch.freeze_active():
-            gamelaunch.reproc_bump()
         if self.daemon.running:
             try:
                 self.client.set_gain(p30["intensity"])
             except Exception:
                 pass
+        if gamelaunch.freeze_active():
+            # AFTER the NRCT push: a resend must see the new value.
+            gamelaunch.reproc_bump()
         return True, "Phase30 parameters reset to defaults"
 
     # ---------------------------------------------------------- screen mode --
