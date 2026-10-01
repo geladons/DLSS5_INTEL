@@ -65,6 +65,7 @@
 #include <stdint.h>
 #include <io.h>
 #include <vulkan/vulkan.h>
+#include <vulkan/vulkan_win32.h>
 #include <vulkan/vk_layer.h>
 #include "chain_c_api.h"
 #include "nr_framegen.h"
@@ -77,6 +78,55 @@
 #define NR_DEFAULT_PORT 48990
 
 static int sync_semaphores;
+
+/* -------------------------------------------------------------------------
+ * GDI repaint guard.
+ *
+ * A Windows repaint message (WM_PAINT / WM_ERASEBKGND - fired by input
+ * events, focus changes, InvalidateRect, DWM housekeeping) can make the
+ * render window flash a stale non-Vulkan surface. Observed live on GTA IV:
+ * every click or posted WM_PAINT splices exactly ONE raw native frame into
+ * the processed stream. In-game input means continuous repaints, which is
+ * the reported "everything flickers when moving the mouse". That traffic
+ * never crosses vkQueuePresentKHR, so the only interception point is the
+ * window proc of the surface's HWND: drain the message (BeginPaint/
+ * EndPaint validates the region) and let the composited swapchain frame
+ * stay authoritative. Kill switch: NR_LAYER_GDI_GUARD=0.
+ * ---------------------------------------------------------------------- */
+static const WCHAR NR_GUARD_PROP[] = L"NR_OLD_WNDPROC";
+
+static LRESULT CALLBACK nr_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (msg == WM_ERASEBKGND)
+        return 1;
+    if (msg == WM_PAINT) {
+        PAINTSTRUCT ps;
+        BeginPaint(hwnd, &ps);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    WNDPROC prev = (WNDPROC)GetPropW(hwnd, NR_GUARD_PROP);
+    return prev ? CallWindowProcW(prev, hwnd, msg, wp, lp)
+                : DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static void nr_log(const char *fmt, ...);   /* fwd: defined below */
+
+static void nr_guard_window(HWND hwnd)
+{
+    static int guard_enabled = -1;
+    if (guard_enabled < 0) {
+        const char *e = getenv("NR_LAYER_GDI_GUARD");
+        guard_enabled = !(e && !strcmp(e, "0"));
+    }
+    if (!guard_enabled || !hwnd || GetPropW(hwnd, NR_GUARD_PROP)) return;
+    WNDPROC prev = (WNDPROC)SetWindowLongPtrW(hwnd, GWLP_WNDPROC,
+                                            (LONG_PTR)nr_wnd_proc);
+    if (prev) {
+        SetPropW(hwnd, NR_GUARD_PROP, (HANDLE)prev);
+        nr_log("[nr_layer] GDI repaint guard armed on hwnd %p", (void *)hwnd);
+    }
+}
 
 typedef struct device_data {
     VkDevice device;
@@ -143,6 +193,7 @@ typedef struct queue_data {
     VkDevice device;
     uint32_t family;
     int capture_ok;
+    int native_logged;
 } queue_data;
 
 #define MAX_QUEUES 16
@@ -1019,6 +1070,19 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
     return r;
 }
 
+VKAPI_ATTR VkResult VKAPI_CALL nr_CreateWin32SurfaceKHR(VkInstance instance,
+    const VkWin32SurfaceCreateInfoKHR *info,
+    const VkAllocationCallbacks *allocator, VkSurfaceKHR *surface)
+{
+    PFN_vkCreateWin32SurfaceKHR create = (PFN_vkCreateWin32SurfaceKHR)
+        next_instance_proc(instance, "vkCreateWin32SurfaceKHR");
+    if (!create) return VK_ERROR_INITIALIZATION_FAILED;
+    VkResult r = create(instance, info, allocator, surface);
+    if (r == VK_SUCCESS && info && info->hwnd)
+        nr_guard_window(info->hwnd);
+    return r;
+}
+
 VKAPI_ATTR void VKAPI_CALL nr_DestroyInstance(VkInstance instance,
                                              const VkAllocationCallbacks *allocator)
 {
@@ -1520,8 +1584,16 @@ static int process_frame(device_data *data, swapchain_data *chain,
         return -1;
     }
     VkDeviceSize needed = (VkDeviceSize)chain->extent.width * chain->extent.height * 4;
-    if (ensure_resources(data, needed)) return -1;
-    if (transfer(data, chain, queue, index, 0)) return -1;
+    if (ensure_resources(data, needed)) {
+        nr_log("[nr_layer] ensure_resources failed (%ux%u); raw out (frame %lu)",
+               chain->extent.width, chain->extent.height, frame_counter);
+        return -1;
+    }
+    if (transfer(data, chain, queue, index, 0)) {
+        nr_log("[nr_layer] readback failed (%ux%u); raw out (frame %lu)",
+               chain->extent.width, chain->extent.height, frame_counter);
+        return -1;
+    }
 
     /* Exact-repeat reuse: a frame identical to the previous one reuses the
      * last processed result instead of running the chain again. data->result
@@ -1536,7 +1608,11 @@ static int process_frame(device_data *data, swapchain_data *chain,
     /* Save native input into data->earlier before processing */
     if (data->earlier_size < needed) {
         unsigned char *grown = (unsigned char *)realloc(data->earlier, (size_t)needed);
-        if (!grown) return -1;
+        if (!grown) {
+            nr_log("[nr_layer] earlier-buffer alloc failed; raw out (frame %lu)",
+                   frame_counter);
+            return -1;
+        }
         data->earlier = grown;
         data->earlier_size = needed;
     }
@@ -1595,6 +1671,8 @@ static int process_frame(device_data *data, swapchain_data *chain,
             nr_degrade_note_held(&g_dg);
             return 0;
         }
+        nr_log("[nr_layer] probe paced and no held result; raw out (frame %lu)",
+               frame_counter);
         return -1;
     }
     /* The reply lands in data->mapped (the payload is fully sent before the
@@ -1790,6 +1868,11 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
     device_data *data = NULL;
     queue_data *owner = find_queue(queue);
     if (owner && !owner->capture_ok) {
+        if (!owner->native_logged) {
+            owner->native_logged = 1;
+            nr_log("[nr_layer] queue %p cannot capture; presenting native",
+                   (void *)queue);
+        }
         device_data *host = find_device(owner->device);
         if (host && host->present) return host->present(queue, info);
     }
@@ -1833,6 +1916,14 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
     init_freeze_paths();
 
     int frozen = freeze_path && _access(freeze_path, 0) == 0;
+    static int frozen_logged;
+    if (frozen && !frozen_logged) {
+        frozen_logged = 1;
+        nr_log("[nr_layer] freeze ENGAGED (frame %lu)", frame_counter);
+    } else if (!frozen && frozen_logged) {
+        frozen_logged = 0;
+        nr_log("[nr_layer] freeze released (frame %lu)", frame_counter);
+    }
     if (!frozen) {
         data->raw_held = 0;
         data->raw_chain = VK_NULL_HANDLE;
@@ -1883,7 +1974,12 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
 
     for (uint32_t i = 0; i < info->swapchainCount; i++) {
         swapchain_data *chain = find_swapchain(info->pSwapchains[i]);
-        if (!chain || info->pImageIndices[i] >= chain->image_count) continue;
+        if (!chain || info->pImageIndices[i] >= chain->image_count) {
+            nr_log("[nr_layer] UNKNOWN swapchain %p idx %u skipped; raw out "
+                   "(frame %lu)", (void *)info->pSwapchains[i],
+                   info->pImageIndices[i], frame_counter);
+            continue;
+        }
         uint32_t index = info->pImageIndices[i];
         VkDeviceSize want = (VkDeviceSize)chain->extent.width
                           * chain->extent.height * 4;
@@ -1928,11 +2024,34 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
         int should_process = nr_fg_should_process(&g_fg, frame_counter,
                                                   fg_enabled, fg_avail);
         if (should_process) {
-            if (process_frame(data, chain, queue, index) == 0) {
+            int ok = (process_frame(data, chain, queue, index) == 0);
+            if (!ok) {
+                /* Splice guard: a frame that failed processing must never go
+                 * out raw between processed neighbours - serve the last
+                 * processed result of this extent instead (same policy as the
+                 * daemon-flap hold). Only a matching-extent result qualifies;
+                 * degenerate/other-extent chains still pass through native. */
+                if (data->result_valid && data->result
+                    && data->result_size == want
+                    && data->result_w == chain->extent.width
+                    && data->result_h == chain->extent.height
+                    && data->mapped && data->staging_size >= want) {
+                    memcpy(data->mapped, data->result, (size_t)want);
+                    nr_log("[nr_layer] process failed; held last processed "
+                           "frame (frame %lu)", frame_counter);
+                    ok = 1;
+                } else {
+                    nr_log("[nr_layer] process failed and no held result; "
+                           "raw out (frame %lu)", frame_counter);
+                }
+            }
+            if (ok) {
                 nr_fg_note(&g_fg, NR_FG_PROCESSED);
                 data->holding = 1;
                 data->holding_chain = chain->swapchain;
-                transfer(data, chain, queue, index, 1);
+                if (transfer(data, chain, queue, index, 1))
+                    nr_log("[nr_layer] write-back failed; raw out (frame %lu)",
+                           frame_counter);
             }
         } else if (fg_enabled && fg_avail) {
             /* Framegen: generate this present from the engine's copy of the
@@ -2017,6 +2136,7 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL nr_GetInstanceProcAddr_(VkInstance inst
 {
     INTERCEPT(CreateInstance);
     INTERCEPT(CreateDevice);
+    INTERCEPT(CreateWin32SurfaceKHR);
     INTERCEPT(DestroyInstance);
     if (!strcmp(pName, "vkGetInstanceProcAddr")) return (PFN_vkVoidFunction)nr_GetInstanceProcAddr_;
     if (!strcmp(pName, "vkGetDeviceProcAddr")) return (PFN_vkVoidFunction)nr_GetDeviceProcAddr_;
