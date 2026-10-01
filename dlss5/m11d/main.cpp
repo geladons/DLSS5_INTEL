@@ -127,6 +127,25 @@ static bool readAll(SOCKET s, uint8_t* dst, size_t n) {
     return true;
 }
 
+// Deadline variant: SO_RCVTIMEO is per-recv, so a client dribbling one byte
+// per 19 s would pin the single-threaded accept loop forever (frames and
+// NRCT probes pile into the backlog). Bound the whole request instead.
+static bool readAllDeadline(SOCKET s, uint8_t* dst, size_t n,
+                            ULONGLONG deadlineMs) {
+    size_t got = 0;
+    while (got < n) {
+        ULONGLONG now = GetTickCount64();
+        if (now >= deadlineMs) return false;
+        ULONGLONG remain = deadlineMs - now;
+        DWORD tv = (DWORD)(remain > 20000 ? 20000 : remain);
+        setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
+        int r = recv(s, (char*)dst + got, (int)(n - got), 0);
+        if (r <= 0) return false;
+        got += (size_t)r;
+    }
+    return true;
+}
+
 static bool writeAll(SOCKET s, const uint8_t* src, size_t n) {
     size_t sent = 0;
     while (sent < n) {
@@ -194,11 +213,22 @@ static void nr_invalid_param_handler(const wchar_t* expr, const wchar_t* func,
 static void nr_abort_signal(int) {
     std::fprintf(stderr, "[m11d] FATAL: abort()\n");
 }
+// SEH faults on threads the wrappers don't cover (main loop, CRT internals,
+// driver worker threads) used to die silently to WER.
+static LONG WINAPI nr_unhandled_filter(EXCEPTION_POINTERS* ep) {
+    std::fprintf(stderr, "[m11d] FATAL: unhandled SEH 0x%08lx at %p\n",
+                 ep && ep->ExceptionRecord ?
+                    (unsigned long)ep->ExceptionRecord->ExceptionCode : 0ul,
+                 ep && ep->ExceptionRecord ?
+                    ep->ExceptionRecord->ExceptionAddress : nullptr);
+    return EXCEPTION_EXECUTE_HANDLER;   // let WER / exit proceed
+}
 static void install_death_witnesses() {
     std::set_terminate(nr_terminate_handler);
     _set_purecall_handler(nr_purecall_handler);
     _set_invalid_parameter_handler(nr_invalid_param_handler);
     std::signal(SIGABRT, nr_abort_signal);
+    SetUnhandledExceptionFilter(nr_unhandled_filter);
 }
 
 // ------------------------------------------------------------------ main --
@@ -301,13 +331,19 @@ int main(int argc, char** argv) {
     long frameCounter = 0;
 
     auto ensureEngine = [&](uint32_t w, uint32_t h) -> bool {
-        if (w == curW && h == curH && std::abs(engine.renderScale() - scale) < 1e-4f)
+        // curW/curH == 0 is the single source of truth for "engine down":
+        // a failed init updates cfg_.renderScale internally, so the
+        // early-return must be gated on curW/curH or a dead engine would
+        // pass as healthy for the current extent (permanent brick).
+        if (curW && curH && w == curW && h == curH
+            && std::abs(engine.renderScale() - scale) < 1e-4f)
             return true;
-        if (curW || curH) {
+        if (curW || curH)
             std::printf("[m11d] config change (%ux%u -> %ux%u, scale %.2f -> %.2f): engine re-init\n",
                         curW, curH, w, h, (double)engine.renderScale(), (double)scale);
-            sehEngineShutdown(&engine);
-        }
+        sehEngineShutdown(&engine);   // unconditional: half-built init state
+                                      // must not leak a device into a retry
+        curW = 0; curH = 0;
         d5c::EngineConfig cfg{};
         cfg.canvasW = w; cfg.canvasH = h;
         cfg.weightsPath = weights;
@@ -323,7 +359,7 @@ int main(int argc, char** argv) {
         // headless: no surface/swapchain extensions, first coopmat-capable device
         if (!sehEngineInit(&engine, &cfg)) {
             std::fprintf(stderr, "[FAIL] engine init for %ux%u\n", w, h);
-            return false;
+            return false;   // curW/curH stay 0 -> the next frame re-inits clean
         }
         curW = w; curH = h;
         return true;
@@ -503,8 +539,14 @@ int main(int argc, char** argv) {
         setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
         setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof tv);
 
+        // The whole request (header + payload + optional mask) gets one
+        // 8-second budget; the serial loop can't be held hostage by a
+        // client that stops mid-transfer.
+        const ULONGLONG deadline = GetTickCount64() + 8000;
         uint32_t hdr[4]{};
-        if (!readAll(s, (uint8_t*)hdr, 16)) { closesocket(s); continue; }
+        if (!readAllDeadline(s, (uint8_t*)hdr, 16, deadline)) {
+            closesocket(s); continue;
+        }
         if (hdr[0] == MAGIC_CTRL) {
             // M13 control: runtime parameters, handled between frames on the
             // accept thread (the engine is driven from this thread only, so
@@ -536,17 +578,19 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "[m11d] ctrl: blend %.3f out of range\n", (double)b);
                 }
             } else if (hdr[1] == 2) {            // STATUS
-                rep[1] = 1;
+                // ok=1 only when the engine is actually up - a dead engine
+                // must not masquerade as a healthy daemon to the manager.
+                rep[1] = (curW && curH) ? 1 : 0;
             } else if (hdr[1] == 4) {            // SETSCALE: hdr[2] = float bits
                 float s = 0.0f;
                 std::memcpy(&s, &hdr[2], 4);
                 if (s >= 0.20f && s <= 1.5f) {
                     scale = s;
-                    if (curW && curH) {
-                        ensureEngine(curW, curH);
-                    }
                     rep[1] = 1;
-                    std::printf("[m11d] ctrl: scale -> %.2f\n", (double)s);
+                    if (curW && curH)
+                        rep[1] = ensureEngine(curW, curH) ? 1 : 0;
+                    std::printf("[m11d] ctrl: scale -> %.2f (reinit %s)\n",
+                                (double)s, rep[1] ? "ok" : "FAILED");
                 } else {
                     std::fprintf(stderr, "[m11d] ctrl: scale %.2f out of range\n", (double)s);
                 }
@@ -622,13 +666,23 @@ int main(int argc, char** argv) {
         }
         inBuf.resize(px * 4);
         outBuf.resize(px * 4);
-        if (!readAll(s, inBuf.data(), px * 4)) { closesocket(s); continue; }
+        if (!readAllDeadline(s, inBuf.data(), px * 4, deadline)) {
+            closesocket(s); continue;
+        }
         if (masked) {   // held-still UI mask: read and (v0) ignore
             maskBuf.resize(px);
-            if (!readAll(s, maskBuf.data(), px)) { closesocket(s); continue; }
+            if (!readAllDeadline(s, maskBuf.data(), px, deadline)) {
+                closesocket(s); continue;
+            }
         }
-        if (fmt != 44 && fmt != 43 && fmt != 50 && fmt != 49)
-            std::printf("[m11d] note: VkFormat %u treated as BGRA8\n", fmt);
+        // Only B8G8R8A8 wire order is valid: the shaders decode B,G,R,A bytes.
+        // An R8G8B8A8 (37/43) or packed-10 swapchain would come back channel-
+        // swapped/garbled and be presented as a "processed" frame - fail closed.
+        if (fmt != 44 && fmt != 50) {
+            std::fprintf(stderr, "[m11d] VkFormat %u is not B8G8R8A8 - dropping "
+                         "(layer must gate non-BGRA formats)\n", fmt);
+            closesocket(s); continue;
+        }
 
         if (ensureEngine(w, h)) {
             if (w != prevW || h != prevH) {
@@ -668,6 +722,10 @@ int main(int argc, char** argv) {
                 // Closing without a reply makes the layer treat this as a
                 // transport failure and hold the last processed frame.
                 std::fprintf(stderr, "[m11d] processFrame FAILED - closing, no reply\n");
+                // A mid-frame fault (device lost etc.) leaves the engine
+                // half-dead: zeroing the extent forces a full re-init on the
+                // next frame instead of fail-closing on this extent forever.
+                curW = 0; curH = 0;
             }
         } else {
             std::fprintf(stderr, "[m11d] engine down - closing, no reply\n");
