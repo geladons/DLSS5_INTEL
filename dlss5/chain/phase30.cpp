@@ -260,15 +260,18 @@ bool Phase30Controller::pollKnobsFile(const std::string& customPath) {
     if (wt == lastFileWriteTime_ && lastFileWriteTime_ != 0) {
         return false;
     }
-    lastFileWriteTime_ = wt;
-
     std::ifstream f(path);
     if (!f.is_open()) return false;
 
     std::stringstream ss;
     ss << f.rdbuf();
     std::string json = ss.str();
-    if (json.empty()) return false;
+    // m13 rewrites this file non-atomically; a mid-rewrite poll reads a
+    // truncated JSON (no closing brace). Bail WITHOUT consuming the mtime so
+    // the next poll retries the same write - otherwise one torn read sticks
+    // a never-intended parameter mix into the engine for >=1 frame.
+    if (json.find('}') == std::string::npos) return false;
+    lastFileWriteTime_ = wt;
 
     std::string val;
     bool changed = false;

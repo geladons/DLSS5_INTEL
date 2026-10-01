@@ -48,9 +48,9 @@ struct FrameStats {
 class ChainEngine {
 public:
     bool init(const EngineConfig& cfg);       // heavy: device + weights + arena (~2 s)
-    // bgraIn/bgraOut: canvasW*canvasH*4 bytes. frameIndex feeds the vendor
-    // deterministic noise (features pc.b.x) — validation vs torch goldens
-    // uses frameIndex=1.
+    // bgraIn/bgraOut: canvasW*canvasH*4 bytes. frameIndex only gates debug
+    // dumps/profiling; the vendor noise seed is pinned (engine.cpp b[0]=1)
+    // so identical input always yields identical output.
     bool processFrame(const uint8_t* bgraIn, uint8_t* bgraOut, long frameIndex,
                       FrameStats* stats = nullptr);
     bool interpolateFrame(uint32_t w, uint32_t h, const void* f0, const void* f1,
