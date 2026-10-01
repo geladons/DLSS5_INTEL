@@ -197,6 +197,9 @@ typedef struct device_data {
     VkSwapchainKHR holding_chain; /* the swapchain the held result belongs to */
     unsigned char *earlier;
     VkDeviceSize earlier_size;
+    int earlier_pending;         /* earlier was overwritten by an input whose
+                                  * process never completed - do not serve
+                                  * `result` as its match until success */
     VkCommandBuffer ring_commands[SYNC_SLOTS];
     VkFence ring_fence[SYNC_SLOTS];
     VkSemaphore ring_done[SYNC_SLOTS];
@@ -469,6 +472,10 @@ static void poll_knob_file(int force)
     n = fread(buf, 1, sizeof(buf) - 1, f);
     fclose(f);
     buf[n] = 0;
+    /* A torn write (manager rewrites non-atomically) lacks the closing brace;
+     * bail without consuming the stamp so the next poll retries it rather
+     * than applying a partial parameter set to one frame. */
+    if (!strchr(buf, '}')) return;
     g_knob_stamp = fa.ftLastWriteTime;
     if (!g_knob_seen)
         nr_log("[nr_layer] live knob file: %s", knob_file_path());
@@ -1675,6 +1682,57 @@ static int transfer(device_data *data, swapchain_data *chain, VkQueue queue,
 }
 
 /* NR_LAYER_CAPTURE_OUT: dump header+processed result for A/B stills. */
+/* Near-identity reuse thresholds. "Static" game content is rarely bit-static:
+ * film grain, dither and cursor sprites shift a few percent of pixels by a few
+ * lsb every present, so the exact memcmp gate never fires, every present runs
+ * a full reprocess, and the slightly-different results land ~70 ms apart -
+ * the output visibly "swims" on content the eye reads as static. Treating
+ * sub-perceptual deltas as repeats freezes the processed frame until real
+ * drift accumulates. */
+static int  eps_state = -1;      /* -1 uninited, 0 off, 1 on */
+static long eps_mean_x100 = 120; /* mean |delta| over sampled rgb, hundredths */
+static int  eps_pix = 24;        /* per-channel delta that counts as real change */
+static int  eps_big_pm = 20;     /* allowed share of big-delta pixels, per-mille */
+
+static void eps_init(void)
+{
+    const char *e;
+    if (eps_state >= 0) return;
+    e = getenv("NR_LAYER_EPS");
+    eps_state = !(e && !strcmp(e, "0"));
+    e = getenv("NR_LAYER_EPS_MEAN"); if (e) eps_mean_x100 = atol(e);
+    e = getenv("NR_LAYER_EPS_PIX");  if (e) eps_pix = atoi(e);
+    e = getenv("NR_LAYER_EPS_BIG");  if (e) eps_big_pm = atoi(e);
+}
+
+/* Sampled near-equality of two BGRA frames: every 4th pixel, rgb channels
+ * (alpha is often garbage). ~0.3 ms on 800x600. */
+static int nearly_identical(const unsigned char *a, const unsigned char *b,
+                            size_t n)
+{
+    uint64_t sum = 0, big = 0, samples = 0;
+    size_t npix = n >> 2, p;
+    eps_init();
+    if (!eps_state) return 0;
+    for (p = 0; p < npix; p += 4) {
+        size_t o = p << 2;
+        int d0 = (int)a[o]   - (int)b[o];
+        int d1 = (int)a[o+1] - (int)b[o+1];
+        int d2 = (int)a[o+2] - (int)b[o+2];
+        int m;
+        if (d0 < 0) d0 = -d0;
+        if (d1 < 0) d1 = -d1;
+        if (d2 < 0) d2 = -d2;
+        m = d0 > d1 ? (d0 > d2 ? d0 : d2) : (d1 > d2 ? d1 : d2);
+        sum += (uint64_t)(d0 + d1 + d2);
+        if (m > eps_pix) big++;
+        samples++;
+    }
+    if (!samples) return 0;
+    return (sum * 100) / (samples * 3) <= (uint64_t)eps_mean_x100 &&
+           (big * 1000) / samples <= (uint64_t)eps_big_pm;
+}
+
 static void dump_capture(const char *path, const uint32_t *header,
                          const unsigned char *pixels, VkDeviceSize size)
 {
@@ -1715,11 +1773,15 @@ static int process_frame(device_data *data, swapchain_data *chain,
     /* Exact-repeat reuse: a frame identical to the previous one reuses the
      * last processed result instead of running the chain again. data->result
      * holds the last processed frame (in-process or TCP path). */
-    if (static_reuse && data->have_earlier && data->earlier_size >= needed &&
-        memcmp(data->mapped, data->earlier, (size_t)needed) == 0 &&
+    if (static_reuse && data->have_earlier && !data->earlier_pending &&
+        data->earlier_size >= needed &&
+        (memcmp(data->mapped, data->earlier, (size_t)needed) == 0 ||
+         nearly_identical((const unsigned char *)data->mapped,
+                          data->earlier, (size_t)needed)) &&
         data->result_valid && data->result && data->result_size >= needed &&
         data->result_w == chain->extent.width &&
-        data->result_h == chain->extent.height) {
+        data->result_h == chain->extent.height &&
+        data->holding_chain == chain->swapchain) {
         memcpy(data->mapped, data->result, (size_t)needed);
         return 0;
     }
@@ -1738,6 +1800,9 @@ static int process_frame(device_data *data, swapchain_data *chain,
     memcpy(data->earlier, data->mapped, (size_t)needed);
     data->have_earlier = 1;
     data->earlier_size = needed;
+    data->earlier_pending = 1;   /* no matching result yet - if the exchange
+                                  * below fails, next frame must not reuse
+                                  * `result` as this input's output */
 
     uint32_t header[4] = { 0x304E524Eu, chain->extent.width,
                            chain->extent.height, (uint32_t)chain->format };
@@ -1765,6 +1830,8 @@ static int process_frame(device_data *data, swapchain_data *chain,
                 data->result_w = chain->extent.width;
                 data->result_h = chain->extent.height;
                 data->result_valid = 1;
+                data->holding_chain = chain->swapchain;
+                data->earlier_pending = 0;
             }
             dump_capture(capture_out_path, header, (const unsigned char *)data->mapped, needed);
             nr_log("[nr_layer] in-process processed %ux%u (frame %lu)",
@@ -1785,7 +1852,8 @@ static int process_frame(device_data *data, swapchain_data *chain,
         if (data->result_valid && data->result
             && data->result_size >= needed
             && data->result_w == chain->extent.width
-            && data->result_h == chain->extent.height) {
+            && data->result_h == chain->extent.height
+            && data->holding_chain == chain->swapchain) {
             memcpy(data->mapped, data->result, (size_t)needed);
             nr_degrade_note_held(&g_dg);
             return 0;
@@ -1811,7 +1879,8 @@ static int process_frame(device_data *data, swapchain_data *chain,
         if (hold && data->result_valid && data->result
             && data->result_size >= needed
             && data->result_w == chain->extent.width
-            && data->result_h == chain->extent.height) {
+            && data->result_h == chain->extent.height
+            && data->holding_chain == chain->swapchain) {
             memcpy(data->mapped, data->result, (size_t)needed);
             nr_degrade_note_held(&g_dg);
             if (dlog == NR_DEGRADE_LOG_HICCUP)
@@ -1831,6 +1900,8 @@ static int process_frame(device_data *data, swapchain_data *chain,
     data->result_w = chain->extent.width;
     data->result_h = chain->extent.height;
     data->result_valid = 1;
+    data->holding_chain = chain->swapchain;
+    data->earlier_pending = 0;
     dump_capture(capture_out_path, header, data->result, needed);
     nr_log("[nr_layer] processed %ux%u", chain->extent.width, chain->extent.height);
     return 0;
@@ -1908,6 +1979,7 @@ static int resend_raw(device_data *data, swapchain_data *chain)
             data->result_w = data->raw_w;
             data->result_h = data->raw_h;
             data->result_valid = 1;
+            data->holding_chain = chain->swapchain;
             nr_log("[nr_layer] in-process reprocessed held raw frame (live knob turn)");
             return 0;
         }
@@ -1939,6 +2011,7 @@ static int resend_raw(device_data *data, swapchain_data *chain)
     data->result_w = data->raw_w;
     data->result_h = data->raw_h;
     data->result_valid = 1;
+    data->holding_chain = chain->swapchain;
     nr_log("[nr_layer] reprocessed the held frame (live knob turn)");
     return 0;
 }
@@ -1975,6 +2048,7 @@ static int freeze_capture(device_data *data, swapchain_data *chain,
             data->result_w = chain->extent.width;
             data->result_h = chain->extent.height;
             data->result_valid = 1;
+            data->holding_chain = chain->swapchain;
         }
         nr_log("[nr_layer] daemon unavailable; freezing the original frame unprocessed");
     }
@@ -2015,8 +2089,23 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
             }
         }
     }
-    if (!data)
-        for (int i = 0; i < 8; i++) if (devices[i].device) { data = &devices[i]; break; }
+    if (!data) {
+        /* A present on a queue the layer never saw via vkGetDeviceQueue*:
+         * falling back to devices[0] would run transfers on a queue whose
+         * family may not support them (present-only / protected). Present
+         * natively through any live device's hook instead. */
+        for (int i = 0; i < 8; i++) {
+            if (devices[i].device && devices[i].present) {
+                static int untracked_logged;
+                if (!untracked_logged) {
+                    untracked_logged = 1;
+                    nr_log("[nr_layer] present on untracked queue %p; "
+                           "passing through native", (void *)queue);
+                }
+                return devices[i].present(queue, info);
+            }
+        }
+    }
     if (!data || !data->present) return VK_ERROR_INITIALIZATION_FAILED;
 
     data->present_plain = info->waitSemaphoreCount > NR_MAX_WAITS;
@@ -2131,10 +2220,11 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                         nr_log("[nr_layer] reprocess failed; keeping the "
                                "previous result");
                 }
-                if (data->result_valid && data->result_size == want
+                if (data->result_valid && data->result_size >= want
+                    && data->holding_chain == chain->swapchain
                     && data->mapped && data->staging_size >= want) {
                     memcpy(data->mapped, data->result,
-                           (size_t)data->result_size);
+                           (size_t)want);
                     transfer(data, chain, queue, index, 1);
                 }
             }
@@ -2164,9 +2254,10 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                  * daemon-flap hold). Only a matching-extent result qualifies;
                  * degenerate/other-extent chains still pass through native. */
                 if (data->result_valid && data->result
-                    && data->result_size == want
+                    && data->result_size >= want
                     && data->result_w == chain->extent.width
                     && data->result_h == chain->extent.height
+                    && data->holding_chain == chain->swapchain
                     && data->mapped && data->staging_size >= want) {
                     memcpy(data->mapped, data->result, (size_t)want);
                     nr_log("[nr_layer] process failed; held last processed "
@@ -2232,9 +2323,10 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
              * splice between processed frames is a visible quality strobe. */
             int held = 0;
             if (data->result_valid && data->result && data->mapped
-                && data->result_size == want
+                && data->result_size >= want
                 && data->result_w == chain->extent.width
-                && data->result_h == chain->extent.height) {
+                && data->result_h == chain->extent.height
+                && data->holding_chain == chain->swapchain) {
                 memcpy(data->mapped, data->result, (size_t)want);
                 held = (transfer(data, chain, queue, index, 1) == 0);
             }
