@@ -20,6 +20,7 @@ import threading
 import time
 
 from . import gamelaunch
+from . import deploy
 from .deploy import Deployer
 from .processes import find_pid
 
@@ -199,6 +200,24 @@ class GameLauncher:
                 return self._finish(game, False, msg)
 
             def do_deploy():
+                # The dx9 poison check runs on EVERY launch, deployed or
+                # not: a DXVK dxgi.dll landing in the game dir after deploy
+                # (the classic "copy the whole x32 set" instruction) crashes
+                # GTA IV inside system d3d11 - proven live, twice. When the
+                # guard flags it, quarantine the file aside and proceed;
+                # only an unmovable poison fails the launch.
+                if meta.get("mode") == "dx9":
+                    gdir = os.path.dirname(exe)
+                    warns = deploy.dx9_guard(gdir)
+                    if warns:
+                        moved, detail = deploy.dx9_quarantine(gdir)
+                        if moved:
+                            self._emit("[launch] quarantined poison "
+                                       "dxgi.dll -> %s" % detail)
+                        else:
+                            return False, (" ".join(warns)
+                                           + " (auto-quarantine failed: %s)"
+                                           % detail)
                 d = Deployer(os.path.dirname(exe))
                 if d.mode_status(meta["mode"], meta["arch"]) == "deployed":
                     return True, "already deployed"

@@ -325,17 +325,24 @@ def _elevated_remove(game_dir, dll_name):
 
 def dx9_guard(game_dir):
     """DX9 rule enforcement: NEVER a dxgi.dll from DXVK next to a D3D9 game.
-    Returns a list of human warnings ([] = clear to deploy)."""
+    Returns a list of human warnings ([] = clear to deploy).
+
+    Detection: the PE header does NOT carry a 'DXVK' literal in its first
+    bytes (a previous version checked head[:64] and could never fire); the
+    project name lives in version info, so scan the whole file. A foreign
+    non-DXVK dxgi.dll (ReShade & co.) is the owner's choice - it warns only
+    in launch logs, it does not block. Unreadable file blocks: unknown
+    provenance at a known-crash site is not worth the dice roll."""
     warnings = []
     dxgi = os.path.join(game_dir, "dxgi.dll")
     if os.path.exists(dxgi):
         try:
             with open(dxgi, "rb") as f:
-                head = f.read(64)
-            # DXVK builds carry a 'DXVK' marker; the .gta4.bak file proves
-            # this class of crash happened once already.
-            if b"DXVK" in head or os.path.exists(dxgi + ".gta4.bak"):
-                warnings.append("dxgi.dll in the game dir looks like DXVK - "
+                blob = f.read()
+            # DXVK builds name themselves in version info; the .gta4.bak
+            # sidecar proves this crash happened once already.
+            if b"DXVK" in blob or os.path.exists(dxgi + ".gta4.bak"):
+                warnings.append("dxgi.dll in the game dir is DXVK - "
                                 "GTA IV crashed on that mix (system d3d11 + "
                                 "DXVK dxgi). Remove it or the game may die.")
         except OSError:
@@ -343,3 +350,20 @@ def dx9_guard(game_dir):
                             "but for D3D9 games only d3d9.dll may come from "
                             "DXVK.")
     return warnings
+
+
+def dx9_quarantine(game_dir):
+    """Move a proven-poison DXVK dxgi.dll aside (reversible .bak rename).
+    Returns (moved, detail). Only call after dx9_guard flagged it - foreign
+    non-DXVK injectors are never touched."""
+    dxgi = os.path.join(game_dir, "dxgi.dll")
+    if not os.path.exists(dxgi):
+        return False, "nothing to quarantine"
+    bak = dxgi + ".dlssnr-poison.bak"
+    try:
+        if os.path.exists(bak):
+            os.remove(bak)
+        os.replace(dxgi, bak)
+        return True, bak
+    except OSError as e:
+        return False, str(e)
