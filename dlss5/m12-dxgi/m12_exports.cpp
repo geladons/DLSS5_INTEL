@@ -48,9 +48,11 @@ extern "C" {
 HRESULT WINAPI CreateDXGIFactory(const IID &riid, void **ppv)
 {
     typedef HRESULT(WINAPI * FnT)(const IID &, void **);
+    m12_logf("CreateDXGIFactory called");
     static FnT fn = (FnT)real_proc("CreateDXGIFactory");
     if (!fn) return DXGI_ERROR_INVALID_CALL;
     HRESULT hr = fn(riid, ppv);
+    m12_logf("CreateDXGIFactory returned 0x%lx", (unsigned long)hr);
     if (SUCCEEDED(hr) && ppv && *ppv) m12_hook_factory(*ppv);
     return hr;
 }
@@ -58,9 +60,11 @@ HRESULT WINAPI CreateDXGIFactory(const IID &riid, void **ppv)
 HRESULT WINAPI CreateDXGIFactory1(const IID &riid, void **ppv)
 {
     typedef HRESULT(WINAPI * FnT)(const IID &, void **);
+    m12_logf("CreateDXGIFactory1 called");
     static FnT fn = (FnT)real_proc("CreateDXGIFactory1");
     if (!fn) return DXGI_ERROR_INVALID_CALL;
     HRESULT hr = fn(riid, ppv);
+    m12_logf("CreateDXGIFactory1 returned 0x%lx", (unsigned long)hr);
     if (SUCCEEDED(hr) && ppv && *ppv) m12_hook_factory(*ppv);
     return hr;
 }
@@ -68,9 +72,11 @@ HRESULT WINAPI CreateDXGIFactory1(const IID &riid, void **ppv)
 HRESULT WINAPI CreateDXGIFactory2(UINT flags, const IID &riid, void **ppv)
 {
     typedef HRESULT(WINAPI * FnT)(UINT, const IID &, void **);
+    m12_logf("CreateDXGIFactory2 called (flags 0x%x)", flags);
     static FnT fn = (FnT)real_proc("CreateDXGIFactory2");
     if (!fn) return DXGI_ERROR_INVALID_CALL;
     HRESULT hr = fn(flags, riid, ppv);
+    m12_logf("CreateDXGIFactory2 returned 0x%lx", (unsigned long)hr);
     if (SUCCEEDED(hr) && ppv && *ppv) m12_hook_factory(*ppv);
     return hr;
 }

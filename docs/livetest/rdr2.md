@@ -34,3 +34,35 @@ No further lines. Proxy DLL loads fine inside RDR2.exe; the game then dies durin
 ## Follow-up (attempt 3, same binary)
 - RDR2.exe pid 20392 stayed alive ~1h with 0:00:29 CPU and no window: proxy attached, `CompatValue` stub calls logged, zero `present` lines — a silent pre-swapchain hang rather than the crash dialog. Killed by hand after path/PID verification; Launcher.exe exited on its own.
 - Root cause candidate found and fixed in `24a54c4`: the proxy patched the swapchain class vtable in the module's shared .rdata. Hooking is now a per-object private vtable swap (vptr rewrite only). `m12_test` passes end-to-end (presents intercepted, in-process chain processed 960x540 frames). **Retest pending.**
+
+## Root cause found — wrong transport for a Vulkan game (attempts 4-6)
+
+- A/B test: with `dxgi.dll` removed from the game folder RDR2 boots to the
+  main menu normally (2.8 GB RSS, "Running"). With the proxy present it
+  stalls at ~190 MB / ~29 s CPU, no window, deterministically.
+- Instrumented forwarders showed CreateDXGIFactory1/2 calls succeeding —
+  the stall is later, during init, with the foreign dll loaded. A copy of
+  the REAL signed `dxgi.dll` in the folder boots fine, so the binary itself
+  is not blocked; our proxy specifically breaks RDR2's init (suspected
+  module-integrity/anti-tamper reaction to a foreign unsigned dxgi.dll).
+- Two real bugs were found and fixed along the way:
+  1. `24a54c4` — shared-.rdata vtable patching replaced by per-object
+     vtable swap.
+  2. `.def` export ordinals did not match system dxgi.dll — ordinal-based
+     callers (which RDR2 uses) were landing on the wrong functions. Fixed
+     ordinals 1-20 to mirror the system table.
+- **The actual fix is configuration**: `sga_vulkan_final_init.*` files and a
+  loaded `vulkan-1.dll` prove RDR2 renders via **Vulkan**, not DX12. The
+  dxgi proxy is the wrong transport — nothing it hooks ever presents.
+  Game config switched `dx12` -> `vulkan`, foreign dxgi/d5c_chain removed
+  from the folder, launched through the implicit Vulkan layer.
+
+## PASS via Vulkan layer (in-process d5c_chain)
+
+- Launcher.exe -> RDR2.exe reached the **main menu** (screenshot evidence).
+- `%TEMP%\nr_layer_win.log`: 450+ `in-process processed 1920x1080` frames.
+- Frame generation cadence healthy: `presents=600 processed=300
+  generated=299 native=1`.
+- Process stays Running (4.2 GB RSS, window titled "Red Dead Redemption 2").
+- Lesson for deploy/launch: a Vulkan-rendered title must not get the dxgi
+  proxy; the layer path is mode `vulkan`.

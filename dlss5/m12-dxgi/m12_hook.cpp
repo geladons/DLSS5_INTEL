@@ -232,9 +232,12 @@ HRESULT WINAPI hooked_CreateSwapChain(IDXGIFactory *factory, IUnknown *device,
         LeaveCriticalSection(&g_cs);
         return DXGI_ERROR_INVALID_CALL;
     }
+    m12_logf("CreateSwapChain entry (%ux%u)", desc ? desc->BufferDesc.Width : 0,
+             desc ? desc->BufferDesc.Height : 0);
     HRESULT hr = ((HRESULT(WINAPI *)(IDXGIFactory *, IUnknown *, DXGI_SWAP_CHAIN_DESC *,
                                       IDXGISwapChain **))orig)(factory, device, desc,
                                                               pp_swapchain);
+    m12_logf("CreateSwapChain returned 0x%lx", (unsigned long)hr);
     if (SUCCEEDED(hr) && pp_swapchain && *pp_swapchain)
         after_create_swapchain(device, *pp_swapchain, desc);
     LeaveCriticalSection(&g_cs);
@@ -254,11 +257,14 @@ HRESULT WINAPI hooked_CreateSwapChainForHwnd(IDXGIFactory2 *factory, IUnknown *d
         LeaveCriticalSection(&g_cs);
         return DXGI_ERROR_INVALID_CALL;
     }
+    m12_logf("CreateSwapChainForHwnd entry (%ux%u)", desc1 ? desc1->Width : 0,
+             desc1 ? desc1->Height : 0);
     HRESULT hr = ((HRESULT(WINAPI *)(IDXGIFactory2 *, IUnknown *, HWND,
                                       const DXGI_SWAP_CHAIN_DESC1 *,
                                       const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *,
                                       IDXGIOutput *, IDXGISwapChain1 **))orig)(
         factory, device, hwnd, desc1, fs, restrict_to, pp_swapchain);
+    m12_logf("CreateSwapChainForHwnd returned 0x%lx", (unsigned long)hr);
     if (SUCCEEDED(hr) && pp_swapchain && *pp_swapchain && desc1) {
         DXGI_SWAP_CHAIN_DESC desc = {};
         desc.BufferDesc.Width = desc1->Width;

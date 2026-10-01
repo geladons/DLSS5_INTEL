@@ -1,23 +1,26 @@
-; m12_dxgi.def - export surface matching the system dxgi.dll
+; m12_dxgi.def - export surface matching the system dxgi.dll, INCLUDING the
+; ordinal slots: some binaries (RDR2, overlays) import dxgi by ordinal, so the
+; table must line up slot-for-slot with C:\Windows\System32\dxgi.dll or calls
+; land on the wrong function and the game stalls before the first present.
 LIBRARY m12_dxgi
 EXPORTS
-    ApplyCompatResolutionQuirking
-    CompatString
-    CompatValue
-    CreateDXGIFactory
-    CreateDXGIFactory1
-    CreateDXGIFactory2
-    DXGID3D10CreateDevice
-    DXGID3D10CreateLayeredDevice
-    DXGID3D10GetLayeredDeviceSize
-    DXGID3D10RegisterLayers
-    DXGIDeclareAdapterRemovalSupport
-    DXGIDisableVBlankVirtualization
-    DXGIDumpJournal
-    DXGIGetDebugInterface1
-    DXGIReportAdapterConfiguration
-    PIXBeginCapture
-    PIXEndCapture
-    PIXGetCaptureState
-    SetAppCompatStringPointer
-    UpdateHMDEmulationStatus
+    ApplyCompatResolutionQuirking    @1
+    CompatString                     @2
+    CompatValue                      @3
+    DXGIDumpJournal                  @4
+    PIXBeginCapture                  @5
+    PIXEndCapture                    @6
+    PIXGetCaptureState               @7
+    SetAppCompatStringPointer        @8
+    UpdateHMDEmulationStatus         @9
+    CreateDXGIFactory                @10
+    CreateDXGIFactory1               @11
+    CreateDXGIFactory2               @12
+    DXGID3D10CreateDevice            @13
+    DXGID3D10CreateLayeredDevice     @14
+    DXGID3D10GetLayeredDeviceSize    @15
+    DXGID3D10RegisterLayers          @16
+    DXGIDeclareAdapterRemovalSupport @17
+    DXGIDisableVBlankVirtualization  @18
+    DXGIGetDebugInterface1           @19
+    DXGIReportAdapterConfiguration   @20
