@@ -166,6 +166,7 @@ class ManagerUI:
         self.nb = nb
         self.games_tab = GamesTab(self, nb)
         self._tab_screen(nb)
+        self._tab_media(nb)
         self._tab_settings(nb)
 
         self.logtxt = ScrolledText(self.root, height=8, state="disabled",
@@ -306,6 +307,17 @@ class ManagerUI:
         self.ctl.submit(lambda: self.ctl.screen.start_window(
             self.win_var.get(), self.ctl.cfg.get("gain"),
             float(self.ctl.cfg.get("blend") or 1.0)))
+
+    # --------------------------------------------------------- Media tab ---
+    def _tab_media(self, nb):
+        """Third tab: offline photo/video DLSS 5 processing. Lazy-imported
+        so a media-module failure can never break app startup."""
+        try:
+            from .ui_media import MediaTab
+            self.media_tab = MediaTab(self, nb)
+        except Exception as e:
+            self.media_tab = None
+            self.log("mgr", "media tab unavailable: %s" % e)
 
     # ------------------------------------------------------- Settings tab --
     def _tab_settings(self, nb):
@@ -618,6 +630,12 @@ class ManagerUI:
     # ----------------------------------------------------------- startup ---
     def _on_close(self):
         self.overlay.unfreeze()          # never leave a game suspended
+        if getattr(self, "media_tab", None):
+            try:
+                # release the ~325 MB engine handle as the LAST queued job
+                self.ctl.submit(self.media_tab.engine_close)
+            except Exception:
+                pass
         self.ctl.shutdown()
         self.hub.stop()
         self.root.destroy()

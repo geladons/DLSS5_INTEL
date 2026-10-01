@@ -22,4 +22,11 @@
 #                 foreground steal when overlay_focus is on)
 #   ui.py         main window (dark theme; zero I/O on the Tk thread -
 #                 StateMonitor probes, ActionWorker mutates)
+#   media.py      Media tab backend: EngineSession ctypes wrapper on
+#                 d5c_chain.dll, Ffmpeg resolver/downloader, SavePolicy
+#                 naming, MediaQueue batch
+#   media_img.py  BMP/PNG codecs + preview downscale (no PIL on this host)
+#   media_video.py VideoJob: ffmpeg/ffprobe pipes around EngineSession
+#   ui_media.py   Media tab UI: queue listbox, before/after preview, the
+#                 overlay knob set reprocessing photos live
 # ============================================================================
