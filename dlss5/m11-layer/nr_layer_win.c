@@ -94,6 +94,8 @@ static int sync_semaphores;
  * stay authoritative. Kill switch: NR_LAYER_GDI_GUARD=0.
  * ---------------------------------------------------------------------- */
 static const WCHAR NR_GUARD_PROP[] = L"NR_OLD_WNDPROC";
+static HWND g_guard_hwnds[8];
+static int g_guard_count;
 
 static LRESULT CALLBACK nr_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -106,11 +108,16 @@ static LRESULT CALLBACK nr_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
     WNDPROC prev = (WNDPROC)GetPropW(hwnd, NR_GUARD_PROP);
+    /* Self-chain defense: if a stale prop ever points back at us, fall to
+     * DefWindowProcW instead of recursing into ourselves forever. */
+    if (prev == (WNDPROC)nr_wnd_proc) prev = NULL;
     return prev ? CallWindowProcW(prev, hwnd, msg, wp, lp)
                 : DefWindowProcW(hwnd, msg, wp, lp);
 }
 
 static void nr_log(const char *fmt, ...);   /* fwd: defined below */
+static void lock(void);                     /* fwd: defined below */
+static void unlock(void);
 
 static void nr_guard_window(HWND hwnd)
 {
@@ -119,13 +126,57 @@ static void nr_guard_window(HWND hwnd)
         const char *e = getenv("NR_LAYER_GDI_GUARD");
         guard_enabled = !(e && !strcmp(e, "0"));
     }
-    if (!guard_enabled || !hwnd || GetPropW(hwnd, NR_GUARD_PROP)) return;
+    if (!guard_enabled || !hwnd) return;
+    lock();
+    if (GetPropW(hwnd, NR_GUARD_PROP) || g_guard_count >= 8) {
+        unlock();
+        return;
+    }
+    SetLastError(0);
     WNDPROC prev = (WNDPROC)SetWindowLongPtrW(hwnd, GWLP_WNDPROC,
                                             (LONG_PTR)nr_wnd_proc);
+    if (!prev && GetLastError()) {          /* swap failed outright */
+        unlock();
+        return;
+    }
+    if (prev == nr_wnd_proc) {
+        /* Raced install: another surface create beat us between the prop
+         * check and the swap. Restoring to "prev" (=us) is a no-op; the
+         * first installer's prop still carries the real wndproc. */
+        SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (LONG_PTR)nr_wnd_proc);
+        unlock();
+        return;
+    }
+    if (prev && !SetPropW(hwnd, NR_GUARD_PROP, (HANDLE)prev)) {
+        SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (LONG_PTR)prev);  /* roll back */
+        unlock();
+        return;
+    }
     if (prev) {
-        SetPropW(hwnd, NR_GUARD_PROP, (HANDLE)prev);
+        g_guard_hwnds[g_guard_count++] = hwnd;
         nr_log("[nr_layer] GDI repaint guard armed on hwnd %p", (void *)hwnd);
     }
+    unlock();
+}
+
+/* Restore every armed wndproc before the DLL can be unmapped (instance
+ * destroy / FreeLibrary): a queued message into a dangling nr_wnd_proc is an
+ * AV inside the game. Safe to call twice. */
+static void nr_unguard_all(void)
+{
+    lock();
+    for (int i = 0; i < g_guard_count; i++) {
+        HWND hwnd = g_guard_hwnds[i];
+        WNDPROC prev = (WNDPROC)GetPropW(hwnd, NR_GUARD_PROP);
+        if (prev) {
+            if ((WNDPROC)GetWindowLongPtrW(hwnd, GWLP_WNDPROC) == nr_wnd_proc)
+                SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (LONG_PTR)prev);
+            RemovePropW(hwnd, NR_GUARD_PROP);
+        }
+        g_guard_hwnds[i] = NULL;
+    }
+    g_guard_count = 0;
+    unlock();
 }
 
 typedef struct device_data {
@@ -1091,6 +1142,9 @@ VKAPI_ATTR void VKAPI_CALL nr_DestroyInstance(VkInstance instance,
         destroy = (PFN_vkDestroyInstance)next_instance_proc(instance, "vkDestroyInstance");
     if (instance == layer_instance) {
         layer_instance = VK_NULL_HANDLE;
+        /* The loader may drop this DLL after the instance dies; queued
+         * window messages must never reach an unmapped nr_wnd_proc. */
+        nr_unguard_all();
     }
     if (destroy) destroy(instance, allocator);
 }
@@ -1347,9 +1401,22 @@ static int ensure_resources(device_data *data, VkDeviceSize needed)
     info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     info.size = needed;
     info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-    if (create_buffer(data->device, &info, NULL, &data->staging) != VK_SUCCESS) return -1;
+    PFN_vkDestroyBuffer destroy_buffer = (PFN_vkDestroyBuffer)
+        data->get_device_proc(data->device, "vkDestroyBuffer");
+    PFN_vkFreeMemory free_memory = (PFN_vkFreeMemory)
+        data->get_device_proc(data->device, "vkFreeMemory");
+    PFN_vkUnmapMemory unmap_memory = (PFN_vkUnmapMemory)
+        data->get_device_proc(data->device, "vkUnmapMemory");
+
+    /* Stage into locals and swap in only after every step succeeds: a failed
+     * bind/map must not leave mapped==NULL under a non-zero staging_size, and
+     * the superseded buffer is released instead of leaked per grow. */
+    VkBuffer staging = VK_NULL_HANDLE;
+    VkDeviceMemory staging_memory = VK_NULL_HANDLE;
+    void *mapped = NULL;
+    if (create_buffer(data->device, &info, NULL, &staging) != VK_SUCCESS) return -1;
     VkMemoryRequirements mr;
-    requirements(data->device, data->staging, &mr);
+    requirements(data->device, staging, &mr);
     uint32_t type = memory_type(data, mr.memoryTypeBits,
                                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
                                 | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
@@ -1358,22 +1425,42 @@ static int ensure_resources(device_data *data, VkDeviceSize needed)
         type = memory_type(data, mr.memoryTypeBits,
                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
                            | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    if (type == UINT32_MAX) return -1;
-    VkMemoryAllocateInfo allocation;
-    memset(&allocation, 0, sizeof allocation);
-    allocation.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocation.allocationSize = mr.size;
-    allocation.memoryTypeIndex = type;
-    if (allocate(data->device, &allocation, NULL, &data->staging_memory) != VK_SUCCESS)
-        return -1;
-    bind(data->device, data->staging, data->staging_memory, 0);
-    map(data->device, data->staging_memory, 0, VK_WHOLE_SIZE, 0, &data->mapped);
-    data->staging_size = needed;
-    free(data->result);
-    data->result = (unsigned char *)malloc((size_t)needed);
-    data->result_size = needed;
-    data->result_valid = 0; /* the old last-processed frame is gone */
-    return data->result ? 0 : -1;
+    if (type != UINT32_MAX) {
+        VkMemoryAllocateInfo allocation;
+        memset(&allocation, 0, sizeof allocation);
+        allocation.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocation.allocationSize = mr.size;
+        allocation.memoryTypeIndex = type;
+        if (allocate(data->device, &allocation, NULL, &staging_memory) == VK_SUCCESS
+            && bind(data->device, staging, staging_memory, 0) == VK_SUCCESS
+            && map(data->device, staging_memory, 0, VK_WHOLE_SIZE, 0, &mapped) == VK_SUCCESS
+            && mapped) {
+            VkBuffer old = data->staging;
+            VkDeviceMemory old_mem = data->staging_memory;
+            int old_mapped = (data->mapped != NULL);
+            data->staging = staging;
+            data->staging_memory = staging_memory;
+            data->mapped = mapped;
+            data->staging_size = needed;
+            data->have_earlier = 0; /* old-extent bytes must not feed memcmp */
+            free(data->result);
+            data->result = (unsigned char *)malloc((size_t)needed);
+            data->result_size = needed;
+            data->result_valid = 0; /* the old last-processed frame is gone */
+            if (old && destroy_buffer) destroy_buffer(data->device, old, NULL);
+            if (old_mem) {
+                if (old_mapped && unmap_memory)
+                    unmap_memory(data->device, old_mem);
+                if (free_memory) free_memory(data->device, old_mem, NULL);
+            }
+            return data->result ? 0 : -1;
+        }
+    }
+    if (mapped && unmap_memory) unmap_memory(data->device, staging_memory);
+    if (staging && destroy_buffer) destroy_buffer(data->device, staging, NULL);
+    if (staging_memory && free_memory) free_memory(data->device, staging_memory, NULL);
+    nr_log("[nr_layer] staging alloc failed (%llu bytes)", (unsigned long long)needed);
+    return -1;
 }
 
 static int ensure_ring(device_data *data)
@@ -1600,7 +1687,9 @@ static int process_frame(device_data *data, swapchain_data *chain,
      * holds the last processed frame (in-process or TCP path). */
     if (static_reuse && data->have_earlier && data->earlier_size >= needed &&
         memcmp(data->mapped, data->earlier, (size_t)needed) == 0 &&
-        data->result && data->result_size >= needed) {
+        data->result_valid && data->result && data->result_size >= needed &&
+        data->result_w == chain->extent.width &&
+        data->result_h == chain->extent.height) {
         memcpy(data->mapped, data->result, (size_t)needed);
         return 0;
     }
@@ -1849,13 +1938,21 @@ static int freeze_capture(device_data *data, swapchain_data *chain,
     data->raw_w = chain->extent.width;
     data->raw_h = chain->extent.height;
     if (resend_raw(data, chain)) {
-        memcpy(data->result, data->raw, (size_t)needed);
-        data->result_w = chain->extent.width;
-        data->result_h = chain->extent.height;
-        data->result_valid = 1;
+        /* resend_raw returning -1 may mean the result realloc itself failed:
+         * only mirror raw->result when the slot is actually big enough. */
+        if (data->result && data->result_size >= needed) {
+            memcpy(data->result, data->raw, (size_t)needed);
+            data->result_w = chain->extent.width;
+            data->result_h = chain->extent.height;
+            data->result_valid = 1;
+        }
         nr_log("[nr_layer] daemon unavailable; freezing the original frame unprocessed");
     }
-    memcpy(data->mapped, data->result, (size_t)needed);
+    /* data->mapped still holds the raw capture when no result exists - the
+     * frozen picture degrades to unprocessed rather than reading a short
+     * or NULL result buffer. */
+    if (data->result_valid && data->result && data->result_size >= needed)
+        memcpy(data->mapped, data->result, (size_t)needed);
     nr_log("[nr_layer] frame frozen (%ux%u); knobs reprocess the original",
            chain->extent.width, chain->extent.height);
     return 0;
@@ -2094,7 +2191,19 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
             }
             nr_fg_note(&g_fg, generated ? NR_FG_GENERATED : NR_FG_NATIVE);
         } else {
-            nr_fg_note(&g_fg, NR_FG_NATIVE);
+            /* Cadence-skipped present (NR_LAYER_LIVE=N>1): re-blit the held
+             * processed result of this extent - the documented behaviour -
+             * falling back to native only when nothing is held yet. A raw
+             * splice between processed frames is a visible quality strobe. */
+            int held = 0;
+            if (data->result_valid && data->result && data->mapped
+                && data->result_size == want
+                && data->result_w == chain->extent.width
+                && data->result_h == chain->extent.height) {
+                memcpy(data->mapped, data->result, (size_t)want);
+                held = (transfer(data, chain, queue, index, 1) == 0);
+            }
+            nr_fg_note(&g_fg, held ? NR_FG_PROCESSED : NR_FG_NATIVE);
             if (fg_enabled && !fg_avail && !g_fg.unavailable_logged) {
                 nr_log("[nr_layer] framegen requested but unavailable "
                        "(requires in-process x64 engine); presenting native");
@@ -2185,6 +2294,10 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
         InitializeCriticalSection(&g_lock);
         g_lock_ready = 1;
     } else if (reason == DLL_PROCESS_DETACH) {
+        /* reserved!=NULL means process termination: wndproc restoration is
+         * pointless (windows die with the process) and DllMain is under the
+         * loader lock, so only unhook on a real FreeLibrary. */
+        if (!reserved) nr_unguard_all();
         if (g_engine && pfn_dlss5_destroy) {
             pfn_dlss5_destroy(g_engine);
             g_engine = NULL;
