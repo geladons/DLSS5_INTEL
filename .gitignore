@@ -35,3 +35,6 @@ dlss5/m13/_ui_shot.png
 .kilo/
 _relicense/
 nul
+
+# MSVC intermediates (x86 layer builds create *.obj in-tree)
+*.obj
