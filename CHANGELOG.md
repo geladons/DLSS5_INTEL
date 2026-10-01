@@ -4,6 +4,38 @@ All notable changes to this project. The day-by-day engineering log with
 measured numbers lives in [DEV_STATE.md](DEV_STATE.md); this file tracks
 user-visible milestones.
 
+## Unreleased — live-test fixes batch (2026-10-01)
+
+### Fixed (field-verified)
+- **RDR2 boots**: it renders via **Vulkan**, not DX12 — a deployed dxgi.dll
+  proxy stalled its init deterministically (real signed dxgi.dll boots
+  fine; suspected anti-tamper reaction to a foreign dll). Game config is
+  now `mode: vulkan` (implicit layer, in-process chain); verified to the
+  main menu with processing + frame generation healthy.
+- m12-dxgi: export ordinals now mirror system dxgi.dll slots 1-20 —
+  ordinal-based callers were landing on entirely wrong stubs; per-object
+  vtable swap replaces shared-.rdata patching; forwarders log call
+  entry/exit.
+- m11-layer: a raw frame is never inserted into a processed stream —
+  connect-refused (daemon absent) vs transport-timeout (daemon busy) are
+  handled differently, the last processed frame is held through fresh
+  outages, and socket probes are paced (no 1.5 s stall per present).
+- **Presets/gain/blend/sharpness/frame_gen now apply LIVE to a running
+  in-process game**: the manager's knob file (%TEMP%\m13_phase30_knobs.json)
+  carries engine knobs; the m11 layer and m12 proxy poll it (mtime, 250 ms).
+  Env vars remain the launch baseline.
+
+### Media tab rework
+- Auto-preview on add, Apply button, explicit Save (full-res via
+  SavePolicy; previews only preview), preview at reduced res
+  (media_preview_max, ~4x faster), zoomable Before/After viewer
+  (wheel zoom, drag pan, linked views), stale-job dropping.
+
+### UI
+- Manager window now opens at 1280x900 with all controls visible (measured
+  widget-tree requirement was 1725x1017 vs the old 1024x760); Settings tab
+  scrolls; media tab keeps its control columns at narrow widths.
+
 ## Unreleased — Stage 25 release-blocker batch (2026-09-30)
 
 ### Licensing
