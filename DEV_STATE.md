@@ -1708,3 +1708,50 @@ Open items: (a) reproduce on a MOVING scene (loading screen) to confirm
 the fix covers gameplay; (b) observe whether SEH logs anything if the
 daemon fault recurs; (c) noise/face-smear quality at scale 0.33 is a
 separate model-quality question, not a transport bug.
+
+## 2026-10-04 (audit pass 2) Owner retest: still flickering + pause hang + crash
+
+Owner retest after the GDI guard: (1) still flickers/shakes on the LOADING
+screen, (2) pause hotkey "hangs" the game, (3) overlay poor in windowed
+mode, (4) GTA IV crashed after the loading screen.
+
+Forensics: GTA IV = deterministic c0000005 AV in system d3d11.dll @0x2fc7a
+(twice, same offset) + an AppHangB1 record. Loaded modules: DXVK
+d3d9+dxgi, igvk32/igc32, nr_layer_win32.dll, system d3d11/d3d12, 1911.dll,
+binkw32, DINPUT8. WER confirmed a ~5s render-thread stall (AppHang).
+
+Subagent audit findings + fixes shipped this pass:
+
+- HANG ROOT (commit e084dd3): exchange() connect() was UNBOUNDED - a wedged
+  daemon with a full listen backlog stalls the render thread ~21s -> AppHang
+  (precedent: 60s hang documented in HANDOFF.md). Now non-blocking + select,
+  same 1.5s budget as send/recv. g_paused/g_off are only read between
+  presents, so during a stall EVERY input incl. the pause key looked dead.
+- DEAD PAUSE CHANNEL (same commit): NR_LAYER_TRIGGER was read at init and
+  never consulted - the m13 Pause button / dx9_pause() toggled a flag file
+  the layer ignored; CTRL+ALT+X was the ONLY working pause. The present
+  path now gates on the trigger file (same _access cadence as freeze).
+- HOTKEY COLLISION (same commit): m8blive.exe registers the identical
+  CTRL+ALT+X/Q globals - first registrant wins, loser got error 1409 and a
+  dead key. Layer now polls GetAsyncKeyState (m12_hotkeys.cpp pattern);
+  cannot collide.
+- WINDOWED OVERLAY (commit bac779a): panel centered on the MONITOR not the
+  game window; a 32ms cursor jail teleported the pointer into the panel for
+  its whole life (meant for fullscreen cursor-grab games); _free_cursor hit
+  whatever was foreground; hwnd_for_pid took the first top-level (GTA IV
+  has several). Fixed: game-anchored centering, jail/warp only when the
+  game covers the screen, targeted _free_cursor, largest-window pick.
+- DAEMON FAKE-SUCCESS (commit 34928fb): a failed frame used to ECHO the raw
+  input back as a "processed" reply -> raw splice + up to 1.5s recv stall
+  per failed frame. Now closes the socket -> layer holds last good result.
+- DX9 POISON (commit 24dc148): GTA IV dir had an incompatible DXVK dxgi.dll
+  next to system d3d11 -> the d3d11.dll AV. deploy.py detects DXVK markers /
+  .gta4.bak evidence on EVERY launch (the "already deployed" fast path used
+  to skip it) and refuses/quarantines rather than silently mixing renderers.
+
+STILL UNVERIFIED: live moving-scene run (needs one physical Sunshine click
+on PLAY - DirectInput ignores all synthetic input), and the throughput
+question: daemon ~60-75ms/frame at 800x600x0.33 while presents want ~7x
+that rate -> paced held-frame mixing = visible judder on a moving scene
+even with zero splices. The 320x320 min network extent (102400 tokens) is
+a suspected fixed floor; per-scale extent/cost table still owed.
