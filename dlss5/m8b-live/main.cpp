@@ -3573,7 +3573,10 @@ int main(int argc, char** argv) {
             vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool, 0);
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeFeatures);
             p.a[0] = netW; p.a[1] = netH; p.a[2] = regionW; p.a[3] = regionH;
-            p.b[0] = (int32_t)(frame & 0x7fffffff);
+            // Pinned vendor noise seed (engine.cpp parity): a per-frame seed
+            // redraws the feature noise field every frame and shimmers static
+            // desktop content.
+            p.b[0] = 1;
             p.b[1] = region.left; p.b[2] = region.top; p.b[3] = (int32_t)W;
             p.c[0] = 0.0f; p.c[1] = 1.0f; p.c[2] = 1.0f;
             // temporal history is OFF on M9b: channels 7-9 take the vendor
