@@ -867,7 +867,34 @@ static int exchange(const void *header, size_t header_size, const void *payload,
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     address.sin_port = htons((u_short)nr_port);
-    if (connect(fd, (struct sockaddr *)&address, sizeof address) != 0) {
+    /* Bound the connect: a blocking connect() to a wedged daemon (listen
+     * backlog saturated while its serial accept loop is stuck inside a
+     * frame) stalls the game render thread for the full TCP SYN
+     * retransmission timeout (~21 s) -> AppHang. Do it non-blocking with
+     * the same 1.5 s budget as send/recv. */
+    u_long nbio = 1;
+    ioctlsocket(fd, FIONBIO, &nbio);
+    int conn_rc = connect(fd, (struct sockaddr *)&address, sizeof address);
+    if (conn_rc != 0 && WSAGetLastError() == WSAEWOULDBLOCK) {
+        fd_set wf, ef;
+        struct timeval ctv;
+        ctv.tv_sec = 1;
+        ctv.tv_usec = 500000;
+        FD_ZERO(&wf); FD_SET(fd, &wf);
+        FD_ZERO(&ef); FD_SET(fd, &ef);
+        int sel = select(0, NULL, &wf, &ef, &ctv);
+        if (sel > 0 && FD_ISSET(fd, &wf) && !FD_ISSET(fd, &ef)) {
+            int soerr = 0;
+            int slen = sizeof soerr;
+            getsockopt(fd, SOL_SOCKET, SO_ERROR, (char *)&soerr, &slen);
+            conn_rc = soerr ? -1 : 0;
+        } else {
+            conn_rc = -1;
+        }
+    }
+    nbio = 0;
+    ioctlsocket(fd, FIONBIO, &nbio);
+    if (conn_rc != 0) {
         closesocket(fd);
         return -2;
     }
@@ -933,30 +960,33 @@ static void lock(void) { if (g_lock_ready) EnterCriticalSection(&g_lock); }
 static void unlock(void) { if (g_lock_ready) LeaveCriticalSection(&g_lock); }
 
 /* CTRL+ALT+X pauses processing (native frames, full fps), CTRL+ALT+Q turns
- * the layer off for good. The thread has its own message loop, so the
- * hotkeys work even inside a game that never pumps messages for us. */
+ * the layer off for good. Polled via GetAsyncKeyState (like
+ * m12-dxgi/m12_hotkeys.cpp): RegisterHotKey is global and EXCLUSIVE -
+ * m8blive.exe registers the same combos and whoever wins the race owns
+ * them; the loser got ERROR_HOTKEY_ALREADY_REGISTERED and a dead pause
+ * key. Polling cannot collide and works in a game that never pumps
+ * messages for us. */
 static DWORD WINAPI hotkey_thread(LPVOID param)
 {
     (void)param;
-    if (!RegisterHotKey(NULL, 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'X')) {
-        nr_log("[nr_layer] pause hotkey unavailable (%lu)", GetLastError());
-    }
-    if (!RegisterHotKey(NULL, 2, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'Q')) {
-        nr_log("[nr_layer] off hotkey unavailable (%lu)", GetLastError());
-    }
+    int x_down = 0, q_down = 0;
     nr_log("[nr_layer] hotkeys armed: CTRL+ALT+X pause/resume, CTRL+ALT+Q layer off");
-    MSG msg;
     for (;;) {
-        LONG r = GetMessage(&msg, NULL, 0, 0);
-        if (r <= 0) break;
-        if (msg.message != WM_HOTKEY) continue;
-        if (msg.wParam == 1) {
+        int mod = (GetAsyncKeyState(VK_CONTROL) & 0x8000) &&
+                  (GetAsyncKeyState(VK_MENU) & 0x8000);
+        int x = mod && (GetAsyncKeyState('X') & 0x8000);
+        int q = mod && (GetAsyncKeyState('Q') & 0x8000);
+        if (x && !x_down) {
             InterlockedExchange(&g_paused, g_paused ? 0 : 1);
             nr_log("[nr_layer] %s by hotkey", g_paused ? "paused" : "resumed");
-        } else if (msg.wParam == 2) {
+        }
+        if (q && !q_down) {
             InterlockedExchange(&g_off, 1);
             nr_log("[nr_layer] layer off by hotkey");
         }
+        x_down = x;
+        q_down = q;
+        Sleep(50);
     }
     return 0;
 }
@@ -2005,6 +2035,11 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
     if (g_paused)
         return data->present(queue, info);
     if (no_patch)
+        return data->present(queue, info);
+    /* Manager pause: processing runs only while the trigger file exists.
+     * m13's dx9_pause()/resume() toggles it; _access on an existing path is
+     * a microseconds-class stat, same cadence as the freeze check below. */
+    if (trigger_path && _access(trigger_path, 0) != 0)
         return data->present(queue, info);
 
     hotkeys_ensure();
