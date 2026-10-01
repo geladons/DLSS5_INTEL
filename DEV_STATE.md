@@ -1787,3 +1787,49 @@ mixing is still visible judder. Engine init also OOMs (vkCreateDevice -2)
 or AVs when VRAM is contended - daemon must init BEFORE the game's VK
 footprint grows. The one-klick loading-screen verification is still owed
 (needs a physical Sunshine click; DirectInput ignores synthetic input).
+
+## 2026-10-04 (audit: epsilon reuse + daemon self-heal) THE swim fix
+
+Three-agent audit (layer present path / chain determinism / daemon+protocol)
+plus live experiments on the REAL game window:
+
+FINDINGS THAT MATTERED:
+- Engine is bit-deterministic: same 800x600 frame through the daemon twice
+  -> byte-identical replies (live test). Noise seed pinned (b[0]=1), no
+  atomics on the live path, temporal state gated off. Swim is NOT the model.
+- The menu is not static: GTA IV renders animated film grain every present
+  (proven layer-OFF: 88 clusters/200 frames, identical oscillation). So the
+  layer's exact memcmp reuse gate NEVER fired on the menu; every present
+  reprocessed, each ~70-190ms-stale result a slightly-different frame =
+  the reported "swim/pлавание".
+- FIX b8431d1: epsilon reuse gate (nearly_identical - sampled rgb delta,
+  mean<=1.20/100 & big-pixel share <=20/1000; NR_LAYER_EPS=0 disables).
+  Plus earlier_pending (failed process no longer leaves earlier[] pointing
+  at an input whose result never arrived), holding_chain (held-result
+  re-blit now gated on the swapchain that produced it), result_size>=want,
+  untracked-queue presents go native instead of borrowing devices[0],
+  torn knob-file reads skipped on both layer and daemon sides.
+- VERIFIED LIVE: same game window, real mouse sweeps -> 3 clusters/108
+  frames (was 126/267); output bit-identical except real hover changes,
+  which still trigger daemon reprocess (frames 5-8 during sweep).
+
+DAEMON (c6a15bf): ensureEngine now shuts down unconditionally before init
+and zeroes curW/curH on failure - the old code could pass the early-return
+check on a TORN-DOWN engine (permanent brick while STATUS said ok). STATUS
+reports real engine health; SETSCALE honors re-init result; non-BGRA
+formats dropped (channel-swap corruption); 8s per-connection deadline
+(serial loop can't be pinned by a dribbling client); SetUnhandledException
+Filter witness added.
+
+M13 (02b08ee): stale reaper tick-debt - _x86_empty_ticks accumulated while
+no daemon ran; a daemon appearing mid-launch inherited it and was killed
+instantly (watched live: exit code 1 = TerminateProcess signature). Ticks
+now only count while a daemon exists.
+
+M8B-LIVE (36592ef): inlined front-end still fed frame counter into the
+feature noise seed (unpinned swim source) - pinned to 1, engine parity.
+
+STILL OPEN: moving-scene/gameplay verification (needs the owner's physical
+PLAY click through Sunshine); daemon throughput ~188ms/frame at scale 1.0
+(~5fps) / ~70ms at 0.33 - on moving scenes held-frame mixing is still
+visible judder; that is a throughput wall, not a transport defect.
