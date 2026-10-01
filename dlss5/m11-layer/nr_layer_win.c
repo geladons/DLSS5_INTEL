@@ -36,12 +36,15 @@
  *   NR_LAYER_UI_MASK  0 = disable exact-repeat reuse of the last processed
  *                     result (default on; legacy name)
  *
- * Daemon flap control (TCP path, nr_degrade.h): a transient exchange failure
- * re-blits the last processed frame of the same extent for up to 8
- * consecutive fails (logged once per streak); past that the daemon is
- * considered down and frames pass native until it answers again. Swapchains
- * below 64x64 on either axis are degenerate (menu/letterbox sub-elements)
- * and always pass through native, never touching the daemon.
+ * Daemon flap control (TCP path, nr_degrade.h): a transport-level exchange
+ * failure (connected, but the daemon did not answer) re-blits the last
+ * processed frame of the same extent - a raw frame is never inserted into a
+ * processed stream while the outage is fresh (NR_DEGRADE_STALE_MS).
+ * connect()-refused means the daemon is absent and passes native. During a
+ * flap/outage only every 8th/32nd present probes the socket; the rest are
+ * served without a blocking timeout. Swapchains below 64x64 on either axis
+ * are degenerate (menu/letterbox sub-elements) and always pass through
+ * native, never touching the daemon.
  *
  * Build: see CMakeLists.txt (x64; x86 build needed for 32-bit games).
  */
@@ -572,12 +575,17 @@ static int winsock_up(void)
     return ok;
 }
 
+static uint64_t nr_now_ms(void) { return (uint64_t)GetTickCount64(); }
+
+/* 0 = ok; -1 = transport failure (connected, send/recv timed out or broke -
+ * the daemon is alive but busy); -2 = connect refused (daemon absent). The
+ * flap policy in nr_degrade.c treats the two differently. */
 static int exchange(const void *header, size_t header_size, const void *payload,
                     size_t payload_size, void *reply, size_t reply_size)
 {
-    if (!winsock_up()) return -1;
+    if (!winsock_up()) return -2;
     SOCKET fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (fd == INVALID_SOCKET) return -1;
+    if (fd == INVALID_SOCKET) return -2;
     DWORD tv = 1500;
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)&tv, sizeof tv);
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof tv);
@@ -587,9 +595,8 @@ static int exchange(const void *header, size_t header_size, const void *payload,
     address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     address.sin_port = htons((u_short)nr_port);
     if (connect(fd, (struct sockaddr *)&address, sizeof address) != 0) {
-        nr_log("[nr_layer] no daemon on 127.0.0.1:%ld", nr_port);
         closesocket(fd);
-        return -1;
+        return -2;
     }
     const unsigned char *out = (const unsigned char *)header;
     for (size_t sent = 0; sent < header_size; ) {
@@ -1383,6 +1390,10 @@ static int process_frame(device_data *data, swapchain_data *chain,
         int r = pfn_dlss5_process_frame(g_engine, chain->extent.width, chain->extent.height,
                                         data->mapped, data->mapped, (long)frame_counter);
         if (r == 0) {
+            /* The in-process engine is a processed-result producer too:
+             * feeding the flap clock here keeps the hold path eligible if a
+             * later in-process failure drops to the TCP fallback. */
+            nr_degrade_note_success(&g_dg, nr_now_ms());
             if (data->result && data->result_size >= needed) {
                 memcpy(data->result, data->mapped, (size_t)needed);
                 data->result_w = chain->extent.width;
@@ -1399,17 +1410,36 @@ static int process_frame(device_data *data, swapchain_data *chain,
 
     /* No daemon configured: capture-only mode (frame passes through). */
     if (!nr_port) return -1;
+    /* Probe pacing: while a flap/outage is in progress only every Nth
+     * present touches the socket; the rest are served from the held result
+     * (or natively when the held extent does not match) without paying the
+     * 1.5 s timeout per frame and without piling TCP backlog on a daemon
+     * that is already saturated. */
+    if (!nr_degrade_probe_now(&g_dg)) {
+        if (data->result_valid && data->result
+            && data->result_size >= needed
+            && data->result_w == chain->extent.width
+            && data->result_h == chain->extent.height) {
+            memcpy(data->mapped, data->result, (size_t)needed);
+            nr_degrade_note_held(&g_dg);
+            return 0;
+        }
+        return -1;
+    }
     /* The reply lands in data->mapped (the payload is fully sent before the
      * first reply byte arrives, so the alias is safe). Receiving anywhere
      * else - into data->result as the old code did - lets a timed-out recv
      * tear the last processed frame we may still want to hold. */
-    if (exchange(header, sizeof header, data->mapped, (size_t)needed,
-                 data->mapped, (size_t)needed)) {
+    int erc = exchange(header, sizeof header, data->mapped, (size_t)needed,
+                       data->mapped, (size_t)needed);
+    if (erc) {
         int hold = 0;
-        int dlog = nr_degrade_note_fail(&g_dg, &hold);
-        /* Flap control: a known-up daemon inside the fail window re-blits
-         * the last processed result of THIS extent instead of strobing a
-         * raw frame between processed neighbours. */
+        int dlog = nr_degrade_note_fail(&g_dg,
+            erc == -2 ? NR_DEGRADE_FAIL_CONNECT : NR_DEGRADE_FAIL_TRANSPORT,
+            nr_now_ms(), &hold);
+        /* Flap control: a fresh outage on a known-up daemon re-blits the
+         * last processed result of THIS extent instead of strobing a raw
+         * frame between processed neighbours. */
         if (hold && data->result_valid && data->result
             && data->result_size >= needed
             && data->result_w == chain->extent.width
@@ -1418,8 +1448,7 @@ static int process_frame(device_data *data, swapchain_data *chain,
             nr_degrade_note_held(&g_dg);
             if (dlog == NR_DEGRADE_LOG_HICCUP)
                 nr_log("[nr_layer] daemon hiccup; holding last processed "
-                       "frame (fail %u/%u)", g_dg.consecutive_fail,
-                       g_dg.window);
+                       "frame (fail %u)", g_dg.consecutive_fail);
             return 0;
         }
         if (dlog == NR_DEGRADE_LOG_DOWN)
@@ -1427,7 +1456,8 @@ static int process_frame(device_data *data, swapchain_data *chain,
         nr_log("[nr_layer] the daemon did not answer; frame unchanged");
         return -1;
     }
-    if (nr_degrade_note_success(&g_dg) == NR_DEGRADE_LOG_RECOVERY)
+    if (nr_degrade_note_success(&g_dg, nr_now_ms())
+            == NR_DEGRADE_LOG_RECOVERY)
         nr_log("[nr_layer] daemon answered again; processed output resumed");
     memcpy(data->result, data->mapped, (size_t)needed);
     data->result_w = chain->extent.width;
@@ -1522,13 +1552,18 @@ static int resend_raw(device_data *data, swapchain_data *chain)
     else
         reply = (unsigned char *)malloc((size_t)needed);
     if (!reply) return -1;
-    if (exchange(header, sizeof header, data->raw, (size_t)needed,
-                 reply, (size_t)needed)) {
+    int erc = exchange(header, sizeof header, data->raw, (size_t)needed,
+                       reply, (size_t)needed);
+    if (erc) {
         if (!reply_is_staging) free(reply);
+        nr_degrade_note_fail(&g_dg,
+            erc == -2 ? NR_DEGRADE_FAIL_CONNECT : NR_DEGRADE_FAIL_TRANSPORT,
+            nr_now_ms(), NULL);
         nr_log("[nr_layer] reprocess: the daemon did not answer "
                "(previous result kept)");
         return -1;
     }
+    nr_degrade_note_success(&g_dg, nr_now_ms());
     memcpy(data->result, reply, (size_t)needed);
     if (!reply_is_staging) free(reply);
     data->result_w = data->raw_w;
