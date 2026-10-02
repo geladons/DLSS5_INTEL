@@ -97,7 +97,10 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
   - Frame generation (`nr_framegen.h/.c`, NrFrameGen): with FG on and the
     in-process x64 engine loaded the layer processes every 2nd present and
     GENERATES the one in between via `dlss5_framegen_transfer` (1:2 cadence,
-    no added latency). x86/daemon path: FG unavailable, logged once. Watch
+    no added latency). x86/daemon path: the same 1:2 cadence sends an NRN2
+    frame magic to m11d, whose resident engine runs the residual transfer
+    (falls back to a full process until a prev pair exists; an old daemon
+    that drops the unknown magic is latched FG-off for the session). Watch
     `fg stats: presents/processed/generated/native` in %TEMP%\nr_layer_win.log.
 - m12-dxgi: DirectX 12 present hook (GTA V Enhanced). Dynamically loads
   `d5c_chain.dll` via C ABI to process present buffers in-process (0 ms TCP lag).

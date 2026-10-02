@@ -21,15 +21,15 @@ _S = {
     "scale_balanced": {"en": "Balanced (58%)", "ru": "Баланс (58%)"},
     "scale_perf": {"en": "Performance (50%)", "ru": "Производительность (50%)"},
     "scale_ultra": {"en": "Ultra Performance (33%)", "ru": "Ультра производительность (33%)"},
-    "framegen": {"en": "Frame Generation (1:2, x64 only)",
-                 "ru": "Генерация кадров (1:2, только x64)"},
+    "framegen": {"en": "Frame Generation (1:2)",
+                 "ru": "Генерация кадров (1:2)"},
     "framegen_hint": {
         "en": "Every 2nd frame is neural-processed, the frame between is "
-              "generated from it (motion-compensated). Not available for x86 "
-              "titles (GTA IV).",
+              "generated from it (motion-compensated). On x86 titles the "
+              "daemon synthesizes it via residual transfer.",
         "ru": "Каждый 2-й кадр обрабатывается нейросетью, промежуточный "
-              "генерируется из него (с компенсацией движения). Недоступно для "
-              "x86-игр (GTA IV)."},
+              "генерируется из него (с компенсацией движения). На x86-играх "
+              "генерирует демон через residual transfer."},
     "sharpness": {"en": "Sharpness", "ru": "Резкость (RCAS)"},
     "autosetup": {"en": "Auto-setup:", "ru": "Автонастройка:"},
     "step_weights": {"en": "Weights", "ru": "Веса"},

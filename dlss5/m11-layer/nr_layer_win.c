@@ -267,6 +267,12 @@ static long capture_every;
 static long live_every;
 static NrFrameGen g_fg;
 static NrDegrade g_dg;
+/* Daemon-path framegen state: 0 = unprobed, 1 = a NRN2 transfer request was
+ * answered, -1 = refused/failed - latched for the session so an old daemon
+ * is never spammed with a doomed multi-MB payload every 2nd present. The
+ * request is self-probing: a new daemon always answers (a process fallback
+ * when it cannot transfer yet), an old daemon drops the unknown magic. */
+static int g_daemon_fg;
 static long nr_port = NR_DEFAULT_PORT;
 static const char *trigger_path;
 static const char *freeze_path;
@@ -1160,11 +1166,14 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
         ensure_inprocess();
         {
             int fg_on = is_framegen_enabled();
-            int fg_avail = g_engine && pfn_dlss5_framegen_transfer;
+            int fg_avail = (g_engine && pfn_dlss5_framegen_transfer)
+                           || (nr_port != 0);
             nr_log("[nr_layer] framegen: %s, %s, cadence every %ld",
                    fg_on ? "enabled" : "disabled",
-                   fg_avail ? "in-process x64 available"
-                            : "unavailable (requires in-process x64 engine)",
+                   (g_engine && pfn_dlss5_framegen_transfer)
+                       ? "in-process x64 available"
+                       : (nr_port ? "daemon path (NRN2 transfer over TCP)"
+                                  : "unavailable (no in-process engine, no daemon port)"),
                    nr_fg_effective_every(&g_fg, fg_on, fg_avail));
         }
     }
@@ -1907,8 +1916,18 @@ static int process_frame(device_data *data, swapchain_data *chain,
         return -1;
     }
     if (nr_degrade_note_success(&g_dg, nr_now_ms())
-            == NR_DEGRADE_LOG_RECOVERY)
+            == NR_DEGRADE_LOG_RECOVERY) {
         nr_log("[nr_layer] daemon answered again; processed output resumed");
+        /* The daemon demonstrably went down and came back: allow the FG
+         * path one fresh NRN2 attempt. A daemon that never went down keeps
+         * its latch (an old daemon gets at most one doomed request, ever;
+         * a respawned/new daemon regains FG). */
+        if (g_daemon_fg < 0) {
+            g_daemon_fg = 0;
+            nr_log("[nr_layer] daemon recovered; framegen re-probed on "
+                   "next generated present");
+        }
+    }
     memcpy(data->result, data->mapped, (size_t)needed);
     data->result_w = chain->extent.width;
     data->result_h = chain->extent.height;
@@ -2263,7 +2282,18 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
          */
         {
         int fg_enabled = is_framegen_enabled();
-        int fg_avail = g_engine && pfn_dlss5_framegen_transfer;
+        /* Two FG producers: the in-process x64 engine answers
+         * dlss5_framegen_transfer directly; the x86 daemon answers the NRN2
+         * frame-magic request (the resident engine owns the prev pair).
+         * Daemon requests only flow once the daemon has proven itself on the
+         * socket (daemon_known_up) - a daemon that is down keeps FG silent
+         * instead of paying a refused connect every 2nd present; a failed
+         * NRN2 latches g_daemon_fg=-1 for the session. */
+        int fg_inprocess = g_inprocess_active && g_engine
+                           && pfn_dlss5_framegen_transfer;
+        int fg_daemon = !fg_inprocess && nr_port
+                        && g_daemon_fg >= 0 && g_dg.daemon_known_up;
+        int fg_avail = fg_inprocess || fg_daemon;
         int should_process = nr_fg_should_process(&g_fg, frame_counter,
                                                   fg_enabled, fg_avail);
         if (should_process) {
@@ -2299,40 +2329,93 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
             }
         } else if (fg_enabled && fg_avail) {
             /* Framegen: generate this present from the engine's copy of the
-             * last processed frame + its raw input (residual transfer). */
+             * last processed frame + its raw input (residual transfer).
+             * x64: dlss5_framegen_transfer in-process. x86 daemon path: the
+             * NRN2 frame magic asks the daemon's resident engine for the
+             * same transfer - it falls back to a full process when it has no
+             * usable prev pair, so any complete reply is a presentable
+             * frame (generated or not). */
             int generated = 0;
-            if (ensure_resources(data, want) == 0 && transfer(data, chain, queue, index, 0) == 0) {
-                if (data->raw_size < want) {
-                    unsigned char *grown = (unsigned char *)realloc(data->raw, (size_t)want);
-                    if (grown) {
-                        data->raw = grown;
-                        data->raw_size = want;
-                    }
-                }
-                if (data->interp_size < want) {
-                    unsigned char *grown = (unsigned char *)realloc(data->interp, (size_t)want);
-                    if (grown) {
-                        data->interp = grown;
-                        data->interp_size = want;
-                    }
-                }
-                if (data->raw && data->raw_size >= want && data->interp && data->interp_size >= want) {
-                    memcpy(data->raw, data->mapped, (size_t)want);
-                    data->raw_size = want;
-                    int r = pfn_dlss5_framegen_transfer(g_engine, chain->extent.width, chain->extent.height,
-                                                        data->raw, data->interp);
-                    if (r == 0) {
-                        static unsigned long fg_frame_count = 0;
-                        fg_frame_count++;
-                        if (fg_frame_count <= 5 || fg_frame_count % 60 == 0) {
-                            nr_log("[nr_layer] framegen generated %ux%u (frame %lu, fg #%lu)",
-                                   chain->extent.width, chain->extent.height, frame_counter, fg_frame_count);
+            int deg_log = NR_DEGRADE_LOG_NONE;
+            /* Same gate as process_frame: a menu/letterbox strip must not
+             * bounce the daemon's (or in-process) engine through a
+             * junk-extent re-init just to synthesize its frame. */
+            int deg = nr_degrade_is_degenerate(&g_dg, chain->extent.width,
+                                               chain->extent.height, &deg_log);
+            if (deg && deg_log == NR_DEGRADE_LOG_DEGENERATE)
+                nr_log("[nr_layer] degenerate swapchain %ux%u; FG "
+                       "passthrough", chain->extent.width,
+                       chain->extent.height);
+            if (!deg
+                && ensure_resources(data, want) == 0
+                && transfer(data, chain, queue, index, 0) == 0) {
+                if (fg_inprocess) {
+                    if (data->raw_size < want) {
+                        unsigned char *grown = (unsigned char *)realloc(data->raw, (size_t)want);
+                        if (grown) {
+                            data->raw = grown;
+                            data->raw_size = want;
                         }
-                        memcpy(data->mapped, data->interp, (size_t)want);
-                        transfer(data, chain, queue, index, 1);
-                        generated = 1;
-                    } else if (g_fg.native < 3) {
-                        nr_log("[nr_layer] dlss5_framegen_transfer failed (%d); presenting native frame", r);
+                    }
+                    if (data->interp_size < want) {
+                        unsigned char *grown = (unsigned char *)realloc(data->interp, (size_t)want);
+                        if (grown) {
+                            data->interp = grown;
+                            data->interp_size = want;
+                        }
+                    }
+                    if (data->raw && data->raw_size >= want && data->interp && data->interp_size >= want) {
+                        memcpy(data->raw, data->mapped, (size_t)want);
+                        data->raw_size = want;
+                        int r = pfn_dlss5_framegen_transfer(g_engine, chain->extent.width, chain->extent.height,
+                                                            data->raw, data->interp);
+                        if (r == 0) {
+                            static unsigned long fg_frame_count = 0;
+                            fg_frame_count++;
+                            if (fg_frame_count <= 5 || fg_frame_count % 60 == 0) {
+                                nr_log("[nr_layer] framegen generated %ux%u (frame %lu, fg #%lu)",
+                                       chain->extent.width, chain->extent.height, frame_counter, fg_frame_count);
+                            }
+                            memcpy(data->mapped, data->interp, (size_t)want);
+                            transfer(data, chain, queue, index, 1);
+                            generated = 1;
+                        } else if (g_fg.native < 3) {
+                            nr_log("[nr_layer] dlss5_framegen_transfer failed (%d); presenting native frame", r);
+                        }
+                    }
+                } else {
+                    /* Daemon path (x86): the reply lands in data->mapped -
+                     * the payload is fully sent before the first reply byte
+                     * arrives, so the aliasing is safe (same trick
+                     * process_frame uses). data->raw/interp stay untouched:
+                     * the engine's own buffers hold prev. */
+                    uint32_t fgheader[4] = { 0x324E524Eu, chain->extent.width,
+                                             chain->extent.height,
+                                             (uint32_t)chain->format };
+                    int erc = exchange(fgheader, sizeof fgheader, data->mapped,
+                                       (size_t)want, data->mapped, (size_t)want);
+                    if (erc == 0) {
+                        static unsigned long fg_tcp_count = 0;
+                        g_daemon_fg = 1;
+                        fg_tcp_count++;
+                        if (fg_tcp_count <= 5 || fg_tcp_count % 60 == 0) {
+                            nr_log("[nr_layer] daemon framegen %ux%u "
+                                   "(frame %lu, fg #%lu)",
+                                   chain->extent.width, chain->extent.height,
+                                   frame_counter, fg_tcp_count);
+                        }
+                        nr_degrade_note_success(&g_dg, nr_now_ms());
+                        if (transfer(data, chain, queue, index, 1) == 0)
+                            generated = 1;
+                    } else {
+                        /* Old daemon without NRN2 support / wedged / dead
+                         * engine: latch FG off for the session rather than
+                         * piling a doomed multi-MB payload onto the socket
+                         * every 2nd present. The frame goes out native
+                         * (staging is never written back on failure). */
+                        g_daemon_fg = -1;
+                        nr_log("[nr_layer] daemon framegen refused/failed "
+                               "(rc %d); daemon FG off for this session", erc);
                     }
                 }
             }
@@ -2354,7 +2437,8 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
             nr_fg_note(&g_fg, held ? NR_FG_PROCESSED : NR_FG_NATIVE);
             if (fg_enabled && !fg_avail && !g_fg.unavailable_logged) {
                 nr_log("[nr_layer] framegen requested but unavailable "
-                       "(requires in-process x64 engine); presenting native");
+                       "(no in-process engine; daemon not up or NRN2 "
+                       "unsupported); presenting native");
                 g_fg.unavailable_logged = 1;
             }
         }

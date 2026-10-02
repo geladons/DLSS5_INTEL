@@ -7,6 +7,18 @@
 //   request: 16-byte header {magic, w, h, format} (uint32 LE)
 //            magic 0x304E524E: payload w*h*4 bytes (BGRA)
 //            magic 0x314E524E: payload w*h*4 + w*h mask bytes (1 = held-still UI)
+//            magic 0x324E524E ("NRN2"): frame-generation transfer request -
+//                     same wire shape as 0x304E524E (no mask), but the frame
+//                     is GENERATED via ChainEngine::transferFrame instead of
+//                     fully processed: generated = cur + warp(prevProcessed -
+//                     prevRaw, motion(prevRaw->cur)) using the prev pair the
+//                     resident engine keeps from the last processed frame
+//                     (bufPrevFrame_/bufPrevRaw_). When no usable prev pair
+//                     exists (stream start, post-reset, re-init) or FG is
+//                     disabled (cmd 5 / --framegen 0) the request degrades to
+//                     a normal process - the reply is always a presentable
+//                     frame. Temporal history (bufHist_) is untouched by a
+//                     transfer, so generated frames never anchor the chain.
 //            magic 0x5443524E ("NRCT"): M13 control channel, 16-byte header
 //                     {magic, cmd, payload, reserved} instead of a frame:
 //                     cmd 1 = SETGAIN (payload = float bits, reply ok+gain)
@@ -15,10 +27,10 @@
 //                     cmd 4 = SETSCALE(payload = float bits 0.2..1.5, reply ok+gain)
 //                     cmd 12 = RESETHIST (temporal history drop; next frame
 //                              takes the first-frame path - photo batches,
-//                              stream switches)
+//                              stream switches; also drops the FG prev pair)
 //                     cmd 13 = SETTEMPORAL (payload = int 0/1)
-//   reply:   frame requests: w*h*4 bytes BGRA (the processed frame)
-//            control requests: 16 bytes {magic, ok, gainBits, frames}
+//   reply:   frame requests: w*h*4 bytes BGRA (the processed or generated
+//            frame); control requests: 16 bytes {magic, ok, gainBits, frames}
 // One TCP connection per frame (the layer connect()s per exchange).
 //
 // Modes:
@@ -57,6 +69,7 @@
 
 static const uint32_t MAGIC_PLAIN = 0x304E524Eu;
 static const uint32_t MAGIC_MASKED = 0x314E524Eu;
+static const uint32_t MAGIC_FGT = 0x324E524Eu;    // "NRN2" - framegen transfer
 static const uint32_t MAGIC_CTRL = 0x5443524Eu;   // "NRCT" - M13 control
 
 // ---------------------------------------------------------------- BMP I/O --
@@ -172,6 +185,18 @@ static bool sehProcessFrame(d5c::ChainEngine* eng, const uint8_t* in,
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         std::fprintf(stderr, "[m11d] SEH 0x%08lx inside processFrame (frame %u) - engine state may be dirty\n",
                      (unsigned long)GetExceptionCode(), (unsigned)frame);
+        return false;
+    }
+}
+// Same containment for the framegen residual-transfer pass (driver faults
+// there are rarer - one dispatch - but a crashed daemon answers nothing).
+static bool sehTransferFrame(d5c::ChainEngine* eng, uint32_t w, uint32_t h,
+                             const uint8_t* in, uint8_t* out, d5c::FrameStats* st) {
+    __try {
+        return eng->transferFrame(w, h, in, out, st);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        std::fprintf(stderr, "[m11d] SEH 0x%08lx inside transferFrame - falling back to a full process\n",
+                     (unsigned long)GetExceptionCode());
         return false;
     }
 }
@@ -601,6 +626,8 @@ int main(int argc, char** argv) {
                     rep[1] = 1;
                     if (curW && curH)
                         rep[1] = ensureEngine(curW, curH) ? 1 : 0;
+                    havePrev = false;            // a re-init wiped the prev pair
+                                                 // (harmless if none ran)
                     std::printf("[m11d] ctrl: scale -> %.2f (reinit %s)\n",
                                 (double)s, rep[1] ? "ok" : "FAILED");
                 } else {
@@ -653,8 +680,9 @@ int main(int argc, char** argv) {
                 std::printf("[m11d] ctrl: color_strength -> %.3f\n", (double)v);
             } else if (hdr[1] == 12) {           // RESETHIST: drop temporal history
                 engine.resetHistory();           // (next frame = first-frame path;
-                rep[1] = 1;                      //  photo batches / stream switches)
-                std::printf("[m11d] ctrl: temporal history reset\n");
+                havePrev = false;                //  photo batches / stream switches;
+                rep[1] = 1;                      //  the stale prev pair must not
+                std::printf("[m11d] ctrl: temporal history reset\n");   //  anchor a post-reset transfer either)
             } else if (hdr[1] == 13) {           // SETTEMPORAL: hdr[2] = int (0/1)
                 engine.setTemporal(hdr[2] != 0);
                 rep[1] = 1;
@@ -673,7 +701,8 @@ int main(int argc, char** argv) {
             engine.setPhase30(p30Ctl.params());
         }
         const bool masked = hdr[0] == MAGIC_MASKED;
-        if (hdr[0] != MAGIC_PLAIN && !masked) {
+        const bool fgReq  = hdr[0] == MAGIC_FGT;
+        if (hdr[0] != MAGIC_PLAIN && !masked && !fgReq) {
             std::fprintf(stderr, "[m11d] bad magic 0x%08x - dropping connection\n", hdr[0]);
             closesocket(s); continue;
         }
@@ -718,6 +747,8 @@ int main(int argc, char** argv) {
                 const ULONGLONG now = GetTickCount64();
                 if (lastFrameTick && now - lastFrameTick > 2000) {
                     engine.resetHistory();
+                    havePrev = false;   // pre-gap frames must not anchor a
+                                        // post-gap residual transfer either
                     std::printf("[m11d] stream gap %llu ms - temporal history reset\n",
                                 (unsigned long long)(now - lastFrameTick));
                 }
@@ -727,17 +758,44 @@ int main(int argc, char** argv) {
             ++frameCounter;
             auto t0 = std::chrono::steady_clock::now();
 
-            // Clean forward processing for every frame via DLSS 5 engine
-            bool ok = sehProcessFrame(&engine, inBuf.data(), outBuf.data(), frameCounter, &st);
+            // NRN2 (FGTRANSFER): run the engine's residual-transfer framegen
+            // when FG is on and the resident engine already holds a prev
+            // processed/raw pair. The generated frame rides the raw->raw
+            // motion and never touches temporal history. Everything else -
+            // first frame, post-reset/gap, engine re-init, FG toggled off, or
+            // a refused/faulted transfer - falls back to a full process so
+            // the reply is always a presentable frame (and refreshes the
+            // prev pair as a side effect).
+            bool transferred = false;
+            bool ok;
+            if (fgReq && frameGen && havePrev) {
+                ok = sehTransferFrame(&engine, w, h, inBuf.data(), outBuf.data(), &st);
+                if (ok) {
+                    transferred = true;
+                } else {
+                    std::fprintf(stderr, "[m11d] transferFrame failed - processing instead\n");
+                    ok = sehProcessFrame(&engine, inBuf.data(), outBuf.data(), frameCounter, &st);
+                }
+            } else {
+                // Clean forward processing for every frame via DLSS 5 engine
+                ok = sehProcessFrame(&engine, inBuf.data(), outBuf.data(), frameCounter, &st);
+            }
             double wall = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - t0).count();
             if (ok) {
-                if (prevProcessedBuf.size() < px * 4) prevProcessedBuf.resize(px * 4);
-                std::memcpy(prevProcessedBuf.data(), outBuf.data(), px * 4);
-                havePrev = true;
+                if (!transferred) {
+                    // Only a real process refreshes the prev pair - a
+                    // generated frame is not a reconstruction and must stay
+                    // out of the transfer baseline (x64 parity).
+                    if (prevProcessedBuf.size() < px * 4) prevProcessedBuf.resize(px * 4);
+                    std::memcpy(prevProcessedBuf.data(), outBuf.data(), px * 4);
+                    havePrev = true;
+                }
                 // vendor parity (nr_daemon.py:88): alpha stays as the game
                 // left it (encode forces opaque for the overlay use-case);
-                // held-still UI pixels (mask) pass through untouched.
+                // held-still UI pixels (mask) pass through untouched. For a
+                // generated frame the loop is a byte-exact no-op: framegen
+                // mode 1 already packs the current raw alpha (cur.a).
                 for (size_t i = 0; i < px; ++i) {
                     if (masked && maskBuf[i]) {
                         std::memcpy(&outBuf[i * 4], &inBuf[i * 4], 4);
@@ -747,14 +805,19 @@ int main(int argc, char** argv) {
                 }
                 if (!writeAll(s, outBuf.data(), px * 4))
                     std::fprintf(stderr, "[m11d] reply write failed\n");
-                std::printf("[m11d] frame %ld %ux%u%s in %.1f ms (chain %.1f)\n",
-                            frameCounter, w, h, masked ? " +mask" : "", wall, st.chainMs);
+                std::printf("[m11d] frame %ld %ux%u%s%s in %.1f ms (%s %.1f)\n",
+                            frameCounter, w, h, masked ? " +mask" : "",
+                            transferred ? " +fg" : (fgReq ? " +fg-fallback" : ""),
+                            wall, transferred ? "transfer" : "chain",
+                            transferred ? st.gpuTotalMs : st.chainMs);
             } else {
                 // Do NOT echo the input: a "successful" raw reply is presented
                 // as a processed frame by the layer - a quality strobe.
                 // Closing without a reply makes the layer treat this as a
                 // transport failure and hold the last processed frame.
-                std::fprintf(stderr, "[m11d] processFrame FAILED - closing, no reply\n");
+                std::fprintf(stderr, "[m11d] %s FAILED - closing, no reply\n",
+                            fgReq ? "fgtransfer/process" : "processFrame");
+                havePrev = false;   // a torn frame can leave the prev pair dirty
                 // A mid-frame fault (device lost etc.) leaves the engine
                 // half-dead: zeroing the extent forces a full re-init on the
                 // next frame instead of fail-closing on this extent forever.
