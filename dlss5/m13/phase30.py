@@ -26,8 +26,12 @@ from tkinter import ttk
 
 try:
     from .i18n import tr
+    from .overlay_win32 import (_u32, GA_ROOT, set_noactivate_for_hwnd,
+                                fix_popdown)
 except (ImportError, ValueError):
     from i18n import tr
+    from overlay_win32 import (_u32, GA_ROOT, set_noactivate_for_hwnd,
+                               fix_popdown)
 
 
 PHASE30_DEFAULTS = {
@@ -135,12 +139,41 @@ class ToolTip:
         self.tipwin = tw = tk.Toplevel(self.widget)
         tw.wm_overrideredirect(True)
         tw.wm_attributes("-topmost", True)
+        # Game Bar semantics: a tooltip is a transient TOOL window of the
+        # panel, never an activation vector - a bare Toplevel map could
+        # steal the game's foreground (exclusive fullscreen minimizes).
+        # transient() ties z-order to the owner; the top-level HWND gets
+        # WS_EX_NOACTIVATE|WS_EX_TOOLWINDOW applied three ways because Tk
+        # re-writes GWL_EXSTYLE while mapping a transient toplevel: once
+        # pre-map on the already-created HWND, once after update_idletasks
+        # forces the map (Tk's restyle lands first, ours last), and once
+        # more at idle as a belt for Tk builds that restyle later.
+        try:
+            tw.transient(self.widget.winfo_toplevel())
+        except tk.TclError:
+            pass
+
+        def _harden():
+            try:
+                th = _u32.GetAncestor(tw.winfo_id(), GA_ROOT) \
+                    or tw.winfo_id()
+                if th:
+                    set_noactivate_for_hwnd(th)
+            except Exception:
+                pass
+        _harden()                            # pre-map, if HWND exists
         tw.geometry("+%d+%d" % (x, y))
         lbl = tk.Label(tw, text=text, justify="left",
                        bg="#1f2430", fg="#e6e9f0",
                        relief="solid", bd=1,
                        font=("Segoe UI", 8), padx=6, pady=4)
         lbl.pack()
+        try:
+            tw.update_idletasks()            # force the map + Tk restyle
+        except tk.TclError:
+            pass
+        _harden()                            # ours lands last
+        tw.after_idle(_harden)
 
     def hide(self, _e=None):
         if self.tipwin:
@@ -255,6 +288,10 @@ class Phase30Panel(tk.Frame):
             values=self._style_labels, width=15 if self.compact else 18)
         self.cb_style.pack(side="left")
         self.cb_style.bind("<<ComboboxSelected>>", self._on_style_selected)
+        # Same hardening as the overlay's scale combobox: the ttk popdown
+        # is its own toplevel and must not become an activation vector.
+        self.cb_style.bind("<Button-1>", fix_popdown(self.cb_style),
+                           add="+")
 
     def _add_slider(self, label_text, var, min_v, max_v, res, tip_fn, key,
                     custom_fmt=None):

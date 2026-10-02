@@ -53,15 +53,21 @@ from .i18n import (tr, scale_preset_labels, scale_to_preset_label,
 from .phase30 import Phase30Panel
 from .overlay_win32 import (_u32, GWL_EXSTYLE, WS_EX_TOPMOST,  # noqa: F401
                             WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+                            HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE,
+                            SWP_NOACTIVATE,
                             _set_noactivate, _free_cursor, _input_jiggle,
                             _force_foreground, _toplevel_hwnd, _exstyle,
-                            _show_noactivate)
+                            _show_noactivate, fix_popdown,
+                            monitor_work_area_for_hwnd)
 
 VK = {"control": 0x11, "ctrl": 0x11, "alt": 0x12, "shift": 0x10}
+VK_LBUTTON = 0x01
 POLL_MS = 120
 DEBOUNCE_MS = 250
 STATUS_MS = 500
 CURSOR_KEEP_MS = 32
+CURSOR_FREE_MS = 500   # low cadence: full ReleaseCapture/SetCursor pass
+TOPMOST_REASSERT_S = 1.0
 
 # dark theme (shared palette with ui.py)
 BG = "#0d1017"
@@ -136,9 +142,9 @@ class ControlOverlay:
         self.win = tk.Toplevel(master)
         self.win.overrideredirect(True)          # frameless: no OS window look
         self.win.attributes("-topmost", True)
-        self.win.attributes("-alpha", 0.95)
-        self.win.configure(bg=BG, highlightthickness=1,
-                           highlightbackground=ACCENT, cursor="arrow")
+        self._alpha = 0.88
+        self.win.attributes("-alpha", self._alpha)
+        self.win.configure(bg=BG, cursor="arrow")
         self.win.resizable(False, False)
         self.win.protocol("WM_DELETE_WINDOW", self.hide)
         self.win.withdraw()
@@ -159,6 +165,15 @@ class ControlOverlay:
         self._focus_mode = False     # we took the foreground this session
         self._jail_cursor = True     # recompute per show(): fullscreen only
         self._tf_saved = None        # original takefocus per widget
+        self._dragging = False       # a mouse button is held over the panel
+        self._last_cursor_free = 0.0  # last full _free_cursor() timestamp
+        self._last_topmost = 0.0     # last HWND_TOPMOST re-assert timestamp
+        self._hwnd = None            # cached top-level HWND (per show())
+        # Drag tracking feeds _cursor_keeper: while a button is held over
+        # the panel the keeper must not ReleaseCapture mid-gesture. The
+        # toplevel bindtag sees presses/releases from every descendant.
+        self.win.bind("<ButtonPress>", self._button_press, add="+")
+        self.win.bind("<ButtonRelease>", self._button_release, add="+")
         self._build()
         self.poller = HotkeyPoller(ctl.cfg.get("overlay_hotkey"), self.toggle)
         self.poller.attach(master)
@@ -230,27 +245,11 @@ class ControlOverlay:
             values=scale_preset_labels(), width=18)
         self.scale_cb.pack(side="left", padx=(6, 12))
         self.scale_cb.bind("<<ComboboxSelected>>", self._scale_selected)
-
-        def _fix_popdown(_e):
-            # The combobox popdown is a fresh Tk toplevel that does NOT
-            # inherit our WS_EX_NOACTIVATE - showing it plain would be an
-            # activation vector against exclusive-fullscreen games.
-            try:
-                popdown = self.win.tk.eval(
-                    "ttk::combobox::PopdownWindow %s" % self.scale_cb)
-                self.win.tk.eval("wm attributes %s -topmost 1" % popdown)
-            except Exception:
-                return
-
-            def _noactivate_popdown():
-                try:
-                    ph = self.win.tk.eval("wm frame %s" % popdown)
-                    _set_noactivate(int(ph, 16), True)
-                except Exception:
-                    pass
-            _noactivate_popdown()          # now, if the HWND already exists
-            self.win.after_idle(_noactivate_popdown)  # else right after map
-        self.scale_cb.bind("<Button-1>", _fix_popdown, add="+")
+        # The combobox popdown is a fresh Tk toplevel that does NOT
+        # inherit our WS_EX_NOACTIVATE - showing it plain would be an
+        # activation vector against exclusive-fullscreen games.
+        self.scale_cb.bind("<Button-1>", fix_popdown(self.scale_cb),
+                           add="+")
 
         self.fg_var = tk.BooleanVar(value=bool(self.ctl.cfg.get("frame_gen")))
         self.fg_chk = tk.Checkbutton(
@@ -348,14 +347,45 @@ class ControlOverlay:
             font=("Segoe UI", 8)).pack(side="bottom", pady=(8, 0))
 
     # -------------------------------------------------------------- drag ---
+    def _button_press(self, _e):
+        """Any button held over the panel - _cursor_keeper must not run
+        ReleaseCapture/SetCursor mid-gesture (kills Tk slider drags)."""
+        self._dragging = True
+
+    def _button_release(self, _e):
+        self._dragging = False
+        self._drag = None
+
+    def _vroot_bounds(self):
+        """(l, t, r, b) of the virtual desktop spanning ALL monitors -
+        winfo_screenwidth() is the primary monitor only. Falls back to the
+        primary screen when the vroot query fails."""
+        try:
+            l, t = self.win.winfo_vrootx(), self.win.winfo_vrooty()
+            w, h = (self.win.winfo_vrootwidth(),
+                    self.win.winfo_vrootheight())
+            if w > 0 and h > 0:
+                return (l, t, l + w, t + h)
+        except tk.TclError:
+            pass
+        return (0, 0, self.win.winfo_screenwidth(),
+                self.win.winfo_screenheight())
+
     def _drag_start(self, e):
         self._drag = (e.x_root - self.win.winfo_x(),
                       e.y_root - self.win.winfo_y())
+        self._dragging = True
 
     def _drag_move(self, e):
         if self._drag:
-            self.win.geometry("+%d+%d" % (e.x_root - self._drag[0],
-                                          e.y_root - self._drag[1]))
+            # Clamp to the virtual desktop so the panel can never be
+            # parked offscreen (negative/secondary-monitor coords are real).
+            x = e.x_root - self._drag[0]
+            y = e.y_root - self._drag[1]
+            l, t, r, b = self._vroot_bounds()
+            x = min(max(l, x), max(l, r - self.win.winfo_width()))
+            y = min(max(t, y), max(t, b - self.win.winfo_height()))
+            self.win.geometry("+%d+%d" % (x, y))
 
     # ----------------------------------------------------------- actions ---
     def _toggle_processing(self):
@@ -540,7 +570,27 @@ class ControlOverlay:
         if p30 and hasattr(self, "p30_panel") and self.p30_panel and not self.p30_panel.is_dragging():
             self.p30_panel.set_values(p30)
 
+        self._reassert_topmost()
         self.win.after(STATUS_MS, self._refresh)
+
+    def _reassert_topmost(self):
+        """~1/s topmost insurance while visible: another always-on-top
+        window (GPU OSD, another game bar) can cover the panel. A bare
+        HWND_TOPMOST restack with SWP_NOACTIVATE is pure z-order - it can
+        never become an activation."""
+        now = time.time()
+        if now - self._last_topmost < TOPMOST_REASSERT_S:
+            return
+        self._last_topmost = now
+        hwnd = self._hwnd
+        if not hwnd:
+            return
+        try:
+            if _u32.IsWindowVisible(hwnd):
+                _u32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+        except (ValueError, OSError):
+            pass
 
 
     # ------------------------------------------------------- focus / cursor
@@ -590,20 +640,27 @@ class ControlOverlay:
                 pass
 
     def _game_covers_screen(self):
-        """True when the game window spans ~the whole monitor. That is the
-        only case where an escaped click could minimize the game / escape
-        into an invisible desktop - so it is also the only case where the
-        cursor jail (and the open-time cursor warp) earns its keep."""
+        """True when the game window spans ~the whole monitor it lives on.
+        That is the only case where an escaped click could minimize the
+        game / escape into an invisible desktop - so it is also the only
+        case where the cursor jail (and the open-time cursor warp) earns
+        its keep. Multi-monitor safe: compares against the game's OWN
+        monitor work area, not the primary screen (winfo_screenwidth)."""
         gh = getattr(self, "_game_hwnd", None)
         if not gh:
             return False
         rect = wintypes.RECT()
         if not _u32.GetWindowRect(gh, ctypes.byref(rect)):
             return False
+        wa = monitor_work_area_for_hwnd(gh)
+        if wa:
+            mw, mh = wa[2] - wa[0], wa[3] - wa[1]
+        else:
+            l, t, r, b = self._vroot_bounds()
+            mw, mh = r - l, b - t
         gw = rect.right - rect.left
         ghh = rect.bottom - rect.top
-        return (gw >= self.win.winfo_screenwidth() * 0.9
-                and ghh >= self.win.winfo_screenheight() * 0.9)
+        return gw >= mw * 0.9 and ghh >= mh * 0.9
 
     def _warp_cursor(self):
         """Park the OS cursor over the panel so the user SEES it at once
@@ -622,15 +679,39 @@ class ControlOverlay:
 
     def _cursor_keeper(self):
         """While the panel is open, keep the cursor free: games re-apply
-        ClipCursor/ShowCursor(false) on every frame, one-shot is not
-        enough. The hard jail (teleport back into the panel) only runs for
-        a fullscreen game; windowed mode leaves the cursor free so the
-        user can click outside the panel."""
+        ClipCursor/ShowCursor(false) on every frame, so the one-shot at
+        show() is not enough. The full ReleaseCapture/SetCursor/ClipCursor
+        pass is NOT run at this 32 ms poll rate - it killed Tk slider
+        drags (ReleaseCapture) and fought widget cursors (SetCursor).
+        It runs once at show() and then at CURSOR_FREE_MS cadence, and the
+        whole keeper skips while a mouse button is held over the panel
+        (_dragging: slider drags, title-strip moves, popdown picks). The
+        hard jail (teleport back into the panel) only runs for a
+        fullscreen game and is also skipped mid-drag."""
         if not self.win.winfo_viewable():
             return
-        _free_cursor(self._game_hwnd)
-        if not self._focus_mode and self._jail_cursor:
-            self._keep_cursor_over_panel()
+        held = False
+        try:
+            held = bool(_u32.GetAsyncKeyState(VK_LBUTTON) & 0x8000)
+        except (ValueError, OSError):
+            pass
+        if not held:
+            # A ButtonRelease landing outside the panel never reaches our
+            # bindtags - drop a stale flag so the keeper cannot wedge.
+            self._dragging = False
+        dragging = held or self._dragging
+        try:
+            if self.p30_panel and self.p30_panel.is_dragging():
+                dragging = True
+        except tk.TclError:
+            pass
+        if not dragging:
+            now = time.time()
+            if now - self._last_cursor_free >= CURSOR_FREE_MS / 1000.0:
+                _free_cursor(self._game_hwnd)
+                self._last_cursor_free = now
+            if not self._focus_mode and self._jail_cursor:
+                self._keep_cursor_over_panel()
         self.win.after(CURSOR_KEEP_MS, self._cursor_keeper)
 
     def _keep_cursor_over_panel(self):
@@ -679,6 +760,7 @@ class ControlOverlay:
         # (geometry/deiconify). The style was already set in __init__ while
         # withdrawn; this covers a Tk rebuild of the HWND and is idempotent.
         hwnd = _toplevel_hwnd(self.win)
+        self._hwnd = hwnd        # cached for _reassert_topmost
         if hwnd is not None:
             _set_noactivate(hwnd, not focus_enabled)
 
@@ -724,6 +806,8 @@ class ControlOverlay:
         _u32.ReleaseCapture()
         _u32.ClipCursor(None)
         _free_cursor(self._game_hwnd)
+        self._last_cursor_free = time.time()
+        self._dragging = False
 
         # Display the panel topmost WITHOUT taking the foreground. Tk's
         # deiconify honors WS_EX_NOACTIVATE on this host (probe: foreground
@@ -778,9 +862,10 @@ class ControlOverlay:
 
     def _center(self):
         """Center on the game window when one is known (windowed games put
-        the play area away from screen-center); fall back to the screen."""
-        sw = self.win.winfo_screenwidth()
-        sh = self.win.winfo_screenheight()
+        the play area away from screen-center); fall back to the virtual
+        desktop. Multi-monitor: clamps to the GAME monitor's work area -
+        a secondary screen is not at (0,0) and primary-screen clamps would
+        fling the panel off the monitor the game actually lives on."""
         rect = wintypes.RECT()
         gh = getattr(self, "_game_hwnd", None)
         if gh and _u32.GetWindowRect(gh, ctypes.byref(rect)):
@@ -789,13 +874,15 @@ class ControlOverlay:
             if gw > 0 and ghh > 0:
                 x = rect.left + max(0, (gw - self.WIDTH) // 2)
                 y = rect.top + max(0, (ghh - self.HEIGHT) // 2)
-                x = min(max(0, x), max(0, sw - self.WIDTH))
-                y = min(max(0, y), max(0, sh - self.HEIGHT))
+                wa = monitor_work_area_for_hwnd(gh) or self._vroot_bounds()
+                x = min(max(wa[0], x), max(wa[0], wa[2] - self.WIDTH))
+                y = min(max(wa[1], y), max(wa[1], wa[3] - self.HEIGHT))
                 self.win.geometry(
                     "%dx%d+%d+%d" % (self.WIDTH, self.HEIGHT, x, y))
                 return
-        x = max(0, (sw - self.WIDTH) // 2)
-        y = max(0, (sh - self.HEIGHT) // 3)
+        l, t, r, b = self._vroot_bounds()
+        x = l + max(0, (r - l - self.WIDTH) // 2)
+        y = t + max(0, (b - t - self.HEIGHT) // 3)
         self.win.geometry("%dx%d+%d+%d" % (self.WIDTH, self.HEIGHT, x, y))
 
     def hide(self):
