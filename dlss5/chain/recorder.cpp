@@ -39,6 +39,8 @@ void ChainRecorder::init(const VkCtx& c, const ChainArena& arena, const WeightsS
     T6P_ = (st[6].TOK + 31) & ~31u;
     chainMakePipe(c, shaderDir + "gemm.spv", pGemm);
     chainMakePipe(c, shaderDir + "gemm_rn1.spv", pGemm1);
+    chainMakePipe(c, shaderDir + "gemm_m8.spv", pGemmM8);
+    slimGemm_ = parsePilot("D5C_GEMM_SLIM", nullptr, 1) > 0;
     chainMakePipe(c, shaderDir + "gemm_i8.spv", pGemmI8);
     chainMakePipe(c, shaderDir + "quant_act.spv", pQuantAct);
     chainMakePipe(c, shaderDir + "cosine.spv", pCos);
@@ -55,12 +57,12 @@ void ChainRecorder::init(const VkCtx& c, const ChainArena& arena, const WeightsS
     chainMakePipe(c, shaderDir + "upmerge.spv", pUpM);
     chainMakePipe(c, shaderDir + "attn_fused.spv", pAttnFused);
     chainMakePipe(c, shaderDir + "ffn_fused.spv", pFfnFused);
-    std::printf("[chain] 18 pipelines up (14 kernels + featpack/headpack + pool2/upmerge), %zu BDA chunk bases, chunk0 0x%llx\n",
+    std::printf("[chain] 19 pipelines up (14 kernels + gemm_m8 + featpack/headpack + pool2/upmerge), %zu BDA chunk bases, chunk0 0x%llx\n",
                 arena.chunks.size(), (unsigned long long)arena.chunks[0].baseA);
 }
 
 void ChainRecorder::destroy(const VkCtx& c) {
-    for (ChainPipe* cp : {&pGemm, &pGemm1, &pGemmI8, &pQuantAct, &pCos, &pCosW, &pSmax, &pEw, &pPart, &pTrans,
+    for (ChainPipe* cp : {&pGemm, &pGemm1, &pGemmM8, &pGemmI8, &pQuantAct, &pCos, &pCosW, &pSmax, &pEw, &pPart, &pTrans,
                           &pGather, &pMerge, &pFeatpack, &pHeadpack, &pPool, &pUpM, &pAttnFused, &pFfnFused}) {
         vkDestroyPipeline(c.dev, cp->pipe, nullptr);
         vkDestroyPipelineLayout(c.dev, cp->layout, nullptr);
@@ -98,10 +100,17 @@ void ChainRecorder::dGemm(VkCommandBuffer cb, int fam, uint64_t a, uint64_t b, u
                           uint32_t gGeo0, uint32_t gGeo1) {
     (void)fam;
     constexpr uint32_t GEMM_BM = 32; // TM=8 * RM=4 (optimal Battlemage occupancy sweet spot)
-    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pGemm.pipe);
+    // slim tile (BM=8, BN=32; gemm_m8 = gemm.comp -DGEMM_RM=1): the narrow f16
+    // epilogue is store-bound at large m and the 4x workgroup count wins
+    // -33..-80% measured on Arc B50 (fam1 expand/proj + fam2 group_expand).
+    // fp32-out and small-m shapes keep the 32x32 tile - they regress with BM=8.
+    bool slim = slimGemm_ && (flags & F_NARROW) && (m >= 2048u || (m >= 512u && batch > 1));
+    uint32_t bm = slim ? 8u : GEMM_BM;
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, slim ? pGemmM8.pipe : pGemm.pipe);
     GemmPush p{a, b, c2, m, n, k, batch, sa, sb, sc, flags, lda, ldb, ldc, 0, res, skip, cosd,
                gGeo0, gGeo1};
-    vkCmdPushConstants(cb, pGemm.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
+    vkCmdPushConstants(cb, slim ? pGemmM8.layout : pGemm.layout,
+                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
 
     uint32_t epi = (flags >> 8) & 0xFu;
     bool res_is_16 = (epi == EPI_RESIDUAL_F16);
@@ -120,8 +129,8 @@ void ChainRecorder::dGemm(VkCommandBuffer cb, int fam, uint64_t a, uint64_t b, u
     );
 
     pmBegin(cb);
-    vkCmdDispatch(cb, n / 32, (m + GEMM_BM - 1) / GEMM_BM, batch);
-    pmEnd(cb, "gemm", "blk", m, n, k, n / 32, (m + GEMM_BM - 1) / GEMM_BM, batch, bytes);
+    vkCmdDispatch(cb, n / 32, (m + bm - 1) / bm, batch);
+    pmEnd(cb, "gemm", "blk", m, n, k, n / 32, (m + bm - 1) / bm, batch, bytes);
 }
 
 void ChainRecorder::dGemmI8(VkCommandBuffer cb, int fam, uint64_t a, uint64_t b, uint64_t c2,

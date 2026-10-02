@@ -279,6 +279,9 @@ private:
 
     ChainPipe pGemm, pGemm1, pGemmI8, pQuantAct, pCos, pCosW, pSmax, pEw, pPart, pTrans, pGather,
               pMerge, pFeatpack, pHeadpack, pPool, pUpM, pAttnFused, pFfnFused;
+    ChainPipe pGemmM8;   // gemm_m8.spv: slim BM=8 tile for narrow-out large-m gemms
+    bool slimGemm_ = false;  // D5C_GEMM_SLIM (default on): dispatch pGemmM8 for
+                             // narrow-out gemms at m>=2048 (or >=512 batched)
 
     uint64_t A(VkDeviceSize o) const { return ar_->A(o); }
     uint64_t vec(const std::string& n) const { return ar_->vecOff.at(n); }

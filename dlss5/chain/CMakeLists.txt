@@ -40,13 +40,18 @@ foreach(S ${SHADERS})
     list(APPEND SPV_OUTPUTS ${SPV})
 endforeach()
 
-set(M8_SHADERS gemm gemm_rn1 gemm_i8 quant_act cosine cosine_win softmax elementwise
+set(M8_SHADERS gemm gemm_rn1 gemm_m8 gemm_i8 quant_act cosine cosine_win softmax elementwise
                partition transpose_we gather_residual merge featpack headpack
                pool2 upmerge attn_fused ffn_fused)
 foreach(S ${M8_SHADERS})
     set(SPV ${CMAKE_CURRENT_BINARY_DIR}/${S}.spv)
     if(S STREQUAL "gemm_rn1")
         set(DEFS -DGEMM_RN=1)
+        set(SRCNAME gemm)
+    elseif(S STREQUAL "gemm_m8")
+        # slim-tile gemm (RM=1 -> BM=8, BN=32): measured -33..-80% vs the 32x32
+        # tile on the dominant narrow-epilogue large-m gemms on Arc B50
+        set(DEFS -DGEMM_RM=1)
         set(SRCNAME gemm)
     else()
         set(DEFS "")
@@ -106,7 +111,7 @@ set_property(GLOBAL PROPERTY D5C_SPV_DIR "${CMAKE_CURRENT_BINARY_DIR}")
 function(d5c_stage_shaders TGT)
     get_property(SPV_DIR GLOBAL PROPERTY D5C_SPV_DIR)
     set(SHADERS decode features compose encode rescale framegen temporal_nr)
-    set(M8_SHADERS gemm gemm_rn1 gemm_i8 quant_act cosine cosine_win softmax elementwise
+    set(M8_SHADERS gemm gemm_rn1 gemm_m8 gemm_i8 quant_act cosine cosine_win softmax elementwise
                    partition transpose_we gather_residual merge featpack headpack
                    pool2 upmerge attn_fused ffn_fused)
     set(STAGED "")
