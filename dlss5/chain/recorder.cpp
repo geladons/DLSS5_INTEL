@@ -93,21 +93,25 @@ void ChainRecorder::dGemm(VkCommandBuffer cb, int fam, uint64_t a, uint64_t b, u
                           uint32_t m, uint32_t n, uint32_t k, uint32_t batch,
                           uint32_t sa, uint32_t sb, uint32_t sc,
                           uint32_t flags, uint32_t lda, uint32_t ldb, uint32_t ldc,
-                          uint64_t res, uint64_t skip) {
+                          uint64_t res, uint64_t skip, uint64_t cosd) {
     (void)fam;
     constexpr uint32_t GEMM_BM = 32; // TM=8 * RM=4 (optimal Battlemage occupancy sweet spot)
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pGemm.pipe);
-    GemmPush p{a, b, c2, m, n, k, batch, sa, sb, sc, flags, lda, ldb, ldc, 0, res, skip};
+    GemmPush p{a, b, c2, m, n, k, batch, sa, sb, sc, flags, lda, ldb, ldc, 0, res, skip, cosd};
     vkCmdPushConstants(cb, pGemm.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
 
     uint32_t epi = (flags >> 8) & 0xFu;
     bool res_is_16 = (epi == EPI_RESIDUAL_F16);
+    bool is_res = (epi == EPI_RESIDUAL_F16 || epi == EPI_RESIDUAL_FP32);
+    // EPI_COSQKV writes f16 oQW/oKW/oVW (m*n*2 total) instead of the fp32 C.
+    uint64_t outBytes = (epi == EPI_COSQKV) ? (uint64_t)m * n * 2
+                                          : (uint64_t)m * n * ((flags & 0x1000) ? 2 : 4);
     uint64_t bcount = (batch == 0) ? 1 : (uint64_t)batch;
     uint64_t bytes = bcount * (
         (uint64_t)m * k * 2 +
         (uint64_t)k * n * 2 +
-        (uint64_t)m * n * ((flags & 0x1000) ? 2 : 4) +
-        (res != 0 ? ((uint64_t)m * n * (res_is_16 ? 2 : 4)) : 0)
+        outBytes +
+        ((res != 0 && is_res) ? ((uint64_t)m * n * (res_is_16 ? 2 : 4)) : 0)
     );
 
     pmBegin(cb);
@@ -120,12 +124,13 @@ void ChainRecorder::dGemmI8(VkCommandBuffer cb, int fam, uint64_t a, uint64_t b,
                             uint32_t m, uint32_t n, uint32_t k, uint32_t batch,
                             uint32_t sa, uint32_t sb, uint32_t sc,
                             uint32_t flags, uint32_t lda, uint32_t ldb, uint32_t ldc,
-                            uint64_t res, uint64_t skip, uint64_t out_scale) {
+                            uint64_t res, uint64_t skip, uint64_t out_scale,
+                          uint64_t cosd) {
     (void)fam;
     constexpr uint32_t GEMM_BM = 32;
     constexpr uint32_t GEMM_BN = 32;
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pGemmI8.pipe);
-    GemmI8Push p{a, b, c2, b_scale, a_scale, m, n, k, batch, sa, sb, sc, flags, lda, ldb, ldc, scale_a, res, skip, out_scale};
+    GemmI8Push p{a, b, c2, b_scale, a_scale, m, n, k, batch, sa, sb, sc, flags, lda, ldb, ldc, scale_a, res, skip, out_scale, cosd};
     vkCmdPushConstants(cb, pGemmI8.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
 
     uint64_t bcount = (batch == 0) ? 1 : (uint64_t)batch;
@@ -141,7 +146,9 @@ void ChainRecorder::dGemmI8(VkCommandBuffer cb, int fam, uint64_t a, uint64_t b,
     uint64_t resBytes = 0;
     if (epi == EPI_RESIDUAL_FP32) resBytes = (uint64_t)m * n * 4 + (uint64_t)n * 4;
     else if (epi == EPI_RESIDUAL_F16) resBytes = (uint64_t)m * n * 2 + (uint64_t)n * 4;
-    uint64_t outBytes = isProducer ? ((uint64_t)m * n * 1) : (narrow ? ((uint64_t)m * n * 2) : ((uint64_t)m * n * 4));
+    uint64_t outBytes = isProducer ? ((uint64_t)m * n * 1)
+                      : (epi == EPI_COSQKV) ? ((uint64_t)m * n * 2)
+                      : (narrow ? ((uint64_t)m * n * 2) : ((uint64_t)m * n * 4));
 
     uint64_t bBytes = (sb == 0) ? ((uint64_t)k * n * 1 + (uint64_t)n * 4) : (bcount * ((uint64_t)k * n * 1 + (uint64_t)n * 4));
     uint64_t bytes = bcount * (

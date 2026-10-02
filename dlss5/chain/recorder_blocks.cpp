@@ -40,23 +40,40 @@ void ChainRecorder::recordWindowAttn(VkCommandBuffer cb, int famIdx, int idx, co
 
     dPart(cb, A(ffnOff), A(ar_->off.oWIN), s, (uint32_t)C, padTop, padLeft, wp8, ffn16);
     bar(cb);
+    // M12: EPI_COSQKV folds the cosine_win publish into the qkv GEMM epilogue
+    // (BN=32 == one head_dim group per N tile), removing the oPROJW fp32 DRAM
+    // round-trip plus one dispatch + barrier per block. With epi==COSQKV the
+    // gemm's c/res/skip fields carry the oQW/oKW/oVW f16 bases and cosd carries
+    // the per-head attn_scale fp32 table. D5C_FUSE_COSW=0 restores the split
+    // gemm->oPROJW->cosw path for bisecting.
+    int fuseCoswEnv = parsePilot("D5C_FUSE_COSW", nullptr, 1);
+    bool fuseCosw = (fuseCoswEnv > 0);
+    uint32_t qkvEpi = fuseCosw ? EPI_COSQKV : EPI_NONE;
+    uint64_t qkvC  = fuseCosw ? A(ar_->off.oQW)  : A(ar_->off.oPROJW);
+    uint64_t qkvK  = fuseCosw ? A(ar_->off.oKW)  : 0;
+    uint64_t qkvV  = fuseCosw ? A(ar_->off.oVW)  : 0;
+    uint64_t qkvSc = fuseCosw ? A(woff(scN))     : 0;
     if (useI8_qkv) {
         dQuantAct(cb, A(ar_->off.oWIN), A(ar_->off.oQAct), A(ar_->off.oQScale), Ww * 64, (uint32_t)C);
         bar(cb);
-        dGemmI8(cb, famIdx, A(ar_->off.oQAct), A(woff(qkvN)), A(ar_->off.oPROJW),
+        dGemmI8(cb, famIdx, A(ar_->off.oQAct), A(woff(qkvN)), qkvC,
                 A(wscale(qkvN)), A(ar_->off.oQScale), 0.0f,
                 64, 3 * (uint32_t)C, (uint32_t)C, Ww,
                 64 * (uint32_t)C, 0, 64 * 3 * (uint32_t)C,
-                gflags(EPI_NONE, false), (uint32_t)C, 3 * (uint32_t)C, 3 * (uint32_t)C);
+                gflags(qkvEpi, false), (uint32_t)C, 3 * (uint32_t)C, 3 * (uint32_t)C,
+                qkvK, qkvV, 0, qkvSc);
     } else {
-        dGemm(cb, famIdx, A(ar_->off.oWIN), A(woff(qkvN)), A(ar_->off.oPROJW), 64, 3 * C, C, Ww,
-              64 * C, 0, 64 * 3 * C, gflags(EPI_NONE, false), C, 3 * C, 3 * C);
+        dGemm(cb, famIdx, A(ar_->off.oWIN), A(woff(qkvN)), qkvC, 64, 3 * C, C, Ww,
+              64 * C, 0, 64 * 3 * C, gflags(qkvEpi, false), C, 3 * C, 3 * C,
+              qkvK, qkvV, qkvSc);
     }
     bar(cb);
-    // M10: fused Q/K/V dispatch reads oPROJW once and writes oQW, oKW, oVW.
-    dCosW(cb, A(ar_->off.oPROJW), A(ar_->off.oQW), A(ar_->off.oKW), A(ar_->off.oVW),
-          A(woff(scN)), Ww, H, C);
-    bar(cb);
+    if (!fuseCosw) {
+        // M10: fused Q/K/V dispatch reads oPROJW once and writes oQW, oKW, oVW.
+        dCosW(cb, A(ar_->off.oPROJW), A(ar_->off.oQW), A(ar_->off.oKW), A(ar_->off.oVW),
+              A(woff(scN)), Ww, H, C);
+        bar(cb);
+    }
 
     // --- Fused or unfused attention core (QK^T + Softmax + PV) ---
     int fusedAttn = parsePilot("D5C_INT8_ATTN_FUSED", nullptr, 1);
@@ -478,7 +495,7 @@ void ChainRecorder::recordChain(VkCommandBuffer cb) {
         bar(cb);
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pGemm1.pipe);
         GemmPush p{A(O.oG2), A(O.oHeadW), A(O.oHEAD), st_[0].TOK, 16, 32, 1, 0, 0, 0,
-                   gflags(EPI_NONE, false), 32, 16, 16, 0, 0, 0};
+                   gflags(EPI_NONE, false), 32, 16, 16, 0, 0, 0, 0};
         vkCmdPushConstants(cb, pGemm1.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
         uint64_t gemm1_bytes = (uint64_t)st_[0].TOK * 32 * 2 + 32 * 16 * 2 + (uint64_t)st_[0].TOK * 16 * 4;
         pmBegin(cb);
