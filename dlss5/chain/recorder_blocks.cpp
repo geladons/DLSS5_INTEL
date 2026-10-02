@@ -22,6 +22,7 @@ static void winGeo(const Stage& s, int oy, int ox,
 void ChainRecorder::recordWindowAttn(VkCommandBuffer cb, int famIdx, int idx, const Stage& s,
                                      int C, int H, int fam, int oy, int ox,
                                      VkDeviceSize ffnOff, bool ffn16,
+                                     VkDeviceSize qkvOff, bool qkv16,
                                      VkDeviceSize rawOff, VkDeviceSize pubOff, bool publish) {
     uint32_t padTop, padLeft, Ww, wp8;
     winGeo(s, oy, ox, padTop, padLeft, Ww, wp8);
@@ -38,8 +39,21 @@ void ChainRecorder::recordWindowAttn(VkCommandBuffer cb, int famIdx, int idx, co
     bool useI8_qkv = isQuantized(qkvN) && (pilotQKV >= 0 && idx <= pilotQKV);
     bool useI8_proj = isQuantized(projN) && (pilotProj >= 0 && idx <= pilotProj);
 
-    dPart(cb, A(ffnOff), A(ar_->off.oWIN), s, (uint32_t)C, padTop, padLeft, wp8, ffn16);
-    bar(cb);
+    // B4: partition is a pure gather (image-order ffn carrier -> window-order
+    // f16 oWIN). F_APART replays partition's inverse window map inside the qkv
+    // GEMM's A-operand tile load, so the oWIN write + qkv-side re-read DRAM
+    // round-trip and the standalone dispatch+barrier disappear. The A source
+    // is always f16: fam1's carrier oG2 already is, and fam0/fam2's fp32
+    // carriers are duplicated to a dead slot as f16 by the residual epilogue
+    // (F_DUP16) - interior windows then take a plain strided coopMatLoad and
+    // only boundary windows stage through aStage. The int8 qkv path still
+    // needs materialized oWIN for quant_act - keep dPart there.
+    // D5C_FUSE_PART=0 restores the split path.
+    bool apartQkv = qkvApart(fam, idx);
+    if (!apartQkv) {
+        dPart(cb, A(ffnOff), A(ar_->off.oWIN), s, (uint32_t)C, padTop, padLeft, wp8, ffn16);
+        bar(cb);
+    }
     // M12: EPI_COSQKV folds the cosine_win publish into the qkv GEMM epilogue
     // (BN=32 == one head_dim group per N tile), removing the oPROJW fp32 DRAM
     // round-trip plus one dispatch + barrier per block. With epi==COSQKV the
@@ -62,6 +76,18 @@ void ChainRecorder::recordWindowAttn(VkCommandBuffer cb, int famIdx, int idx, co
                 64 * (uint32_t)C, 0, 64 * 3 * (uint32_t)C,
                 gflags(qkvEpi, false), (uint32_t)C, 3 * (uint32_t)C, 3 * (uint32_t)C,
                 qkvK, qkvV, 0, qkvSc);
+    } else if (apartQkv) {
+        // F_APART: A = image-order qkvOff (always f16 - fam1's oG2 carrier or
+        // the F_DUP16 duplicate for fp32 carriers); sa is ignored - batch z IS
+        // the window index. gGeo0/gGeo1 carry the same packed window geometry
+        // as EPI_GATHER_RES (gfl bit0 here means "A source is f16"). lda is
+        // unused by the fused load. ffnOff still feeds the gather_res
+        // residual below, unchanged.
+        uint32_t pGeo0 = (uint32_t)s.H | ((uint32_t)s.W << 16);
+        uint32_t pGeo1 = padTop | (padLeft << 6) | ((qkv16 ? 1u : 0u) << 12) | (wp8 << 16);
+        dGemm(cb, famIdx, A(qkvOff), A(woff(qkvN)), qkvC, 64, 3 * C, C, Ww,
+              0, 0, 64 * 3 * C, gflags(qkvEpi, false) | F_APART, C, 3 * C, 3 * C,
+              qkvK, qkvV, qkvSc, pGeo0, pGeo1);
     } else {
         dGemm(cb, famIdx, A(ar_->off.oWIN), A(woff(qkvN)), qkvC, 64, 3 * C, C, Ww,
               64 * C, 0, 64 * 3 * C, gflags(qkvEpi, false), C, 3 * C, 3 * C,
@@ -116,7 +142,13 @@ void ChainRecorder::recordWindowAttn(VkCommandBuffer cb, int famIdx, int idx, co
     // restores the oABW -> dGather path for bisecting.
     int fuseGatherEnv = parsePilot("D5C_FUSE_GATHER", nullptr, 1);
     bool fuseGather = (fuseGatherEnv > 0);
-    uint32_t gfl = (publish ? 1u : 0u) | (ffn16 ? 2u : 0u);
+    // A2: publish blocks' fp32 oRAW is dead traffic - only the publish=false
+    // blocks' oRAW feeds the ds-pool / b70 head path. gfl bit2 tells the
+    // EPI_GATHER_RES epilogue to store ONLY the e4m3 output when publishing.
+    // D5C_SKIP_RAW=0 restores the fp32 store.
+    int skipRawEnv = parsePilot("D5C_SKIP_RAW", nullptr, 1);
+    uint32_t gfl = (publish ? 1u : 0u) | (ffn16 ? 2u : 0u)
+                 | ((publish && skipRawEnv > 0) ? 4u : 0u);
     uint32_t gGeo0 = (uint32_t)s.H | ((uint32_t)s.W << 16);
     uint32_t gGeo1 = padTop | (padLeft << 6) | (gfl << 12) | (wp8 << 16);
     uint32_t projEpi = fuseGather ? EPI_GATHER_RES : EPI_NONE;
@@ -171,6 +203,16 @@ void ChainRecorder::recordWindowBlock(VkCommandBuffer cb, int famIdx, int idx, c
 
         bool doFusion = useI8_w1 && useI8_w2 && enableFusion;
 
+        // B4: the fused qkv A-load is cheapest on an f16 source (interior
+        // windows become a plain strided coopMatLoad). The fp32 carrier oG4
+        // is therefore duplicated to oG2 as f16 by the w2 epilogue
+        // (F_DUP16, identical half_round bits to partition's fp32->f16 pass);
+        // oG2 is dead after w1 consumed it. Only when the partition fusion
+        // actually runs - the int8 qkv path still partitions oG4.
+        bool apart = qkvApart(fam, idx);
+        uint64_t dup = apart ? A(O.oG2) : 0;
+        uint32_t dupFl = apart ? F_DUP16 : 0u;
+
         if (doFusion) {
             dQuantAct(cb, A(x16), A(O.oQAct), A(O.oQScale), TOKS, (uint32_t)C);
             bar(cb);
@@ -183,9 +225,10 @@ void ChainRecorder::recordWindowBlock(VkCommandBuffer cb, int famIdx, int idx, c
             dGemmI8(cb, famIdx, A(O.oG3), A(woff(w2)), A(O.oG4),
                     A(wscale(w2)), A(O.oQScale2), 0.0f,
                     TOKS, (uint32_t)C, 4 * (uint32_t)C, 1, 0, 0, 0,
-                    gflags(epi, false) | F_FUSED_I8_CONSUMER,
+                    gflags(epi, false) | F_FUSED_I8_CONSUMER | dupFl,
                     4 * (uint32_t)C, (uint32_t)C, (uint32_t)C,
-                    A(cur.off), A(vec(tn("block%d.layer0.ffn_cos_skip", idx))));
+                    A(cur.off), A(vec(tn("block%d.layer0.ffn_cos_skip", idx))),
+                    0, dup);
         } else {
             if (useI8_w1) {
                 dQuantAct(cb, A(x16), A(O.oQAct), A(O.oQScale), TOKS, (uint32_t)C);
@@ -205,26 +248,52 @@ void ChainRecorder::recordWindowBlock(VkCommandBuffer cb, int famIdx, int idx, c
                 dGemmI8(cb, famIdx, A(O.oQAct), A(woff(w2)), A(O.oG4),
                         A(wscale(w2)), A(O.oQScale), 0.0f,
                         TOKS, (uint32_t)C, 4 * (uint32_t)C, 1, 0, 0, 0,
-                        gflags(epi, false), 4 * (uint32_t)C, (uint32_t)C, (uint32_t)C,
-                        A(cur.off), A(vec(tn("block%d.layer0.ffn_cos_skip", idx))));
+                        gflags(epi, false) | dupFl, 4 * (uint32_t)C, (uint32_t)C, (uint32_t)C,
+                        A(cur.off), A(vec(tn("block%d.layer0.ffn_cos_skip", idx))),
+                        0, dup);
             } else {
                 dGemm(cb, famIdx, A(O.oG3), A(woff(w2)), A(O.oG4),
-                      TOKS, C, 4 * C, 1, 0, 0, 0, gflags(epi, false), 4 * C, C, C,
-                      A(cur.off), A(vec(tn("block%d.layer0.ffn_cos_skip", idx))));
+                      TOKS, C, 4 * C, 1, 0, 0, 0, gflags(epi, false) | dupFl, 4 * C, C, C,
+                      A(cur.off), A(vec(tn("block%d.layer0.ffn_cos_skip", idx))), dup);
             }
         }
         bar(cb);
-        recordWindowAttn(cb, famIdx, idx, s, C, H, fam, oy, ox, O.oG4, false, rawOff, pubOff, publish);
+        // ffnOff stays the true fp32 carrier oG4 (partition source when
+        // unfused, gather_res residual always); qkvOff is the f16 dup oG2
+        // the fused A-load reads.
+        recordWindowAttn(cb, famIdx, idx, s, C, H, fam, oy, ox,
+                         O.oG4, false, apart ? O.oG2 : O.oG4, apart,
+                         rawOff, pubOff, publish);
     } else if (fam == 1) {
         uint64_t expBase = A(woff(tn("block%d.layer0.ffn_expand_weight", idx)));
         uint64_t prjBase = A(woff(tn("block%d.layer0.ffn_branch_projection_weight", idx)));
-        for (uint32_t oh = 0; oh < G; ++oh) {
-            dGemm(cb, famIdx, A(x16), expBase + (uint64_t)oh * C * 128 * 2, A(O.oG3),
-                  TOKS, 128, C, 1, 0, 0, 0, gflags(EPI_GATE_E4M3, true), C, 128, 128);
+        // B5: collapse the 2G serialized group dispatches into two batched
+        // gemms (same pattern as fam2/4/5's group_expand/group_project). The
+        // fuse-folded expand weight is already [G][C][128] contiguous (slice
+        // stride C*128 elems -> sb) and branch_proj is [G][128][32] (128*32).
+        // Expand writes G disjoint [TOKS,128] f16 slabs in oG3 (sc=TOKS*128);
+        // proj reads them via sa and writes the 32-wide column slices of oG4
+        // (sc=32, ldc=C) - identical addresses as the unrolled loop.
+        // D5C_FUSE_FAM1=0 keeps the per-group loop for bisecting.
+        int fuseFam1Env = parsePilot("D5C_FUSE_FAM1", nullptr, 1);
+        if (fuseFam1Env > 0) {
+            dGemm(cb, famIdx, A(x16), expBase, A(O.oG3),
+                  TOKS, 128, C, G, 0, (uint32_t)C * 128, TOKS * 128,
+                  gflags(EPI_GATE_E4M3, true), C, 128, 128);
             bar(cb);
-            dGemm(cb, famIdx, A(O.oG3), prjBase + (uint64_t)oh * 128 * 32 * 2, A(O.oG4 + oh * 32 * 2),
-                  TOKS, 32, 128, 1, 0, 0, 0, gflags(EPI_E4M3, true), 128, 32, C);
+            dGemm(cb, famIdx, A(O.oG3), prjBase, A(O.oG4),
+                  TOKS, 32, 128, G, TOKS * 128, 128 * 32, 32,
+                  gflags(EPI_E4M3, true), 128, 32, C);
             bar(cb);
+        } else {
+            for (uint32_t oh = 0; oh < G; ++oh) {
+                dGemm(cb, famIdx, A(x16), expBase + (uint64_t)oh * C * 128 * 2, A(O.oG3),
+                      TOKS, 128, C, 1, 0, 0, 0, gflags(EPI_GATE_E4M3, true), C, 128, 128);
+                bar(cb);
+                dGemm(cb, famIdx, A(O.oG3), prjBase + (uint64_t)oh * 128 * 32 * 2, A(O.oG4 + oh * 32 * 2),
+                      TOKS, 32, 128, 1, 0, 0, 0, gflags(EPI_E4M3, true), 128, 32, C);
+                bar(cb);
+            }
         }
         dGemm(cb, famIdx, A(O.oG4), A(woff(tn("block%d.layer0.ffn_output_projection_weight", idx))),
               A(O.oG3), TOKS, C, C, 1, 0, 0, 0, gflags(EPI_NONE, false), C, C, C);
@@ -232,7 +301,8 @@ void ChainRecorder::recordWindowBlock(VkCommandBuffer cb, int famIdx, int idx, c
         dEw(cb, A(O.oG3), A(cur.off), A(O.oG3), A(vec(tn("block%d.layer0.ffn_cos_skip", idx))),
             A(O.oG2), TOKS * C, 5, C);
         bar(cb);
-        recordWindowAttn(cb, famIdx, idx, s, C, H, fam, oy, ox, O.oG2, true, rawOff, pubOff, publish);
+        recordWindowAttn(cb, famIdx, idx, s, C, H, fam, oy, ox,
+                         O.oG2, true, O.oG2, true, rawOff, pubOff, publish);
     } else {
         dGemm(cb, famIdx, A(x16), A(woff(tn("block%d.layer0.first_projection_weight", idx))),
               A(O.oG2), TOKS, C, C, 1, 0, 0, 0, gflags(EPI_E4M3, true), C, C, C);
@@ -248,11 +318,18 @@ void ChainRecorder::recordWindowBlock(VkCommandBuffer cb, int famIdx, int idx, c
         dEw(cb, A(O.oG4), 0, 0, 0, A(O.oG2), TOKS * C, 3, 0);
         bar(cb);
         uint32_t epi = cur.is16 ? EPI_RESIDUAL_F16 : EPI_RESIDUAL_FP32;
+        // B4: same trick as fam0 - duplicate the fp32 carrier oG3 into oG4
+        // (dead after kind3 -> oG2) as f16 so the fused qkv A-load runs on
+        // the f16 path. Skipped when the int8 qkv path needs oWIN instead.
+        bool apart = qkvApart(fam, idx);
         dGemm(cb, famIdx, A(O.oG2), A(woff(tn("block%d.layer1.weight3", idx))), A(O.oG3),
-              TOKS, C, C, 1, 0, 0, 0, gflags(epi, false), C, C, C,
-              A(cur.off), A(vec(tn("block%d.layer1.ffn_cos_skip", idx))));
+              TOKS, C, C, 1, 0, 0, 0, gflags(epi, false) | (apart ? F_DUP16 : 0u), C, C, C,
+              A(cur.off), A(vec(tn("block%d.layer1.ffn_cos_skip", idx))),
+              apart ? A(O.oG4) : 0);
         bar(cb);
-        recordWindowAttn(cb, famIdx, idx, s, C, H, fam, oy, ox, O.oG3, false, rawOff, pubOff, publish);
+        recordWindowAttn(cb, famIdx, idx, s, C, H, fam, oy, ox,
+                         O.oG3, false, apart ? O.oG4 : O.oG3, apart,
+                         rawOff, pubOff, publish);
     }
 }
 

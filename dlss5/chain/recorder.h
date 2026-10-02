@@ -128,7 +128,14 @@ struct AttnFusedPush {
 enum { EPI_NONE = 0, EPI_E4M3 = 1, EPI_GATE = 2, EPI_GATE_E4M3 = 3, EPI_HALF = 4,
        EPI_RESIDUAL_FP32 = 5, EPI_RESIDUAL_F16 = 6, EPI_COSQKV = 7,
        EPI_GATHER_RES = 8 };
-enum { F_NARROW = 0x1000, F_TRANSPOSE = 1, F_FUSED_I8_PRODUCER = 0x2000, F_FUSED_I8_CONSUMER = 0x4000 };
+enum { F_NARROW = 0x1000, F_TRANSPOSE = 1, F_FUSED_I8_PRODUCER = 0x2000, F_FUSED_I8_CONSUMER = 0x4000,
+       F_APART = 0x8000,     // gemm.comp only: A operand gathers through the
+                             // inverse window map (partition fused; gGeo0/gGeo1
+                             // carry the window geometry, gfl bit0 = f16 src)
+       F_DUP16 = 0x10000 };  // residual epilogue also writes an f16 duplicate
+                             // (half_round of the fp32 result, partition's exact
+                             // bits) to the image-order buffer in `cosd` - lets
+                             // the fused qkv A-load take the cheap f16 path.
 
 struct ChainPipe {
     VkPipeline pipe = VK_NULL_HANDLE;
@@ -216,9 +223,13 @@ private:
 
     // block recorders
     struct Cur { VkDeviceSize off; bool is16; uint32_t C; };
+    // ffnOff/ffn16 = the FFN carrier (partition source + gather_res residual).
+    // qkvOff/qkv16 = the A source the fused qkv partition-load reads; differs
+    // from ffnOff for fp32 carriers duplicated to f16 by F_DUP16 (fam0/2).
     void recordWindowAttn(VkCommandBuffer cb, int famIdx, int idx, const Stage& s,
                           int C, int H, int fam, int oy, int ox,
                           VkDeviceSize ffnOff, bool ffn16,
+                          VkDeviceSize qkvOff, bool qkv16,
                           VkDeviceSize rawOff, VkDeviceSize pubOff, bool publish);
     void recordWindowBlock(VkCommandBuffer cb, int famIdx, int idx, const Stage& s,
                            int C, int H, int fam, int oy, int ox, bool publish, Cur& cur,
@@ -250,6 +261,18 @@ private:
     uint64_t wscale(const std::string& n) const { return ws_->scaleOff(n); }
     bool isQuantized(const std::string& n) const { return ws_->isQuantized(n); }
     std::string tn(const char* fmt, int i) const { return WeightsStore::tname(fmt, i); }
+
+    // B4 fused-partition decision, shared by the FFN tail (which may emit an
+    // f16 duplicate of the fp32 carrier via F_DUP16) and recordWindowAttn's
+    // fused A-load. Fusing is skipped when the qkv gemm itself runs int8
+    // (it consumes materialized oWIN through quant_act). D5C_FUSE_PART=0 off.
+    bool qkvApart(int fam, int idx) const {
+        if (parsePilot("D5C_FUSE_PART", nullptr, 1) <= 0) return false;
+        int pilotQKV = parsePilot("D5C_INT8_ATTN_QKV", "D5C_INT8_ATTN", -1);
+        std::string qkvN = tn(fam == 2 ? "block%d.layer2.qkv_weight"
+                                       : "block%d.layer0.qkv_weight", idx);
+        return !(isQuantized(qkvN) && pilotQKV >= 0 && idx <= pilotQKV);
+    }
 };
 
 } // namespace d5c

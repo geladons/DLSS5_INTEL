@@ -55,6 +55,11 @@ const uint F_TRANSPOSE          = 1u;
 const uint F_NARROW             = 0x1000u;
 const uint F_FUSED_I8_PRODUCER  = 0x2000u;
 const uint F_FUSED_I8_CONSUMER  = 0x4000u;
+const uint F_DUP16              = 0x10000u; // residual epilogues also write an
+                                     // f16 duplicate (half_round bits, same as
+                                     // partition's fp32->f16 pass) to pc.cosd
+                                     // as dense image-order [m,ldc] f16 - the
+                                     // fused qkv A-load then takes the f16 path.
 
 layout(local_size_x = 32) in;
 
@@ -199,6 +204,15 @@ void main() {
                     : FloatBuf(pc.res).v[idx];
                 float skipVal = (c < pc.n) ? FloatBuf(pc.skip).v[c] : 0.0;
                 v_out[k] = val + resVal * skipVal;
+            }
+
+            // F_DUP16: emit the f16 duplicate the fused qkv partition-load
+            // reads (identical half_round bits to partition's fp32->f16 pass).
+            if ((pc.flags & F_DUP16) != 0u) {
+                for (uint k = 0u; k < 4u; ++k)
+                    if (c_base + k < pc.n)
+                        HalfBuf(uint64_t(pc.cosd)).v[at + k] =
+                            float16_t(half_round(v_out[k]));
             }
 
             if (narrow) {
@@ -406,6 +420,7 @@ void main() {
     }
 
     if (epilogue == EPI_RESIDUAL_FP32 || epilogue == EPI_RESIDUAL_F16) {
+        bool dup16 = (pc.flags & F_DUP16) != 0u;
         for (uint e = gl_LocalInvocationID.x * 4u; e < BM * BN; e += 32u * 4u) {
             uint r = row + e / BN;
             if (r >= pc.m) continue;
@@ -423,6 +438,13 @@ void main() {
                     : FloatBuf(pc.res).v[idx];
                 float skipVal = (c < pc.n) ? FloatBuf(pc.skip).v[c] : 0.0;
                 v_out[k] = val + resVal * skipVal;
+            }
+            if (dup16) {
+                // f16 duplicate for the fused qkv A-load (partition's bits).
+                for (uint k = 0u; k < 4u; ++k)
+                    if (c_base + k < pc.n)
+                        HalfBuf(uint64_t(pc.cosd)).v[at + k] =
+                            float16_t(half_round(v_out[k]));
             }
             if (narrow) {
                 if ((at & 3u) == 0u && (uint(pc.c) & 7u) == 0u) {
@@ -455,6 +477,9 @@ void main() {
         uint wp8 = pc.gGeo1 >> 16;
         bool pub = (gfl & 1u) != 0u;
         bool b16 = (gfl & 2u) != 0u;
+        // A2: bit2 = skip the dead fp32 oRAW store on publish blocks (nothing
+        // consumes it - only publish=false blocks' oRAW feeds the ds-pool).
+        bool skipFp32 = pub && ((gfl & 4u) != 0u);
         uint w = gl_WorkGroupID.z;             // window index
         uint wy = w / wp8, wx = w % wp8;
 
@@ -487,7 +512,8 @@ void main() {
                             fma(bv.y, dv.y, av.y),
                             fma(bv.z, dv.z, av.z),
                             fma(bv.w, dv.w, av.w));
-            Float4Buf(pc.c).v4[io4 >> 2] = val;
+            if (!skipFp32)
+                Float4Buf(pc.c).v4[io4 >> 2] = val;
             if (pub)
                 Half4Buf(uint64_t(pc.cosd)).v4[io4 >> 2] =
                     f16vec4(float16_t(e4m3(val.x)), float16_t(e4m3(val.y)),

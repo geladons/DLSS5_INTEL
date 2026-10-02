@@ -46,6 +46,17 @@ const uint EPI_COSQKV        = 7u;   // fused cosine_win publish (M12): Q/K cosi
 const uint EPI_GATHER_RES    = 8u;   // fused gather_residual (M13): window-order
                                      // proj tile -> image-order oRAW fp32 +
                                      // ffn_res*cos_skip + optional e4m3 pub.
+const uint F_APART           = 0x8000u; // fused partition (B4): A is the image-
+                                     // order ffn carrier, batch z = window;
+                                     // tile rows map through the inverse
+                                     // window map (gGeo0/gGeo1, gfl bit0 = f16
+                                     // source). Replaces the oWIN round-trip.
+const uint F_DUP16           = 0x10000u; // residual epilogue also writes an f16
+                                     // duplicate of the fp32 result
+                                     // (float16_t(half_round(v)) = partition's
+                                     // exact f16 bits) to pc.cosd as a dense
+                                     // image-order [m,ldc] f16 buffer, so the
+                                     // fused qkv A-load takes the f16 path.
 
 // fp16-island rounding ops, verbatim from cosine_win.comp (EPI_COSQKV must
 // reproduce that kernel's exact float math sequence for bit-exactness).
@@ -104,6 +115,55 @@ const uint BM = TM * RM, BN = TN * RN;
 
 shared ACC stage[BM * BN];   // narrow-store staging only
 
+// F_APART staging: two k-tile slots of gathered f16 A tiles (BM rows x TK cols
+// per slot = RM row-tiles of TMxTK packed back to back, row stride TK).
+shared float16_t aStage[2 * BM * TK];
+
+/* F_APART A-operand gather (partition.comp folded into the tile load):
+ * row-block `row`..`row+BM` of window z covers window-local tokens; token i of
+ * window w = (wy,wx) maps to image (wy*8 + i/8 - padTop, wx*8 + i%8 - padLeft),
+ * out-of-image rows -> 0 (partition's pad semantics verbatim). fp32 sources
+ * go through the same half_round() partition applies; f16 sources (branched
+ * FFN residual, already e4m3-published) are copied verbatim. Batch z IS the
+ * window index - pc.sa is ignored in this mode.
+ *
+ * Per-lane mapping inside a row-tile: lane covers (r = lid/4, c4 = lid%4) for
+ * all four 8-token row-tiles i = 0..3, so token (row + i*TM + r) lands at
+ * image (y0 + i, x0 + r). allIn (whole 32-token box inside the image) skips
+ * the per-element bounds tests; boundary windows take the checked path. */
+void aPartStage(uint slot0, uint t, int y0, int x0,
+                uint Wimg, uint Himg, bool src16, bool allIn) {
+    uint C4 = pc.k / 4u;
+    uint lid = gl_LocalInvocationID.x;
+    uint r = lid / 4u, c4 = lid % 4u;
+    int x = x0 + int(r);
+    uint kc = t * (TK / 4u) + c4;
+    for (uint j = 0u; j < 4u; ++j) {
+        int y = y0 + int(j);
+        bool ok = allIn || (y >= 0 && uint(y) < Himg && x >= 0 && uint(x) < Wimg);
+        f16vec4 val4 = f16vec4(float16_t(0.0));
+        if (ok) {
+            uint src4 = (uint(y) * Wimg + uint(x)) * C4 + kc;
+            if (src16) {
+                val4 = Half4Buf(uint64_t(pc.a)).v4[src4];
+            } else {
+                vec4 f4 = Float4Buf(uint64_t(pc.a)).v4[src4];
+                val4 = f16vec4(float16_t(half_round(f4.x)),
+                               float16_t(half_round(f4.y)),
+                               float16_t(half_round(f4.z)),
+                               float16_t(half_round(f4.w)));
+            }
+        }
+        uint e0 = slot0 + j * TM * TK + r * TK + c4 * 4u;
+        aStage[e0 + 0u] = val4.x;
+        aStage[e0 + 1u] = val4.y;
+        aStage[e0 + 2u] = val4.z;
+        aStage[e0 + 3u] = val4.w;
+    }
+    subgroupMemoryBarrierShared();
+    subgroupBarrier();
+}
+
 void main() {
     uint row = gl_WorkGroupID.y * BM, col = gl_WorkGroupID.x * BN;
     if (row >= pc.m || col >= pc.n) return;
@@ -127,7 +187,105 @@ void main() {
     coopmat<float16_t, gl_ScopeSubgroup, TK, TN, gl_MatrixUseB> b[2][RN];
     const uint tiles = (pc.k + TK - 1u) / TK;
 
-    if ((pc.flags & 1u) != 0u) {
+    if ((pc.flags & F_APART) != 0u) {
+        // B4: partition fused into the A load. Same TK tiles and accumulate
+        // order as the generic path -> bit-exact. Two A-feeds:
+        //  * src16 + fully interior row-block: each 8-token tile row is a
+        //    contiguous run in the f16 carrier -> plain strided coopMatLoad,
+        //    no staging, no barriers (the common case; ~95% of windows).
+        //  * otherwise: aPartStage gathers through aStage (pad zeros +
+        //    half_round for fp32 sources), one stage + barrier per k-tile.
+        uint Himg = pc.gGeo0 & 0xFFFFu, Wimg = pc.gGeo0 >> 16;
+        uint padTop = pc.gGeo1 & 0x3Fu, padLeft = (pc.gGeo1 >> 6) & 0x3Fu;
+        bool src16 = ((pc.gGeo1 >> 12) & 1u) != 0u;
+        uint wp8 = pc.gGeo1 >> 16;
+        uint w = gl_WorkGroupID.z;
+        uint wy = w / wp8, wx = w % wp8;
+        int x0 = int(wx * 8u) - int(padLeft);
+        int y0 = int(wy * 8u + (row >> 3)) - int(padTop);
+        bool allIn = (y0 >= 0) && (uint(y0 + 3) < Himg) &&
+                     (x0 >= 0) && (uint(x0 + 7) < Wimg);
+
+        if (src16 && allIn) {
+            uint aBase = (uint(y0) * Wimg + uint(x0)) * pc.k;
+            uint aStep = Wimg * pc.k;   // per 8-token row-tile (i -> +y)
+            for (uint i = 0u; i < RM; i++)
+                coopMatLoad(a[0][i], pc.a.v, aBase + i * aStep, pc.k,
+                            gl_CooperativeMatrixLayoutRowMajor);
+            for (uint j = 0u; j < RN; j++)
+                coopMatLoad(b[0][j], pc.b.v, bo + col + j * TN, ldb,
+                            gl_CooperativeMatrixLayoutRowMajor);
+            uint t = 0u;
+            while (true) {
+                if (t + 1u < tiles) {
+                    for (uint i = 0u; i < RM; i++)
+                        coopMatLoad(a[1][i], pc.a.v, aBase + i * aStep + (t + 1u) * TK, pc.k,
+                                    gl_CooperativeMatrixLayoutRowMajor);
+                    for (uint j = 0u; j < RN; j++)
+                        coopMatLoad(b[1][j], pc.b.v, bo + (t + 1u) * TK * ldb + col + j * TN, ldb,
+                                    gl_CooperativeMatrixLayoutRowMajor);
+                }
+                for (uint i = 0u; i < RM; i++)
+                    for (uint j = 0u; j < RN; j++)
+                        acc[i][j] = coopMatMulAdd(a[0][i], b[0][j], acc[i][j]);
+                ++t;
+                if (t >= tiles) break;
+                if (t + 1u < tiles) {
+                    for (uint i = 0u; i < RM; i++)
+                        coopMatLoad(a[0][i], pc.a.v, aBase + i * aStep + (t + 1u) * TK, pc.k,
+                                    gl_CooperativeMatrixLayoutRowMajor);
+                    for (uint j = 0u; j < RN; j++)
+                        coopMatLoad(b[0][j], pc.b.v, bo + (t + 1u) * TK * ldb + col + j * TN, ldb,
+                                    gl_CooperativeMatrixLayoutRowMajor);
+                }
+                for (uint i = 0u; i < RM; i++)
+                    for (uint j = 0u; j < RN; j++)
+                        acc[i][j] = coopMatMulAdd(a[1][i], b[1][j], acc[i][j]);
+                ++t;
+                if (t >= tiles) break;
+            }
+        } else {
+            const uint SLOT = BM * TK;
+            aPartStage(0u, 0u, y0, x0, Wimg, Himg, src16, allIn);
+            for (uint i = 0u; i < RM; i++)
+                coopMatLoad(a[0][i], aStage, i * TM * TK, TK,
+                            gl_CooperativeMatrixLayoutRowMajor);
+            for (uint j = 0u; j < RN; j++)
+                coopMatLoad(b[0][j], pc.b.v, bo + col + j * TN, ldb,
+                            gl_CooperativeMatrixLayoutRowMajor);
+            uint t = 0u;
+            while (true) {
+                if (t + 1u < tiles) {
+                    aPartStage(SLOT, t + 1u, y0, x0, Wimg, Himg, src16, allIn);
+                    for (uint i = 0u; i < RM; i++)
+                        coopMatLoad(a[1][i], aStage, SLOT + i * TM * TK, TK,
+                                    gl_CooperativeMatrixLayoutRowMajor);
+                    for (uint j = 0u; j < RN; j++)
+                        coopMatLoad(b[1][j], pc.b.v, bo + (t + 1u) * TK * ldb + col + j * TN, ldb,
+                                    gl_CooperativeMatrixLayoutRowMajor);
+                }
+                for (uint i = 0u; i < RM; i++)
+                    for (uint j = 0u; j < RN; j++)
+                        acc[i][j] = coopMatMulAdd(a[0][i], b[0][j], acc[i][j]);
+                ++t;
+                if (t >= tiles) break;
+                if (t + 1u < tiles) {
+                    aPartStage(0u, t + 1u, y0, x0, Wimg, Himg, src16, allIn);
+                    for (uint i = 0u; i < RM; i++)
+                        coopMatLoad(a[0][i], aStage, i * TM * TK, TK,
+                                    gl_CooperativeMatrixLayoutRowMajor);
+                    for (uint j = 0u; j < RN; j++)
+                        coopMatLoad(b[0][j], pc.b.v, bo + (t + 1u) * TK * ldb + col + j * TN, ldb,
+                                    gl_CooperativeMatrixLayoutRowMajor);
+                }
+                for (uint i = 0u; i < RM; i++)
+                    for (uint j = 0u; j < RN; j++)
+                        acc[i][j] = coopMatMulAdd(a[1][i], b[1][j], acc[i][j]);
+                ++t;
+                if (t >= tiles) break;
+            }
+        }
+    } else if ((pc.flags & 1u) != 0u) {
         // B stored row-major as (N, K): element (n, k) at n*ldb + k. A ColumnMajor
         // coopmat load of that buffer yields the (K, N) tile = B^T.
         if (tiles == 1u) {
@@ -442,6 +600,10 @@ void main() {
         subgroupMemoryBarrierShared();
         subgroupBarrier();
 
+        // F_DUP16: also emit the f16 duplicate the fused qkv partition-load
+        // consumes (partition writes half_round(src fp32) -> f16; the epilogue
+        // reproduces those exact bits without the oWIN round-trip).
+        bool dup16 = (pc.flags & F_DUP16) != 0u;
         for (uint e = gl_LocalInvocationID.x; e < BM * BN; e += 32u) {
             uint r = row + e / BN;
             uint c = col + e % BN;
@@ -454,6 +616,8 @@ void main() {
             float skipVal = FloatBuf(pc.skip).v[ch];
             float acc_val = float(stage[e]) + resVal * skipVal;
             pc.c.v[idx] = acc_val;
+            if (dup16)
+                HalfBuf(uint64_t(pc.cosd)).v[idx] = float16_t(half_round(acc_val));
         }
         return;
     }
@@ -480,6 +644,9 @@ void main() {
         uint wp8 = pc.gGeo1 >> 16;
         bool pub = (gfl & 1u) != 0u;
         bool b16 = (gfl & 2u) != 0u;
+        // A2: bit2 = skip the dead fp32 oRAW store on publish blocks (nothing
+        // consumes it - only publish=false blocks' oRAW feeds the ds-pool).
+        bool skipFp32 = pub && ((gfl & 4u) != 0u);
         uint w = gl_WorkGroupID.z;             // window index
         uint wy = w / wp8, wx = w % wp8;
 
@@ -510,7 +677,8 @@ void main() {
                             fma(bv.y, dv.y, float(stage[e + 1u])),
                             fma(bv.z, dv.z, float(stage[e + 2u])),
                             fma(bv.w, dv.w, float(stage[e + 3u])));
-            Float4Buf(uint64_t(pc.c)).v4[io4 >> 2] = val;
+            if (!skipFp32)
+                Float4Buf(uint64_t(pc.c)).v4[io4 >> 2] = val;
             if (pub)
                 Half4Buf(uint64_t(pc.cosd)).v4[io4 >> 2] =
                     f16vec4(float16_t(e4m3(val.x)), float16_t(e4m3(val.y)),
