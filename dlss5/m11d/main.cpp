@@ -565,7 +565,6 @@ int main(int argc, char** argv) {
     std::printf("[m11d] listening on 127.0.0.1:%d (one connection per frame)\n", port);
 
     std::vector<uint8_t> inBuf, outBuf, maskBuf;
-    std::vector<uint8_t> prevProcessedBuf;
     bool havePrev = false;
     uint32_t prevW = 0, prevH = 0;
     for (;;) {
@@ -786,9 +785,10 @@ int main(int argc, char** argv) {
                 if (!transferred) {
                     // Only a real process refreshes the prev pair - a
                     // generated frame is not a reconstruction and must stay
-                    // out of the transfer baseline (x64 parity).
-                    if (prevProcessedBuf.size() < px * 4) prevProcessedBuf.resize(px * 4);
-                    std::memcpy(prevProcessedBuf.data(), outBuf.data(), px * 4);
+                    // out of the transfer baseline (x64 parity). The pair
+                    // itself lives engine-side (bufPrevFrame_/bufPrevRaw_,
+                    // written GPU-side inside processFrame); havePrev is only
+                    // the daemon-side gate for the NRN2 path - no host copy.
                     havePrev = true;
                 }
                 // vendor parity (nr_daemon.py:88): alpha stays as the game
