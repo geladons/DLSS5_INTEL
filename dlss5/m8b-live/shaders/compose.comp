@@ -19,7 +19,7 @@
 // clamp(residual, +/-maxDelta/255); encode adds fin onto lastPresented.
 //
 //   push a = (fullStridePx, regionTop, regionLeft, netW)
-//        b = (regionW, regionH, 0, 0)
+//        b = (regionW, regionH, headStride, 0)   // headStride 0 -> legacy 16
 //        c = (maxDelta01, accumulateMode, gain, blend)
 //        d = (colorStrength, colorStrengthOn, deltaOutput, 0)
 //   M13 knob #2: blend = the vendor recipe's mix factor (was hardcoded 1.0).
@@ -104,7 +104,10 @@ void main() {
     uint y = p / uint(pc.b.x);
 
     uint natP = (uint(pc.a.y) + y) * uint(pc.a.x) + (uint(pc.a.z) + x);
-    uint hP = (y * uint(pc.a.w) + x) * 16u;        // head token (region origin == net origin)
+    // head row stride: chain stores the head compact as [TOK,4] fp32
+    // (pc.b.z = 4); 0 means the legacy 16-channel layout (m8b-live).
+    uint hStride = pc.b.z > 0 ? uint(pc.b.z) : 16u;
+    uint hP = (y * uint(pc.a.w) + x) * hStride;    // head token (region origin == net origin)
     float m = pc.c.x > 0.0 && pc.c.x < 1.0 ? pc.c.x : 1.0;   // accumulate clamp
     float gain = pc.c.z > 0.0 ? pc.c.z : 1.0;
     float intensity = pc.c.w;                      // Phase 30 intensity (0..2, default 1.6)

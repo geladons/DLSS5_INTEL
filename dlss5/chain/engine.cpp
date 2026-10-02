@@ -25,7 +25,7 @@ static DbgLayout dbgLayout(const Stage st[7], uint32_t T6P) {
     auto al = [](uint64_t v) { return (v + 255) & ~255ull; };
     DbgLayout d{};
     d.szFeat = al((uint64_t)st[0].TOK * 16 * 4);
-    d.szHead = al((uint64_t)st[0].TOK * 16 * 4);
+    d.szHead = al((uint64_t)st[0].TOK * 4 * 4);   // oHEAD is compact [TOK,4] now
     d.szX16 = al((uint64_t)st[0].TOK * 16 * 2);
     d.szADA = al((uint64_t)st[0].TOK * 32 * 4);
     d.szMRG = al((uint64_t)st[0].TOK * 32 * 4);
@@ -383,8 +383,10 @@ bool ChainEngine::createFrontEnd() {
         writeBuf(setFinal_, 1, bufRgb_, (uint64_t)W_ * H_ * 3 * 4);
         writeBuf(setFinal_, 2, bufT_, Tfloats * 4);
         writeBufRange(setFinal_, 3, arena_.bufOf(O.oFeatV), arena_.localOff(O.oFeatV), (uint64_t)st_[0].TOK * 16 * 4);
-        writeBufRange(setFinal_, 4, arena_.bufOf(O.oHEAD), arena_.localOff(O.oHEAD), (uint64_t)st_[0].TOK * 16 * 4);
-        writeBufRange(setFinal_, 5, arena_.bufOf(O.oHEAD), arena_.localOff(O.oHEAD), (uint64_t)st_[0].TOK * 16 * 4);
+        // binding 4: features.comp emits the f16 chain input oX16 itself
+        // (featpack pass removed); oHEAD is compact [TOK,4] fp32 now.
+        writeBufRange(setFinal_, 4, arena_.bufOf(O.oX16), arena_.localOff(O.oX16), (uint64_t)st_[0].TOK * 16 * 2);
+        writeBufRange(setFinal_, 5, arena_.bufOf(O.oHEAD), arena_.localOff(O.oHEAD), (uint64_t)st_[0].TOK * 4 * 4);
         writeBuf(setFinal_, 6, bufFin_, (uint64_t)regionW_ * regionH_ * 3 * 4);
         writeBuf(setFinal_, 7, bufNr_, (uint64_t)regionW_ * regionH_ * 3 * 4);
         writeBuf(setFinal_, 8, bufMax_, 4096 * 4);
@@ -393,15 +395,16 @@ bool ChainEngine::createFrontEnd() {
         writeBuf(setFinal_, 11, bufFbStats_, 8);
         writeBuf(setFinal_, 12, bufHp_, 65536);
         writeBuf(setFinal_, 13, bufHist_, (uint64_t)st_[0].TOK * 3 * 4);
-        writeBufRange(setFinal_, 14, arena_.bufOf(O.oHEAD), arena_.localOff(O.oHEAD), (uint64_t)st_[0].TOK * 16 * 4);
+        writeBufRange(setFinal_, 14, arena_.bufOf(O.oHEAD), arena_.localOff(O.oHEAD), (uint64_t)st_[0].TOK * 4 * 4);
         writeBufRange(setFinal_, 15, arena_.bufOf(O.oHeadDC), arena_.localOff(O.oHeadDC), 1024);
     } else {
         writeImg(setFinal_, 0, imgInView_);
         writeBuf(setFinal_, 1, bufNetRgb_, (uint64_t)netW_ * netH_ * 3 * 4);
         writeBuf(setFinal_, 2, bufT_, Tfloats * 4);
         writeBufRange(setFinal_, 3, arena_.bufOf(O.oFeatV), arena_.localOff(O.oFeatV), (uint64_t)st_[0].TOK * 16 * 4);
-        writeBufRange(setFinal_, 4, arena_.bufOf(O.oHEAD), arena_.localOff(O.oHEAD), (uint64_t)st_[0].TOK * 16 * 4);
-        writeBufRange(setFinal_, 5, arena_.bufOf(O.oHEAD), arena_.localOff(O.oHEAD), (uint64_t)st_[0].TOK * 16 * 4);
+        // binding 4: features.comp emits the f16 chain input oX16 itself
+        writeBufRange(setFinal_, 4, arena_.bufOf(O.oX16), arena_.localOff(O.oX16), (uint64_t)st_[0].TOK * 16 * 2);
+        writeBufRange(setFinal_, 5, arena_.bufOf(O.oHEAD), arena_.localOff(O.oHEAD), (uint64_t)st_[0].TOK * 4 * 4);
         writeBuf(setFinal_, 6, bufFinLow_, (uint64_t)netW_ * netH_ * 3 * 4);
         writeBuf(setFinal_, 7, bufNr_, (uint64_t)regionW_ * regionH_ * 3 * 4);
         writeBuf(setFinal_, 8, bufMax_, 4096 * 4);
@@ -410,7 +413,7 @@ bool ChainEngine::createFrontEnd() {
         writeBuf(setFinal_, 11, bufFbStats_, 8);
         writeBuf(setFinal_, 12, bufHp_, 65536);
         writeBuf(setFinal_, 13, bufHist_, (uint64_t)st_[0].TOK * 3 * 4);
-        writeBufRange(setFinal_, 14, arena_.bufOf(O.oHEAD), arena_.localOff(O.oHEAD), (uint64_t)st_[0].TOK * 16 * 4);
+        writeBufRange(setFinal_, 14, arena_.bufOf(O.oHEAD), arena_.localOff(O.oHEAD), (uint64_t)st_[0].TOK * 4 * 4);
         writeBufRange(setFinal_, 15, arena_.bufOf(O.oHeadDC), arena_.localOff(O.oHeadDC), 1024);
 
         writeImg(setDown_, 0, imgInView_);
@@ -555,17 +558,9 @@ void ChainEngine::recordFrame(long frameIndex) {
             barrierAll();
             vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 1);
         }
-        {   // featpack: features fp32 [TOK0,16] -> chain input f16 (oX16)
-            vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, rec_.featpackPipe().pipe);
-            PackPush fp{arena_.A(arena_.off.oFeatV), arena_.A(arena_.off.oX16), st_[0].TOK * 16};
-            vkCmdPushConstants(cmd_, rec_.featpackPipe().layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
-                               sizeof(fp), &fp);
-            if (prof_.enabled()) prof_.markBegin(cmd_);
-            vkCmdDispatch(cmd_, (st_[0].TOK * 16 + 255) / 256, 1, 1);
-            if (prof_.enabled()) prof_.markEnd(cmd_, "featpack", "", 0, 16, 0,
-                                               (st_[0].TOK * 16 + 255) / 256, 1, 1,
-                                               (uint64_t)st_[0].TOK * 96);
-            barrierAll();
+        {   // featpack is gone: features.comp writes the f16 chain input oX16
+            // itself (binding 4). ts slot 2 still marks the chain boundary so
+            // FrameStats (fpMs ~= 0) stays layout-compatible.
             vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 2);
             // full 71-block DLSSNR U-Net chain (~1400 dispatches), replayed
             // from the cached secondary command buffer
@@ -590,6 +585,7 @@ void ChainEngine::recordFrame(long frameIndex) {
             vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeCompose_);
             p.a[0] = (int32_t)W_; p.a[1] = (int32_t)rt; p.a[2] = (int32_t)rl; p.a[3] = (int32_t)netW_;
             p.b[0] = (int32_t)regionW_; p.b[1] = (int32_t)regionH_;
+            p.b[2] = 4;                           // head is compact [TOK,4] fp32
             p.c[0] = 12.0f / 255.0f;              // legacy accumulate clamp (unused in absolute mode)
             p.c[1] = 0.0f;                        // absolute mode (no accumulate)
             p.c[2] = cfg_.headGain;               // vendor residual scale
@@ -696,17 +692,8 @@ void ChainEngine::recordFrame(long frameIndex) {
             barrierAll();
             vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 1);
         }
-        {   // featpack: features fp32 [TOK0,16] -> chain input f16 (oX16)
-            vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, rec_.featpackPipe().pipe);
-            PackPush fp{arena_.A(arena_.off.oFeatV), arena_.A(arena_.off.oX16), st_[0].TOK * 16};
-            vkCmdPushConstants(cmd_, rec_.featpackPipe().layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
-                               sizeof(fp), &fp);
-            if (prof_.enabled()) prof_.markBegin(cmd_);
-            vkCmdDispatch(cmd_, (st_[0].TOK * 16 + 255) / 256, 1, 1);
-            if (prof_.enabled()) prof_.markEnd(cmd_, "featpack", "", 0, 16, 0,
-                                               (st_[0].TOK * 16 + 255) / 256, 1, 1,
-                                               (uint64_t)st_[0].TOK * 96);
-            barrierAll();
+        {   // featpack is gone: features.comp writes the f16 chain input oX16
+            // itself (binding 4); ts slot 2 still marks the chain boundary.
             vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 2);
             // full 71-block DLSSNR U-Net chain, replayed from the cached
             // secondary command buffer
@@ -729,6 +716,7 @@ void ChainEngine::recordFrame(long frameIndex) {
             vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeCompose_);
             p.a[0] = (int32_t)netW_; p.a[1] = 0; p.a[2] = 0; p.a[3] = (int32_t)netW_;
             p.b[0] = (int32_t)netW_; p.b[1] = (int32_t)netH_;
+            p.b[2] = 4;                           // head is compact [TOK,4] fp32
             p.c[0] = 12.0f / 255.0f;
             p.c[1] = 0.0f;
             p.c[2] = cfg_.headGain;
@@ -849,7 +837,7 @@ void ChainEngine::recordDebugCopies() {
     struct DbgCp { VkDeviceSize srcOff, dstOff, size; };
     DbgCp dcps[15] = {
         {O.oFeatV, dl.offFeat, (uint64_t)st_[0].TOK * 16 * 4},
-        {O.oHEAD, dl.offHead, (uint64_t)st_[0].TOK * 16 * 4},
+        {O.oHEAD, dl.offHead, (uint64_t)st_[0].TOK * 4 * 4},
         {O.oX16, dl.offX16, (uint64_t)st_[0].TOK * 16 * 2},
         {O.oADA, dl.offADA, (uint64_t)st_[0].TOK * 32 * 4},
         {O.oMRG70, dl.offMRG, (uint64_t)st_[0].TOK * 32 * 4},
@@ -886,7 +874,17 @@ void ChainEngine::writeDebugDumps() {
     };
     const uint64_t T0 = st_[0].TOK;
     wr("live_featV.bin", db + dl.offFeat, (uint64_t)T0 * 16 * 4);
-    wr("live_head.bin", db + dl.offHead, (uint64_t)T0 * 16 * 4);
+    {   // oHEAD is stored compact [TOK,4] fp32 on device; expand the dump
+        // back to the legacy [TOK,16] layout (ch 4..15 zero) so every
+        // existing reader (m11d --selftest, _validate.py, tools/*) keeps
+        // the same file format and stride.
+        std::vector<float> head16((size_t)T0 * 16, 0.0f);
+        const float* h4 = (const float*)(db + dl.offHead);
+        for (uint64_t t = 0; t < T0; ++t)
+            for (uint32_t c = 0; c < 4; ++c)
+                head16[t * 16 + c] = h4[t * 4 + c];
+        wr("live_head.bin", head16.data(), (uint64_t)T0 * 16 * 4);
+    }
     wr("live_x16.bin", db + dl.offX16, (uint64_t)T0 * 16 * 2);
     wr("live_ada.bin", db + dl.offADA, (uint64_t)T0 * 32 * 4);
     wr("live_mrg70.bin", db + dl.offMRG, (uint64_t)T0 * 32 * 4);

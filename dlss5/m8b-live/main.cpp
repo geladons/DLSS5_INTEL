@@ -2358,7 +2358,7 @@ int main(int argc, char** argv) {
     {
         writeBuf(setFinal, 2, bufT, Tfloats * 4);
         writeBufRange(setFinal, 3, bufOf(oFeatV), localOff(oFeatV), (uint64_t)st[0].TOK * 16 * 4);
-        writeBufRange(setFinal, 4, bufOf(oHEAD), localOff(oHEAD), (uint64_t)st[0].TOK * 16 * 4);   // legacy slot (was headpack out)
+        writeBufRange(setFinal, 4, bufOf(oX16), localOff(oX16), (uint64_t)st[0].TOK * 16 * 2);   // features.comp emits the f16 chain input here (was headpack out)
         writeBufRange(setFinal, 5, bufOf(oHEAD), localOff(oHEAD), (uint64_t)st[0].TOK * 16 * 4);   // compose reads the raw head here
         writeBuf(setFinal, 6, bufFin, (uint64_t)regionW * regionH * 3 * 4);
         writeBuf(setFinal, 7, bufNr, (uint64_t)regionW * regionH * 3 * 4);

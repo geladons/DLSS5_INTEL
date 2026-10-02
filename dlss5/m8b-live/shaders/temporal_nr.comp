@@ -8,10 +8,10 @@
 //   col01     = fv[p*16+4+c] * 8 + 0.5    (scaled_color decode of source)
 //   hist01    = fv[p*16+7+c] * 8 + 0.5    (features already substitute col01
 //                                          on frame 1 via histValid=0)
-//   alpha     = clamp(sigmoid(halfr(head[p*16+3])) * 0.73974609375, 0, 1)
-//   predicted = clamp(col01 + halfr(head[p*16+c]) * 0.25, 0, 1)
+//   alpha     = clamp(sigmoid(halfr(head[p*4+3])) * 0.73974609375, 0, 1)
+//   predicted = clamp(col01 + halfr(head[p*4+c]) * 0.25, 0, 1)
 //   outp      = predicted + alpha * (hist01 - predicted)
-//   head[p*16+c] = halfr((outp - col01) * 4.0)     // corrected residual:
+//   head[p*4+c] = halfr((outp - col01) * 4.0)     // corrected residual:
 //                                        // compose's halfr(head)*0.25*gain
 //                                        // reconstructs outp (gain=1) or a
 //                                        // gain-scaled delta (gain!=1)
@@ -96,7 +96,9 @@ layout(push_constant) uniform Push { ivec4 a; ivec4 b; vec4 c; vec4 d; } pc;
 void main() {
     uint p = gl_GlobalInvocationID.x;
     if (p >= uint(pc.a.x)) return;
-    uint hP = p * 16u;
+    // head is compact [TOK,4] fp32 in the chain (only channels 0..3 exist);
+    // temporal_nr is chain-only - m8b-live never builds this shader.
+    uint hP = p * 4u;
 
     float logit = halfr(head[hP + 3u]);
     float alpha = clamp(1.0 / (1.0 + exp(-logit)) * halfr(0.73974609375), 0.0, 1.0);

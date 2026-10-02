@@ -3,6 +3,7 @@
 // dlss5/chain — ChainArena implementation (see arena.h).
 // ============================================================================
 #include "arena.h"
+#include "recorder.h"   // parsePilot - dead-slot liveness must mirror the recorder's gates
 
 #include <algorithm>
 #include <cstdlib>
@@ -110,12 +111,54 @@ void ChainArena::layout(const Stage st[7], uint64_t T6P, uint64_t packTotalIn,
     off.oG4 = slot(maxTokC * 4);
     off.oRAW = slot(maxTokC * 4);
     off.oPOOL = slot(maxTokC * 2);
-    // window attention set
-    off.oWIN = slot(wWin * 2);
-    off.oPROJW = slot(wProj * 4);
+
+    // --- split-path scratch liveness --------------------------------------
+    // The default chain runs every fusion ON; the slots below are touched
+    // only by recordWindowAttn's split-path fallbacks. Evaluate the SAME env
+    // gates here: a dead slot aliases `oDead` (a 256 B tombstone the chunker
+    // still maps, so bufOf/A() stay valid) instead of owning DRAM. Both sides
+    // read process env, so layout() and recordChain() always agree.
+    const VkDeviceSize oDead = ar.alloc(256);
+    auto deadOr = [&](bool live, VkDeviceSize bytes) {
+        return live ? ar.alloc(bytes) : oDead;
+    };
+    const bool fuseCosw   = parsePilot("D5C_FUSE_COSW", nullptr, 1) > 0;
+    const bool fusedAttn  = parsePilot("D5C_INT8_ATTN_FUSED", nullptr, 1) > 0;
+    const bool fuseTrans  = fusedAttn && parsePilot("D5C_FUSE_TRANS", nullptr, 1) > 0;
+    const bool fuseGather = parsePilot("D5C_FUSE_GATHER", nullptr, 1) > 0;
+    // oWIN: needed iff some window block cannot run the fused F_APART load -
+    // i.e. D5C_FUSE_PART=0, or the block's int8 qkv path materializes oWIN
+    // for quant_act. Mirrors ChainRecorder::qkvApart exactly (same pilot env
+    // names, same isQuantized test, same fam->tensor-name mapping).
+    bool needWIN = parsePilot("D5C_FUSE_PART", nullptr, 1) <= 0;
+    if (!needWIN) {
+        int pilotQKV = parsePilot("D5C_INT8_ATTN_QKV", "D5C_INT8_ATTN", -1);
+        if (pilotQKV >= 0) {
+            for (int idx = 0; idx <= 70; ++idx) {
+                if (idx >= 31 && idx <= 39) continue;   // L6 global blocks
+                bool l2 = (idx >= 23 && idx <= 30) || (idx >= 40 && idx <= 69);
+                if (idx <= pilotQKV &&
+                    ws.isQuantized(WeightsStore::tname(
+                        l2 ? "block%d.layer2.qkv_weight" : "block%d.layer0.qkv_weight",
+                        idx))) {
+                    needWIN = true;
+                    break;
+                }
+            }
+        }
+    }
+    const VkDeviceSize reclaimed =
+        (needWIN ? 0 : wWin * 2) + (fuseCosw ? wProj * 4 : 0) +
+        (fusedAttn ? wSc * 6 : 0) + (fuseTrans ? wQkv * 4 : 0) +
+        (fuseGather ? wWin * 4 : 0);
+
+    // window attention set (the fused path keeps only oQW/oKW/oVW + oATW live)
+    off.oWIN = deadOr(needWIN, wWin * 2);
+    off.oPROJW = deadOr(!fuseCosw, wProj * 4);
     off.oQW = slot(wQkv * 2); off.oKW = slot(wQkv * 2); off.oVW = slot(wQkv * 2);
-    off.oSCW = slot(wSc * 4); off.oPRW = slot(wSc * 2);
-    off.oMGW = slot(wQkv * 4); off.oATW = slot(wWin * 2); off.oABW = slot(wWin * 4);
+    off.oSCW = deadOr(!fusedAttn, wSc * 4); off.oPRW = deadOr(!fusedAttn, wSc * 2);
+    off.oMGW = deadOr(!fuseTrans, wQkv * 4); off.oATW = slot(wWin * 2);
+    off.oABW = deadOr(!fuseGather, wWin * 4);
     // global set (L6); token count padded to T6P (align 32) for the coopmat
     // score GEMM — softmax masks cols >= T6 (nReal), padded rows carry zeros.
     off.oHG = slot((uint64_t)T6P * 4096 * 2);
@@ -136,7 +179,9 @@ void ChainArena::layout(const Stage st[7], uint64_t T6P, uint64_t packTotalIn,
     off.oB48 = slot((uint64_t)st[4].TOK * 256 * 2);
     off.oB69 = slot((uint64_t)st[1].TOK * 32 * 2);
     off.oMRG39 = slot((uint64_t)st[5].TOK * 512 * 4);
-    off.oMRG70 = slot((uint64_t)st[0].TOK * 32 * 4); off.oHEAD = slot((uint64_t)st[0].TOK * 16 * 4);
+    // oHEAD is compact [TOK0,4] fp32 (head GEMM F_CN store) - consumers only
+    // read channels 0..3 (compose 0-2, temporal_nr 0-3).
+    off.oMRG70 = slot((uint64_t)st[0].TOK * 32 * 4); off.oHEAD = slot((uint64_t)st[0].TOK * 4 * 4);
     // m8b bridge slots: features output (fp32 [TOK0,16]) + head row-DC scratch
     // (kept allocated: descriptor bindings 3/15 reference these ranges)
     off.oFeatV = slot((uint64_t)st[0].TOK * 16 * 4);
@@ -174,6 +219,9 @@ void ChainArena::layout(const Stage st[7], uint64_t T6P, uint64_t packTotalIn,
     totalBytes = packTotalIn + ar.off;
     std::printf("arena: %.2f MB scratch after weights; total %.1f MB\n",
                 ar.off / 1048576.0, totalBytes / 1048576.0);
+    if (reclaimed > 0)
+        std::printf("arena: fused-path reclaim %.2f MB scratch skipped (dead split-path slots)\n",
+                    reclaimed / 1048576.0);
 
     // Chunked split at slot boundaries (the weights pack rides chunk 0).
     // M10 measured: 3500 MB works; 3800 MB SILENTLY breaks chain numerics

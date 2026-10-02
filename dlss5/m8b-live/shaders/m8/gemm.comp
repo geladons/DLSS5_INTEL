@@ -57,6 +57,10 @@ const uint F_DUP16           = 0x10000u; // residual epilogue also writes an f16
                                      // exact f16 bits) to pc.cosd as a dense
                                      // image-order [m,ldc] f16 buffer, so the
                                      // fused qkv A-load takes the f16 path.
+const uint F_CN              = 0x2u;    // compact-N C store: only cols
+                                     // [0, pc.pad) of each row are written
+                                     // (head [TOK,4] store); tile compute is
+                                     // unchanged, values bit-identical.
 
 // fp16-island rounding ops, verbatim from cosine_win.comp (EPI_COSQKV must
 // reproduce that kernel's exact float math sequence for bit-exactness).
@@ -501,6 +505,28 @@ void main() {
     bool narrow = (pc.flags & 0x1000u) != 0u;
 
     if (epilogue == 0u && !narrow) {
+        if ((pc.flags & F_CN) != 0u) {
+            // Compact-N store: the A-side compute and 16x16 tile loop are
+            // identical to the plain path; only the C store is truncated to
+            // cols [0, pc.pad) at row stride ldc. Staging through `stage`
+            // (ACC-typed, same width as the accumulator) keeps every stored
+            // value bit-identical to a full [*,BN] store - under ACC16 the
+            // acc->f16->f32 widening happens elementwise either way.
+            for (uint i = 0u; i < RM; i++)
+                for (uint j = 0u; j < RN; j++)
+                    coopMatStore(acc[i][j], stage, i * TM * BN + j * TN, BN,
+                                 gl_CooperativeMatrixLayoutRowMajor);
+            subgroupMemoryBarrierShared();
+            subgroupBarrier();
+            for (uint e = gl_LocalInvocationID.x; e < BM * BN; e += 32u) {
+                uint cn = e % BN;
+                if (cn >= pc.pad) continue;
+                uint r = row + e / BN;
+                if (r >= pc.m) continue;
+                pc.c.v[co + r * ldc + col + cn] = float(stage[e]);
+            }
+            return;
+        }
         for (uint i = 0u; i < RM; i++)
             for (uint j = 0u; j < RN; j++)
                 if (row + i * TM < pc.m) {

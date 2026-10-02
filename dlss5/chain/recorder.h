@@ -129,6 +129,9 @@ enum { EPI_NONE = 0, EPI_E4M3 = 1, EPI_GATE = 2, EPI_GATE_E4M3 = 3, EPI_HALF = 4
        EPI_RESIDUAL_FP32 = 5, EPI_RESIDUAL_F16 = 6, EPI_COSQKV = 7,
        EPI_GATHER_RES = 8 };
 enum { F_NARROW = 0x1000, F_TRANSPOSE = 1, F_FUSED_I8_PRODUCER = 0x2000, F_FUSED_I8_CONSUMER = 0x4000,
+       F_CN = 0x2,           // gemm.comp only: C stores just cols [0,pad) at
+                             // ldc (compact head [TOK,4]); tile compute is
+                             // identical, values bit-exact
        F_APART = 0x8000,     // gemm.comp only: A operand gathers through the
                              // inverse window map (partition fused; gGeo0/gGeo1
                              // carry the window geometry, gfl bit0 = f16 src)

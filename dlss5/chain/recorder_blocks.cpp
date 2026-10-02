@@ -602,10 +602,13 @@ void ChainRecorder::recordChain(VkCommandBuffer cb) {
         dEw(cb, A(O.oRAW), 0, 0, 0, A(O.oG2), st_[0].TOK * 32, 2, 0);
         bar(cb);
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pGemm1.pipe);
+        // Head output is compact [TOK,4] fp32 (F_CN stores only C cols 0..3,
+        // ldc=4). The coopmat tile still computes all 16 columns with the
+        // identical k-loop - only the store is truncated, values bit-exact.
         GemmPush p{A(O.oG2), A(O.oHeadW), A(O.oHEAD), st_[0].TOK, 16, 32, 1, 0, 0, 0,
-                   gflags(EPI_NONE, false), 32, 16, 16, 0, 0, 0, 0};
+                   gflags(EPI_NONE, false) | F_CN, 32, 16, 4, 4, 0, 0, 0};
         vkCmdPushConstants(cb, pGemm1.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
-        uint64_t gemm1_bytes = (uint64_t)st_[0].TOK * 32 * 2 + 32 * 16 * 2 + (uint64_t)st_[0].TOK * 16 * 4;
+        uint64_t gemm1_bytes = (uint64_t)st_[0].TOK * 32 * 2 + 32 * 16 * 2 + (uint64_t)st_[0].TOK * 4 * 4;
         pmBegin(cb);
         vkCmdDispatch(cb, 1, st_[0].TOK / 16, 1);
         pmEnd(cb, "gemm1", "head", st_[0].TOK, 16, 32, 1, st_[0].TOK / 16, 1, gemm1_bytes);
