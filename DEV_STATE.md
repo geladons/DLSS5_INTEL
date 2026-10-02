@@ -1,5 +1,35 @@
 # DEV_STATE.md - where we are (updated 2026-10-02 by Devin)
 
+## Stage 29: chain perf program - memory round-trip elimination sweep (2026-10-01)
+
+Driver: chain time at 1920x1080@0.55 went 254 -> ~168 ms chain (~-34%);
+640x360@0.50 67 -> 50.8 ms; 854x480@0.50 82 -> 63.5; 1024x768@0.55 129 ->
+100.8. Per-frame dispatches 1141 -> ~570. Every step gated behind
+D5C_FUSE_* / D5C_GEMM_SLIM envs (default ON) and verified bit-exact vs
+sha256 goldens at scale 1.0/0.5 + INT8 pilots + noise/scale/graceful
+tests. All intermediate data-movement passes (cosw, trans, gather, part,
+featpack) are gone - their work moved into GEMM/attn prolog-epilogues:
+
+- engine: 71-block command stream recorded once into a SECONDARY cmd
+  buffer, replayed via vkCmdExecuteCommands (was re-recorded per frame).
+- EPI_COSQKV in gemm/gemm_i8: cosine QKV norm written at GEMM store.
+- attn_fused phase-4 writes token-major e4m3 directly (trans fused);
+  internal rewrite: SLM 6.25->4.25KB, softmax register caches, PV
+  software-pipelined => attn family -45%.
+- EPI_GATHER_RES: inverse window->image map + residual + publish inside
+  the proj GEMM store (explicit fma() pins driver contraction).
+- F_APART A-load: qkv reads image-order FFN output (partition gone).
+- fam1 branched FFN batched (2G -> 2 dispatches); dead fp32 stores skipped.
+- featpack removed (features writes f16 oX16); head compacted 16->4ch;
+  dead arena slots (oSCW/oPRW/oWIN/oPROJW/oMGW/...) reclaimed ~263 MB.
+- ffn_fused.comp: whole fam0 i8 FFN in one dispatch, hidden stays in SLM.
+- gemm_m8 (GEMM_RM=1, 8x32 tile) selected for narrow-out large-m shapes
+  (measured: wide tiles regress hard on B50 register pressure).
+- New: frame generation now also works on the x86/daemon path (NRN2
+  frame magic -> engine transferFrame, ~7 ms/frame end-to-end).
+- Found while benching: B50 driver DEVICE_LOST on >2GB BDA spans
+  (documented in AGENTS.md host quirks).
+
 ## Stage 28: SLM-resident fused FFN for fam0 window blocks (ffn_fused.comp)
 - One dispatch per fam0 window block (C=32) now runs the whole i8 FFN per
   32-token tile: quant_act replay + w1 expand (EPI_GATE_E4M3 + per-32x32

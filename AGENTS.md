@@ -55,6 +55,11 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
   "absolutely nothing" while all readback metrics were green. Owner-facing
   runs MUST pass `--echo-free 0` (fbcancel accumulate path, bounded deltas).
   Conversely, echo-free mode is still right for clean validation readbacks.
+- B50 DRIVER BUG (reproduced 2026-10-01): any single compute dispatch whose
+  BDA byte-span exceeds ~2 GB (e.g. a batched gemm covering a >2GB tensor)
+  returns VK_ERROR_DEVICE_LOST - in-bounds verified, pure driver limit.
+  Production never emits such spans; if a future batching change does,
+  split the batch.
 - Machine: real GPU = Arc Pro B50 (PCI DEV_E212, LUID ...95a2, driver 101.8805,
   Vulkan 1.4.348, coopmat rev2). "Arc Pro B500" in WMI = virtual root display,
   IGNORE for compute. Primary display \\.\DISPLAY5 2560x1440 @ (0,0). QEMU basic
