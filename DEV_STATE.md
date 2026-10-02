@@ -1,5 +1,22 @@
 # DEV_STATE.md - where we are (updated 2026-10-02 by Devin)
 
+## Stage 30: int8 attention extension EVALUATED - regression, kept OFF
+
+Extended `work/mlxw/dlssnr-int8.bin` coverage to qkv/proj at l4/l5
+(pack variants under Temp/int8ext/, loader override `D5C_INT8_PACK`,
+pilot envs D5C_INT8_ATTN_QKV/PROJ): output quality is acceptable
+(45.4-49.5 dB PSNR vs fp16 baseline, all 3 tests still PASS) but chain
+time REGRESSES on B50 in every configuration (+4..+35%). Root cause:
+int8 qkv disables qkvApart -> loses the F_APART fused partition load and
+re-adds dPart + quant_act + barriers per block; the int8 B-fetch saving
+does not cover the unfused prologue cost. Decision: pilots stay OFF,
+fp16 attention GEMMs remain the production path. Latent arena bug found:
+`needWIN` (arena.cpp) probes `layer2.qkv_weight` quantization for dec
+blocks idx 40-69, but blocks 48-70 keep qkv at `layer0` - a pack with
+int8 qkv ONLY at dec 48-69 would alias oWIN to the 256-byte oDead
+tombstone while dPart writes MBs. Harmless with current pack configs;
+fix if per-decoder int8 granularity is ever wanted.
+
 ## Stage 29: chain perf program - memory round-trip elimination sweep (2026-10-01)
 
 Driver: chain time at 1920x1080@0.55 went 254 -> ~168 ms chain (~-34%);
