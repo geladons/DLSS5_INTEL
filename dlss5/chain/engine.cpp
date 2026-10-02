@@ -88,6 +88,8 @@ bool ChainEngine::init(const EngineConfig& cfg) {
         VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
         ai.commandPool = cmdPool_; ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; ai.commandBufferCount = 1;
         D5C_VK_RET(vkAllocateCommandBuffers(c.dev, &ai, &cmd_));
+        ai.level = VK_COMMAND_BUFFER_LEVEL_SECONDARY;   // cached 71-block chain (see recordChainCached)
+        D5C_VK_RET(vkAllocateCommandBuffers(c.dev, &ai, &chainCmd_));
         VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
         D5C_VK_RET(vkCreateFence(c.dev, &fci, nullptr, &fence_));
         VkQueryPoolCreateInfo qpci{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
@@ -186,6 +188,12 @@ bool ChainEngine::init(const EngineConfig& cfg) {
     hostImg.clear(); hostImg.shrink_to_fit();   // ~2 GB host copy no longer needed
 
     rec_.init(c, arena_, ws_, st_, cfg.shaderDir);
+    // Everything the chain records is (re)built above: stage extents, arena
+    // chunk BDA bases, weight-pack offsets, recorder pipelines, and the
+    // D5C_INT8_* pilot envs read while recording. Mark the cached secondary
+    // stale so it re-records on the next processFrame. This is the ONLY
+    // invalidation point - reconfigure goes through shutdown()+init().
+    chainDirty_ = true;
     if (!cfg.profPath.empty()) {
         prof_.create(c, cfg.profPath);
         rec_.setProf(&prof_);
@@ -440,6 +448,35 @@ void ChainEngine::barrierAll() {
                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
 }
 
+// Emits the 71-block chain into cmd_. recordChain's push constants are BDA
+// addresses into the device arena + weight pack and its barriers are plain
+// compute-stage, so the command stream is extent/config-static between
+// inits: record it once into chainCmd_ (secondary, SIMULTANEOUS_USE) and
+// replay per frame via vkCmdExecuteCommands. chainDirty_ (set in init, the
+// only place chain-affecting state changes) re-records lazily on the first
+// frame after. Re-recording is safe mid-frame: cmd_ recording is host-side
+// and the previous submit already passed its fence.
+// With the per-dispatch profiler enabled the chain records inline instead:
+// prof marks carry CPU-side slot bookkeeping (count_/evs_) that advances
+// only while recording, so replaying a cached buffer would corrupt the CSV.
+void ChainEngine::recordChainCached() {
+    if (prof_.enabled()) {
+        rec_.recordChain(cmd_);
+        return;
+    }
+    if (chainDirty_) {
+        VkCommandBufferInheritanceInfo inh{VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO};
+        VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        bi.flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
+        bi.pInheritanceInfo = &inh;
+        D5C_VK_FATAL(vkBeginCommandBuffer(chainCmd_, &bi));   // implicit reset of prior record
+        rec_.recordChain(chainCmd_);
+        D5C_VK_FATAL(vkEndCommandBuffer(chainCmd_));
+        chainDirty_ = false;
+    }
+    vkCmdExecuteCommands(cmd_, 1, &chainCmd_);
+}
+
 // ------------------------------------------------------------ record ------
 void ChainEngine::recordFrame(long frameIndex) {
     const uint32_t rl = cfg_.regionLeft, rt = cfg_.regionTop;
@@ -530,8 +567,9 @@ void ChainEngine::recordFrame(long frameIndex) {
                                                (uint64_t)st_[0].TOK * 96);
             barrierAll();
             vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 2);
-            // full 71-block DLSSNR U-Net chain (~1400 dispatches)
-            rec_.recordChain(cmd_);
+            // full 71-block DLSSNR U-Net chain (~1400 dispatches), replayed
+            // from the cached secondary command buffer
+            recordChainCached();
             vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 3);
             vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 4);
         }
@@ -670,8 +708,9 @@ void ChainEngine::recordFrame(long frameIndex) {
                                                (uint64_t)st_[0].TOK * 96);
             barrierAll();
             vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 2);
-            // full 71-block DLSSNR U-Net chain
-            rec_.recordChain(cmd_);
+            // full 71-block DLSSNR U-Net chain, replayed from the cached
+            // secondary command buffer
+            recordChainCached();
             vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 3);
             vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 4);
         }
@@ -1136,6 +1175,8 @@ void ChainEngine::shutdown() {
     if (fence_) vkDestroyFence(c.dev, fence_, nullptr);
     if (tsPool_) vkDestroyQueryPool(c.dev, tsPool_, nullptr);
     if (cmdPool_) vkDestroyCommandPool(c.dev, cmdPool_, nullptr);
+    cmd_ = chainCmd_ = VK_NULL_HANDLE;   // command buffers die with the pool
+    chainDirty_ = true;
     vkc_.destroy();
     std::printf("[chain] engine shut down\n");
 }

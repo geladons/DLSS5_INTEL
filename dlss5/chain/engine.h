@@ -102,6 +102,9 @@ public:
 private:
     bool createFrontEnd();        // buffers/images/descriptors/transport pipelines
     void recordFrame(long frameIndex);  // into cmd (not submitted yet)
+    // Emits the 71-block chain into cmd_: replays the cached secondary
+    // chainCmd_, re-recording it first when chainDirty_.
+    void recordChainCached();
     // framegen tail: timestamps + dispatch + readback copies into cmd.
     // rollPrev copies bufCurrFrame_ into bufPrevFrame_ (interpolate only).
     void recordFrameGenTail(const struct Push& p, bool rollPrev);
@@ -128,6 +131,8 @@ private:
 
     VkCommandPool cmdPool_ = VK_NULL_HANDLE;
     VkCommandBuffer cmd_ = VK_NULL_HANDLE;
+    VkCommandBuffer chainCmd_ = VK_NULL_HANDLE;   // secondary: cached recordChain stream
+    bool chainDirty_ = true;                      // re-record chainCmd_ on next processFrame
     VkFence fence_ = VK_NULL_HANDLE;
     VkQueryPool tsPool_ = VK_NULL_HANDLE;
     float tsPeriodNs_ = 1.0f;
