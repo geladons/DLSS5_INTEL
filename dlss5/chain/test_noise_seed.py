@@ -66,6 +66,14 @@ def main():
     chain.dlss5_set_scale.argtypes = [ctypes.c_void_p, ctypes.c_float]
     chain.dlss5_set_scale.restype = None
 
+    # Temporal conditioning makes identical inputs differ across indices by
+    # design (history anchors each output to the previous one). This test
+    # verifies the *memoryless* determinism contract, so disable it here.
+    set_temporal = getattr(chain, "dlss5_set_temporal", None)
+    if set_temporal is not None:
+        set_temporal.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        set_temporal.restype = None
+
     weights_bytes = str(weights_path).encode('utf-8')
     shader_dir_bytes = (str(shader_dir) + "\\").encode('utf-8')
 
@@ -85,6 +93,8 @@ def main():
     if not handle:
         print("[FAIL] dlss5_create returned NULL")
         return 1
+    if set_temporal is not None:
+        set_temporal(handle, 0)
 
     all_ok = True
     try:

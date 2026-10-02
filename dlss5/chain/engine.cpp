@@ -248,11 +248,23 @@ bool ChainEngine::createFrontEnd() {
     pipeCompose_ = makePipe("compose");
     pipeEncode_ = makePipe("encode");
     pipeFrameGen_ = makePipe("framegen");
+    if (cfg_.temporal) {
+        try {
+            pipeTemporalNr_ = makePipe("temporal_nr");
+        } catch (const std::exception& e) {
+            // A deployment missing temporal_nr.spv must not brick the whole
+            // engine - degrade to memoryless reconstruction instead.
+            std::fprintf(stderr, "[VK] temporal_nr unavailable (%s) - temporal off\n", e.what());
+            cfg_.temporal = false;
+        }
+    }
     if (cfg_.renderScale < 1.0f) {
         pipeRescale_ = makePipe("rescale");
-        std::printf("[VK] 6 pipelines up (decode/rescale/features/compose/encode/framegen; absolute mode)\n");
+        std::printf("[VK] %d pipelines up (decode/rescale/features/compose/encode/framegen%s; absolute mode)\n",
+                    cfg_.temporal ? 7 : 6, cfg_.temporal ? "/temporal" : "");
     } else {
-        std::printf("[VK] 5 pipelines up (decode/features/compose/encode/framegen; absolute mode)\n");
+        std::printf("[VK] %d pipelines up (decode/features/compose/encode/framegen%s; absolute mode)\n",
+                    cfg_.temporal ? 6 : 5, cfg_.temporal ? "/temporal" : "");
     }
 
     // buffers (m8b parity: same bindings, dummy sizes where the M9b absolute
@@ -493,7 +505,7 @@ void ChainEngine::recordFrame(long frameIndex) {
             p.c[1] = p30Ctrl[1]; // ch 11: tone
             p.c[2] = p30Ctrl[2]; // ch 12: structure
             p.c[3] = p30Ctrl[3]; // ch 13: skin_structure
-            p.d[0] = 0.0f;       // histValid
+            p.d[0] = (cfg_.temporal && framesDone_ > 0) ? 1.0f : 0.0f;  // histValid
             p.d[1] = p30Ctrl[4]; // ch 14: auto_mask_structure
             p.d[2] = 1.0f;       // phase30Valid
             p.d[3] = 0.0f;
@@ -522,6 +534,18 @@ void ChainEngine::recordFrame(long frameIndex) {
             rec_.recordChain(cmd_);
             vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 3);
             vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 4);
+        }
+        if (cfg_.temporal) {
+            // temporal_nr: blend the head toward the previous OUTPUT via the
+            // learned per-pixel alpha (head[3]) - damps per-frame reconstruction
+            // jitter (the "swim"/flicker on moving content). In-place head
+            // rewrite + next-frame history write; compose below runs unchanged.
+            Push tp{};
+            tp.a[0] = (int32_t)st_[0].TOK;
+            vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeTemporalNr_);
+            push(tp);
+            vkCmdDispatch(cmd_, (st_[0].TOK + 255) / 256, 1, 1);
+            barrierAll();
         }
         {   // compose (vendor compose_head on the raw head, absolute mode) + encode
             Push p{};
@@ -621,7 +645,7 @@ void ChainEngine::recordFrame(long frameIndex) {
             p.c[1] = p30Ctrl[1]; // ch 11: tone
             p.c[2] = p30Ctrl[2]; // ch 12: structure
             p.c[3] = p30Ctrl[3]; // ch 13: skin_structure
-            p.d[0] = 0.0f;       // histValid
+            p.d[0] = (cfg_.temporal && framesDone_ > 0) ? 1.0f : 0.0f;  // histValid
             p.d[1] = p30Ctrl[4]; // ch 14: auto_mask_structure
             p.d[2] = 1.0f;       // phase30Valid
             p.d[3] = 0.0f;
@@ -650,6 +674,16 @@ void ChainEngine::recordFrame(long frameIndex) {
             rec_.recordChain(cmd_);
             vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 3);
             vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 4);
+        }
+        if (cfg_.temporal) {
+            // temporal_nr pre-pass (see the scale==1.0 branch): in-place head
+            // rewrite toward the previous output + next-frame history write.
+            Push tp{};
+            tp.a[0] = (int32_t)st_[0].TOK;
+            vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeTemporalNr_);
+            push(tp);
+            vkCmdDispatch(cmd_, (st_[0].TOK + 255) / 256, 1, 1);
+            barrierAll();
         }
         {   // compose on (netW_, netH_) with output into bufFinLow_
             Push p{};
@@ -850,6 +884,8 @@ bool ChainEngine::processFrame(const uint8_t* bgraIn, uint8_t* bgraOut, long fra
 
     std::memcpy(bgraOut, rbFinalPtr_, (size_t)W_ * H_ * 4);
     havePrevProcessed_ = true;   // bufPrevFrame_/bufPrevRaw_ now hold a pair
+    framesDone_++;               // bufHist_ now holds this frame's output -
+                                 // next frame's features read it as history
     if (cfg_.debugDumps && frameIndex == 1) writeDebugDumps();
 
     if (stats) {
@@ -1061,9 +1097,9 @@ void ChainEngine::shutdown() {
     if (rbFinalPtr_) vkUnmapMemory(c.dev, memRbFinal_);
     uploadPtr_ = nullptr; rbFinalPtr_ = nullptr;
     rec_.destroy(c);
-    for (VkPipeline p : {pipeDecode_, pipeFeatures_, pipeCompose_, pipeEncode_, pipeRescale_, pipeFrameGen_})
+    for (VkPipeline p : {pipeDecode_, pipeFeatures_, pipeCompose_, pipeEncode_, pipeRescale_, pipeFrameGen_, pipeTemporalNr_})
         if (p) vkDestroyPipeline(c.dev, p, nullptr);
-    pipeDecode_ = pipeFeatures_ = pipeCompose_ = pipeEncode_ = pipeRescale_ = pipeFrameGen_ = VK_NULL_HANDLE;
+    pipeDecode_ = pipeFeatures_ = pipeCompose_ = pipeEncode_ = pipeRescale_ = pipeFrameGen_ = pipeTemporalNr_ = VK_NULL_HANDLE;
     if (pipeLayout_) vkDestroyPipelineLayout(c.dev, pipeLayout_, nullptr);
     pipeLayout_ = VK_NULL_HANDLE;
     if (dpool_) vkDestroyDescriptorPool(c.dev, dpool_, nullptr);
@@ -1090,6 +1126,7 @@ void ChainEngine::shutdown() {
         memNetRgb_ = memFinLow_ = memPrevFrame_ = memCurrFrame_ = memInterpOut_ =
         memPrevRaw_ = VK_NULL_HANDLE;
     havePrevProcessed_ = false;
+    framesDone_ = 0;
     if (imgInView_) vkDestroyImageView(c.dev, imgInView_, nullptr);
     if (viewFinal_) vkDestroyImageView(c.dev, viewFinal_, nullptr);
     if (imgIn_) vkDestroyImage(c.dev, imgIn_, nullptr);

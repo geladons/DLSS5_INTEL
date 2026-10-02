@@ -19,3 +19,6 @@ EXPORTS
     dlss5_set_framegen
     dlss5_get_framegen
     dlss5_get_framegen_gpu_ms
+    dlss5_set_temporal
+    dlss5_get_temporal
+    dlss5_reset_history

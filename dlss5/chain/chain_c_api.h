@@ -74,6 +74,13 @@ DLSS5_API void dlss5_set_auto_mask(void* handle, int auto_mask);
 DLSS5_API void dlss5_set_style_index(void* handle, int style_index);
 DLSS5_API void dlss5_set_color_strength(void* handle, float color_strength);
 
+// Temporal conditioning (features ch 7-9 = previous output + temporal_nr
+// compose). Default on; set_temporal(0) or env DLSS5_TEMPORAL=0 disables.
+// reset_history drops the anchor: next frame runs the first-frame path.
+DLSS5_API void dlss5_set_temporal(void* handle, int enable);
+DLSS5_API int dlss5_get_temporal(void* handle);
+DLSS5_API void dlss5_reset_history(void* handle);
+
 // Frame Generation (FSR 3.1 / Optical Flow Interpolation):
 // Interpolate an intermediate frame between frame0 and frame1 using GPU optical flow.
 DLSS5_API int dlss5_interpolate_frame(void* handle, uint32_t w, uint32_t h,
@@ -123,6 +130,9 @@ typedef int (*PFN_dlss5_framegen_transfer)(void* handle, uint32_t w, uint32_t h,
 typedef void (*PFN_dlss5_set_framegen)(void* handle, int enable);
 typedef int (*PFN_dlss5_get_framegen)(void* handle);
 typedef float (*PFN_dlss5_get_framegen_gpu_ms)(void* handle);
+typedef void (*PFN_dlss5_set_temporal)(void* handle, int enable);
+typedef int (*PFN_dlss5_get_temporal)(void* handle);
+typedef void (*PFN_dlss5_reset_history)(void* handle);
 
 #ifdef __cplusplus
 }

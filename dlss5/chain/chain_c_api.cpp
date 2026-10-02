@@ -71,6 +71,12 @@ public:
         const char* fg_env = std::getenv("DLSS5_FRAMEGEN");
         if (!fg_env) fg_env = std::getenv("NR_LAYER_FRAMEGEN");
         frameGenEnabled_ = (fg_env && std::strcmp(fg_env, "0") != 0);
+        // Temporal conditioning default ON - it anchors each reconstruction
+        // to the previous output (the flicker fix). DLSS5_TEMPORAL=0 /
+        // NR_LAYER_TEMPORAL=0 disables for A/B and determinism tests.
+        const char* t_env = std::getenv("DLSS5_TEMPORAL");
+        if (!t_env) t_env = std::getenv("NR_LAYER_TEMPORAL");
+        temporal_ = !(t_env && std::strcmp(t_env, "0") == 0);
         resolveWeights(weights);
         resolveShaders(shaders);
     }
@@ -111,6 +117,7 @@ public:
         cfg.headGain = gain_;
         cfg.headBlend = blend_;
         cfg.renderScale = scale_;
+        cfg.temporal = temporal_;
         cfg.phase30 = p30Ctl_.params();
         const char* s_env = std::getenv("DLSS5_SHARPNESS");
         if (!s_env) s_env = std::getenv("NR_LAYER_SHARPNESS");
@@ -243,6 +250,26 @@ public:
         frameGenEnabled_ = (enable != 0);
         if (!frameGenEnabled_) {
             havePrev_ = false;
+        }
+    }
+
+    void setTemporal(int enable) {
+        temporal_ = (enable != 0);
+        if (initialized_) {
+            engine_.setTemporal(temporal_);
+        }
+    }
+
+    int getTemporal() const {
+        return temporal_ ? 1 : 0;
+    }
+
+    // Drop temporal history - next frame takes the first-frame path. For
+    // callers that feed the engine unrelated content back to back (photo
+    // batch, window switch): stale history would otherwise bleed across.
+    void resetHistory() {
+        if (initialized_) {
+            engine_.resetHistory();
         }
     }
 
@@ -404,6 +431,7 @@ private:
     bool initialized_ = false;
     bool init_failed_ = false;   // latched until dimensions/scale change
     bool frameGenEnabled_ = false;
+    bool temporal_ = true;
     std::vector<uint8_t> prevProcessed_;
     bool havePrev_ = false;
     uint32_t prevW_ = 0, prevH_ = 0;
@@ -617,6 +645,34 @@ DLSS5_API float dlss5_get_framegen_gpu_ms(void* handle) {
         return ctx->getFrameGenGpuMs();
     } catch (...) {
         return 0.0f;
+    }
+}
+
+DLSS5_API void dlss5_set_temporal(void* handle, int enable) {
+    if (!handle) return;
+    try {
+        auto* ctx = static_cast<EngineContext*>(handle);
+        ctx->setTemporal(enable);
+    } catch (...) {
+    }
+}
+
+DLSS5_API int dlss5_get_temporal(void* handle) {
+    if (!handle) return 0;
+    try {
+        auto* ctx = static_cast<EngineContext*>(handle);
+        return ctx->getTemporal();
+    } catch (...) {
+        return 0;
+    }
+}
+
+DLSS5_API void dlss5_reset_history(void* handle) {
+    if (!handle) return;
+    try {
+        auto* ctx = static_cast<EngineContext*>(handle);
+        ctx->resetHistory();
+    } catch (...) {
     }
 }
 

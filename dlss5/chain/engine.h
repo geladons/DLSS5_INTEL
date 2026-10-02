@@ -33,6 +33,9 @@ struct EngineConfig {
     float headBlend = 1.0f;                            // vendor mix factor / intensity (public baseline 1.0)
     float renderScale = 1.0f;
     float sharpness = 0.8f;
+    bool temporal = true;                              // vendor history conditioning (features 7-9
+                                                       // + temporal_nr compose). Damps per-frame
+                                                       // reconstruction jitter on moving content.
     Phase30Params phase30{};                           // NVIDIA Phase 30 condition parameters
     VkContextConfig vkCfg{};                           // device selection (headless default)
     bool debugDumps = false;                           // dump live_*.bin on frame index 1
@@ -83,6 +86,13 @@ public:
     void setAutoMask(bool v) { cfg_.phase30.autoMask = v; }
     void setStyleIndex(int v) { cfg_.phase30.styleIndex = v; }
     void setColorStrength(float v) { cfg_.phase30.colorStrength = v; }
+    void setTemporal(bool v) { cfg_.temporal = v; }
+    bool temporal() const { return cfg_.temporal; }
+    // Drop temporal history: the NEXT frame runs the first-frame path
+    // (histValid=0, plain compose). Use on stream switches (new game window,
+    // a different photo in a batch) so stale history cannot bleed across
+    // unrelated content.
+    void resetHistory() { framesDone_ = 0; }
 
     uint32_t netW() const { return netW_; }
     uint32_t netH() const { return netH_; }
@@ -129,7 +139,8 @@ private:
 
     VkPipeline pipeDecode_ = VK_NULL_HANDLE, pipeFeatures_ = VK_NULL_HANDLE,
                pipeCompose_ = VK_NULL_HANDLE, pipeEncode_ = VK_NULL_HANDLE;
-    VkPipeline pipeRescale_ = VK_NULL_HANDLE, pipeFrameGen_ = VK_NULL_HANDLE;
+    VkPipeline pipeRescale_ = VK_NULL_HANDLE, pipeFrameGen_ = VK_NULL_HANDLE,
+               pipeTemporalNr_ = VK_NULL_HANDLE;
     VkBuffer bufNetRgb_ = VK_NULL_HANDLE, bufFinLow_ = VK_NULL_HANDLE;
     VkDeviceMemory memNetRgb_ = VK_NULL_HANDLE, memFinLow_ = VK_NULL_HANDLE;
     VkDescriptorSet setDown_ = VK_NULL_HANDLE, setUp_ = VK_NULL_HANDLE, setFrameGen_ = VK_NULL_HANDLE;
@@ -152,6 +163,8 @@ private:
              bufPrevRaw_ = VK_NULL_HANDLE;
     double lastFrameGenGpuMs_ = 0.0;
     bool havePrevProcessed_ = false;   // set after a successful processFrame
+    uint64_t framesDone_ = 0;          // frames completed on THIS instance;
+                                       // 0 -> first-frame path (no history)
     void* uploadPtr_ = nullptr;
     void* rbFinalPtr_ = nullptr;             // persistently mapped readback
 
