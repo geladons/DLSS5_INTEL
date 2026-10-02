@@ -1,4 +1,68 @@
-# DEV_STATE.md - where we are (updated 2026-09-30 by Devin)
+# DEV_STATE.md - where we are (updated 2026-10-01 by Devin)
+
+## Stage 27: Temporal Conditioning (flicker root cause) + Stale-DLL Purge + Elevated-Deploy Fix (2026-10-01)
+Owner report: processing ON = whole-image "swim"/flicker in menu AND
+gameplay, worse at higher FPS; processing OFF = static. Epsilon reuse
+(Stage 26) froze the static menu but could not fix moving content.
+
+- ROOT CAUSE (measured): the chain is deterministic (same frame twice
+  -> byte-identical), but memoryless - every accepted present is an
+  independent reconstruction. A sub-visible input perturbation (mean
+  0.256, max 6 - GTA IV's animated menu grain produces exactly this)
+  lands as mean 0.813 / max 18 output delta (3.2x gain). The layer's
+  synchronous TCP exchange means displayed FPS == daemon FPS, so every
+  displayed frame was a fresh independent reconstruction -> shimmer,
+  scaling with FPS.
+- FIX (e483207): temporal_nr.comp wired into the chain - the vendor
+  temporal recipe for the full aligned network extent (old
+  temporal.comp was 288-token-era; its per-row DC correction would
+  subtract real content). In-place oHEAD rewrite toward the previous
+  composed output via learned per-pixel alpha (sigmoid(head[3]) *
+  0.73974609375) before compose; history written pre-Phase30;
+  features.comp histValid gate preserves first-frame semantics.
+  Daemon A/B: same frame + fresh grain x6 -> consecutive-output diff
+  converges 1.06 -> 0.48 ON vs flat ~0.86 OFF.
+- Control path (198a730): NRCT cmd 12 RESETHIST / 13 SETTEMPORAL;
+  layer resolves dlss5_reset_history and resets before knob-triggered
+  resends; daemon resets after idle gaps/extent changes. Env:
+  DLSS5_TEMPORAL=0 (primary), NR_LAYER_TEMPORAL=0, D5C_TEMPORAL=0.
+- Media (ed07b50): reset_history between unrelated photos, once per
+  video (intra-video frames keep history).
+- Graceful degrade: missing temporal_nr.spv logs + falls back to
+  memoryless instead of bricking engine init.
+- m13.deploy fix (fdb64d2): _run_elevated's nested -Command quoting
+  silently ate every elevated step (inner double quotes ended the
+  outer parse). Now -File + -JsonFile; verified with a live elevated
+  write+delete in 'D:\Grand Theft Auto V Enhanced'. THIS WAS BROKEN
+  FOR EVERY ACL'D GAME DEPLOY.
+- STALE-DLL PURGE (owner's first-run requirement): scanned all 8
+  managed game dirs - 9 stale/foreign deployables across 5 dirs
+  (sha1-mismatched our-DLLs the cleaner classified "foreign" and kept).
+  Quarantined to %LOCALAPPDATA%\DLSS5Manager\quarantine\_20261001_184514;
+  GTA V dxgi.dll needed elevated delete. Re-scan: ZERO hits - every
+  game dir now has only legit current deployments (GTA IV keeps its
+  DXVK d3d9.dll).
+- Overlay (70b4930, agent W): popdowns/tooltips get WS_EX_NOACTIVATE+
+  TOOLWINDOW before map; monitor-aware anchoring (MonitorFromWindow +
+  work area, virtual-screen fallback); _cursor_keeper drag-aware
+  (button hold skips ReleaseCapture/SetCursor -> slider drags survive);
+  topmost re-assert is SWP_NOACTIVATE-only. Shared-_u32 fix: typed
+  POINTER argtypes broke on double module import (m13.* vs dlss5.m13.*)
+  - GetMonitorInfoW arg2 now c_void_p.
+- Tests: chain noise-seed PASS (memoryless determinism, temporal off),
+  scale-reconstruction PASS (first-frame path byte-identical to old
+  production dll), graceful-fail PASS; m13 29/29 green.
+- Rebuilt 18:44-18:52: d5c_chain.dll identical (d035f25e) in m11d/,
+  m11-layer/, m12-dxgi/ Release dirs; temporal_nr.spv staged into all
+  three; nr_layer_win x64+x86 rebuilt.
+- OPEN: real moving-scene validation needs the owner to PLAY via
+  Sunshine. Honest expectation: temporal damping halves reconstruction
+  jitter and converges; daemon throughput (~5 fps native / ~14 fps at
+  0.33) still paces everything - residual judder on fast motion is a
+  throughput wall, not a correctness bug. Exclusive fullscreen still
+  cannot host a Tk overlay (OS limitation - documented).
+
+## Stage 26: Release Hardening - In-Process Crash Root Cause, GTA IV Flicker, Cleaner, Dead Code (2026-09-30)
 
 ## Stage 26: Release Hardening - In-Process Crash Root Cause, GTA IV Flicker, Cleaner, Dead Code (2026-09-30)
 Field report from the owner: Witcher 3 (dx11 AND dx12), Metro Exodus and
