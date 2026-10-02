@@ -13,6 +13,10 @@
 //                     cmd 2 = STATUS  (reply ok, gain, frames processed)
 //                     cmd 3 = SETBLEND(payload = float bits 0..1, reply ok+gain)
 //                     cmd 4 = SETSCALE(payload = float bits 0.2..1.5, reply ok+gain)
+//                     cmd 12 = RESETHIST (temporal history drop; next frame
+//                              takes the first-frame path - photo batches,
+//                              stream switches)
+//                     cmd 13 = SETTEMPORAL (payload = int 0/1)
 //   reply:   frame requests: w*h*4 bytes BGRA (the processed frame)
 //            control requests: 16 bytes {magic, ok, gainBits, frames}
 // One TCP connection per frame (the layer connect()s per exchange).
@@ -352,6 +356,14 @@ int main(int argc, char** argv) {
         cfg.headBlend = p30Ctl.params().intensity;
         cfg.renderScale = scale;
         cfg.phase30 = p30Ctl.params();
+        // Temporal conditioning default ON (the flicker fix): history anchors
+        // each reconstruction to the previous output. DLSS5_TEMPORAL=0 /
+        // NR_LAYER_TEMPORAL=0 / D5C_TEMPORAL=0 disables for A/B and
+        // determinism tests (same env names as chain_c_api).
+        const char* tenv = std::getenv("DLSS5_TEMPORAL");
+        if (!tenv) tenv = std::getenv("NR_LAYER_TEMPORAL");
+        if (!tenv) tenv = std::getenv("D5C_TEMPORAL");
+        cfg.temporal = !(tenv && std::strcmp(tenv, "0") == 0);
         cfg.debugDumps = dump;
         cfg.dumpDir = "out";
         cfg.vkCfg.appName = "m11d";
@@ -639,6 +651,14 @@ int main(int argc, char** argv) {
                 engine.setColorStrength(v);
                 rep[1] = 1;
                 std::printf("[m11d] ctrl: color_strength -> %.3f\n", (double)v);
+            } else if (hdr[1] == 12) {           // RESETHIST: drop temporal history
+                engine.resetHistory();           // (next frame = first-frame path;
+                rep[1] = 1;                      //  photo batches / stream switches)
+                std::printf("[m11d] ctrl: temporal history reset\n");
+            } else if (hdr[1] == 13) {           // SETTEMPORAL: hdr[2] = int (0/1)
+                engine.setTemporal(hdr[2] != 0);
+                rep[1] = 1;
+                std::printf("[m11d] ctrl: temporal -> %d\n", hdr[2] ? 1 : 0);
             } else {
                 std::fprintf(stderr, "[m11d] ctrl: unknown cmd %u\n", hdr[1]);
             }
@@ -689,6 +709,19 @@ int main(int argc, char** argv) {
                 havePrev = false;
                 prevW = w;
                 prevH = h;
+            }
+            // Stream-gap reset: a >2 s silence means a new stream (game
+            // restart, alt-tab, different game) - the old history must not
+            // anchor unrelated content.
+            {
+                static ULONGLONG lastFrameTick = 0;
+                const ULONGLONG now = GetTickCount64();
+                if (lastFrameTick && now - lastFrameTick > 2000) {
+                    engine.resetHistory();
+                    std::printf("[m11d] stream gap %llu ms - temporal history reset\n",
+                                (unsigned long long)(now - lastFrameTick));
+                }
+                lastFrameTick = now;
             }
             d5c::FrameStats st{};
             ++frameCounter;

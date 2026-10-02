@@ -353,6 +353,7 @@ static PFN_dlss5_set_skin_structure pfn_dlss5_set_skin_structure = NULL;
 static PFN_dlss5_set_auto_mask pfn_dlss5_set_auto_mask = NULL;
 static PFN_dlss5_set_style_index pfn_dlss5_set_style_index = NULL;
 static PFN_dlss5_set_color_strength pfn_dlss5_set_color_strength = NULL;
+static PFN_dlss5_reset_history pfn_dlss5_reset_history = NULL;
 static int g_inprocess_attempted = 0;
 static int g_inprocess_active = 0;
 static float g_cur_scale = -1.0f;
@@ -786,6 +787,7 @@ static void ensure_inprocess(void)
     pfn_dlss5_set_auto_mask = (PFN_dlss5_set_auto_mask)GetProcAddress(hDll, "dlss5_set_auto_mask");
     pfn_dlss5_set_style_index = (PFN_dlss5_set_style_index)GetProcAddress(hDll, "dlss5_set_style_index");
     pfn_dlss5_set_color_strength = (PFN_dlss5_set_color_strength)GetProcAddress(hDll, "dlss5_set_color_strength");
+    pfn_dlss5_reset_history = (PFN_dlss5_reset_history)GetProcAddress(hDll, "dlss5_reset_history");
 
     if (!pfn_dlss5_create || !pfn_dlss5_destroy || !pfn_dlss5_process_frame) {
         nr_log("d5c_chain.dll missing exports; falling back to TCP");
@@ -925,6 +927,17 @@ static int exchange(const void *header, size_t header_size, const void *payload,
     }
     closesocket(fd);
     return 0;
+}
+
+/* Fire a 16-byte NRCT control command through the same bounded exchange
+ * (header-only, 16-byte reply). 0 = daemon ok; <0 transport; 1 = rejected. */
+static int nr_ctrl(uint32_t cmd, uint32_t payload_arg)
+{
+    uint32_t hdr[4] = { 0x5443524Eu, cmd, payload_arg, 0 };
+    uint32_t rep[4] = { 0 };
+    int rc = exchange(hdr, sizeof hdr, NULL, 0, rep, sizeof rep);
+    if (rc) return rc;
+    return (rep[0] == 0x5443524Eu && rep[1]) ? 0 : 1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1972,6 +1985,14 @@ static int resend_raw(device_data *data, swapchain_data *chain)
         data->result = grown;
         data->result_size = needed;
     }
+    /* Knob-turned reprocess: drop the temporal anchor so the new parameter
+     * values apply unblended. Without this the net's history pull converges
+     * over several reprocesses instead of answering the knob turn now. */
+    if (g_inprocess_active && pfn_dlss5_reset_history && g_engine)
+        pfn_dlss5_reset_history(g_engine);
+    else
+        nr_ctrl(12, 0);
+
     if (g_inprocess_active && pfn_dlss5_process_frame && g_engine) {
         int r = pfn_dlss5_process_frame(g_engine, data->raw_w, data->raw_h,
                                         data->raw, data->result, (long)frame_counter);
