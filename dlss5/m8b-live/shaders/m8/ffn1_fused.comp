@@ -1,0 +1,238 @@
+// SPDX-License-Identifier: Apache-2.0
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_shader_subgroup_basic : require
+
+#include "publish.glsl"
+
+/*
+ * ffn1_fused -- SLM-resident fused FFN for fam1 (branched) window blocks,
+ * C = 64/128/256 (G = C/32 groups). One workgroup (4 subgroups x 32 lanes =
+ * 128 invocations) computes the COMPLETE FFN for one 32-token tile,
+ * replacing four dispatches (batched expand gemm -> batched branch-proj gemm
+ * -> out-proj gemm -> kind5 residual+publish ew) and eliminating the hidden
+ * (oG3 [TOKS,4C] f16) and branched (oG4 [TOKS,C] f16) DRAM round-trips plus
+ * the dead fp32 oG3 residual copy.
+ *
+ *   Phase X:  stage the f16 input tile [32,C] once (x16 == the f16 carrier).
+ *   Phase E:  per group g, expand GEMM [32,C]x[C,128] split as four 32-col
+ *             tiles across subgroups; GATE_E4M3 publish in-register, f16
+ *             store to sHid[32,128] (one group's hidden slab at a time).
+ *   Phase B:  branch-proj GEMM [32,128]x[128,32] split as four 8-row strips;
+ *             E4M3 publish in-register, f16 store to sY[32,C] (group column
+ *             slice) - exactly the oG4 e4m3 bits the unfused path writes.
+ *   Phase O:  out-proj GEMM [32,C]x[C,C] split as four 8-row strips over all
+ *             C/32 col tiles; f16 acc, then the ew kind5 epilogue verbatim:
+ *             r = acc + widen(res16)*cos_skip, dst = e4m3(r) f16.
+ *
+ * Bit-exact vs the unfused quartet: identical coopmat tile shapes (8x16x16
+ * f16 -> f16 acc), identical per-element k-tile accumulate order (serial,
+ * ascending), identical publish/gate/e4m3 expressions (verbatim), identical
+ * f16 staging values (the SLM tiles hold exactly what oG3/oG4 held).
+ *
+ * SLM budget (48 KB cap): sX 32*C f16 + sHid 8 KB + sY 32*C f16 + stage 2 KB
+ *   = 18/26/42 KB for C = 64/128/256.
+ *
+ * Grid: (ceil(m/32), 1, 1). local_size 128 = four subgroups per workgroup.
+ */
+
+layout(local_size_x = 128) in;
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer HalfBuf   { float16_t v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf  { float     v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 8)  buffer Half4Buf  { f16vec4   v4[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer Float4Buf { vec4      v4[]; };
+
+layout(push_constant, scalar) uniform Push {
+    HalfBuf  a;      // x16 f16 input [m, C] (the block f16 carrier)
+    HalfBuf  wexp;   // expand weight [G, C, 128] f16
+    HalfBuf  wprj;   // branch projection weight [G, 128, 32] f16
+    HalfBuf  wout;   // output projection weight [C, C] f16
+    HalfBuf  res;    // residual carrier f16 [m, C] (== a for fam1)
+    FloatBuf skip;   // ffn_cos_skip f32 [C]
+    HalfBuf  dst;    // oG2 f16 output [m, C]
+    uint     m;      // tokens (multiple of 32 in practice)
+    uint     cn;     // C in {64, 128, 256}
+    uint     flags;  // reserved, must be 0
+} pc;
+
+const uint TM = 8, TN = 16, TK = 16;
+const uint RM = 4, RN = 2;
+
+// [32, C] f16 input tile + published branch outputs; [32,128] hidden slab;
+// per-sg [8,32] f16 epilogue de-swizzle scratch (512 B each).
+shared float16_t sX[32 * 256];
+shared float16_t sHid[32 * 128];
+shared float16_t sY[32 * 256];
+shared float16_t sStage[4 * 8 * 32];
+
+#define WAVE_SYNC() do { subgroupMemoryBarrierShared(); subgroupBarrier(); } while (false)
+
+void main() {
+    uint row = gl_WorkGroupID.x * 32u;
+    if (row >= pc.m) return;
+    uint lid  = gl_LocalInvocationID.x;   // 0..127
+    uint sg   = gl_SubgroupID;            // 0..3
+    uint slid = gl_SubgroupInvocationID;  // 0..31
+    uint C    = pc.cn;
+    uint G    = C / 32u;
+
+    // ------------------------------------------------------------------
+    // Phase X: stage the [32,C] f16 input tile. Rows are contiguous in the
+    // carrier ([m,C] row-major), so the tile is one dense 32*C run.
+    // ------------------------------------------------------------------
+    {
+        uint base = row * C;
+        for (uint e = lid; e < 32u * C; e += 128u)
+            sX[e] = pc.a.v[base + e];
+    }
+    barrier();
+
+    // ------------------------------------------------------------------
+    // Phases E+B per group: hidden slab for group g in sHid, branch output
+    // column slice in sY. The unfused path runs the same GEMMs batched over
+    // G (per-group work is bit-identical; only the SLM residency differs).
+    // ------------------------------------------------------------------
+    for (uint g = 0u; g < G; ++g) {
+        // Phase E: expand [32,C] @ [C,128] -> sHid, sg owns col tile s*32.
+        {
+            coopmat<float16_t, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> acc[RM][RN];
+            for (uint i = 0u; i < RM; ++i)
+                for (uint j = 0u; j < RN; ++j)
+                    acc[i][j] = coopmat<float16_t, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(float16_t(0.0));
+
+            for (uint t = 0u; t < C / 16u; ++t) {
+                coopmat<float16_t, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA> aT[RM];
+                for (uint i = 0u; i < RM; ++i)
+                    coopMatLoad(aT[i], sX, (i * TM) * C + t * TK, C,
+                                gl_CooperativeMatrixLayoutRowMajor);
+                for (uint j = 0u; j < RN; ++j) {
+                    coopmat<float16_t, gl_ScopeSubgroup, TK, TN, gl_MatrixUseB> bT;
+                    coopMatLoad(bT, pc.wexp.v,
+                                g * C * 128u + (t * TK) * 128u + sg * 32u + j * TN,
+                                128u, gl_CooperativeMatrixLayoutRowMajor);
+                    for (uint i = 0u; i < RM; ++i)
+                        acc[i][j] = coopMatMulAdd(aT[i], bT, acc[i][j]);
+                }
+            }
+            // producer epilogue verbatim: GATE_E4M3 publish on the widened acc.
+            for (uint i = 0u; i < RM; ++i)
+                for (uint j = 0u; j < RN; ++j) {
+                    for (uint e = 0u; e < acc[i][j].length(); ++e)
+                        acc[i][j][e] = float16_t(publish(3u, float(acc[i][j][e])));
+                    coopMatStore(acc[i][j], sHid, (i * TM) * 128u + sg * 32u + j * TN,
+                                 128u, gl_CooperativeMatrixLayoutRowMajor);
+                }
+        }
+        barrier();   // all four hidden col tiles of group g complete
+
+        // Phase B: branch proj [32,128] @ [128,32] -> sY[:, g*32:+32],
+        // sg owns row strip [s*8, s*8+8).
+        {
+            coopmat<float16_t, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> accB[RN];
+            for (uint j = 0u; j < RN; ++j)
+                accB[j] = coopmat<float16_t, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(float16_t(0.0));
+
+            for (uint t = 0u; t < 8u; ++t) {   // K = 128 -> 8 k-tiles, serial
+                coopmat<float16_t, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA> aT;
+                coopMatLoad(aT, sHid, (sg * TM) * 128u + t * TK, 128u,
+                            gl_CooperativeMatrixLayoutRowMajor);
+                for (uint j = 0u; j < RN; ++j) {
+                    coopmat<float16_t, gl_ScopeSubgroup, TK, TN, gl_MatrixUseB> bT;
+                    coopMatLoad(bT, pc.wprj.v,
+                                g * 128u * 32u + (t * TK) * 32u + j * TN,
+                                32u, gl_CooperativeMatrixLayoutRowMajor);
+                    accB[j] = coopMatMulAdd(aT, bT, accB[j]);
+                }
+            }
+            // EPI_E4M3 publish verbatim, store to the [32,C] f16 y tile.
+            for (uint j = 0u; j < RN; ++j) {
+                for (uint e = 0u; e < accB[j].length(); ++e)
+                    accB[j][e] = float16_t(e4m3(float(accB[j][e])));
+                coopMatStore(accB[j], sY, (sg * TM) * C + g * 32u + j * TN,
+                             C, gl_CooperativeMatrixLayoutRowMajor);
+            }
+        }
+        barrier();   // sHid is dead until the next group's expand rewrites it
+    }
+
+    // ------------------------------------------------------------------
+    // Phase O: out proj [32,C] @ [C,C] -> residual + e4m3 publish -> oG2.
+    // sg owns row strip [s*8, s*8+8) and walks all C/32 col tiles serially;
+    // each strip's acc persists in registers across the full k loop (the
+    // same per-element f16 accumulate chain as the unfused consumer).
+    // ------------------------------------------------------------------
+    {
+        for (uint nc = 0u; nc < C / 32u; ++nc) {
+            coopmat<float16_t, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> accO[RN];
+            for (uint j = 0u; j < RN; ++j)
+                accO[j] = coopmat<float16_t, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(float16_t(0.0));
+
+            for (uint t = 0u; t < C / 16u; ++t) {
+                coopmat<float16_t, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA> aT;
+                coopMatLoad(aT, sY, (sg * TM) * C + t * TK, C,
+                            gl_CooperativeMatrixLayoutRowMajor);
+                for (uint j = 0u; j < RN; ++j) {
+                    coopmat<float16_t, gl_ScopeSubgroup, TK, TN, gl_MatrixUseB> bT;
+                    coopMatLoad(bT, pc.wout.v, (t * TK) * C + nc * 32u + j * TN,
+                                C, gl_CooperativeMatrixLayoutRowMajor);
+                    accO[j] = coopMatMulAdd(aT, bT, accO[j]);
+                }
+            }
+            // de-swizzle the [8,32] strip once, then the ew kind5 epilogue
+            // verbatim: r = a + widen(res16)*skip; dst = f16(e4m3(r)).
+            uint sb = sg * 256u;
+            for (uint j = 0u; j < RN; ++j)
+                coopMatStore(accO[j], sStage, sb + j * TN, 32u,
+                             gl_CooperativeMatrixLayoutRowMajor);
+            WAVE_SYNC();
+            // 256 strip elems / 32 lanes = 8 per lane = two f16vec4 chunks.
+            // lane covers 8 contiguous elems at [slid*8, +8) of the strip.
+            for (uint h = 0u; h < 2u; ++h) {
+                uint e  = sb + slid * 8u + h * 4u;
+                uint el = e - sb;                        // local elem in [0,256)
+                uint r  = row + sg * TM + el / 32u;
+                uint cB = nc * 32u + (el % 32u);
+                uint at = r * C + cB;
+                if (r >= pc.m) continue;
+                f16vec4 res4 = Half4Buf(uint64_t(pc.res)).v4[at >> 2];
+                vec4 sk4 = Float4Buf(uint64_t(pc.skip)).v4[cB >> 2];
+                f16vec4 out4;
+                {
+                    float av = float(sStage[e + 0u]);
+                    float bv = f16_widen(uint(float16BitsToUint16(res4.x)));
+                    float rv = fma(bv, sk4.x, av);
+                    out4.x = float16_t(e4m3(rv));
+                }
+                {
+                    float av = float(sStage[e + 1u]);
+                    float bv = f16_widen(uint(float16BitsToUint16(res4.y)));
+                    float rv = fma(bv, sk4.y, av);
+                    out4.y = float16_t(e4m3(rv));
+                }
+                {
+                    float av = float(sStage[e + 2u]);
+                    float bv = f16_widen(uint(float16BitsToUint16(res4.z)));
+                    float rv = fma(bv, sk4.z, av);
+                    out4.z = float16_t(e4m3(rv));
+                }
+                {
+                    float av = float(sStage[e + 3u]);
+                    float bv = f16_widen(uint(float16BitsToUint16(res4.w)));
+                    float rv = fma(bv, sk4.w, av);
+                    out4.w = float16_t(e4m3(rv));
+                }
+                Half4Buf(uint64_t(pc.dst)).v4[at >> 2] = out4;
+            }
+            WAVE_SYNC();   // strip scratch reused by the next col tile
+        }
+    }
+}

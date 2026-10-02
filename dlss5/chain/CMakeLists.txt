@@ -42,7 +42,7 @@ endforeach()
 
 set(M8_SHADERS gemm gemm_rn1 gemm_m8 gemm_i8 quant_act cosine cosine_win softmax elementwise
                partition transpose_we gather_residual merge featpack headpack
-               pool2 upmerge attn_fused ffn_fused)
+               pool2 upmerge attn_fused ffn_fused ffn1_fused attn_global)
 foreach(S ${M8_SHADERS})
     set(SPV ${CMAKE_CURRENT_BINARY_DIR}/${S}.spv)
     if(S STREQUAL "gemm_rn1")
@@ -113,7 +113,7 @@ function(d5c_stage_shaders TGT)
     set(SHADERS decode features compose encode rescale framegen temporal_nr)
     set(M8_SHADERS gemm gemm_rn1 gemm_m8 gemm_i8 quant_act cosine cosine_win softmax elementwise
                    partition transpose_we gather_residual merge featpack headpack
-                   pool2 upmerge attn_fused ffn_fused)
+                   pool2 upmerge attn_fused ffn_fused ffn1_fused attn_global)
     set(STAGED "")
     foreach(S ${SHADERS} ${M8_SHADERS})
         # $<TARGET_FILE_DIR> is not evaluable in an OUTPUT; consumers here are

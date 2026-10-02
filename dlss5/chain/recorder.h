@@ -141,6 +141,33 @@ struct FfnFusedPush {
     uint32_t cn;     // C (32)
     uint32_t flags;  // F_RES16 | F_DUP16
 };
+
+// ffn1_fused: SLM-resident fam1 (branched) FFN, one 32-token tile per
+// 128-lane workgroup. Replaces expand+branch+out gemms + kind5 ew; hidden
+// (oG3 [TOKS,4C] f16) and branch (oG4 [TOKS,C] f16) slabs stay in SLM.
+struct Ffn1FusedPush {
+    uint64_t a;      // x16 f16 input [m, C] (== the f16 carrier)
+    uint64_t wexp;   // f16 [G, C, 128]
+    uint64_t wprj;   // f16 [G, 128, 32]
+    uint64_t wout;   // f16 [C, C]
+    uint64_t res;    // residual carrier f16 [m, C] (== a for fam1)
+    uint64_t skip;   // ffn_cos_skip f32 [C]
+    uint64_t dst;    // oG2 f16 out [m, C]
+    uint32_t m;      // tokens
+    uint32_t cn;     // C (64/128/256)
+    uint32_t flags;  // reserved, 0
+};
+
+// attn_global: one dispatch per L6 block = cosg x3 + QK^T + masked softmax
+// + PV + ew3 publish. proj fp32 [T6P,3072] -> dst f16 [T6P,1024].
+struct AttnGlobalPush {
+    uint64_t proj;   // oPROJG fp32
+    uint64_t scale;  // per-head attn_scale fp32 [32] (x sqrt(32), Q only)
+    uint64_t dst;    // oATG f16
+    uint32_t t6p;    // padded token count (<= 512, multiple of 32)
+    uint32_t nReal;  // real tokens (softmax col mask)
+    uint32_t hcount; // heads (32)
+};
 #pragma pack(pop)
 
 enum { EPI_NONE = 0, EPI_E4M3 = 1, EPI_GATE = 2, EPI_GATE_E4M3 = 3, EPI_HALF = 4,
@@ -245,6 +272,11 @@ private:
                    uint64_t w1s, uint64_t w2s, uint64_t c2,
                    uint64_t res, uint64_t skip, uint64_t dup,
                    uint32_t m, uint32_t C, uint32_t flags);
+    void dFfn1Fused(VkCommandBuffer cb, int fam, uint64_t a, uint64_t wexp,
+                    uint64_t wprj, uint64_t wout, uint64_t res, uint64_t skip,
+                    uint64_t dst, uint32_t m, uint32_t C);
+    void dAttnGlobal(VkCommandBuffer cb, uint64_t proj, uint64_t scale,
+                     uint64_t dst);
 
     // block recorders
     struct Cur { VkDeviceSize off; bool is16; uint32_t C; };
@@ -278,7 +310,8 @@ private:
     uint32_t T6P_ = 0;
 
     ChainPipe pGemm, pGemm1, pGemmI8, pQuantAct, pCos, pCosW, pSmax, pEw, pPart, pTrans, pGather,
-              pMerge, pFeatpack, pHeadpack, pPool, pUpM, pAttnFused, pFfnFused;
+              pMerge, pFeatpack, pHeadpack, pPool, pUpM, pAttnFused, pFfnFused,
+              pFfn1Fused, pAttnGlobal;
     ChainPipe pGemmM8;   // gemm_m8.spv: slim BM=8 tile for narrow-out large-m gemms
     bool slimGemm_ = false;  // D5C_GEMM_SLIM (default on): dispatch pGemmM8 for
                              // narrow-out gemms at m>=2048 (or >=512 batched)

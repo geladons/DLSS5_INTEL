@@ -57,13 +57,16 @@ void ChainRecorder::init(const VkCtx& c, const ChainArena& arena, const WeightsS
     chainMakePipe(c, shaderDir + "upmerge.spv", pUpM);
     chainMakePipe(c, shaderDir + "attn_fused.spv", pAttnFused);
     chainMakePipe(c, shaderDir + "ffn_fused.spv", pFfnFused);
-    std::printf("[chain] 19 pipelines up (14 kernels + gemm_m8 + featpack/headpack + pool2/upmerge), %zu BDA chunk bases, chunk0 0x%llx\n",
+    chainMakePipe(c, shaderDir + "ffn1_fused.spv", pFfn1Fused);
+    chainMakePipe(c, shaderDir + "attn_global.spv", pAttnGlobal);
+    std::printf("[chain] 21 pipelines up (14 kernels + gemm_m8 + featpack/headpack + pool2/upmerge + ffn1/attnG), %zu BDA chunk bases, chunk0 0x%llx\n",
                 arena.chunks.size(), (unsigned long long)arena.chunks[0].baseA);
 }
 
 void ChainRecorder::destroy(const VkCtx& c) {
     for (ChainPipe* cp : {&pGemm, &pGemm1, &pGemmM8, &pGemmI8, &pQuantAct, &pCos, &pCosW, &pSmax, &pEw, &pPart, &pTrans,
-                          &pGather, &pMerge, &pFeatpack, &pHeadpack, &pPool, &pUpM, &pAttnFused, &pFfnFused}) {
+                          &pGather, &pMerge, &pFeatpack, &pHeadpack, &pPool, &pUpM, &pAttnFused, &pFfnFused,
+                          &pFfn1Fused, &pAttnGlobal}) {
         vkDestroyPipeline(c.dev, cp->pipe, nullptr);
         vkDestroyPipelineLayout(c.dev, cp->layout, nullptr);
         vkDestroyDescriptorSetLayout(c.dev, cp->dsl, nullptr);
@@ -426,6 +429,48 @@ void ChainRecorder::dFfnFused(VkCommandBuffer cb, int fam, uint64_t a, uint64_t 
     pmBegin(cb);
     vkCmdDispatch(cb, (m + 31u) / 32u, 1, 1);
     pmEnd(cb, "ffn_fused", "blk", m, C, C, (m + 31u) / 32u, 1, 1, bytes);
+}
+
+void ChainRecorder::dFfn1Fused(VkCommandBuffer cb, int fam, uint64_t a, uint64_t wexp,
+                               uint64_t wprj, uint64_t wout, uint64_t res, uint64_t skip,
+                               uint64_t dst, uint32_t m, uint32_t C) {
+    (void)fam;
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pFfn1Fused.pipe);
+    Ffn1FusedPush p{a, wexp, wprj, wout, res, skip, dst, m, C, 0};
+    vkCmdPushConstants(cb, pFfn1Fused.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
+
+    // vs the unfused quartet: drops oG3 hidden w+r (2*m*4C f16), oG4 w+r
+    // (2*m*C f16), the dead fp32 oG3 residual write+read (2*m*C), and three
+    // dispatch+barrier pairs per block.
+    uint64_t bytes = (uint64_t)m * C * 2          // x16 read
+                   + (uint64_t)C * 4 * C * 2      // wexp f16
+                   + (uint64_t)C * 128 * 2        // wprj f16 (G*128*32 = 4C*32)
+                   + (uint64_t)C * C * 2          // wout f16
+                   + (uint64_t)m * C * 2          // res read (f16)
+                   + (uint64_t)C * 4              // cos_skip
+                   + (uint64_t)m * C * 2;         // oG2 f16 write
+
+    pmBegin(cb);
+    vkCmdDispatch(cb, (m + 31u) / 32u, 1, 1);
+    pmEnd(cb, "ffn1_fused", "blk", m, C, C, (m + 31u) / 32u, 1, 1, bytes);
+}
+
+void ChainRecorder::dAttnGlobal(VkCommandBuffer cb, uint64_t proj, uint64_t scale,
+                                uint64_t dst) {
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pAttnGlobal.pipe);
+    AttnGlobalPush p{proj, scale, dst, T6P_, (uint32_t)T6_, 32};
+    vkCmdPushConstants(cb, pAttnGlobal.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
+
+    // vs unfused (cosg x3 + score gemm + smaxg + PV gemm + ew3): eliminates
+    // the oQG/oKG/oVG writes+reads (T6P*1024 f16 x3), the oSCG write + read
+    // (32*T6P^2 fp32 = 8 MB x2 at T6P=256), the oPRG write + read (4 MB x2),
+    // and the oMGG fp32 write+read (T6P*1024 fp32 x2).
+    uint64_t bytes = (uint64_t)T6P_ * 3072 * 4 * 8   // oPROJG re-reads (~8 row tiles/head amortized, L2)
+                   + (uint64_t)T6P_ * 1024 * 2;      // oATG f16 write
+
+    pmBegin(cb);
+    vkCmdDispatch(cb, T6P_ / 32u, 32u, 1);
+    pmEnd(cb, "attn_global", "blk", T6P_, 32, 1024, T6P_ / 32u, 32u, 1, bytes);
 }
 
 } // namespace d5c

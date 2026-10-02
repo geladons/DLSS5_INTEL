@@ -282,6 +282,31 @@ void ChainRecorder::recordWindowBlock(VkCommandBuffer cb, int famIdx, int idx, c
     } else if (fam == 1) {
         uint64_t expBase = A(woff(tn("block%d.layer0.ffn_expand_weight", idx)));
         uint64_t prjBase = A(woff(tn("block%d.layer0.ffn_branch_projection_weight", idx)));
+        std::string woutN = tn("block%d.layer0.ffn_output_projection_weight", idx);
+        // ffn1_fused (ffn1_fused.comp): one 128-lane workgroup per 32-token
+        // tile runs the whole branched FFN - expand (GATE_E4M3), branch proj
+        // (E4M3), out proj, and the kind5 residual+publish epilogue - with the
+        // hidden [32,128] slab and published y [32,C] tile kept in SLM.
+        // Bit-exact vs the quartet it replaces (same coopmat tiles, same
+        // k-tile order, verbatim publish/ew math). Eliminates the oG3/oG4
+        // hidden round-trips + the dead fp32 oG3 copy + 3 barriers. Requires
+        // the f16 carrier (fam1 contract) and plain f16 weights.
+        // D5C_FFN1_FUSED: default OFF - measured bit-exact at s1.0/0.5/1080p
+        // but ~3x slower than the batched-gemm quartet on B50 (57.4ms vs
+        // ~21ms/frame: one 32-row tile per workgroup with serial G-group
+        // k-loops loses badly to gemm.comp's pipelined wide tiles). Kept
+        // gated for future kernel rework; =1 enables, =0 default path.
+        int ffn1Env = parsePilot("D5C_FFN1_FUSED", nullptr, 0);
+        bool fuse1 = ffn1Env > 0 && cur.is16 && C <= 256
+                     && !isQuantized(tn("block%d.layer0.ffn_expand_weight", idx))
+                     && !isQuantized(tn("block%d.layer0.ffn_branch_projection_weight", idx))
+                     && !isQuantized(woutN);
+        if (fuse1) {
+            dFfn1Fused(cb, famIdx, A(x16), expBase, prjBase, A(woff(woutN)),
+                       A(cur.off), A(vec(tn("block%d.layer0.ffn_cos_skip", idx))),
+                       A(O.oG2), TOKS, (uint32_t)C);
+            bar(cb);
+        } else {
         // B5: collapse the 2G serialized group dispatches into two batched
         // gemms (same pattern as fam2/4/5's group_expand/group_project). The
         // fuse-folded expand weight is already [G][C][128] contiguous (slice
@@ -310,12 +335,13 @@ void ChainRecorder::recordWindowBlock(VkCommandBuffer cb, int famIdx, int idx, c
                 bar(cb);
             }
         }
-        dGemm(cb, famIdx, A(O.oG4), A(woff(tn("block%d.layer0.ffn_output_projection_weight", idx))),
+        dGemm(cb, famIdx, A(O.oG4), A(woff(woutN)),
               A(O.oG3), TOKS, C, C, 1, 0, 0, 0, gflags(EPI_NONE, false), C, C, C);
         bar(cb);
         dEw(cb, A(O.oG3), A(cur.off), A(O.oG3), A(vec(tn("block%d.layer0.ffn_cos_skip", idx))),
             A(O.oG2), TOKS * C, 5, C);
         bar(cb);
+        } // !fuse1
         recordWindowAttn(cb, famIdx, idx, s, C, H, fam, oy, ox,
                          O.oG2, true, O.oG2, true, rawOff, pubOff, publish);
     } else {
@@ -396,21 +422,39 @@ void ChainRecorder::recordGlobal(VkCommandBuffer cb, int famIdx, int idx, Cur& c
     dGemm(cb, famIdx, A(O.oG2), A(woff(tn("block%d.layer2.qkv_weight", idx))), A(O.oPROJG),
           TOKG, 3072, 1024, 1, 0, 0, 0, gflags(EPI_NONE, false), 1024, 3072, 3072);
     bar(cb);
-    // M10: Q/K/V read the same oPROJG and write disjoint slots -> one bar.
-    dCosG(cb, A(O.oPROJG), A(O.oQG), A(vec(tn("block%d.layer2.attn_scale.q32", idx))), 0);
-    dCosG(cb, A(O.oPROJG), A(O.oKG), A(vec(tn("block%d.layer2.attn_scale.q32", idx))), 1);
-    dCosG(cb, A(O.oPROJG), A(O.oVG), A(vec(tn("block%d.layer2.attn_scale.q32", idx))), 2);
-    bar(cb);
-    dGemm(cb, famIdx, A(O.oQG), A(O.oKG), A(O.oSCG), TOKG, TOKG, 32, 32,
-          32, 32, TOKG * TOKG, gflags(EPI_NONE, false) | F_TRANSPOSE, 1024, 1024, TOKG);
-    bar(cb);
-    dSmaxG(cb, A(O.oSCG), A(O.oPRG));
-    bar(cb);
-    dGemm(cb, famIdx, A(O.oPRG), A(O.oVG), A(O.oMGG), TOKG, 32, TOKG, 32,
-          TOKG * TOKG, 32, 32, gflags(EPI_NONE, false), TOKG, 1024, 1024);
-    bar(cb);
-    dEw(cb, A(O.oMGG), 0, 0, 0, A(O.oATG), TOKG * 1024, 3, 0);
-    bar(cb);
+    // attn_global (attn_global.comp): one dispatch per L6 block fuses the
+    // three cosg publishes + QK^T score gemm + masked smaxg + PV gemm + ew3
+    // e4m3 publish. Score/prob matrices stay in SLM; oQG/oKG/oVG, oSCG, oPRG
+    // and oMGG become dead scratch (the ~24 MB score round-trip per block
+    // disappears). Bit-exact: same coopmat tiles/accumulate order, verbatim
+    // cosg/smaxg element math. Gate: T6P_ <= 256 (48 KB SLM cap bounds the
+    // 32-row x T6P f16 score tile + operand tiles under two workgroups).
+    // D5C_ATTN_GLOBAL: default OFF - measured bit-exact incl. T6P=256
+    // padding, but ~6ms/dispatch vs ~1ms for the six dispatches it merges
+    // on B50 (per-head K/V re-transformation + single-row softmax chains
+    // are latency-bound vs the batched gemm's wide tiling). =1 enables.
+    int attnGEnv = parsePilot("D5C_ATTN_GLOBAL", nullptr, 0);
+    if (attnGEnv > 0 && T6P_ <= 256u) {
+        dAttnGlobal(cb, A(O.oPROJG), A(vec(tn("block%d.layer2.attn_scale.q32", idx))),
+                    A(O.oATG));
+        bar(cb);
+    } else {
+        // M10: Q/K/V read the same oPROJG and write disjoint slots -> one bar.
+        dCosG(cb, A(O.oPROJG), A(O.oQG), A(vec(tn("block%d.layer2.attn_scale.q32", idx))), 0);
+        dCosG(cb, A(O.oPROJG), A(O.oKG), A(vec(tn("block%d.layer2.attn_scale.q32", idx))), 1);
+        dCosG(cb, A(O.oPROJG), A(O.oVG), A(vec(tn("block%d.layer2.attn_scale.q32", idx))), 2);
+        bar(cb);
+        dGemm(cb, famIdx, A(O.oQG), A(O.oKG), A(O.oSCG), TOKG, TOKG, 32, 32,
+              32, 32, TOKG * TOKG, gflags(EPI_NONE, false) | F_TRANSPOSE, 1024, 1024, TOKG);
+        bar(cb);
+        dSmaxG(cb, A(O.oSCG), A(O.oPRG));
+        bar(cb);
+        dGemm(cb, famIdx, A(O.oPRG), A(O.oVG), A(O.oMGG), TOKG, 32, TOKG, 32,
+              TOKG * TOKG, 32, 32, gflags(EPI_NONE, false), TOKG, 1024, 1024);
+        bar(cb);
+        dEw(cb, A(O.oMGG), 0, 0, 0, A(O.oATG), TOKG * 1024, 3, 0);
+        bar(cb);
+    }
     dGemm(cb, famIdx, A(O.oATG), A(woff(tn("block%d.layer4.projection_weight", idx))), A(O.oABG),
           TOKG, 1024, 1024, 1, 0, 0, 0, gflags(EPI_NONE, false), 1024, 1024, 1024);
     bar(cb);

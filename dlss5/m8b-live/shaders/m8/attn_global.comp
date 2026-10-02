@@ -1,0 +1,320 @@
+// SPDX-License-Identifier: Apache-2.0
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_shader_subgroup_basic : require
+
+#include "publish.glsl"
+
+/*
+ * attn_global -- fully fused L6 global attention (fam3, blocks 31-38):
+ * one workgroup (4 subgroups x 32 lanes = 128 invocations) per
+ * (head, 32-token query row tile). Subgroup s owns the 8-row strip
+ * [s*8, s*8+8) of the tile - identical per-element math to one wave
+ * doing all 32 rows, but 4x the resident parallelism. Replaces SIX
+ * dispatches per block - cosg x3 (Q/K cosine-norm + scale + V e4m3
+ * publishes into oQG/oKG/oVG), the batched QK^T score gemm (-> oSCG
+ * fp32), the masked softmax (smaxg -> oPRG f16), the batched PV gemm
+ * (-> oMGG fp32) and the ew kind3 publish (-> oATG f16) - and all of
+ * the oSCG/oPRG score-matrix DRAM round-trips (~24 MB per block at
+ * T6P=256).
+ *
+ * Input is the qkv gemm output oPROJG fp32 [T6P, 3072] = [Q|K|V] x 1024.
+ * Per workgroup (head h, query rows [rt*32, rt*32+32)):
+ *
+ *   Phase Q:  lane l<8 of each subgroup cosine-normalizes its query row
+ *             (kind=0 verbatim: fp16 island tree, per-head attn_scale,
+ *             e4m3) into sQ[32,32] f16.
+ *   Phase S:  per 32-key n-tile, all 128 lanes transform K rows into
+ *             sK[32,32] (kind=1 verbatim; 4 lanes share one row's load,
+ *             each writes its own 8-dim octet), then every subgroup MMAs
+ *             its [8,32] score strip via two k-tiles (identical tile
+ *             shapes/accumulate order as the unfused F_TRANSPOSE gemm)
+ *             into sS[32,T6P] f16.
+ *   Phase M:  lanes l<8 of each subgroup run the smaxg row transform on
+ *             their sS row: bit-affine pair weights, masked cols
+ *             (i >= nReal) -> 0, sequential fp32 sum order, half_round'd
+ *             reciprocal, e4m3 probs - in place.
+ *   Phase PV: per 16-key k-tile, all 128 lanes transform V rows into the
+ *             sVt 2-slot pipeline (kind=2 e4m3 verbatim); each subgroup
+ *             accumulates its [8,32] P x V strip, k-tiles serial - the
+ *             unfused PV gemm's exact accumulate chain.
+ *   Phase E:  e4m3 publish of the f16 acc (== ew kind3 on the widened
+ *             fp32), stored f16 straight to oATG[token, h*32 + d].
+ *
+ * Bit-exactness: identical coopmat tile shapes (8x16x16 f16 -> f16 acc)
+ * and identical accumulate orders for S and PV (a row strip is computed
+ * by one subgroup with the same serial k-tile chain); the cosg/smaxg/ew
+ * transforms are copied verbatim per element; SLM tiles hold exactly the
+ * bits the DRAM buffers held (f16 scores are the widened fp32 values,
+ * bit-preserving).
+ *
+ * SLM (48 KB cap): sS 32x258 f16 (T6P <= 256; dispatch gates on it)
+ * + sQ 2 KB + sK 2 KB + sVt 2 KB ~= 23 KB -> 2 workgroups/core.
+ *
+ * Grid: (T6P/32, 32, 1). local_size 128 = four subgroups.
+ */
+
+layout(local_size_x = 128) in;
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer HalfBuf   { float16_t v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf  { float     v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer Float4Buf { vec4      v4[]; };
+
+layout(push_constant, scalar) uniform Push {
+    FloatBuf proj;   // oPROJG fp32 [T6P, 3072] = [Q|K|V] head-major
+    FloatBuf scale;  // per-head attn_scale fp32 [H] (x sqrt(32), Q only)
+    HalfBuf  dst;    // oATG f16 [T6P, 1024]
+    uint     t6p;    // padded token count (multiple of 32)
+    uint     nReal;  // real tokens (softmax mask, smaxg nReal semantics)
+    uint     hcount; // heads (32)
+} pc;
+
+const uint TM = 8u, TN = 16u, TK = 16u;
+const uint RN = 2u;
+const uint HD = 32u;       // head_dim
+const uint SS = 258u;      // padded row stride for T6P<=256 (even stride + odd-bank offset)
+
+const float COSINE_NORM_FLOOR = 0.00006198883056640625;
+float hmul(float l, float r) { precise float t = l * r; return half_round(t); }
+float hadd(float l, float r) { precise float t = l + r; return half_round(t); }
+float hfma(float l, float r, float acc) { precise float t = l * r + acc; return half_round(t); }
+
+shared float16_t sS[32 * SS];    // scores -> weights -> probs, [32, T6P]
+shared float16_t sQ[32 * HD];    // cosine-normalized Q tile f16
+shared float16_t sK[32 * HD];    // one 32-key n-tile of K f16
+shared float16_t sVt[2 * 16 * HD]; // two 16-key k-tiles of V f16 (pipelined)
+
+// cosine.comp verbatim: 32-dim fp16-island norm tree over h[32].
+float cosineRecip(const float h[32]) {
+    float partial[4][2];
+    for (uint lane = 0u; lane < 4u; lane++)
+        for (uint parity = 0u; parity < 2u; parity++) {
+            uint ch = lane * 2u + parity;
+            float first  = hfma(h[ch + 8u],  h[ch + 8u],  hmul(h[ch],       h[ch]));
+            float second = hfma(h[ch + 24u], h[ch + 24u], hmul(h[ch + 16u], h[ch + 16u]));
+            partial[lane][parity] = hadd(first, second);
+        }
+    float two[4][2], one[4][2];
+    for (uint lane = 0u; lane < 4u; lane++)
+        for (uint p = 0u; p < 2u; p++) two[lane][p] = hadd(partial[lane][p], partial[lane ^ 2u][p]);
+    for (uint lane = 0u; lane < 4u; lane++)
+        for (uint p = 0u; p < 2u; p++) one[lane][p] = hadd(two[lane][p], two[lane ^ 1u][p]);
+    float norm = max(hadd(one[0][0], one[0][1]), half_round(COSINE_NORM_FLOOR));
+    return half_round(inversesqrt(norm));
+}
+
+void main() {
+    uint rt   = gl_WorkGroupID.x;          // query row tile
+    uint head = gl_WorkGroupID.y;          // head
+    if (rt * 32u >= pc.t6p || head >= pc.hcount) return;
+    uint lid  = gl_LocalInvocationID.x;    // 0..127
+    uint sg   = gl_SubgroupID;             // 0..3
+    uint slid = gl_SubgroupInvocationID;   // 0..31
+    uint T6P  = pc.t6p;
+    uint NT   = T6P / 32u;                 // score n-tiles
+    uint KT   = T6P / 16u;                 // PV k-tiles
+    uint r0   = sg * TM;                   // this subgroup's 8-row strip
+
+    // ------------------------------------------------------------------
+    // Phase Q: lanes 0..7 of each subgroup transform their strip's query
+    // rows (cosine kind=0 verbatim). Padded rows produce zeros, same as
+    // the standalone pass on the zero-filled oPROJG rows.
+    // ------------------------------------------------------------------
+    if (slid < 8u) {
+        uint t  = rt * 32u + r0 + slid;
+        uint rd = t * 3072u + head * 32u;          // Q slice
+        float h[HD];
+        for (uint k = 0u; k < 8u; k++) {
+            vec4 in4 = Float4Buf(uint64_t(pc.proj)).v4[(rd >> 2) + k];
+            h[k * 4u + 0u] = half_round(in4.x);
+            h[k * 4u + 1u] = half_round(in4.y);
+            h[k * 4u + 2u] = half_round(in4.z);
+            h[k * 4u + 3u] = half_round(in4.w);
+        }
+        float reciprocal = cosineRecip(h);
+        float scale = half_round(pc.scale.v[head]);
+        for (uint i = 0u; i < HD; i++) {
+            float value = hmul(h[i], reciprocal);
+            value = hmul(value, scale);            // Q only
+            sQ[(r0 + slid) * HD + i] = float16_t(e4m3(value));
+        }
+    }
+    barrier();
+
+    // ------------------------------------------------------------------
+    // Phase S: S[32, T6P] = Q x K^T. Per n-tile the 32 K rows are
+    // transformed into sK (cosine kind=1 verbatim, 4 lanes per row: each
+    // lane loads the full row - L1 absorbs the redundancy - then writes
+    // only its own 8-dim octet). Each subgroup then MMAs its own 8-row
+    // strip: two k-tiles, serial - the unfused gemm's accumulate order.
+    // ------------------------------------------------------------------
+    {
+        coopmat<float16_t, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA> aQ[2];
+        for (uint t = 0u; t < 2u; ++t)
+            coopMatLoad(aQ[t], sQ, r0 * HD + t * TK, HD,
+                        gl_CooperativeMatrixLayoutRowMajor);
+
+        uint krow = lid >> 2;              // K row this lane helps stage
+        uint oct  = (lid & 3u) * 8u;       // its 8-dim octet
+        for (uint nt = 0u; nt < NT; ++nt) {
+            {
+                uint t2 = nt * 32u + krow;
+                uint rd = t2 * 3072u + 1024u + head * 32u;   // K slice
+                float h[HD];
+                for (uint k = 0u; k < 8u; k++) {
+                    vec4 in4 = Float4Buf(uint64_t(pc.proj)).v4[(rd >> 2) + k];
+                    h[k * 4u + 0u] = half_round(in4.x);
+                    h[k * 4u + 1u] = half_round(in4.y);
+                    h[k * 4u + 2u] = half_round(in4.z);
+                    h[k * 4u + 3u] = half_round(in4.w);
+                }
+                float reciprocal = cosineRecip(h);
+                for (uint i = 0u; i < 8u; i++) {
+                    float value = hmul(h[oct + i], reciprocal);
+                    sK[krow * HD + oct + i] = float16_t(e4m3(value));
+                }
+            }
+            barrier();
+
+            coopmat<float16_t, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> acc[RN];
+            for (uint j = 0u; j < RN; ++j)
+                acc[j] = coopmat<float16_t, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(float16_t(0.0));
+            for (uint t = 0u; t < 2u; ++t) {
+                coopmat<float16_t, gl_ScopeSubgroup, TK, TN, gl_MatrixUseB> bK[RN];
+                for (uint j = 0u; j < RN; ++j)
+                    coopMatLoad(bK[j], sK, (j * TN) * HD + t * TK, HD,
+                                gl_CooperativeMatrixLayoutColumnMajor);
+                for (uint j = 0u; j < RN; ++j)
+                    acc[j] = coopMatMulAdd(aQ[t], bK[j], acc[j]);
+            }
+            // f16 acc -> sS (f16): the unfused fp32 store widens these
+            // same f16 values, and smaxg reads them back identically.
+            for (uint j = 0u; j < RN; ++j)
+                coopMatStore(acc[j], sS, r0 * SS + nt * 32u + j * TN,
+                             SS, gl_CooperativeMatrixLayoutRowMajor);
+            barrier();   // sK rewritten next iteration
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Phase M: masked bit-affine softmax (softmax.comp generic path,
+    // p0 = 3.0 logit cap, no bias, nReal mask - verbatim). Lanes 0..7 of
+    // each subgroup own one sS row each; weights are cached in-row (exact
+    // f16 bits), then normalized in place to e4m3 probs.
+    // ------------------------------------------------------------------
+    if (slid < 8u) {
+        uint rb = (r0 + slid) * SS;
+        float total = 0.0;
+        for (uint i = 0u; i < T6P; i += 2u) {
+            float w0, w1;
+            if (i >= pc.nReal) {
+                w0 = 0.0; w1 = 0.0;
+            } else {
+                vec2 affine;
+                {
+                    float logit = clamp(float(sS[rb + i]), -3.0, 3.0);
+                    precise float scaled = half_round(logit) * 0.044921875;
+                    scaled += 1.30078125;
+                    affine.x = clamp(scaled, 1.03125, 1.5693359375);
+                }
+                {
+                    float logit = clamp(float(sS[rb + i + 1u]), -3.0, 3.0);
+                    precise float scaled = half_round(logit) * 0.044921875;
+                    scaled += 1.30078125;
+                    affine.y = clamp(scaled, 1.03125, 1.5693359375);
+                }
+                uint transformed = (packHalf2x16(affine) << 5) + 0x7FF88000u;
+                vec2 w = unpackHalf2x16(transformed);
+                w0 = w.x; w1 = w.y;
+            }
+            sS[rb + i]      = float16_t(w0);
+            sS[rb + i + 1u] = float16_t(w1);
+            total += w0;
+            total += w1;
+        }
+        float reciprocal = half_round(1.0 / half_round(total));
+        for (uint i = 0u; i < T6P; i += 2u) {
+            precise float p0 = float(sS[rb + i]) * reciprocal;
+            precise float p1 = float(sS[rb + i + 1u]) * reciprocal;
+            sS[rb + i]      = float16_t(e4m3(half_round(p0)));
+            sS[rb + i + 1u] = float16_t(e4m3(half_round(p1)));
+        }
+    }
+    barrier();
+
+    // ------------------------------------------------------------------
+    // Phase PV: O[32,32] = P[32,T6P] @ V[T6P,32]. V k-tiles are
+    // transformed into the 2-slot pipeline by all 128 lanes (kind=2 e4m3
+    // verbatim: lane -> row lid/8, 4 dims (lid&7)*4); each subgroup
+    // accumulates its own 8-row strip, k-tiles serial - the unfused PV
+    // gemm's exact accumulate chain.
+    // ------------------------------------------------------------------
+    {
+        // V tile helper: 16 rows x 32 dims, 8 lanes per row (4 dims each).
+        // Prologue: tile 0 -> slot 0.
+        {
+            uint t2 = lid >> 3;                    // row within tile
+            uint d0 = (lid & 7u) * 4u;
+            uint rd = (t2) * 3072u + 2048u + head * 32u + d0;  // V slice
+            vec4 in4 = Float4Buf(uint64_t(pc.proj)).v4[(rd >> 2)];
+            sVt[t2 * HD + d0 + 0u] = float16_t(e4m3(in4.x));
+            sVt[t2 * HD + d0 + 1u] = float16_t(e4m3(in4.y));
+            sVt[t2 * HD + d0 + 2u] = float16_t(e4m3(in4.z));
+            sVt[t2 * HD + d0 + 3u] = float16_t(e4m3(in4.w));
+        }
+        barrier();
+
+        coopmat<float16_t, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> acc[RN];
+        for (uint j = 0u; j < RN; ++j)
+            acc[j] = coopmat<float16_t, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(float16_t(0.0));
+
+        for (uint t = 0u; t < KT; ++t) {
+            coopmat<float16_t, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA> aP;
+            coopMatLoad(aP, sS, r0 * SS + t * TK, SS,
+                        gl_CooperativeMatrixLayoutRowMajor);
+            uint slot = (t & 1u) * (16u * HD);
+            coopmat<float16_t, gl_ScopeSubgroup, TK, TN, gl_MatrixUseB> bV[RN];
+            for (uint j = 0u; j < RN; ++j)
+                coopMatLoad(bV[j], sVt, slot + j * TN, HD,
+                            gl_CooperativeMatrixLayoutRowMajor);
+            for (uint j = 0u; j < RN; ++j)
+                acc[j] = coopMatMulAdd(aP, bV[j], acc[j]);
+
+            // Prefetch V k-tile t+1 into the other slot (its rows were
+            // read by this iteration's loads, separated by the loop-end
+            // barrier).
+            if (t + 1u < KT) {
+                uint tn = (t + 1u) * 16u;
+                uint t2 = tn + (lid >> 3);
+                uint d0 = (lid & 7u) * 4u;
+                uint rd = t2 * 3072u + 2048u + head * 32u + d0;
+                uint sl = ((t + 1u) & 1u) * (16u * HD) + (lid >> 3) * HD + d0;
+                vec4 in4 = Float4Buf(uint64_t(pc.proj)).v4[(rd >> 2)];
+                sVt[sl + 0u] = float16_t(e4m3(in4.x));
+                sVt[sl + 1u] = float16_t(e4m3(in4.y));
+                sVt[sl + 2u] = float16_t(e4m3(in4.z));
+                sVt[sl + 3u] = float16_t(e4m3(in4.w));
+            }
+            barrier();
+        }
+
+        // Phase E: ew kind3 verbatim - e4m3 publish of the f16 acc
+        // (widened fp32 in the unfused path; the f16->f32 widen is exact),
+        // f16 store straight to oATG[token, head*32 + d].
+        for (uint j = 0u; j < RN; ++j) {
+            for (uint e = 0u; e < acc[j].length(); ++e)
+                acc[j][e] = float16_t(e4m3(float(acc[j][e])));
+            coopMatStore(acc[j], pc.dst.v,
+                         (rt * 32u + r0) * 1024u + head * 32u + j * TN,
+                         1024u, gl_CooperativeMatrixLayoutRowMajor);
+        }
+    }
+}

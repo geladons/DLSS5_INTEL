@@ -17,6 +17,23 @@ int8 qkv ONLY at dec 48-69 would alias oWIN to the 256-byte oDead
 tombstone while dPart writes MBs. Harmless with current pack configs;
 fix if per-decoder int8 granularity is ever wanted.
 
+## Stage 30b: fam1 SLM-FFN + global-attn fused kernels - bit-exact, gated OFF
+
+`ffn1_fused.comp` (fam1 b5-22, C=64/128/256, one dispatch replaces
+expand+branch-proj+out-proj+ew5) and `attn_global.comp` (L6 b31-38, one
+dispatch replaces 3x cosg + score gemm + smaxg + PV + ew3, kills ~24MB
+score round-trip/block) both landed **bitwise-identical** at s1.0/s0.5
+AND at 1920x1080@0.55 (the only shape that exercises real padded-token
+masking, TOK=240 in T6P=256). But measured end-to-end they regress:
+chain 167 -> 239 ms at 1080p (+72 ms) despite -156 dispatches. Root
+cause: both are latency-bound - one 32-token tile per workgroup with
+serial k-loops cannot match gemm.comp's pipelined wide tiles on this
+driver; a 128-lane attn_global rewrite did not recover it. Kept in-tree
+behind `D5C_FFN1_FUSED` / `D5C_ATTN_GLOBAL` (default OFF, bit-exact when
+ON) for a future restructuring toward gemm's occupancy model. Lesson:
+on B50, dispatch-count reduction is worthless if the surviving kernel's
+per-subgroup parallelism drops.
+
 ## Stage 29: chain perf program - memory round-trip elimination sweep (2026-10-01)
 
 Driver: chain time at 1920x1080@0.55 went 254 -> ~168 ms chain (~-34%);
