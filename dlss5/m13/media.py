@@ -168,6 +168,11 @@ class EngineSession:
             fn.restype = None
             fn.argtypes = [p, i] if cast is int or attr == "dlss5_set_auto_mask" \
                 else [p, f]
+        # temporal history reset (absent on pre-temporal dlls - guard)
+        fn = getattr(dll, "dlss5_reset_history", None)
+        if fn is not None:
+            fn.restype = None
+            fn.argtypes = [p]
 
     def _ensure(self):
         if self._h:
@@ -225,6 +230,20 @@ class EngineSession:
         if ret != 0:
             raise MediaError("dlss5_process_frame rc=%d" % ret)
         return self._out.raw
+
+    def reset_history(self):
+        """Drop the engine's temporal anchor so the NEXT process() call
+        takes the first-frame path. Photos and unrelated video sources must
+        never share history - call once per item, not per frame."""
+        if not self._h or self._dll is None:
+            return
+        fn = getattr(self._dll, "dlss5_reset_history", None)
+        if fn is None:
+            return                       # pre-temporal dll: nothing to reset
+        try:
+            fn(self._h)
+        except Exception:
+            pass
 
     @property
     def ready(self):
@@ -528,6 +547,9 @@ class MediaQueue:
     def _run_photo(self, item, dst, engine, ffm):
         # JPEG photos decode through the ffmpeg resolver; PNG/BMP never
         # touch it (PhotoIO decides by magic bytes itself).
+        # Reset temporal history: an unrelated photo must not inherit the
+        # previous item's anchor (shared engine, independent content).
+        engine.reset_history()
         w, h, bgra = PhotoIO.load(item.path, ffm=ffm)
         out = engine.process(bgra, w, h)
         PhotoIO.save(dst, w, h, out)
@@ -541,6 +563,9 @@ class MediaQueue:
         if not ffmpeg or not ffprobe:
             raise MediaError("ffmpeg not found")
         log_path = os.path.join(paths.find("logs"), "media_ffmpeg.log")
+        # Reset once per video: frames within it share temporal history
+        # (that is the point of the anchor), across videos it must not bleed.
+        engine.reset_history()
         job = VideoJob(ffmpeg, ffprobe, item.path, dst,
                        engine, log_path=log_path)
         ok, msg = job.run(

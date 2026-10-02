@@ -305,6 +305,9 @@ class _FakeEngine:
     def apply_knobs(self, k):
         pass
 
+    def reset_history(self):
+        pass
+
 
 info = VideoJob.parse_probe(json.loads(PROBE_JSON))
 assert (info.w, info.h) == (64, 32) and info.has_audio
