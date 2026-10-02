@@ -53,11 +53,16 @@ const uint TM = 8u, TN = 16u, TK = 16u;
 const uint RM = 4u, RN = 2u;
 const uint BM = TM * RM;  // 32
 const uint BN = TN * RN;  // 32
-const uint PADDED_STRIDE = 68u; // 64 cols + 4 pad elements (eliminates bank conflicts)
+const uint PADDED_STRIDE = 66u; // 64 cols + 2 pad: odd 33-word row stride -> zero bank conflicts
 
-shared float16_t sQ[32 * 32];                // 2048 bytes
-shared float16_t sS[32 * PADDED_STRIDE];     // 4352 bytes (scores then probs)
-shared float     sO[32 * 32];                // 4096 bytes (fused-store staging)
+const uint STAGE_STRIDE = 34u; // f16 O staging overlay inside sS: odd 17-word stride
+
+shared float16_t sS[32 * PADDED_STRIDE];     // 4224 bytes (scores/probs, then O staging)
+
+/* local_size_x = 32 == one subgroup: a subgroup-scope barrier + SLM memory
+ * barrier is the exact legal sync for every hand-off below (cheaper than a
+ * full workgroup-scope barrier() which must cater for multi-wave wgs). */
+#define WAVE_SYNC() do { subgroupMemoryBarrierShared(); subgroupBarrier(); } while (false)
 
 void main() {
     uint halfId = gl_WorkGroupID.x;
@@ -70,103 +75,156 @@ void main() {
     uint tid = gl_LocalInvocationID.x;  // 0..31
 
     // ================================================================
-    // PHASE 1: Load Q for this half (32 tokens) into shared memory
-    // ================================================================
-    uint qBase4 = (wh * 64u + rowBase + tid) * 8u;
-    uint sqBase = tid * 32u;
-    for (uint i = 0u; i < 8u; ++i) {
-        f16vec4 q4 = Half4Buf(pc.q).v4[qBase4 + i];
-        sQ[sqBase + i * 4u + 0u] = q4.x;
-        sQ[sqBase + i * 4u + 1u] = q4.y;
-        sQ[sqBase + i * 4u + 2u] = q4.z;
-        sQ[sqBase + i * 4u + 3u] = q4.w;
-    }
-
-    barrier();
-
-    // ================================================================
     // PHASE 2: S[32, 64] = Q[32, 32] @ K[64, 32]^T
-    // Q from sQ, K directly from L1/L2 cache (pc.k)
+    // Q direct from L1/L2 (pc.q) - sQ staging removed. The A fragments
+    // (4 row-tiles x 2 k-steps) are identical for both column passes -
+    // load them once, reuse; K^T streams from L1/L2 per pass.
     // ================================================================
+    uint qBase = (wh * 64u + rowBase) * 32u;
     uint kBase = wh * (64u * 32u);
-    for (uint colPass = 0u; colPass < 2u; ++colPass) {
-        uint colBase = colPass * BN;
-
-        coopmat<float16_t, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> acc[RM][RN];
-        for (uint i = 0u; i < RM; ++i)
-            for (uint j = 0u; j < RN; ++j)
-                acc[i][j] = coopmat<float16_t, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(float16_t(0.0));
-
-        // K=32, TK=16 -> 2 tiles
-        for (uint t = 0u; t < 2u; ++t) {
-            coopmat<float16_t, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA> a[RM];
-            coopmat<float16_t, gl_ScopeSubgroup, TK, TN, gl_MatrixUseB> b[RN];
-
+    {
+        coopmat<float16_t, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA> a[2][RM];
+        for (uint t = 0u; t < 2u; ++t)
             for (uint i = 0u; i < RM; ++i)
-                coopMatLoad(a[i], sQ, (i * TM) * 32u + t * TK, 32u,
+                coopMatLoad(a[t][i], HalfBuf(pc.q).v, qBase + (i * TM) * 32u + t * TK, 32u,
                             gl_CooperativeMatrixLayoutRowMajor);
 
-            // K^T loaded directly from global memory buffer pc.k (L1/L2 cache)
-            for (uint j = 0u; j < RN; ++j)
-                coopMatLoad(b[j], HalfBuf(pc.k).v, kBase + (colBase + j * TN) * 32u + t * TK, 32u,
-                            gl_CooperativeMatrixLayoutColumnMajor);
+        for (uint colPass = 0u; colPass < 2u; ++colPass) {
+            uint colBase = colPass * BN;
 
+            coopmat<float16_t, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> acc[RM][RN];
             for (uint i = 0u; i < RM; ++i)
                 for (uint j = 0u; j < RN; ++j)
-                    acc[i][j] = coopMatMulAdd(a[i], b[j], acc[i][j]);
-        }
+                    acc[i][j] = coopmat<float16_t, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(float16_t(0.0));
 
-        // Store S tile directly to shared memory sS [32, 68] (bank-conflict free)
-        for (uint i = 0u; i < RM; ++i)
-            for (uint j = 0u; j < RN; ++j)
-                coopMatStore(acc[i][j], sS, (i * TM) * PADDED_STRIDE + colBase + j * TN,
-                             PADDED_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
+            for (uint t = 0u; t < 2u; ++t) {
+                coopmat<float16_t, gl_ScopeSubgroup, TK, TN, gl_MatrixUseB> b[RN];
+                for (uint j = 0u; j < RN; ++j)
+                    coopMatLoad(b[j], HalfBuf(pc.k).v, kBase + (colBase + j * TN) * 32u + t * TK, 32u,
+                                gl_CooperativeMatrixLayoutColumnMajor);
+                for (uint i = 0u; i < RM; ++i)
+                    for (uint j = 0u; j < RN; ++j)
+                        acc[i][j] = coopMatMulAdd(a[t][i], b[j], acc[i][j]);
+            }
+
+            // Store S tile directly to shared memory sS [32, 66] (bank-conflict free)
+            for (uint i = 0u; i < RM; ++i)
+                for (uint j = 0u; j < RN; ++j)
+                    coopMatStore(acc[i][j], sS, (i * TM) * PADDED_STRIDE + colBase + j * TN,
+                                 PADDED_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
+        }
     }
 
-    barrier();
+    WAVE_SYNC();
 
     // ================================================================
     // PHASE 3: On-Chip Softmax (M7b Bit-Affine, Exact Match)
     // ================================================================
+    uint vBase = wh * (64u * 32u);
+    coopmat<float16_t, gl_ScopeSubgroup, TK, TN, gl_MatrixUseB> bV[2][RN];
+    // V is independent of sS: issue the first k-step load BEFORE the
+    // softmax stretch so its global latency overlaps phase-3 math.
+    for (uint j = 0u; j < RN; ++j)
+        coopMatLoad(bV[0][j], HalfBuf(pc.v).v, vBase + 0u * TK * 32u + j * TN, 32u,
+                    gl_CooperativeMatrixLayoutRowMajor);
     {
         uint base = tid * PADDED_STRIDE;
         uint rowInWindow = rowBase + tid;
-        uint biasBase = (pc.bias != 0u) ? (head * 4096u + rowInWindow * 64u) : 0u;
+        uint bias4 = (pc.bias != 0u) ? ((head * 4096u + rowInWindow * 64u) >> 2u) : 0u;
 
         float total = 0.0;
-        // Pass 3a: compute transformed weights and row total
-        for (uint i = 0u; i < 32u; ++i) {
-            vec2 affine;
-            for (uint j = 0u; j < 2u; ++j) {
-                uint col = i * 2u + j;
-                float logit = float(sS[base + col]);
-                if (pc.bias != 0u) {
-                    uint bb = float16BitsToUint16(HalfBuf(pc.bias).v[biasBase + col]);
-                    logit += f16_widen(bb);
+        // Pass 3a: compute transformed weights and row total.
+        // One f16vec4 bias fetch covers a 4-column quad; the per-element
+        // math sequence (widen, add, half_round, scale, clamp, pair-pack)
+        // is identical to the scalar loop - bit-exact. The transformed
+        // packed pairs are kept in registers (pk[]) instead of bouncing
+        // through sS: pass 3b re-unpacks the exact same f16 pair values.
+        uint pk[32];
+        if (pc.bias != 0u) {
+            for (uint i = 0u; i < 16u; ++i) {
+                f16vec4 b4 = Half4Buf(pc.bias).v4[bias4 + i];
+                vec2 affine0, affine1;
+                {
+                    float logit = float(sS[base + i * 4u + 0u]) + float(b4.x);
+                    precise float scaled = half_round(logit) * 0.044921875 + 1.30078125;
+                    affine0.x = clamp(scaled, 1.03125, 1.5693359375);
                 }
-                precise float scaled = half_round(logit) * 0.044921875 + 1.30078125;
-                affine[j] = clamp(scaled, 1.03125, 1.5693359375);
+                {
+                    float logit = float(sS[base + i * 4u + 1u]) + float(b4.y);
+                    precise float scaled = half_round(logit) * 0.044921875 + 1.30078125;
+                    affine0.y = clamp(scaled, 1.03125, 1.5693359375);
+                }
+                {
+                    float logit = float(sS[base + i * 4u + 2u]) + float(b4.z);
+                    precise float scaled = half_round(logit) * 0.044921875 + 1.30078125;
+                    affine1.x = clamp(scaled, 1.03125, 1.5693359375);
+                }
+                {
+                    float logit = float(sS[base + i * 4u + 3u]) + float(b4.w);
+                    precise float scaled = half_round(logit) * 0.044921875 + 1.30078125;
+                    affine1.y = clamp(scaled, 1.03125, 1.5693359375);
+                }
+                uint t0 = (packHalf2x16(affine0) << 5) + 0x7FF88000u;
+                uint t1 = (packHalf2x16(affine1) << 5) + 0x7FF88000u;
+                pk[i * 2u + 0u] = t0;
+                pk[i * 2u + 1u] = t1;
+                vec2 w0 = unpackHalf2x16(t0);
+                vec2 w1 = unpackHalf2x16(t1);
+                total += w0.x + w0.y;
+                total += w1.x + w1.y;
             }
-            uint transformed = (packHalf2x16(affine) << 5) + 0x7FF88000u;
-            vec2 weights = unpackHalf2x16(transformed);
-            sS[base + i * 2u + 0u] = float16_t(weights.x);
-            sS[base + i * 2u + 1u] = float16_t(weights.y);
-            total += weights.x + weights.y;
+        } else {
+            for (uint i = 0u; i < 16u; ++i) {
+                vec2 affine0, affine1;
+                {
+                    precise float scaled = half_round(float(sS[base + i * 4u + 0u])) * 0.044921875 + 1.30078125;
+                    affine0.x = clamp(scaled, 1.03125, 1.5693359375);
+                }
+                {
+                    precise float scaled = half_round(float(sS[base + i * 4u + 1u])) * 0.044921875 + 1.30078125;
+                    affine0.y = clamp(scaled, 1.03125, 1.5693359375);
+                }
+                {
+                    precise float scaled = half_round(float(sS[base + i * 4u + 2u])) * 0.044921875 + 1.30078125;
+                    affine1.x = clamp(scaled, 1.03125, 1.5693359375);
+                }
+                {
+                    precise float scaled = half_round(float(sS[base + i * 4u + 3u])) * 0.044921875 + 1.30078125;
+                    affine1.y = clamp(scaled, 1.03125, 1.5693359375);
+                }
+                uint t0 = (packHalf2x16(affine0) << 5) + 0x7FF88000u;
+                uint t1 = (packHalf2x16(affine1) << 5) + 0x7FF88000u;
+                pk[i * 2u + 0u] = t0;
+                pk[i * 2u + 1u] = t1;
+                vec2 w0 = unpackHalf2x16(t0);
+                vec2 w1 = unpackHalf2x16(t1);
+                total += w0.x + w0.y;
+                total += w1.x + w1.y;
+            }
         }
 
-        // Pass 3b: normalize by reciprocal and apply e4m3
+        // Pass 3b: normalize by reciprocal and apply e4m3.
+        // unpackHalf2x16(pk[i]) yields the same f16 values the sS
+        // round-trip produced, so p is bit-identical.
         float recip = half_round(1.0 / half_round(total));
-        for (uint col = 0u; col < 64u; ++col) {
-            precise float p = float(sS[base + col]) * recip;
-            sS[base + col] = float16_t(e4m3(half_round(p)));
+        for (uint i = 0u; i < 32u; ++i) {
+            vec2 w = unpackHalf2x16(pk[i]);
+            precise float p0 = w.x * recip;
+            precise float p1 = w.y * recip;
+            sS[base + i * 2u + 0u] = float16_t(e4m3(half_round(p0)));
+            sS[base + i * 2u + 1u] = float16_t(e4m3(half_round(p1)));
         }
     }
 
-    barrier();
+    WAVE_SYNC();
 
     // ================================================================
     // PHASE 4: O[32, 32] = P[32, 64] @ V[64, 32]
-    // P from sS, V directly from L1/L2 cache (pc.v)
+    // P from sS, V directly from L1/L2 cache (pc.v).
+    // K-loop software pipeline (same shape as gemm's tiles==4 path):
+    // loads for k-tile t+1 issue before the MMAs consuming slot t, so
+    // load latency overlaps XMX math. Accumulate order t=0,1,2,3 is
+    // unchanged -> bit-exact.
     // ================================================================
     {
         coopmat<float16_t, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> accPV[RM][RN];
@@ -174,54 +232,80 @@ void main() {
             for (uint j = 0u; j < RN; ++j)
                 accPV[i][j] = coopmat<float16_t, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(float16_t(0.0));
 
-        uint vBase = wh * (64u * 32u);
-        // K=64, TK=16 -> 4 tiles
-        for (uint t = 0u; t < 4u; ++t) {
-            coopmat<float16_t, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA> a[RM];
-            coopmat<float16_t, gl_ScopeSubgroup, TK, TN, gl_MatrixUseB> b[RN];
+        coopmat<float16_t, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA> a[2][RM];
 
-            for (uint i = 0u; i < RM; ++i)
-                coopMatLoad(a[i], sS, (i * TM) * PADDED_STRIDE + t * TK, PADDED_STRIDE,
-                            gl_CooperativeMatrixLayoutRowMajor);
+        // slot0 <- t0 (b already loaded pre-softmax), slot1 <- t1
+        for (uint i = 0u; i < RM; ++i)
+            coopMatLoad(a[0][i], sS, (i * TM) * PADDED_STRIDE + 0u * TK, PADDED_STRIDE,
+                        gl_CooperativeMatrixLayoutRowMajor);
+        for (uint j = 0u; j < RN; ++j)
+            coopMatLoad(bV[1][j], HalfBuf(pc.v).v, vBase + 1u * TK * 32u + j * TN, 32u,
+                        gl_CooperativeMatrixLayoutRowMajor);
+        for (uint i = 0u; i < RM; ++i)
+            coopMatLoad(a[1][i], sS, (i * TM) * PADDED_STRIDE + 1u * TK, PADDED_STRIDE,
+                        gl_CooperativeMatrixLayoutRowMajor);
 
-            // V loaded directly from global memory buffer pc.v (L1/L2 cache)
+        for (uint i = 0u; i < RM; ++i)
             for (uint j = 0u; j < RN; ++j)
-                coopMatLoad(b[j], HalfBuf(pc.v).v, vBase + (t * TK) * 32u + j * TN, 32u,
-                            gl_CooperativeMatrixLayoutRowMajor);
+                accPV[i][j] = coopMatMulAdd(a[0][i], bV[0][j], accPV[i][j]);
 
-            for (uint i = 0u; i < RM; ++i)
-                for (uint j = 0u; j < RN; ++j)
-                    accPV[i][j] = coopMatMulAdd(a[i], b[j], accPV[i][j]);
-        }
+        // slot0 <- t2
+        for (uint i = 0u; i < RM; ++i)
+            coopMatLoad(a[0][i], sS, (i * TM) * PADDED_STRIDE + 2u * TK, PADDED_STRIDE,
+                        gl_CooperativeMatrixLayoutRowMajor);
+        for (uint j = 0u; j < RN; ++j)
+            coopMatLoad(bV[0][j], HalfBuf(pc.v).v, vBase + 2u * TK * 32u + j * TN, 32u,
+                        gl_CooperativeMatrixLayoutRowMajor);
+
+        for (uint i = 0u; i < RM; ++i)
+            for (uint j = 0u; j < RN; ++j)
+                accPV[i][j] = coopMatMulAdd(a[1][i], bV[1][j], accPV[i][j]);
+
+        // slot1 <- t3
+        for (uint i = 0u; i < RM; ++i)
+            coopMatLoad(a[1][i], sS, (i * TM) * PADDED_STRIDE + 3u * TK, PADDED_STRIDE,
+                        gl_CooperativeMatrixLayoutRowMajor);
+        for (uint j = 0u; j < RN; ++j)
+            coopMatLoad(bV[1][j], HalfBuf(pc.v).v, vBase + 3u * TK * 32u + j * TN, 32u,
+                        gl_CooperativeMatrixLayoutRowMajor);
+
+        for (uint i = 0u; i < RM; ++i)
+            for (uint j = 0u; j < RN; ++j)
+                accPV[i][j] = coopMatMulAdd(a[0][i], bV[0][j], accPV[i][j]);
+        for (uint i = 0u; i < RM; ++i)
+            for (uint j = 0u; j < RN; ++j)
+                accPV[i][j] = coopMatMulAdd(a[1][i], bV[1][j], accPV[i][j]);
 
         if ((pc.flags & 1u) != 0u) {
             // M13 fused transpose store: replicate transpose_we.comp bitwise.
-            // Stage the widened fp32 O tile in shared (the same values the fp32
-            // store would land in oMGW), then each lane converts one token row
-            // with e4m3 and writes it into the token-major f16 oATW:
+            // The PV accumulator is ALREADY f16, so the old fp32 widening
+            // stage (sO) is redundant: storing accPV fragments into sS
+            // (dead after the last P-load above) and reading them back as
+            // f16 widens to the exact same f32 values the sO path produced.
+            // Bit-exact by construction; stride 34 keeps the row-gather
+            // bank-conflict free (the old stride-32 f32 staging made every
+            // lane hit the same bank).
             //   transpose_we: rd = ((w*H + hd)*64 + t)*32 + d   (oMGW fp32)
             //                 wr = (w*64 + t)*C + hd*32 + d     (oATW f16)
             // here wh = w*H + head and the tile row r is token t = rowBase + r.
+            subgroupMemoryBarrierShared();  // ordering fence: P reads precede staging writes
             for (uint i = 0u; i < RM; ++i)
-                for (uint j = 0u; j < RN; ++j) {
-                    coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> wide =
-                        coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(accPV[i][j]);
-                    coopMatStore(wide, sO, (i * TM) * 32u + j * TN,
-                                 32u, gl_CooperativeMatrixLayoutRowMajor);
-                }
+                for (uint j = 0u; j < RN; ++j)
+                    coopMatStore(accPV[i][j], sS, (i * TM) * STAGE_STRIDE + j * TN,
+                                 STAGE_STRIDE, gl_CooperativeMatrixLayoutRowMajor);
 
-            barrier();
+            WAVE_SYNC();
 
             uint w = wh / pc.H;
             uint C = pc.H * 32u;
             uint ioBase = (w * 64u + rowBase + tid) * C + head * 32u;
-            uint rb = tid * 32u;
+            uint rb = tid * STAGE_STRIDE;
             for (uint k = 0u; k < 8u; ++k) {
                 f16vec4 out4 = f16vec4(
-                    float16_t(e4m3(sO[rb + k * 4u + 0u])),
-                    float16_t(e4m3(sO[rb + k * 4u + 1u])),
-                    float16_t(e4m3(sO[rb + k * 4u + 2u])),
-                    float16_t(e4m3(sO[rb + k * 4u + 3u])));
+                    float16_t(e4m3(float(sS[rb + k * 4u + 0u]))),
+                    float16_t(e4m3(float(sS[rb + k * 4u + 1u]))),
+                    float16_t(e4m3(float(sS[rb + k * 4u + 2u]))),
+                    float16_t(e4m3(float(sS[rb + k * 4u + 3u]))));
                 Half4Buf(pc.dst).v4[(ioBase >> 2u) + k] = out4;
             }
         } else {
