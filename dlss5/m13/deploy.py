@@ -259,8 +259,8 @@ class DeployNeedsElevation(DeployError):
 
 # --------------------------------------------------------- elevated copy ---
 _PS_COPY = r"""
-param([string]$Json)
-$pairs = $Json | ConvertFrom-Json
+param([string]$JsonFile)
+$pairs = (Get-Content -Raw $JsonFile) | ConvertFrom-Json
 foreach ($p in $pairs) {
     $dst = $p.dst; $bak = $dst + '.m13bak'
     if ((Test-Path $dst) -and -not (Test-Path $bak)) {
@@ -271,7 +271,8 @@ foreach ($p in $pairs) {
 """
 
 _PS_REMOVE = r"""
-param([string]$Dst)
+param([string]$JsonFile)
+$Dst = (Get-Content -Raw $JsonFile) | ConvertFrom-Json
 $bak = $Dst + '.m13bak'
 if (Test-Path $Dst) { Remove-Item $Dst -Force }
 if (Test-Path $bak) { Move-Item $bak $Dst -Force }
@@ -280,7 +281,10 @@ if (Test-Path $bak) { Move-Item $bak $Dst -Force }
 
 def _run_elevated(ps_body, arg):
     """Run a small PowerShell script elevated (one UAC prompt), wait for it.
-    Quoting gotcha: the script goes to a temp .ps1, the arg is JSON."""
+    Quoting gotcha: the script goes to a temp .ps1, the arg is a JSON file.
+    -Command nested inside -ArgumentList mangled the inner double quotes on
+    this host (elevated steps silently no-oped); -File + -JsonFile keeps every
+    argument a verbatim single-quoted element instead."""
     import json as _json
     import subprocess
     import tempfile
@@ -291,12 +295,11 @@ def _run_elevated(ps_body, arg):
     argfile = script + ".json"
     with open(argfile, "w") as f:
         _json.dump(arg, f)
-    inner = ('& "%s" -Json (Get-Content -Raw "%s")'
-             % (script.replace('"', '`"'), argfile.replace('"', '`"')))
     cmd = ["powershell", "-NoProfile", "-Command",
            "Start-Process", "powershell", "-Verb", "RunAs", "-Wait",
            "-WindowStyle", "Hidden", "-ArgumentList",
-           "'-NoProfile','-ExecutionPolicy','Bypass','-Command',\"%s\"" % inner]
+           "'-NoProfile','-ExecutionPolicy','Bypass','-File','\"%s\"',"
+           "'-JsonFile','\"%s\"'" % (script, argfile)]
     try:
         subprocess.run(cmd, timeout=120, creationflags=CREATE_NO_WINDOW,
                        capture_output=True)
