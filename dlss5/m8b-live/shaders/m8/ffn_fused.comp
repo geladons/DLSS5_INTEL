@@ -1,0 +1,287 @@
+// SPDX-License-Identifier: Apache-2.0
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+#include "publish.glsl"
+
+/*
+ * ffn_fused -- SLM-resident fused FFN for fam0 window blocks (C=32).
+ *
+ * One workgroup (4 subgroups x 32 lanes = 128 invocations) computes the
+ * COMPLETE FFN for one 32-token tile, replacing three dispatches
+ * (dQuantAct + gemm_i8 producer + gemm_i8 consumer) and eliminating the
+ * hidden-activation DRAM round-trip (oG3 i8 + oQScale2) plus the
+ * oQAct/oQScale traffic:
+ *
+ *   Phase Q: input activation quant, quant_act.comp replayed in-workgroup.
+ *            quant_act's scale is one scalar per 32-token block over ALL C
+ *            channels - the scale window IS this tile, so a subgroupMax per
+ *            subgroup followed by a 4-wide max over sQMax reproduces the
+ *            256-lane tree exactly (max is order-insensitive). Result ->
+ *            sAq i8 [32,C] + scaleA broadcast in regs.
+ *   Phase A: w1 expand i8 GEMM (C -> 4C). Subgroup sg owns hidden col-tile
+ *            nt=sg (each sg = one producer workgroup of the unfused path):
+ *            mma -> i32 de-swizzle -> dequant -> publish(GATE_E4M3) ->
+ *            tile max; the published f32 is bit-punned into the same i32
+ *            scratch (floatBitsToInt/intBitsToFloat is lossless), so the
+ *            publish math runs exactly once per element. Result -> sHid i8
+ *            [32,4C] + sSc2[sg] (== oG3/oQScale2 slices, never written out).
+ *   Phase B: w2 project i8 GEMM (4C -> C). Subgroup sg owns output row-strip
+ *            rm=sg (8 rows x 32 cols); the k-loop stays serial per strip and
+ *            the fp32 accumulator lives in coopmat registers - each element
+ *            sees the identical per-k-tile accumulate order as the unfused
+ *            consumer's stage_f pass, with zero SLM traffic in the loop.
+ *   Phase C: acc strips de-swizzle once to the stage_f quarters, then the
+ *            consumer's EPI_RESIDUAL_* epilogue verbatim -> oG4 fp32
+ *            (+ F_DUP16 f16 dup to oG2).
+ *
+ * Bit-exact vs the unfused trio: identical coopmat tile shapes and MMA order,
+ * identical dequant/publish/quantize expressions (copied verbatim), identical
+ * scale values (max over the same element sets; max is order-insensitive),
+ * identical per-element fp32 accumulate order (k-tiles serial per strip).
+ *
+ * Synchronization: subgroupMemoryBarrierShared()+subgroupBarrier() for
+ * sg-private SLM handoffs (mirrors gemm_i8.comp), workgroup barrier() only
+ * at the phase boundaries where data crosses subgroups.
+ *
+ * Grid: (ceil(m/32), 1, 1). local_size 128 = four subgroups per workgroup.
+ * Shared usage: sAq 1KB + sHid 4KB + stage 16KB + stage_f 4KB + scalars
+ * ~= 25.3KB (< the ~48KB hardware cap noted in attn_fused.comp).
+ */
+
+const uint EPI_GATE_E4M3     = 3u;
+
+const uint F_RES16 = 1u;    // residual buffer is f16 (EPI_RESIDUAL_F16 vs FP32)
+const uint F_DUP16 = 2u;    // also write f16 dup of v_out to pc.dup (oG2)
+
+layout(local_size_x = 128) in;
+
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer Int8Buf   { int8_t    v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf  { float     v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer Float4Buf { vec4      v4[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer HalfBuf   { float16_t v[]; };
+
+layout(push_constant, scalar) uniform Push {
+    uint64_t a;      // x16 f16 input [m, C]
+    Int8Buf  w1;     // i8 expand weight [C, 4C] row-major (ldb = 4C)
+    Int8Buf  w2;     // i8 project weight [4C, C] row-major (ldb = C)
+    FloatBuf w1s;    // f32 per-channel w1 scales [4C]
+    FloatBuf w2s;    // f32 per-channel w2 scales [C]
+    FloatBuf c;      // oG4 fp32 output [m, C] (ldc = C)
+    uint64_t res;    // residual carrier: FloatBuf or HalfBuf (flags bit0)
+    FloatBuf skip;   // ffn_cos_skip f32 [C]
+    uint64_t dup;    // f16 duplicate dst (oG2) when flags bit1 set
+    uint     m;      // tokens (multiple of 32 in practice)
+    uint     cn;     // C (fam0 = 32)
+    uint     flags;  // F_RES16 | F_DUP16
+} pc;
+
+const uint TM = 8, TN = 16, TK = 32;
+const uint RM = 4, RN = 2;
+const uint BM = TM * RM;   // 32 rows per workgroup
+const uint BN = TN * RN;   // 32 cols per tile
+const uint HC = 128;       // hidden width 4*C for C=32 (fam0-only kernel)
+
+shared int8_t  sAq[BM * 32];        // 1 KB: quantized input tile (oQAct slice)
+shared int8_t  sHid[BM * HC];       // 4 KB: quantized hidden tile (oG3 slice)
+shared int32_t stage[4 * BM * BN];  // 16 KB: per-sg i32 de-swizzle scratch;
+                                    // phase A then bit-puns it to hold the
+                                    // published f32 vals for requantize
+shared float   stage_f[BM * BN];    // 4 KB: canonical out tile, sg strip at
+                                    // [sg*256,+256)
+shared float   sQMax[4];            // per-sg phase-Q maxima
+shared float   sSc2[4];             // per-hidden-col-tile scales (oQScale2)
+
+void main() {
+    uint row = gl_WorkGroupID.x * BM;
+    if (row >= pc.m) return;
+    if (pc.cn != 32u) return;            // fam0-only kernel (SLM sized for C=32)
+    uint lid  = gl_LocalInvocationID.x;  // 0..127
+    uint sg   = gl_SubgroupID;           // 0..3 (subgroups are 32 lanes, dense)
+    uint slid = gl_SubgroupInvocationID; // 0..31
+    uint C = pc.cn;
+    uint NKT = (4u * C) / TK;            // consumer k-tiles (4 for C=32)
+
+    // ------------------------------------------------------------------
+    // Phase Q: quant_act replay - per-32-token-block symmetric i8 quant.
+    // 128 lanes -> row r_local = lid>>2, 8 contiguous cols each.
+    // ------------------------------------------------------------------
+    uint r_local = lid >> 2;
+    uint c0      = (lid & 3u) * 8u;
+    uint rGlob   = row + r_local;
+
+    float v[8];
+    float myMax = 0.0;
+    {
+        uint rb = rGlob * C + c0;
+        bool ok = (rGlob < pc.m);
+        for (uint j = 0u; j < 8u; ++j) {
+            v[j] = ok ? float(HalfBuf(pc.a).v[rb + j]) : 0.0;
+            myMax = max(myMax, abs(v[j]));
+        }
+    }
+    float sgQMax = subgroupMax(myMax);       // collective: all lanes must call
+    if (slid == 0u) sQMax[sg] = sgQMax;
+    barrier();
+    float blockMax = max(max(sQMax[0], sQMax[1]), max(sQMax[2], sQMax[3]));
+    float scaleA = (blockMax > 0.0) ? (blockMax / 127.0) : 1.0;  // == oQScale[b]
+    float invScaleA = 1.0 / scaleA;
+    {
+        uint qb = r_local * C + c0;
+        for (uint j = 0u; j < 8u; ++j) {
+            int q = int(round(v[j] * invScaleA));
+            sAq[qb + j] = int8_t(clamp(q, -127, 127));
+        }
+    }
+    barrier();
+
+    // ------------------------------------------------------------------
+    // Phase A: w1 expand C -> 4C. Subgroup sg produces hidden col-tile nt=sg
+    // (the unfused producer's per-workgroup tile), serial k = 1 tile.
+    //   pass 1: mma -> i32 de-swizzle -> dequant -> publish -> tile max,
+    //           published f32 bit-punned back into stage (lossless).
+    //   pass 2: vals re-read and requantized into sHid (oG3 tile slice).
+    // ------------------------------------------------------------------
+    coopmat<int8_t, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA> qa[RM];
+    for (uint i = 0u; i < RM; ++i)
+        coopMatLoad(qa[i], sAq, (i * TM) * C, C, gl_CooperativeMatrixLayoutRowMajor);
+
+    {
+        uint col = sg * BN;
+        uint sb  = sg * (BM * BN);      // this sg's i32 scratch base
+
+        coopmat<int8_t, gl_ScopeSubgroup, TK, TN, gl_MatrixUseB> b[RN];
+        for (uint j = 0u; j < RN; ++j)
+            coopMatLoad(b[j], pc.w1.v, col + j * TN, 4u * C,
+                        gl_CooperativeMatrixLayoutRowMajor);
+        for (uint i = 0u; i < RM; ++i)
+            for (uint j = 0u; j < RN; ++j) {
+                coopmat<int32_t, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> acc;
+                acc = coopmat<int32_t, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(0);
+                acc = coopMatMulAdd(qa[i], b[j], acc);
+                coopMatStore(acc, stage, sb + i * TM * BN + j * TN, BN,
+                             gl_CooperativeMatrixLayoutRowMajor);
+            }
+        subgroupMemoryBarrierShared();
+        subgroupBarrier();
+
+        // producer epilogue verbatim: dequant -> publish(GATE_E4M3) -> tile max.
+        // The published f32 is stored bit-punned over the dead i32 acc so the
+        // ~30-op publish math runs once per element (exact bit round-trip).
+        float tileMax = 0.0;
+        for (uint e = slid * 4u; e < BM * BN; e += 32u * 4u) {
+            uint r = row + e / BN;
+            uint c_base = col + (e % BN);
+            for (uint k = 0u; k < 4u; ++k) {
+                uint cc = c_base + k;
+                float scale_b = (cc < 4u * C) ? pc.w1s.v[cc] : 0.0;
+                float val = float(stage[sb + e + k]) * (scaleA * scale_b);
+                val = publish(EPI_GATE_E4M3, val);
+                stage[sb + e + k] = floatBitsToInt(val);
+                if (r < pc.m && cc < 4u * C)
+                    tileMax = max(tileMax, abs(val));
+            }
+        }
+        float tileScale = subgroupMax(tileMax);
+        tileScale = (tileScale > 0.0) ? (tileScale / 127.0) : 1.0; // == oQScale2[blk*NH+nt]
+        if (slid == 0u) sSc2[sg] = tileScale;
+        float invTileScale = 1.0 / tileScale;
+        subgroupBarrier();
+
+        for (uint e = slid * 4u; e < BM * BN; e += 32u * 4u) {
+            uint hb = (e / BN) * 4u * C + col + (e % BN);
+            for (uint k = 0u; k < 4u; ++k) {
+                float val = intBitsToFloat(stage[sb + e + k]);
+                int q = int(round(val * invTileScale));
+                sHid[hb + k] = int8_t(clamp(q, -127, 127));
+            }
+        }
+    }
+    barrier();   // sHid + sSc2 complete across all subgroups
+
+    // ------------------------------------------------------------------
+    // Phase B: w2 project 4C -> C. Subgroup sg owns output row-strip rm=sg
+    // (8 x 32); k-tiles serial, fp32 acc in coopmat registers. Per-element
+    // sequence is identical to the consumer's stage_f += stage*sc2[t].
+    // ------------------------------------------------------------------
+    {
+        coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> facc[RN];
+        for (uint rn = 0u; rn < RN; ++rn)
+            facc[rn] = coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(0.0);
+
+        for (uint t = 0u; t < NKT; ++t) {
+            coopmat<int8_t, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA> a2;
+            coopMatLoad(a2, sHid, (sg * TM) * HC + t * TK, HC,
+                        gl_CooperativeMatrixLayoutRowMajor);
+
+            for (uint rn = 0u; rn < RN; ++rn) {
+                coopmat<int8_t, gl_ScopeSubgroup, TK, TN, gl_MatrixUseB> b2;
+                coopMatLoad(b2, pc.w2.v, (t * TK) * C + rn * TN, C,
+                            gl_CooperativeMatrixLayoutRowMajor);
+                coopmat<int32_t, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> tacc;
+                tacc = coopmat<int32_t, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(0);
+                tacc = coopMatMulAdd(a2, b2, tacc);
+                facc[rn] = facc[rn]
+                    + coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(tacc)
+                    * sSc2[t];
+            }
+        }
+
+        // de-swizzle strip once, then EPI_RESIDUAL_* epilogue verbatim.
+        uint qb = sg * 256u;
+        for (uint rn = 0u; rn < RN; ++rn)
+            coopMatStore(facc[rn], stage_f, qb + rn * TN, BN,
+                         gl_CooperativeMatrixLayoutRowMajor);
+        subgroupMemoryBarrierShared();
+        subgroupBarrier();
+
+        // 256 strip elems / 32 lanes = 8 per lane = two vec4 chunks.
+        bool res16 = (pc.flags & F_RES16) != 0u;
+        bool dup16 = (pc.flags & F_DUP16) != 0u;
+        for (uint h = 0u; h < 2u; ++h) {
+            uint e = qb + slid * 8u + h * 4u;
+            uint r = row + e / BN;
+            if (r >= pc.m) continue;
+            uint c_base = e % BN;
+            uint at = r * C + c_base;
+
+            vec4 v_out;
+            for (uint k = 0u; k < 4u; ++k) {
+                uint cc = c_base + k;
+                float scale_b = (cc < C) ? pc.w2s.v[cc] : 0.0;
+                float val = stage_f[e + k] * scale_b;
+                uint idx = at + k;
+                float resVal = res16
+                    ? f16_widen(uint(float16BitsToUint16(HalfBuf(pc.res).v[idx])))
+                    : FloatBuf(pc.res).v[idx];
+                float skipVal = (cc < C) ? pc.skip.v[cc] : 0.0;
+                v_out[k] = val + resVal * skipVal;
+            }
+
+            if (dup16) {
+                for (uint k = 0u; k < 4u; ++k)
+                    if (c_base + k < C)
+                        HalfBuf(pc.dup).v[at + k] = float16_t(half_round(v_out[k]));
+            }
+            if ((at & 3u) == 0u && (uint(uint64_t(pc.c)) & 15u) == 0u) {
+                Float4Buf(uint64_t(pc.c)).v4[at >> 2] = v_out;
+            } else {
+                for (uint k = 0u; k < 4u; ++k) {
+                    if (c_base + k < C) FloatBuf(uint64_t(pc.c)).v[at + k] = v_out[k];
+                }
+            }
+        }
+    }
+}

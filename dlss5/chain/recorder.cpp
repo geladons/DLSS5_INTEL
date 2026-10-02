@@ -54,13 +54,14 @@ void ChainRecorder::init(const VkCtx& c, const ChainArena& arena, const WeightsS
     chainMakePipe(c, shaderDir + "pool2.spv", pPool);
     chainMakePipe(c, shaderDir + "upmerge.spv", pUpM);
     chainMakePipe(c, shaderDir + "attn_fused.spv", pAttnFused);
-    std::printf("[chain] 17 pipelines up (13 kernels + featpack/headpack + pool2/upmerge), %zu BDA chunk bases, chunk0 0x%llx\n",
+    chainMakePipe(c, shaderDir + "ffn_fused.spv", pFfnFused);
+    std::printf("[chain] 18 pipelines up (14 kernels + featpack/headpack + pool2/upmerge), %zu BDA chunk bases, chunk0 0x%llx\n",
                 arena.chunks.size(), (unsigned long long)arena.chunks[0].baseA);
 }
 
 void ChainRecorder::destroy(const VkCtx& c) {
     for (ChainPipe* cp : {&pGemm, &pGemm1, &pGemmI8, &pQuantAct, &pCos, &pCosW, &pSmax, &pEw, &pPart, &pTrans,
-                          &pGather, &pMerge, &pFeatpack, &pHeadpack, &pPool, &pUpM, &pAttnFused}) {
+                          &pGather, &pMerge, &pFeatpack, &pHeadpack, &pPool, &pUpM, &pAttnFused, &pFfnFused}) {
         vkDestroyPipeline(c.dev, cp->pipe, nullptr);
         vkDestroyPipelineLayout(c.dev, cp->layout, nullptr);
         vkDestroyDescriptorSetLayout(c.dev, cp->dsl, nullptr);
@@ -389,6 +390,33 @@ void ChainRecorder::dAttnFused(VkCommandBuffer cb, uint64_t q, uint64_t k, uint6
     pmBegin(cb);
     vkCmdDispatch(cb, Ww * H * 2, 1, 1);
     pmEnd(cb, "attn_fused", "", Ww * H * 64, 32, 32, Ww * H * 2, 1, 1, bytes);
+}
+
+void ChainRecorder::dFfnFused(VkCommandBuffer cb, int fam, uint64_t a, uint64_t w1, uint64_t w2,
+                              uint64_t w1s, uint64_t w2s, uint64_t c2,
+                              uint64_t res, uint64_t skip, uint64_t dup,
+                              uint32_t m, uint32_t C, uint32_t flags) {
+    (void)fam;
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pFfnFused.pipe);
+    FfnFusedPush p{a, w1, w2, w1s, w2s, c2, res, skip, dup, m, C, flags};
+    vkCmdPushConstants(cb, pFfnFused.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
+
+    // vs the unfused trio: drops oQAct w+r (2*m*C), oG3 w+r (2*m*4C),
+    // oQScale/oQScale2 w+r, and two dispatch+barrier pairs per block.
+    bool res16 = (flags & 1u) != 0u;
+    bool dup16 = (flags & 2u) != 0u;
+    uint64_t bytes = (uint64_t)m * C * 2          // x16 read
+                   + (uint64_t)C * 4 * C          // w1 i8
+                   + (uint64_t)4 * C * C          // w2 i8
+                   + (uint64_t)5 * C * 4          // w1s + w2s
+                   + (uint64_t)m * C * (res16 ? 2 : 4)  // residual read
+                   + (uint64_t)C * 4              // cos_skip
+                   + (uint64_t)m * C * 4          // oG4 fp32 write
+                   + (dup16 ? (uint64_t)m * C * 2 : 0); // f16 dup write
+
+    pmBegin(cb);
+    vkCmdDispatch(cb, (m + 31u) / 32u, 1, 1);
+    pmEnd(cb, "ffn_fused", "blk", m, C, C, (m + 31u) / 32u, 1, 1, bytes);
 }
 
 } // namespace d5c

@@ -123,6 +123,24 @@ struct AttnFusedPush {
     uint32_t H;        // number of heads
     uint32_t flags;    // bit0: fused transpose store (transpose_we folded in)
 };
+
+// ffn_fused: SLM-resident fam0 FFN (one 32-token tile per workgroup; hidden
+// activations stay in shared memory). Mirrors quant_act + gemm_i8 producer +
+// gemm_i8 consumer bit-exactly. flags bit0: residual is f16; bit1: f16 dup.
+struct FfnFusedPush {
+    uint64_t a;      // x16 f16 input [m, C]
+    uint64_t w1;     // i8 expand weight [C, 4C]
+    uint64_t w2;     // i8 project weight [4C, C]
+    uint64_t w1s;    // f32 per-channel w1 scales [4C]
+    uint64_t w2s;    // f32 per-channel w2 scales [C]
+    uint64_t c;      // oG4 fp32 output [m, C]
+    uint64_t res;    // residual carrier (fp32 or f16 per flags bit0)
+    uint64_t skip;   // ffn_cos_skip f32 [C]
+    uint64_t dup;    // f16 duplicate dst (oG2) when flags bit1 set
+    uint32_t m;      // tokens
+    uint32_t cn;     // C (32)
+    uint32_t flags;  // F_RES16 | F_DUP16
+};
 #pragma pack(pop)
 
 enum { EPI_NONE = 0, EPI_E4M3 = 1, EPI_GATE = 2, EPI_GATE_E4M3 = 3, EPI_HALF = 4,
@@ -223,6 +241,10 @@ private:
                   uint32_t C, uint32_t kind);
     void dAttnFused(VkCommandBuffer cb, uint64_t q, uint64_t k, uint64_t v, uint64_t bias,
                     uint64_t out, uint32_t Ww, uint32_t H, bool fuseT = false);
+    void dFfnFused(VkCommandBuffer cb, int fam, uint64_t a, uint64_t w1, uint64_t w2,
+                   uint64_t w1s, uint64_t w2s, uint64_t c2,
+                   uint64_t res, uint64_t skip, uint64_t dup,
+                   uint32_t m, uint32_t C, uint32_t flags);
 
     // block recorders
     struct Cur { VkDeviceSize off; bool is16; uint32_t C; };
@@ -256,7 +278,7 @@ private:
     uint32_t T6P_ = 0;
 
     ChainPipe pGemm, pGemm1, pGemmI8, pQuantAct, pCos, pCosW, pSmax, pEw, pPart, pTrans, pGather,
-              pMerge, pFeatpack, pHeadpack, pPool, pUpM, pAttnFused;
+              pMerge, pFeatpack, pHeadpack, pPool, pUpM, pAttnFused, pFfnFused;
 
     uint64_t A(VkDeviceSize o) const { return ar_->A(o); }
     uint64_t vec(const std::string& n) const { return ar_->vecOff.at(n); }

@@ -1,4 +1,30 @@
-# DEV_STATE.md - where we are (updated 2026-10-01 by Devin)
+# DEV_STATE.md - where we are (updated 2026-10-02 by Devin)
+
+## Stage 28: SLM-resident fused FFN for fam0 window blocks (ffn_fused.comp)
+- One dispatch per fam0 window block (C=32) now runs the whole i8 FFN per
+  32-token tile: quant_act replay + w1 expand (EPI_GATE_E4M3 + per-32x32
+  tile rescale) + w2 project + EPI_RESIDUAL_* epilogue. The hidden i8 tile
+  (oG3) and its per-tile scales (oQScale2) plus oQAct/oQScale never touch
+  DRAM - they live in SLM (~25.3 KB/wg).
+- Workgroup = 4 subgroups (128 lanes): phase A gives each sg one producer
+  col-tile (same parallelism as the unfused producer's per-tile wgs),
+  phase B gives each sg one 8-row output strip with the k-loop serial per
+  element (identical fp32 accumulate order, acc in coopmat registers).
+  bit-punned floatBitsToInt keeps the published vals in the i32 scratch so
+  the ~30-op publish math runs once per element.
+- Bit-exact vs the unfused trio: golden sha256 s1.0 dc33cec0... and s0.5
+  79986353... unchanged; D5C_FFN_FUSED=0 restores the 3-dispatch path
+  (also verified bit-identical).
+- Bench 45 frames 640x384 (same-session): chain 101.7 -> 94.1 ms
+  (-7.6 ms, -7.5%). Per-dispatch sum: fam0 trio 24.4 ms -> ffn_fused
+  20.2 ms. Dispatches -20/frame, barriers -20/frame; modeled DRAM saved
+  ~250 MB/frame (oQAct w+r, oG3 w+r, oQScale/oQScale2 w+r).
+- Iteration note: first fused draft serialized all work in one 32-lane wg
+  (117.5 ms chain) and a naive 4-sg split that recomputed publish twice
+  (107.6 ms). The register-resident consumer acc + publish-once layout is
+  what beat the unfused path.
+- fam1+ (C=64-256) FFNs untouched; global fam3 FFN excluded by design.
+- Tests: noise-seed PASS, scale-reconstruction PASS, graceful-fail PASS.
 
 ## Stage 27: Temporal Conditioning (flicker root cause) + Stale-DLL Purge + Elevated-Deploy Fix (2026-10-01)
 Owner report: processing ON = whole-image "swim"/flicker in menu AND

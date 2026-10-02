@@ -213,7 +213,22 @@ void ChainRecorder::recordWindowBlock(VkCommandBuffer cb, int famIdx, int idx, c
         uint64_t dup = apart ? A(O.oG2) : 0;
         uint32_t dupFl = apart ? F_DUP16 : 0u;
 
-        if (doFusion) {
+        // ffn_fused (ffn_fused.comp): one 128-lane workgroup (4 subgroups)
+        // per 32-token tile runs the whole i8 FFN - input quant + w1 expand
+        // + w2 project with residual - with the hidden tile (oG3 i8 +
+        // oQScale2) kept in SLM.
+        // Bit-exact vs the trio it replaces (same coopmat tiles, same dequant
+        // and scale math; quant_act's scale window IS the tile). Eliminates
+        // the oQAct/oG3/oQScale/oQScale2 DRAM round-trips + 2 barriers.
+        // D5C_FFN_FUSED=0 restores the 3-dispatch path for bisecting.
+        int ffnFusedEnv = parsePilot("D5C_FFN_FUSED", nullptr, 1);
+        if (doFusion && ffnFusedEnv > 0 && C == 32) {
+            uint32_t ffl = ((epi == EPI_RESIDUAL_F16) ? 1u : 0u) | (dupFl != 0u ? 2u : 0u);
+            dFfnFused(cb, famIdx, A(x16), A(woff(w1)), A(woff(w2)),
+                      A(wscale(w1)), A(wscale(w2)), A(O.oG4),
+                      A(cur.off), A(vec(tn("block%d.layer0.ffn_cos_skip", idx))),
+                      dup, TOKS, (uint32_t)C, ffl);
+        } else if (doFusion) {
             dQuantAct(cb, A(x16), A(O.oQAct), A(O.oQScale), TOKS, (uint32_t)C);
             bar(cb);
             dGemmI8(cb, famIdx, A(O.oQAct), A(woff(w1)), A(O.oG3),
