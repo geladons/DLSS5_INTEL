@@ -40,6 +40,9 @@ const uint EPI_RESIDUAL_F16  = 6u;
 const uint EPI_COSQKV        = 7u;   // fused cosine_win publish (M12): Q/K cosine
                                      // norm + V e4m3 -> f16 oQW/oKW/oVW; the
                                      // fp32 C store is skipped entirely.
+const uint EPI_GATHER_RES    = 8u;   // fused gather_residual (M13): window-order
+                                     // proj tile -> image-order oRAW fp32 +
+                                     // ffn_res*cos_skip + optional e4m3 pub.
 
 // fp16-island rounding ops, verbatim from cosine_win.comp (EPI_COSQKV must
 // reproduce that kernel's exact float math sequence for bit-exactness).
@@ -78,6 +81,11 @@ layout(push_constant, scalar) uniform Push {
     FloatBuf cosd;          // EPI_COSQKV: per-head attn_scale fp32 [H]
                             // (with epi==COSQKV: c/res/skip carry the oQW/oKW/oVW
                             //  f16 bases instead of their other meanings)
+    uint gGeo0;             // EPI_GATHER_RES: Himg | (Wimg << 16)
+    uint gGeo1;             // EPI_GATHER_RES: padTop | padLeft<<6 | gflags<<12 | wp8<<16
+                            // (epi==GATHER_RES: c = image-order fp32 oRAW,
+                            //  res = ffn residual, skip = attn_cos_skip,
+                            //  cosd = e4m3 f16 publish dst, gated by gflags bit0)
 } pc;
 
 const uint TM = 8, TN = 16, TK = 32;
@@ -433,6 +441,57 @@ void main() {
                     }
                 }
             }
+        }
+    } else if (epilogue == EPI_GATHER_RES) {
+        // M13 gather fusion on the int8 proj path: identical math to the fp16
+        // gemm EPI_GATHER_RES, except the staged value is int32 and goes
+        // through the i8 dequant product first - val = i32acc * (act_scale *
+        // scale_b), bit-identical to the fp32 the old path wrote to oABW.
+        uint Himg = pc.gGeo0 & 0xFFFFu;
+        uint Wimg = pc.gGeo0 >> 16;
+        uint padTop = pc.gGeo1 & 0x3Fu;
+        uint padLeft = (pc.gGeo1 >> 6) & 0x3Fu;
+        uint gfl = (pc.gGeo1 >> 12) & 0xFu;
+        uint wp8 = pc.gGeo1 >> 16;
+        bool pub = (gfl & 1u) != 0u;
+        bool b16 = (gfl & 2u) != 0u;
+        uint w = gl_WorkGroupID.z;             // window index
+        uint wy = w / wp8, wx = w % wp8;
+
+        for (uint e = gl_LocalInvocationID.x * 4u; e < BM * BN; e += 32u * 4u) {
+            uint tok = row + e / BN;           // window-local token i (0..63)
+            if (tok >= pc.m) continue;
+            uint ly = tok / 8u, lx = tok % 8u;
+            int y = int(wy * 8u + ly) - int(padTop);
+            int x = int(wx * 8u + lx) - int(padLeft);
+            if (y < 0 || uint(y) >= Himg || x < 0 || uint(x) >= Wimg) continue;
+            uint io4 = (uint(y) * Wimg + uint(x)) * pc.n + col + (e % BN);
+            vec4 bv;
+            if (b16) {
+                f16vec4 r4 = Half4Buf(pc.res).v4[io4 >> 2];
+                bv = vec4(f16_widen(uint(float16BitsToUint16(r4.x))),
+                          f16_widen(uint(float16BitsToUint16(r4.y))),
+                          f16_widen(uint(float16BitsToUint16(r4.z))),
+                          f16_widen(uint(float16BitsToUint16(r4.w))));
+            } else {
+                bv = Float4Buf(pc.res).v4[io4 >> 2];
+            }
+            vec4 dv = Float4Buf(pc.skip).v4[(col + (e % BN)) >> 2];
+            vec4 av;
+            for (uint k = 0u; k < 4u; ++k)
+                av[k] = float(stage[e + k]) * (act_scale * pc.b_scale.v[col + (e % BN) + k]);
+            // per-element: val = a + b*cos. The standalone gather's driver
+            // codegen contracts this to a single fma - emit fma() explicitly
+            // so the fused epilogue rounds identically bit-for-bit.
+            vec4 val = vec4(fma(bv.x, dv.x, av.x),
+                            fma(bv.y, dv.y, av.y),
+                            fma(bv.z, dv.z, av.z),
+                            fma(bv.w, dv.w, av.w));
+            Float4Buf(pc.c).v4[io4 >> 2] = val;
+            if (pub)
+                Half4Buf(uint64_t(pc.cosd)).v4[io4 >> 2] =
+                    f16vec4(float16_t(e4m3(val.x)), float16_t(e4m3(val.y)),
+                            float16_t(e4m3(val.z)), float16_t(e4m3(val.w)));
         }
     } else {
         for (uint e = gl_LocalInvocationID.x * 4u; e < BM * BN; e += 32u * 4u) {

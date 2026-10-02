@@ -93,17 +93,21 @@ void ChainRecorder::dGemm(VkCommandBuffer cb, int fam, uint64_t a, uint64_t b, u
                           uint32_t m, uint32_t n, uint32_t k, uint32_t batch,
                           uint32_t sa, uint32_t sb, uint32_t sc,
                           uint32_t flags, uint32_t lda, uint32_t ldb, uint32_t ldc,
-                          uint64_t res, uint64_t skip, uint64_t cosd) {
+                          uint64_t res, uint64_t skip, uint64_t cosd,
+                          uint32_t gGeo0, uint32_t gGeo1) {
     (void)fam;
     constexpr uint32_t GEMM_BM = 32; // TM=8 * RM=4 (optimal Battlemage occupancy sweet spot)
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pGemm.pipe);
-    GemmPush p{a, b, c2, m, n, k, batch, sa, sb, sc, flags, lda, ldb, ldc, 0, res, skip, cosd};
+    GemmPush p{a, b, c2, m, n, k, batch, sa, sb, sc, flags, lda, ldb, ldc, 0, res, skip, cosd,
+               gGeo0, gGeo1};
     vkCmdPushConstants(cb, pGemm.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
 
     uint32_t epi = (flags >> 8) & 0xFu;
     bool res_is_16 = (epi == EPI_RESIDUAL_F16);
     bool is_res = (epi == EPI_RESIDUAL_F16 || epi == EPI_RESIDUAL_FP32);
     // EPI_COSQKV writes f16 oQW/oKW/oVW (m*n*2 total) instead of the fp32 C.
+    // EPI_GATHER_RES writes image-order oRAW fp32 + optional e4m3 publish; the
+    // residual/cos reads add m*n*(4|2) + n*4 on top of the fp32 store size.
     uint64_t outBytes = (epi == EPI_COSQKV) ? (uint64_t)m * n * 2
                                           : (uint64_t)m * n * ((flags & 0x1000) ? 2 : 4);
     uint64_t bcount = (batch == 0) ? 1 : (uint64_t)batch;
@@ -125,12 +129,12 @@ void ChainRecorder::dGemmI8(VkCommandBuffer cb, int fam, uint64_t a, uint64_t b,
                             uint32_t sa, uint32_t sb, uint32_t sc,
                             uint32_t flags, uint32_t lda, uint32_t ldb, uint32_t ldc,
                             uint64_t res, uint64_t skip, uint64_t out_scale,
-                          uint64_t cosd) {
+                          uint64_t cosd, uint32_t gGeo0, uint32_t gGeo1) {
     (void)fam;
     constexpr uint32_t GEMM_BM = 32;
     constexpr uint32_t GEMM_BN = 32;
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pGemmI8.pipe);
-    GemmI8Push p{a, b, c2, b_scale, a_scale, m, n, k, batch, sa, sb, sc, flags, lda, ldb, ldc, scale_a, res, skip, out_scale, cosd};
+    GemmI8Push p{a, b, c2, b_scale, a_scale, m, n, k, batch, sa, sb, sc, flags, lda, ldb, ldc, scale_a, res, skip, out_scale, cosd, gGeo0, gGeo1};
     vkCmdPushConstants(cb, pGemmI8.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
 
     uint64_t bcount = (batch == 0) ? 1 : (uint64_t)batch;
@@ -371,15 +375,15 @@ void ChainRecorder::dUpMerge(VkCommandBuffer cb, uint64_t a, uint64_t b, uint64_
 }
 
 void ChainRecorder::dAttnFused(VkCommandBuffer cb, uint64_t q, uint64_t k, uint64_t v, uint64_t bias,
-                               uint64_t out, uint32_t Ww, uint32_t H) {
+                               uint64_t out, uint32_t Ww, uint32_t H, bool fuseT) {
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pAttnFused.pipe);
-    AttnFusedPush p{q, k, v, bias, out, Ww, H};
+    AttnFusedPush p{q, k, v, bias, out, Ww, H, fuseT ? 1u : 0u};
     vkCmdPushConstants(cb, pAttnFused.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
 
     // Read: Q f16 [Ww*H, 64, 32] (2B) + K f16 (2B) + V f16 (2B) + bias f16 [H, 64, 64] (2B, optional)
-    // Write: out fp32 [Ww*H, 64, 32] (4B)
+    // Write: out fp32 [Ww*H, 64, 32] (4B) — or f16 token-major oATW (2B) when fuseT.
     // DRAM traffic for score (oSCW) and prob (oPRW) matrices is 100% eliminated (0 bytes).
-    uint64_t bytes = (uint64_t)Ww * H * 64 * 32 * (2 + 2 + 2 + 4)
+    uint64_t bytes = (uint64_t)Ww * H * 64 * 32 * (2 + 2 + 2 + (fuseT ? 2 : 4))
                    + (bias ? (uint64_t)H * 64 * 64 * 2 : 0);
 
     pmBegin(cb);

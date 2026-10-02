@@ -43,6 +43,9 @@ const uint EPI_RESIDUAL_F16  = 6u;
 const uint EPI_COSQKV        = 7u;   // fused cosine_win publish (M12): Q/K cosine
                                      // norm + V e4m3 -> f16 oQW/oKW/oVW; the
                                      // fp32 C store is skipped entirely.
+const uint EPI_GATHER_RES    = 8u;   // fused gather_residual (M13): window-order
+                                     // proj tile -> image-order oRAW fp32 +
+                                     // ffn_res*cos_skip + optional e4m3 pub.
 
 // fp16-island rounding ops, verbatim from cosine_win.comp (EPI_COSQKV must
 // reproduce that kernel's exact float math sequence for bit-exactness).
@@ -55,6 +58,7 @@ layout(local_size_x = 32) in;
 
 layout(buffer_reference, scalar, buffer_reference_align = 16) buffer HalfBuf  { float16_t v[]; };
 layout(buffer_reference, scalar, buffer_reference_align = 16) buffer FloatBuf { float     v[]; };
+layout(buffer_reference, scalar, buffer_reference_align = 16) buffer Float4Buf{ vec4      v4[]; };
 layout(buffer_reference, scalar, buffer_reference_align = 8)  buffer Half4Buf { f16vec4   v4[]; };
 
 layout(push_constant, scalar) uniform Push {
@@ -70,6 +74,11 @@ layout(push_constant, scalar) uniform Push {
     FloatBuf cosd;   // EPI_COSQKV: per-head attn_scale fp32 [H]
                      // (with epi==COSQKV: c/res/skip carry the oQW/oKW/oVW f16
                      //  bases instead of their residual-epilogue meanings)
+    uint gGeo0;      // EPI_GATHER_RES: Himg | (Wimg << 16)
+    uint gGeo1;      // EPI_GATHER_RES: padTop | padLeft<<6 | gflags<<12 | wp8<<16
+                     // (epi==GATHER_RES: c = image-order fp32 oRAW, res = ffn
+                     //  residual (f16 when gflags bit1), skip = attn_cos_skip,
+                     //  cosd = e4m3 f16 publish dst, gated by gflags bit0)
 } pc;
 
 const uint TM = 8, TN = 16, TK = 16;
@@ -445,6 +454,67 @@ void main() {
             float skipVal = FloatBuf(pc.skip).v[ch];
             float acc_val = float(stage[e]) + resVal * skipVal;
             pc.c.v[idx] = acc_val;
+        }
+        return;
+    }
+
+    if (epilogue == EPI_GATHER_RES) {
+        // M13 gather fusion: this tile is the windowed attention-projection
+        // output (batch z = window w, m = 64 padded window tokens, n = C
+        // channels). Replay gather_residual.comp's inverse window->image map
+        // per tile row and emit image-order fp32 oRAW (+ optional e4m3 f16
+        // publish) - padding rows store nothing, same as the standalone pass.
+        for (uint i = 0u; i < RM; i++)
+            for (uint j = 0u; j < RN; j++)
+                coopMatStore(acc[i][j], stage, i * TM * BN + j * TN, BN,
+                             gl_CooperativeMatrixLayoutRowMajor);
+
+        subgroupMemoryBarrierShared();
+        subgroupBarrier();
+
+        uint Himg = pc.gGeo0 & 0xFFFFu;
+        uint Wimg = pc.gGeo0 >> 16;
+        uint padTop = pc.gGeo1 & 0x3Fu;
+        uint padLeft = (pc.gGeo1 >> 6) & 0x3Fu;
+        uint gfl = (pc.gGeo1 >> 12) & 0xFu;
+        uint wp8 = pc.gGeo1 >> 16;
+        bool pub = (gfl & 1u) != 0u;
+        bool b16 = (gfl & 2u) != 0u;
+        uint w = gl_WorkGroupID.z;             // window index
+        uint wy = w / wp8, wx = w % wp8;
+
+        for (uint e = gl_LocalInvocationID.x * 4u; e < BM * BN; e += 32u * 4u) {
+            uint tok = row + e / BN;           // window-local token i (0..63)
+            if (tok >= pc.m) continue;
+            uint ly = tok / 8u, lx = tok % 8u;
+            int y = int(wy * 8u + ly) - int(padTop);
+            int x = int(wx * 8u + lx) - int(padLeft);
+            if (y < 0 || uint(y) >= Himg || x < 0 || uint(x) >= Wimg) continue;
+            uint io4 = (uint(y) * Wimg + uint(x)) * pc.n + col + (e % BN);
+            vec4 bv;
+            if (b16) {
+                // widen each f16 lane separately - same as gather_residual
+                f16vec4 r4 = Half4Buf(pc.res).v4[io4 >> 2];
+                bv = vec4(f16_widen(uint(float16BitsToUint16(r4.x))),
+                          f16_widen(uint(float16BitsToUint16(r4.y))),
+                          f16_widen(uint(float16BitsToUint16(r4.z))),
+                          f16_widen(uint(float16BitsToUint16(r4.w))));
+            } else {
+                bv = Float4Buf(pc.res).v4[io4 >> 2];
+            }
+            vec4 dv = Float4Buf(pc.skip).v4[(col + (e % BN)) >> 2];
+            // per-element: val = a + b*cos. The standalone gather's driver
+            // codegen contracts this to a single fma - emit fma() explicitly
+            // so the fused epilogue rounds identically bit-for-bit.
+            vec4 val = vec4(fma(bv.x, dv.x, float(stage[e + 0u])),
+                            fma(bv.y, dv.y, float(stage[e + 1u])),
+                            fma(bv.z, dv.z, float(stage[e + 2u])),
+                            fma(bv.w, dv.w, float(stage[e + 3u])));
+            Float4Buf(uint64_t(pc.c)).v4[io4 >> 2] = val;
+            if (pub)
+                Half4Buf(uint64_t(pc.cosd)).v4[io4 >> 2] =
+                    f16vec4(float16_t(e4m3(val.x)), float16_t(e4m3(val.y)),
+                            float16_t(e4m3(val.z)), float16_t(e4m3(val.w)));
         }
         return;
     }

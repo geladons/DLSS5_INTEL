@@ -79,12 +79,21 @@ void ChainRecorder::recordWindowAttn(VkCommandBuffer cb, int famIdx, int idx, co
     int fusedAttn = parsePilot("D5C_INT8_ATTN_FUSED", nullptr, 1);
     bool useFused = (fusedAttn >= 0 && (fusedAttn == 0 ? false : true));
 
+    // M13: transpose_we is pure data movement (oMGW fp32 window/head-major ->
+    // oATW e4m3-f16 token-major). The fused attn kernel stores its widened fp32
+    // O tile through shared memory and emits the exact e4m3 f16 token-major
+    // layout transpose_we would produce, so the standalone pass is skipped.
+    // D5C_FUSE_TRANS=0 restores the split oMGW -> dTrans path for bisecting.
+    int fuseTransEnv = parsePilot("D5C_FUSE_TRANS", nullptr, 1);
+    bool fuseTrans = useFused && (fuseTransEnv > 0);
+
     if (useFused) {
         // Flash-Attention fusion: 1 dispatch replaces 3 (GEMM QK^T + smaxw + GEMM PV).
         // Score (oSCW) and probability (oPRW) matrices stay on-chip in shared memory (20 KB).
         // Zero DRAM traffic for intermediate scores/probs.
         dAttnFused(cb, A(ar_->off.oQW), A(ar_->off.oKW), A(ar_->off.oVW),
-                   A(woff(biasN)), A(ar_->off.oMGW), Ww, H);
+                   A(woff(biasN)), fuseTrans ? A(ar_->off.oATW) : A(ar_->off.oMGW),
+                   Ww, H, fuseTrans);
     } else {
         dGemm(cb, famIdx, A(ar_->off.oQW), A(ar_->off.oKW), A(ar_->off.oSCW), 64, 64, 32, Ww * H,
               64 * 32, 64 * 32, 64 * 64, gflags(EPI_NONE, false) | F_TRANSPOSE, 32, 32, 64);
@@ -95,24 +104,46 @@ void ChainRecorder::recordWindowAttn(VkCommandBuffer cb, int famIdx, int idx, co
               64 * 64, 64 * 32, 64 * 32, gflags(EPI_NONE, false), 64, 32, 32);
     }
     bar(cb);
-    dTrans(cb, A(ar_->off.oMGW), A(ar_->off.oATW), Ww, H);
-    bar(cb);
+    if (!fuseTrans) {
+        dTrans(cb, A(ar_->off.oMGW), A(ar_->off.oATW), Ww, H);
+        bar(cb);
+    }
+    // M13: gather_residual is pure data movement too (oABW window-order ->
+    // oRAW image-order + ffn_residual*attn_cos_skip + optional e4m3 publish).
+    // EPI_GATHER_RES replays the gather's inverse window->image map inside the
+    // proj GEMM epilogue and writes oRAW (+e4m3 pub) directly, skipping the
+    // oABW round-trip. gGeo* pack the geometry pushes; D5C_FUSE_GATHER=0
+    // restores the oABW -> dGather path for bisecting.
+    int fuseGatherEnv = parsePilot("D5C_FUSE_GATHER", nullptr, 1);
+    bool fuseGather = (fuseGatherEnv > 0);
+    uint32_t gfl = (publish ? 1u : 0u) | (ffn16 ? 2u : 0u);
+    uint32_t gGeo0 = (uint32_t)s.H | ((uint32_t)s.W << 16);
+    uint32_t gGeo1 = padTop | (padLeft << 6) | (gfl << 12) | (wp8 << 16);
+    uint32_t projEpi = fuseGather ? EPI_GATHER_RES : EPI_NONE;
+    uint64_t projC = fuseGather ? A(rawOff) : A(ar_->off.oABW);
+    uint64_t gRes = fuseGather ? A(ffnOff) : 0;
+    uint64_t gSkip = fuseGather ? A(vec(acosN)) : 0;
+    uint64_t gPub = (fuseGather && publish) ? A(pubOff) : 0;
     if (useI8_proj) {
         dQuantAct(cb, A(ar_->off.oATW), A(ar_->off.oQAct), A(ar_->off.oQScale), Ww * 64, (uint32_t)C);
         bar(cb);
-        dGemmI8(cb, famIdx, A(ar_->off.oQAct), A(woff(projN)), A(ar_->off.oABW),
+        dGemmI8(cb, famIdx, A(ar_->off.oQAct), A(woff(projN)), projC,
                 A(wscale(projN)), A(ar_->off.oQScale), 0.0f,
                 64, (uint32_t)C, (uint32_t)C, Ww,
                 64 * (uint32_t)C, 0, 64 * (uint32_t)C,
-                gflags(EPI_NONE, false), (uint32_t)C, (uint32_t)C, (uint32_t)C);
+                gflags(projEpi, false), (uint32_t)C, (uint32_t)C, (uint32_t)C,
+                gRes, gSkip, 0, gPub, gGeo0, gGeo1);
     } else {
-        dGemm(cb, famIdx, A(ar_->off.oATW), A(woff(projN)), A(ar_->off.oABW), 64, C, C, Ww,
-              64 * C, 0, 64 * C, gflags(EPI_NONE, false), C, C, C);
+        dGemm(cb, famIdx, A(ar_->off.oATW), A(woff(projN)), projC, 64, C, C, Ww,
+              64 * C, 0, 64 * C, gflags(projEpi, false), C, C, C,
+              gRes, gSkip, gPub, gGeo0, gGeo1);
     }
     bar(cb);
-    dGather(cb, A(ar_->off.oABW), A(ffnOff), A(vec(acosN)), A(rawOff), A(publish ? pubOff : rawOff),
-            s, (uint32_t)C, padTop, padLeft, wp8, publish, ffn16);
-    bar(cb);
+    if (!fuseGather) {
+        dGather(cb, A(ar_->off.oABW), A(ffnOff), A(vec(acosN)), A(rawOff), A(publish ? pubOff : rawOff),
+                s, (uint32_t)C, padTop, padLeft, wp8, publish, ffn16);
+        bar(cb);
+    }
 }
 
 // FFN + attention for one window block; writes raw (always) + pub (if publish).

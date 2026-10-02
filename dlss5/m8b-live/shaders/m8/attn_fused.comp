@@ -42,9 +42,11 @@ layout(push_constant, scalar) uniform Push {
     uint64_t k;        // oKW f16 [Ww*H, 64, 32]
     uint64_t v;        // oVW f16 [Ww*H, 64, 32]
     uint64_t bias;     // attn_bias f16 [H, 64, 64] or 0
-    uint64_t dst;      // oMGW fp32 [Ww*H, 64, 32] output
+    uint64_t dst;      // oMGW fp32 [Ww*H, 64, 32] output; flags bit0: oATW f16
     uint     Ww;       // number of windows
     uint     H;        // number of heads
+    uint     flags;    // bit0: fused transpose store -> dst is oATW f16
+                       // token-major [Ww, 64, C] (C = H*32), e4m3 published
 } pc;
 
 const uint TM = 8u, TN = 16u, TK = 16u;
@@ -55,6 +57,7 @@ const uint PADDED_STRIDE = 68u; // 64 cols + 4 pad elements (eliminates bank con
 
 shared float16_t sQ[32 * 32];                // 2048 bytes
 shared float16_t sS[32 * PADDED_STRIDE];     // 4352 bytes (scores then probs)
+shared float     sO[32 * 32];                // 4096 bytes (fused-store staging)
 
 void main() {
     uint halfId = gl_WorkGroupID.x;
@@ -191,15 +194,47 @@ void main() {
                     accPV[i][j] = coopMatMulAdd(a[i], b[j], accPV[i][j]);
         }
 
-        // Store widened to fp32 directly into pc.dst (oMGW)
-        uint outBase = (wh * 64u + rowBase) * 32u;
-        for (uint i = 0u; i < RM; ++i)
-            for (uint j = 0u; j < RN; ++j) {
-                coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> wide =
-                    coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(accPV[i][j]);
-                coopMatStore(wide, FloatBuf(pc.dst).v,
-                             outBase + (i * TM) * 32u + j * TN,
-                             32u, gl_CooperativeMatrixLayoutRowMajor);
+        if ((pc.flags & 1u) != 0u) {
+            // M13 fused transpose store: replicate transpose_we.comp bitwise.
+            // Stage the widened fp32 O tile in shared (the same values the fp32
+            // store would land in oMGW), then each lane converts one token row
+            // with e4m3 and writes it into the token-major f16 oATW:
+            //   transpose_we: rd = ((w*H + hd)*64 + t)*32 + d   (oMGW fp32)
+            //                 wr = (w*64 + t)*C + hd*32 + d     (oATW f16)
+            // here wh = w*H + head and the tile row r is token t = rowBase + r.
+            for (uint i = 0u; i < RM; ++i)
+                for (uint j = 0u; j < RN; ++j) {
+                    coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> wide =
+                        coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(accPV[i][j]);
+                    coopMatStore(wide, sO, (i * TM) * 32u + j * TN,
+                                 32u, gl_CooperativeMatrixLayoutRowMajor);
+                }
+
+            barrier();
+
+            uint w = wh / pc.H;
+            uint C = pc.H * 32u;
+            uint ioBase = (w * 64u + rowBase + tid) * C + head * 32u;
+            uint rb = tid * 32u;
+            for (uint k = 0u; k < 8u; ++k) {
+                f16vec4 out4 = f16vec4(
+                    float16_t(e4m3(sO[rb + k * 4u + 0u])),
+                    float16_t(e4m3(sO[rb + k * 4u + 1u])),
+                    float16_t(e4m3(sO[rb + k * 4u + 2u])),
+                    float16_t(e4m3(sO[rb + k * 4u + 3u])));
+                Half4Buf(pc.dst).v4[(ioBase >> 2u) + k] = out4;
             }
+        } else {
+            // Store widened to fp32 directly into pc.dst (oMGW)
+            uint outBase = (wh * 64u + rowBase) * 32u;
+            for (uint i = 0u; i < RM; ++i)
+                for (uint j = 0u; j < RN; ++j) {
+                    coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> wide =
+                        coopmat<float, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator>(accPV[i][j]);
+                    coopMatStore(wide, FloatBuf(pc.dst).v,
+                                 outBase + (i * TM) * 32u + j * TN,
+                                 32u, gl_CooperativeMatrixLayoutRowMajor);
+                }
+        }
     }
 }

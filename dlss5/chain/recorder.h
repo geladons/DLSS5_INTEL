@@ -41,6 +41,11 @@ struct GemmPush {
     uint64_t skip;
     uint64_t cosd;   // EPI_COSQKV only: per-head attn_scale fp32 [H]
                      // (epi==COSQKV also reuses c/res/skip as oQW/oKW/oVW f16 bases)
+                     // EPI_GATHER_RES: reused as the e4m3 f16 publish dst (h);
+                     //  c = image-order fp32 oRAW, res = ffn residual, skip = cos
+    uint32_t gGeo0;  // EPI_GATHER_RES: Himg | (Wimg << 16)
+    uint32_t gGeo1;  // EPI_GATHER_RES: padTop | padLeft<<6 | gflags<<12 | wp8<<16
+                     //  (gflags bit0 publish, bit1 residual is f16)
 };
 
 struct GemmI8Push {
@@ -57,7 +62,10 @@ struct GemmI8Push {
     uint64_t res;
     uint64_t skip;
     uint64_t out_scale;
-    uint64_t cosd;   // EPI_COSQKV only (same field reuse as GemmPush)
+    uint64_t cosd;   // EPI_COSQKV only (same field reuse as GemmPush);
+                     // EPI_GATHER_RES: e4m3 f16 publish dst (h), same as GemmPush
+    uint32_t gGeo0;  // EPI_GATHER_RES: Himg | (Wimg << 16)
+    uint32_t gGeo1;  // EPI_GATHER_RES: padTop | padLeft<<6 | gflags<<12 | wp8<<16
 };
 
 struct QuantActPush {
@@ -110,14 +118,16 @@ struct AttnFusedPush {
     uint64_t k;        // oKW f16 [Ww*H, 64, 32]
     uint64_t v;        // oVW f16 [Ww*H, 64, 32]
     uint64_t bias;     // attn_bias f16 [H, 64, 64] or 0
-    uint64_t dst;      // oMGW fp32 [Ww*H, 64, 32] output
+    uint64_t dst;      // oMGW fp32 output; flags bit0: oATW f16 token-major
     uint32_t Ww;       // number of windows
     uint32_t H;        // number of heads
+    uint32_t flags;    // bit0: fused transpose store (transpose_we folded in)
 };
 #pragma pack(pop)
 
 enum { EPI_NONE = 0, EPI_E4M3 = 1, EPI_GATE = 2, EPI_GATE_E4M3 = 3, EPI_HALF = 4,
-       EPI_RESIDUAL_FP32 = 5, EPI_RESIDUAL_F16 = 6, EPI_COSQKV = 7 };
+       EPI_RESIDUAL_FP32 = 5, EPI_RESIDUAL_F16 = 6, EPI_COSQKV = 7,
+       EPI_GATHER_RES = 8 };
 enum { F_NARROW = 0x1000, F_TRANSPOSE = 1, F_FUSED_I8_PRODUCER = 0x2000, F_FUSED_I8_CONSUMER = 0x4000 };
 
 struct ChainPipe {
@@ -169,14 +179,15 @@ private:
                uint32_t m, uint32_t n, uint32_t k, uint32_t batch,
                uint32_t sa, uint32_t sb, uint32_t sc,
                uint32_t flags, uint32_t lda, uint32_t ldb, uint32_t ldc,
-               uint64_t res = 0, uint64_t skip = 0, uint64_t cosd = 0);
+               uint64_t res = 0, uint64_t skip = 0, uint64_t cosd = 0,
+               uint32_t gGeo0 = 0, uint32_t gGeo1 = 0);
     void dGemmI8(VkCommandBuffer cb, int fam, uint64_t a, uint64_t b, uint64_t c2,
                  uint64_t b_scale, uint64_t a_scale, float scale_a,
                  uint32_t m, uint32_t n, uint32_t k, uint32_t batch,
                  uint32_t sa, uint32_t sb, uint32_t sc,
                  uint32_t flags, uint32_t lda, uint32_t ldb, uint32_t ldc,
                  uint64_t res = 0, uint64_t skip = 0, uint64_t out_scale = 0,
-                 uint64_t cosd = 0);
+                 uint64_t cosd = 0, uint32_t gGeo0 = 0, uint32_t gGeo1 = 0);
     void dQuantAct(VkCommandBuffer cb, uint64_t a, uint64_t aq, uint64_t scales,
                    uint32_t m, uint32_t k);
     void dEw(VkCommandBuffer cb, uint64_t a, uint64_t b, uint64_t c2, uint64_t d,
@@ -201,7 +212,7 @@ private:
                   uint64_t cos, uint64_t h, const Stage& tgt, const Stage& low,
                   uint32_t C, uint32_t kind);
     void dAttnFused(VkCommandBuffer cb, uint64_t q, uint64_t k, uint64_t v, uint64_t bias,
-                    uint64_t out, uint32_t Ww, uint32_t H);
+                    uint64_t out, uint32_t Ww, uint32_t H, bool fuseT = false);
 
     // block recorders
     struct Cur { VkDeviceSize off; bool is16; uint32_t C; };
