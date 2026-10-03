@@ -1557,12 +1557,26 @@ static int ensure_ring(device_data *data)
     return 0;
 }
 
+static int diag_active(void);   /* fwd: per-present diagnostics gate */
+
 /* Move the presented frame between the swapchain image and the staging
  * buffer. idle sync = vkQueueWaitIdle around the transfer (default, proven);
  * semaphore sync = take over the present's wait semaphores (NR_LAYER_SYNC). */
 static int transfer(device_data *data, swapchain_data *chain, VkQueue queue,
                     uint32_t index, int to_image)
 {
+    /* Diagnostic marker (NR_LAYER_DIAG): stamp magic + frame counter into the
+     * first pixels of every uploaded buffer. The staging image is host-visible
+     * so the GPU copy picks this up at execution. A screen-captured "insert"
+     * frame carrying this mark proves it left through our upload path; without
+     * it, the insert arrived through a non-Vulkan surface. */
+    if (to_image && diag_active() && data->mapped && data->staging_size >= 8) {
+        unsigned char *mk = (unsigned char *)data->mapped;
+        mk[0] = 'N'; mk[1] = 'R'; mk[2] = 'M'; mk[3] = 'K';
+        mk[4] = (unsigned char)(frame_counter & 0xFF);
+        mk[5] = (unsigned char)((frame_counter >> 8) & 0xFF);
+        mk[6] = 0; mk[7] = 0;
+    }
     PFN_vkAllocateCommandBuffers allocate_commands = (PFN_vkAllocateCommandBuffers)
         data->get_device_proc(data->device, "vkAllocateCommandBuffers");
     PFN_vkBeginCommandBuffer begin = (PFN_vkBeginCommandBuffer)
@@ -1766,6 +1780,31 @@ static void dump_capture(const char *path, const uint32_t *header,
     fclose(file);
 }
 
+/* Per-present diagnostics (NR_LAYER_DIAG=1): one line per live-mode present
+ * naming the path that produced it plus a cheap CRC of the buffer that was
+ * uploaded to the swapchain image. Lets a captured "insert" frame be traced
+ * back to the exact code path that produced (or failed to overwrite) it. */
+static int diag_enabled = -1;
+static const char *diag_path = "?";
+static int diag_active(void)
+{
+    if (diag_enabled < 0) {
+        const char *e = getenv("NR_LAYER_DIAG");
+        diag_enabled = (e && *e && *e != '0');
+    }
+    return diag_enabled;
+}
+static uint32_t diag_crc(const void *p, VkDeviceSize n)
+{
+    const unsigned char *b = (const unsigned char *)p;
+    uint32_t h = 2166136261u;
+    if (!b || !n) return 0;
+    for (VkDeviceSize i = 0; i < n; i += 4093)
+        h = (h ^ b[i]) * 16777619u;
+    h = (h ^ b[n - 1]) * 16777619u;
+    return h;
+}
+
 static int process_frame(device_data *data, swapchain_data *chain,
                          VkQueue queue, uint32_t index)
 {
@@ -1778,17 +1817,20 @@ static int process_frame(device_data *data, swapchain_data *chain,
         if (deg_log == NR_DEGRADE_LOG_DEGENERATE)
             nr_log("[nr_layer] degenerate swapchain %ux%u; passing through",
                    chain->extent.width, chain->extent.height);
+        diag_path = "degen";
         return -1;
     }
     VkDeviceSize needed = (VkDeviceSize)chain->extent.width * chain->extent.height * 4;
     if (ensure_resources(data, needed)) {
         nr_log("[nr_layer] ensure_resources failed (%ux%u); raw out (frame %lu)",
                chain->extent.width, chain->extent.height, frame_counter);
+        diag_path = "eres";
         return -1;
     }
     if (transfer(data, chain, queue, index, 0)) {
         nr_log("[nr_layer] readback failed (%ux%u); raw out (frame %lu)",
                chain->extent.width, chain->extent.height, frame_counter);
+        diag_path = "rbfail";
         return -1;
     }
 
@@ -1805,6 +1847,7 @@ static int process_frame(device_data *data, swapchain_data *chain,
         data->result_h == chain->extent.height &&
         data->holding_chain == chain->swapchain) {
         memcpy(data->mapped, data->result, (size_t)needed);
+        diag_path = "reuse";
         return 0;
     }
 
@@ -1814,6 +1857,7 @@ static int process_frame(device_data *data, swapchain_data *chain,
         if (!grown) {
             nr_log("[nr_layer] earlier-buffer alloc failed; raw out (frame %lu)",
                    frame_counter);
+            diag_path = "ealloc";
             return -1;
         }
         data->earlier = grown;
@@ -1858,13 +1902,14 @@ static int process_frame(device_data *data, swapchain_data *chain,
             dump_capture(capture_out_path, header, (const unsigned char *)data->mapped, needed);
             nr_log("[nr_layer] in-process processed %ux%u (frame %lu)",
                    chain->extent.width, chain->extent.height, frame_counter);
+            diag_path = "inproc";
             return 0;
         }
         nr_log("[nr_layer] in-process process_frame returned %d; trying TCP fallback", r);
     }
 
     /* No daemon configured: capture-only mode (frame passes through). */
-    if (!nr_port) return -1;
+    if (!nr_port) { diag_path = "noport"; return -1; }
     /* Probe pacing: while a flap/outage is in progress only every Nth
      * present touches the socket; the rest are served from the held result
      * (or natively when the held extent does not match) without paying the
@@ -1878,10 +1923,12 @@ static int process_frame(device_data *data, swapchain_data *chain,
             && data->holding_chain == chain->swapchain) {
             memcpy(data->mapped, data->result, (size_t)needed);
             nr_degrade_note_held(&g_dg);
+            diag_path = "pheld";
             return 0;
         }
         nr_log("[nr_layer] probe paced and no held result; raw out (frame %lu)",
                frame_counter);
+        diag_path = "praw";
         return -1;
     }
     /* The reply lands in data->mapped (the payload is fully sent before the
@@ -1908,11 +1955,13 @@ static int process_frame(device_data *data, swapchain_data *chain,
             if (dlog == NR_DEGRADE_LOG_HICCUP)
                 nr_log("[nr_layer] daemon hiccup; holding last processed "
                        "frame (fail %u)", g_dg.consecutive_fail);
+            diag_path = "hold";
             return 0;
         }
         if (dlog == NR_DEGRADE_LOG_DOWN)
             nr_log("[nr_layer] daemon considered down; native passthrough");
         nr_log("[nr_layer] the daemon did not answer; frame unchanged");
+        diag_path = "exfail";
         return -1;
     }
     if (nr_degrade_note_success(&g_dg, nr_now_ms())
@@ -1936,6 +1985,7 @@ static int process_frame(device_data *data, swapchain_data *chain,
     data->earlier_pending = 0;
     dump_capture(capture_out_path, header, data->result, needed);
     nr_log("[nr_layer] processed %ux%u", chain->extent.width, chain->extent.height);
+    diag_path = "tcp";
     return 0;
 }
 
@@ -2296,6 +2346,8 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
         int fg_avail = fg_inprocess || fg_daemon;
         int should_process = nr_fg_should_process(&g_fg, frame_counter,
                                                   fg_enabled, fg_avail);
+        diag_path = "?";
+        int diag_tr = -1;
         if (should_process) {
             int ok = (process_frame(data, chain, queue, index) == 0);
             if (!ok) {
@@ -2314,16 +2366,19 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                     nr_log("[nr_layer] process failed; held last processed "
                            "frame (frame %lu)", frame_counter);
                     ok = 1;
+                    diag_path = "sheld";
                 } else {
                     nr_log("[nr_layer] process failed and no held result; "
                            "raw out (frame %lu)", frame_counter);
+                    diag_path = "raw";
                 }
             }
             if (ok) {
                 nr_fg_note(&g_fg, NR_FG_PROCESSED);
                 data->holding = 1;
                 data->holding_chain = chain->swapchain;
-                if (transfer(data, chain, queue, index, 1))
+                diag_tr = transfer(data, chain, queue, index, 1);
+                if (diag_tr)
                     nr_log("[nr_layer] write-back failed; raw out (frame %lu)",
                            frame_counter);
             }
@@ -2377,7 +2432,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                                        chain->extent.width, chain->extent.height, frame_counter, fg_frame_count);
                             }
                             memcpy(data->mapped, data->interp, (size_t)want);
-                            transfer(data, chain, queue, index, 1);
+                            diag_tr = transfer(data, chain, queue, index, 1);
                             generated = 1;
                         } else if (g_fg.native < 3) {
                             nr_log("[nr_layer] dlss5_framegen_transfer failed (%d); presenting native frame", r);
@@ -2405,7 +2460,8 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                                    frame_counter, fg_tcp_count);
                         }
                         nr_degrade_note_success(&g_dg, nr_now_ms());
-                        if (transfer(data, chain, queue, index, 1) == 0)
+                        diag_tr = transfer(data, chain, queue, index, 1);
+                        if (diag_tr == 0)
                             generated = 1;
                     } else {
                         /* Old daemon without NRN2 support / wedged / dead
@@ -2420,6 +2476,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                 }
             }
             nr_fg_note(&g_fg, generated ? NR_FG_GENERATED : NR_FG_NATIVE);
+            diag_path = generated ? "fgd" : "fgn";
         } else {
             /* Cadence-skipped present (NR_LAYER_LIVE=N>1): re-blit the held
              * processed result of this extent - the documented behaviour -
@@ -2432,9 +2489,11 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                 && data->result_h == chain->extent.height
                 && data->holding_chain == chain->swapchain) {
                 memcpy(data->mapped, data->result, (size_t)want);
-                held = (transfer(data, chain, queue, index, 1) == 0);
+                diag_tr = transfer(data, chain, queue, index, 1);
+                held = (diag_tr == 0);
             }
             nr_fg_note(&g_fg, held ? NR_FG_PROCESSED : NR_FG_NATIVE);
+            diag_path = held ? "eheld" : "enat";
             if (fg_enabled && !fg_avail && !g_fg.unavailable_logged) {
                 nr_log("[nr_layer] framegen requested but unavailable "
                        "(no in-process engine; daemon not up or NRN2 "
@@ -2446,6 +2505,12 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
             nr_log("[nr_layer] fg stats: presents=%lu processed=%lu "
                    "generated=%lu native=%lu",
                    g_fg.presents, g_fg.processed, g_fg.generated, g_fg.native);
+        }
+        if (diag_active()) {
+            nr_log("[diag] f=%lu sc=%p idx=%u p=%s up=%08x res=%08x tr=%d",
+                   frame_counter, (void *)chain->swapchain, index, diag_path,
+                   diag_crc(data->mapped, want),
+                   diag_crc(data->result, data->result_size), diag_tr);
         }
         }
     }
