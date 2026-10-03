@@ -2270,3 +2270,10 @@ Metro deploy resynced.
 Not done (Stage 2+): multi-scale/pyramid flow, per-region confidence
 map, live mode switching through the knob file, field A/B on GTA IV +
 RDR2 + Metro.
+
+Live field smoke (this session, GTA IV x86 -> daemon NRN3, 800x600):
+p=fgi/p=mheld alternation on every present, fg stats
+presents=6900 processed=6836 generated=3417 native=0 - 3453 generated
+frames through the real daemon socket, zero native fallthrough.
+NRN2 regression: +fg reply in 1.5 ms against the new daemon (old x86
+clients unaffected).
