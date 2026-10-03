@@ -70,6 +70,7 @@
 static const uint32_t MAGIC_PLAIN = 0x304E524Eu;
 static const uint32_t MAGIC_MASKED = 0x314E524Eu;
 static const uint32_t MAGIC_FGT = 0x324E524Eu;    // "NRN2" - framegen transfer
+static const uint32_t MAGIC_FGI = 0x334E524Eu;    // "NRN3" - framegen interpolate (mode 2)
 static const uint32_t MAGIC_CTRL = 0x5443524Eu;   // "NRCT" - M13 control
 
 // ---------------------------------------------------------------- BMP I/O --
@@ -200,6 +201,19 @@ static bool sehTransferFrame(d5c::ChainEngine* eng, uint32_t w, uint32_t h,
         return false;
     }
 }
+// Same containment for the mode-2 anchor interpolation (the payload `mid`
+// is the REAL middle frame, not the current raw - do not confuse with
+// transferFrame's curRaw upload).
+static bool sehInterpAnchors(d5c::ChainEngine* eng, uint32_t w, uint32_t h,
+                             const uint8_t* mid, uint8_t* out, d5c::FrameStats* st) {
+    __try {
+        return eng->interpolateAnchors(w, h, mid, out, 0.5f, st);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        std::fprintf(stderr, "[m11d] SEH 0x%08lx inside interpolateAnchors - falling back to a full process\n",
+                     (unsigned long)GetExceptionCode());
+        return false;
+    }
+}
 static bool sehEngineInit(d5c::ChainEngine* eng, const d5c::EngineConfig* cfg) {
     __try {
         return eng->init(*cfg);
@@ -274,12 +288,19 @@ int main(int argc, char** argv) {
     float gain = p30Ctl.params().intensity;
     float blend = p30Ctl.params().intensity;
     float scale = 1.0f;
-    bool frameGen = true;
+    int fgMode = 1;    // 0 = off, 1 = residual transfer, 2 = anchor interp
     const char* fg_env = std::getenv("DLSS5_FRAMEGEN");
     if (!fg_env) fg_env = std::getenv("NR_LAYER_FRAMEGEN");
     if (fg_env) {
-        frameGen = (std::strcmp(fg_env, "0") != 0);
+        fgMode = (std::strcmp(fg_env, "0") != 0) ? fgMode : 0;
     }
+    const char* fm_env = std::getenv("DLSS5_FG_MODE");
+    if (!fm_env) fm_env = std::getenv("NR_LAYER_FG_MODE");
+    if (fm_env) {
+        int m = std::atoi(fm_env);
+        fgMode = (m >= 0 && m <= 2) ? m : fgMode;
+    }
+    int fgModeConfigured = fgMode;
     bool dump = false;
     std::string selftest;
     std::string benchProf;
@@ -313,7 +334,11 @@ int main(int argc, char** argv) {
             gain = blend;
         }
         else if (a == "--scale" && i + 1 < argc) scale = (float)std::atof(argv[++i]);
-        else if (a == "--framegen" && i + 1 < argc) frameGen = (std::atoi(argv[++i]) != 0);
+        else if (a == "--framegen" && i + 1 < argc) {
+            int m = std::atoi(argv[++i]);
+            fgMode = (m >= 0 && m <= 2) ? m : (m != 0);
+            fgModeConfigured = fgMode;
+        }
         else if (a == "--weights" && i + 1 < argc) weights = argv[++i];
         else if (a == "--shader-dir" && i + 1 < argc) {
             shaderDir = argv[++i];
@@ -356,7 +381,7 @@ int main(int argc, char** argv) {
         }
         else if (a == "--prof" && i + 1 < argc) benchProf = argv[++i];
         else {
-            std::fprintf(stderr, "usage: m11d [--port N] [--gain F] [--blend F] [--scale F] [--framegen <0|1>] [--weights PATH] [--dump] "
+            std::fprintf(stderr, "usage: m11d [--port N] [--gain F] [--blend F] [--scale F] [--framegen <0|1|2>] [--weights PATH] [--dump] "
                                  "[--intensity F] [--local-tone F] [--local-structure F] [--skin-structure F] [--auto-mask <0|1>] "
                                  "[--style-index <0|1|2>] [--color-strength F] [--selftest file.bmp] [--bench N WxH [--prof out.csv]]\n");
             return 1;
@@ -371,7 +396,7 @@ int main(int argc, char** argv) {
                 weights.c_str(), (double)p30Ctl.params().intensity, (double)p30Ctl.params().localTone,
                 (double)p30Ctl.params().localStructure, (double)p30Ctl.params().skinStructure,
                 p30Ctl.params().autoMask ? 1 : 0, p30Ctl.params().styleIndex, (double)p30Ctl.params().colorStrength,
-                (double)scale, frameGen ? 1 : 0);
+                (double)scale, fgMode);
 
     d5c::ChainEngine engine;
     uint32_t curW = 0, curH = 0;
@@ -417,6 +442,7 @@ int main(int argc, char** argv) {
             return false;   // curW/curH stay 0 -> the next frame re-inits clean
         }
         curW = w; curH = h;
+        engine.setFrameGenMode(fgMode >= 2 ? 2 : 1);
         return true;
     };
 
@@ -650,11 +676,12 @@ int main(int argc, char** argv) {
                 } else {
                     std::fprintf(stderr, "[m11d] ctrl: scale %.2f out of range\n", (double)s);
                 }
-            } else if (hdr[1] == 5) {            // SETFRAMEGEN
-                frameGen = (hdr[2] != 0);
-                if (!frameGen) havePrev = false;
+            } else if (hdr[1] == 5) {            // SETFRAMEGEN (on/off; mode preserved)
+                fgMode = (hdr[2] != 0) ? (fgModeConfigured ? fgModeConfigured : 1) : 0;
+                if (!fgMode) havePrev = false;
+                engine.setFrameGenMode(fgMode >= 2 ? 2 : 1);
                 rep[1] = 1;
-                std::printf("[m11d] ctrl: framegen -> %d\n", frameGen ? 1 : 0);
+                std::printf("[m11d] ctrl: framegen -> %d\n", fgMode);
             } else if (hdr[1] == 6) {            // SETLOCALTONE: hdr[2] = float bits
                 float v = 0.0f;
                 std::memcpy(&v, &hdr[2], 4);
@@ -704,6 +731,15 @@ int main(int argc, char** argv) {
                 engine.setTemporal(hdr[2] != 0);
                 rep[1] = 1;
                 std::printf("[m11d] ctrl: temporal -> %d\n", hdr[2] ? 1 : 0);
+            } else if (hdr[1] == 14) {           // SETFGMODE: hdr[2] = 0/1/2
+                int m = (int)hdr[2];
+                if (m < 0 || m > 2) m = 1;
+                fgMode = m;
+                fgModeConfigured = m;
+                if (!fgMode) havePrev = false;
+                engine.setFrameGenMode(fgMode >= 2 ? 2 : 1);
+                rep[1] = 1;
+                std::printf("[m11d] ctrl: fg mode -> %d\n", fgMode);
             } else {
                 std::fprintf(stderr, "[m11d] ctrl: unknown cmd %u\n", hdr[1]);
             }
@@ -719,7 +755,8 @@ int main(int argc, char** argv) {
         }
         const bool masked = hdr[0] == MAGIC_MASKED;
         const bool fgReq  = hdr[0] == MAGIC_FGT;
-        if (hdr[0] != MAGIC_PLAIN && !masked && !fgReq) {
+        const bool fgiReq = hdr[0] == MAGIC_FGI;
+        if (hdr[0] != MAGIC_PLAIN && !masked && !fgReq && !fgiReq) {
             std::fprintf(stderr, "[m11d] bad magic 0x%08x - dropping connection\n", hdr[0]);
             closesocket(s); continue;
         }
@@ -783,12 +820,28 @@ int main(int argc, char** argv) {
             // a refused/faulted transfer - falls back to a full process so
             // the reply is always a presentable frame (and refreshes the
             // prev pair as a side effect).
-            bool transferred = false;
+            // NRN2 (FGTRANSFER, mode 1): residual-transfer framegen. NRN3
+            // (FGINTERP, mode 2): midpoint of the last two processed anchors
+            // - the payload is the REAL middle frame the layer captured at
+            // the previous mid present, not the current raw. Everything else
+            // - first frame, post-reset/gap, engine re-init, FG toggled off,
+            // or a refused/faulted transfer - falls back to a full process so
+            // the reply is always a presentable frame (and rotates anchors
+            // as a side effect).
+            int generated = 0;   // 0=processed, 1=transferred, 2=interpolated
             bool ok;
-            if (fgReq && frameGen && havePrev) {
+            if (fgiReq && fgMode >= 2 && havePrev) {
+                ok = sehInterpAnchors(&engine, w, h, inBuf.data(), outBuf.data(), &st);
+                if (ok) {
+                    generated = 2;
+                } else {
+                    std::fprintf(stderr, "[m11d] interpolateAnchors failed - processing instead\n");
+                    ok = sehProcessFrame(&engine, inBuf.data(), outBuf.data(), frameCounter, &st);
+                }
+            } else if (fgReq && fgMode && havePrev) {
                 ok = sehTransferFrame(&engine, w, h, inBuf.data(), outBuf.data(), &st);
                 if (ok) {
-                    transferred = true;
+                    generated = 1;
                 } else {
                     std::fprintf(stderr, "[m11d] transferFrame failed - processing instead\n");
                     ok = sehProcessFrame(&engine, inBuf.data(), outBuf.data(), frameCounter, &st);
@@ -800,7 +853,7 @@ int main(int argc, char** argv) {
             double wall = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - t0).count();
             if (ok) {
-                if (!transferred) {
+                if (!generated) {
                     // Only a real process refreshes the prev pair - a
                     // generated frame is not a reconstruction and must stay
                     // out of the transfer baseline (x64 parity). The pair
@@ -825,15 +878,20 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "[m11d] reply write failed\n");
                 std::printf("[m11d] frame %ld %ux%u%s%s in %.1f ms (%s %.1f)\n",
                             frameCounter, w, h, masked ? " +mask" : "",
-                            transferred ? " +fg" : (fgReq ? " +fg-fallback" : ""),
-                            wall, transferred ? "transfer" : "chain",
-                            transferred ? st.gpuTotalMs : st.chainMs);
+                            generated == 2 ? " +fgi" :
+                            generated == 1 ? " +fg" :
+                            ((fgReq || fgiReq) ? " +fg-fallback" : ""),
+                            wall,
+                            generated == 2 ? "interp" :
+                            generated == 1 ? "transfer" : "chain",
+                            generated ? st.gpuTotalMs : st.chainMs);
             } else {
                 // Do NOT echo the input: a "successful" raw reply is presented
                 // as a processed frame by the layer - a quality strobe.
                 // Closing without a reply makes the layer treat this as a
                 // transport failure and hold the last processed frame.
                 std::fprintf(stderr, "[m11d] %s FAILED - closing, no reply\n",
+                            fgiReq ? "fginterp/process" :
                             fgReq ? "fgtransfer/process" : "processFrame");
                 havePrev = false;   // a torn frame can leave the prev pair dirty
                 // A mid-frame fault (device lost etc.) leaves the engine
