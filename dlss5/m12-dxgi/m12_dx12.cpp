@@ -58,8 +58,11 @@ static PFN_dlss5_set_blend pfn_dlss5_set_blend = NULL;
 static PFN_dlss5_set_sharpness pfn_dlss5_set_sharpness = NULL;
 static PFN_dlss5_interpolate_frame pfn_dlss5_interpolate_frame = NULL;
 static PFN_dlss5_framegen_transfer pfn_dlss5_framegen_transfer = NULL;
+static PFN_dlss5_framegen_interpolate pfn_dlss5_framegen_interpolate = NULL;
 static PFN_dlss5_set_framegen pfn_dlss5_set_framegen = NULL;
 static PFN_dlss5_get_framegen pfn_dlss5_get_framegen = NULL;
+static PFN_dlss5_set_framegen_mode pfn_dlss5_set_framegen_mode = NULL;
+static PFN_dlss5_get_framegen_mode pfn_dlss5_get_framegen_mode = NULL;
 static PFN_dlss5_set_phase30 pfn_dlss5_set_phase30 = NULL;
 static PFN_dlss5_set_intensity pfn_dlss5_set_intensity = NULL;
 static PFN_dlss5_set_local_tone pfn_dlss5_set_local_tone = NULL;
@@ -104,6 +107,22 @@ static bool is_framegen_enabled()
         return pfn_dlss5_get_framegen(g_engine) == 1;
     }
     return false;
+}
+
+/* FG algorithm: 1 = residual transfer (+0 latency), 2 = anchor-to-anchor
+ * interpolation (+1 frame). Env override M12_FG_MODE/DLSS5_FG_MODE wins;
+ * else the engine's effective mode; default 1 for deployments without
+ * fginterp.spv. */
+static int framegen_mode()
+{
+    const char *fm = getenv("M12_FG_MODE");
+    if (!fm) fm = getenv("DLSS5_FG_MODE");
+    if (fm && fm[0]) return (atoi(fm) == 2) ? 2 : 1;
+    if (g_engine && pfn_dlss5_get_framegen_mode) {
+        int m = pfn_dlss5_get_framegen_mode(g_engine);
+        return (m == 2) ? 2 : 1;
+    }
+    return 1;
 }
 
 static const char *knob_file_path()
@@ -410,8 +429,11 @@ static void ensure_inprocess()
     pfn_dlss5_set_sharpness = (PFN_dlss5_set_sharpness)GetProcAddress(hDll, "dlss5_set_sharpness");
     pfn_dlss5_interpolate_frame = (PFN_dlss5_interpolate_frame)GetProcAddress(hDll, "dlss5_interpolate_frame");
     pfn_dlss5_framegen_transfer = (PFN_dlss5_framegen_transfer)GetProcAddress(hDll, "dlss5_framegen_transfer");
+    pfn_dlss5_framegen_interpolate = (PFN_dlss5_framegen_interpolate)GetProcAddress(hDll, "dlss5_framegen_interpolate");
     pfn_dlss5_set_framegen = (PFN_dlss5_set_framegen)GetProcAddress(hDll, "dlss5_set_framegen");
     pfn_dlss5_get_framegen = (PFN_dlss5_get_framegen)GetProcAddress(hDll, "dlss5_get_framegen");
+    pfn_dlss5_set_framegen_mode = (PFN_dlss5_set_framegen_mode)GetProcAddress(hDll, "dlss5_set_framegen_mode");
+    pfn_dlss5_get_framegen_mode = (PFN_dlss5_get_framegen_mode)GetProcAddress(hDll, "dlss5_get_framegen_mode");
     pfn_dlss5_set_phase30 = (PFN_dlss5_set_phase30)GetProcAddress(hDll, "dlss5_set_phase30");
     pfn_dlss5_set_intensity = (PFN_dlss5_set_intensity)GetProcAddress(hDll, "dlss5_set_intensity");
     pfn_dlss5_set_local_tone = (PFN_dlss5_set_local_tone)GetProcAddress(hDll, "dlss5_set_local_tone");
@@ -519,6 +541,12 @@ static void ensure_inprocess()
     if (fg_env && pfn_dlss5_set_framegen && g_engine) {
         int enable = (fg_env[0] == '1' || !strcmp(fg_env, "true") || !strcmp(fg_env, "on")) ? 1 : 0;
         pfn_dlss5_set_framegen(g_engine, enable);
+    }
+    /* Push the resolved FG algorithm so the engine's per-frame anchor
+     * rotation runs in the mode the present cadence expects (the engine
+     * clamps to 1 when fginterp.spv is absent). */
+    if (pfn_dlss5_set_framegen_mode && g_engine) {
+        pfn_dlss5_set_framegen_mode(g_engine, framegen_mode());
     }
 
     g_inprocess_active = 1;
@@ -704,6 +732,7 @@ bool M12Dx12Processor::refreshDesc()
         width_ = w;
         height_ = h;
         fmt_ = f;
+        mid_valid_ = false;   // the mode-2 mid frame belongs to the old extent
         releaseResources();
         switch (f) {
         case DXGI_FORMAT_R8G8B8A8_UNORM:
@@ -804,6 +833,16 @@ static int safe_transfer_frame(PFN_dlss5_framegen_transfer pfn, void *engine, ui
 {
     __try {
         return pfn(engine, w, h, cur_raw, out);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -999;
+    }
+}
+
+static int safe_interp_anchors(PFN_dlss5_framegen_interpolate pfn, void *engine, uint32_t w, uint32_t h,
+                               const uint8_t *mid, uint8_t *out, float factor)
+{
+    __try {
+        return pfn(engine, w, h, mid, out, factor);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return -999;
     }
@@ -1053,19 +1092,50 @@ void M12Dx12Processor::onPresent()
     static const UINT64 min_interval_ms = 250;
     UINT64 now = GetTickCount64();
     if (live && now - last_live_ms_ < min_interval_ms) live = false;
+    const int fg_mode = is_framegen_enabled() ? framegen_mode() : 1;
+    const std::size_t want = (std::size_t)width_ * height_ * 4;
     if (live) {
         last_live_ms_ = now;
         captureToCpu(bb.Get());
+        /* Mode-2 anchor present: the generated midpoint of the just-closed
+         * anchor interval goes out here (uniform +1-present delay); the
+         * processed anchor in processed_ is the fallback and the frame the
+         * next mid present re-blits. */
+        if (fg_mode == 2 && have_processed_ && mid_valid_
+            && mid_.size() == want && g_engine && pfn_dlss5_framegen_interpolate) {
+            if (interp_.size() < want) interp_.resize(want);
+            int r = safe_interp_anchors(pfn_dlss5_framegen_interpolate, g_engine,
+                                        width_, height_, mid_.data(),
+                                        interp_.data(), 0.5f);
+            if (r == 0) {
+                static UINT64 s_fgi_count = 0;
+                s_fgi_count++;
+                if (s_fgi_count <= 5 || s_fgi_count % 60 == 0) {
+                    m12_logf("[m12_dxgi] framegen interpolate %ux%u (frame %llu, fgi #%llu)",
+                             width_, height_, present_count_, s_fgi_count);
+                }
+                blitToBackbuffer(bb.Get(), interp_);
+                return;
+            }
+        }
         if (have_processed_) blitToBackbuffer(bb.Get());
     } else {
         bool interpolated = false;
         ensure_inprocess();
-        // Residual transfer, not a F0/F1 crossfade: interpolate_frame(prev
-        // processed, cur raw, 0.5) blended two temporally different frames
-        // and read as permanent smear on Metro. The transfer warps the
-        // engine-side (prev processed - prev raw) delta along raw->raw
-        // motion - the same path the x64 layer runs.
-        if (is_framegen_enabled() && g_engine && pfn_dlss5_framegen_transfer && have_processed_ &&
+        if (fg_mode == 2) {
+            /* Mode-2 mid present: stash the REAL middle frame for the next
+             * anchor interval and re-blit the held processed anchor - no
+             * engine call at this slot. */
+            if (grabRaw(bb.Get()) && raw_.size() == want) {
+                if (mid_.size() != want) mid_.resize(want);
+                memcpy(mid_.data(), raw_.data(), want);
+                mid_valid_ = true;
+            }
+            if (have_processed_) {
+                blitToBackbuffer(bb.Get());
+                interpolated = true;
+            }
+        } else if (is_framegen_enabled() && g_engine && pfn_dlss5_framegen_transfer && have_processed_ &&
             processed_.size() == (std::size_t)width_ * height_ * 4) {
             if (grabRaw(bb.Get()) && !raw_.empty() && raw_.size() == (std::size_t)width_ * height_ * 4) {
                 std::size_t needed = (std::size_t)width_ * height_ * 4;

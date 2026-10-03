@@ -73,6 +73,8 @@ private:
     std::vector<BYTE> processed_;  // last daemon reply, packed w*h*4 BGRA
     std::vector<BYTE> raw_;      // freeze mode: the held UNPROCESSED frame
     std::vector<BYTE> interp_;   // framegen interpolated frame
+    std::vector<BYTE> mid_;      // fg mode 2: the REAL middle frame
+    bool mid_valid_ = false;     // mid_ holds a frame of the current extent
     bool raw_held_ = false;
     FILETIME reproc_stamp_ = {}; // last seen m13_reproc.flag mtime
     bool reproc_seen_ = false;
