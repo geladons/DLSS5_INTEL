@@ -107,6 +107,16 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
     (falls back to a full process until a prev pair exists; an old daemon
     that drops the unknown magic is latched FG-off for the session). Watch
     `fg stats: presents/processed/generated/native` in %TEMP%\nr_layer_win.log.
+  - Diagnostics: `NR_LAYER_DIAG=1` logs every present (path tag, upload/
+    result CRC, transfer status) and stamps an 'NRM' marker into the
+    upload buffer so DDA-captured frames can be attributed to the layer.
+    `NR_LAYER_CAPTURE` / `NR_LAYER_CAPTURE_OUT` dump raw-in/processed-out.
+    KNOWN EXTERNAL DEFECT: a game that SWITCHES THE DISPLAY MODE (GTA IV
+    fullscreen 800x600 on a 1440p desktop) lets Windows arbitrate between
+    the exclusive surface and a parallel raw surface - ~15% single raw
+    frames that bypass every layer path (marker-proven). Fix: native-res
+    fullscreen or windowed, both measured clean; m13 launch_args support
+    {screen_w}/{screen_h} for this.
 - m12-dxgi: DirectX 12 present hook (GTA V Enhanced). Dynamically loads
   `d5c_chain.dll` via C ABI to process present buffers in-process (0 ms TCP lag).
 - chain: THE model as an OOP module (`d5c::ChainEngine`). Exported via clean
