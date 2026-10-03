@@ -29,7 +29,7 @@
 #include "m12_log.h"
 
 #include <d3d12.h>
-#include <dxgi1_4.h>
+#include <dxgi1_6.h>
 
 #include <cstdlib>
 #include <cstring>
@@ -68,11 +68,28 @@ void *orig_entry(void *obj, int idx)
 // Swap-and-hook: if the object still points at its ORIGINAL vtable, build the
 // private copy and redirect the object at it; then install fn at idx inside
 // the copy (idempotent per idx). The module image is never written to.
+//
+// Address-reuse hazard: g_obj_copy is keyed by raw COM pointer. When a hooked
+// object is released its address can be handed to a NEW COM object, whose
+// vptr then points at an original (read-only image) vtable while the stale
+// map entry claims the copy is already installed. Writing a hook into that
+// original vtable faults with 0xC0000005 - observed in the field as a crash
+// inside this module on Witcher 3 DX12 (factory create/release churn during
+// adapter probing). Detect the mismatch by comparing the live vptr with the
+// recorded copy and evict the stale bookkeeping before hooking.
 bool hook_entry(void *obj, int idx, void *fn)
 {
     if (!obj || !fn || g_restored || idx < 0 || idx >= VTABLE_COPY_SLOTS)
         return false;
     void **cur = *(void ***)obj;
+    std::map<void *, void **>::iterator cp = g_obj_copy.find(obj);
+    if (cp != g_obj_copy.end() && cur != cp->second) {
+        g_orig.erase(cp->second);
+        g_obj_copy.erase(cp);
+        g_obj_vt.erase(obj);
+        m12_logf("stale hook entry evicted for object %p (address reused)",
+                 obj);
+    }
     if (g_obj_copy.find(obj) == g_obj_copy.end()) {
         if (g_obj_vt.find(obj) != g_obj_vt.end())
             return true;      // already swapped on this object; cur == copy
@@ -170,9 +187,21 @@ void attach_swapchain(IDXGISwapChain *sc, ID3D12CommandQueue *queue, UINT w, UIN
                       DXGI_FORMAT fmt)
 {
     EnterCriticalSection(&g_cs);
-    if (g_objects.find(sc) != g_objects.end()) {
-        LeaveCriticalSection(&g_cs);
-        return;
+    std::map<void *, SwapchainState *>::iterator old = g_objects.find(sc);
+    if (old != g_objects.end()) {
+        // A live entry means the recorded swapchain still carries our copy
+        // vtable. If the vptr moved off the copy, the old COM object was
+        // released and this address was reused for a new swapchain - drop
+        // the dead state and attach fresh instead of skipping it.
+        std::map<void *, void **>::iterator cp = g_obj_copy.find(sc);
+        if (cp != g_obj_copy.end() && *(void ***)sc == cp->second) {
+            LeaveCriticalSection(&g_cs);
+            return;
+        }
+        m12_logf("stale swapchain state evicted for %p (address reused)", sc);
+        delete old->second->proc;
+        delete old->second;
+        g_objects.erase(old);
     }
     SwapchainState *st = new SwapchainState();
     st->proc = queue ? new M12Dx12Processor(sc, queue, w, h, fmt, live_every()) : NULL;
@@ -331,13 +360,52 @@ HRESULT WINAPI hooked_CreateSwapChainForComposition(IDXGIFactory2 *factory,
     return hr;
 }
 
-HRESULT WINAPI hooked_Factory_QueryInterface(IDXGIFactory *factory, const IID &riid, void **ppv)
+HRESULT WINAPI hooked_Factory_QueryInterface(IUnknown *obj, const IID &riid,
+                                             void **ppv);
+
+// QI results that are factories must get the full factory hook; every other
+// interface gets only its slot-0 QueryInterface swapped so factory views
+// reached THROUGH it (e.g. IDXGIObject view -> IDXGIFactoryN) still route
+// back into this function. Patching factory slots onto a non-factory vtable
+// would mis-wire that object's real methods.
+bool is_factory_iid(const IID &riid)
 {
-    void *orig = orig_entry(factory, 0);
+    // IID_IDXGIFactory5/6/7 are declared by dxgi1_6.h but the GUIDs live in a
+    // dxgi.lib newer than this toolchain's - defined here from the public
+    // SDK values (stable ABI constants).
+    static const IID kFactory5 = {0x7632e1f5, 0xee65, 0x4dca,
+                                  {0x87, 0xfd, 0x84, 0xcd, 0x75, 0xf8, 0x83, 0x8d}};
+    static const IID kFactory6 = {0xc1b6694f, 0xff09, 0x44a9,
+                                  {0xb0, 0x3c, 0x77, 0x90, 0x0a, 0x0a, 0x1d, 0x17}};
+    static const IID kFactory7 = {0xa4966eed, 0x76db, 0x44da,
+                                  {0x84, 0xc1, 0xee, 0x9a, 0x7a, 0xfb, 0x20, 0xa8}};
+    static const IID *ids[] = {
+        &IID_IDXGIFactory,  &IID_IDXGIFactory1, &IID_IDXGIFactory2,
+        &IID_IDXGIFactory3, &IID_IDXGIFactory4, &kFactory5,
+        &kFactory6,         &kFactory7,
+    };
+    for (size_t i = 0; i < sizeof(ids) / sizeof(ids[0]); ++i)
+        if (IsEqualIID(riid, *ids[i])) return true;
+    return false;
+}
+
+void hook_object_qi(void *obj)
+{
+    if (!obj || disabled()) return;
+    patch_object(obj, 0, (void *)&hooked_Factory_QueryInterface, 0, NULL, 0,
+                 NULL, 0, NULL);
+}
+
+HRESULT WINAPI hooked_Factory_QueryInterface(IUnknown *obj, const IID &riid, void **ppv)
+{
+    void *orig = orig_entry(obj, 0);
     if (!orig) return E_NOINTERFACE;
-    HRESULT hr = ((HRESULT(WINAPI *)(IDXGIFactory *, const IID &, void **))orig)(factory, riid, ppv);
+    HRESULT hr = ((HRESULT(WINAPI *)(IUnknown *, const IID &, void **))orig)(obj, riid, ppv);
     if (SUCCEEDED(hr) && ppv && *ppv) {
-        m12_hook_factory(*ppv);
+        if (is_factory_iid(riid))
+            m12_hook_factory(*ppv);
+        else
+            hook_object_qi(*ppv);
     }
     return hr;
 }
