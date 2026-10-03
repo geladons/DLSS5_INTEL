@@ -311,6 +311,10 @@ def launch_game(exe_path, mode, scale=None, gain=None, blend=None, cfg=None, sha
 
     fg_val = True
     meta = {}
+    if cfg is not None and hasattr(cfg, "get"):
+        meta = (cfg.get("games") or {}).get(exe_path) or {}
+    elif isinstance(cfg, dict):
+        meta = (cfg.get("games") or {}).get(exe_path) or {}
     # Per-game "framegen"/"fg" flag overrides the global switch. Measured on
     # the x86 daemon path (GTA IV, DDA-verified): residual-transfer FG only
     # transfers detail for motion <= ~4 px/frame; real gameplay motion emits
