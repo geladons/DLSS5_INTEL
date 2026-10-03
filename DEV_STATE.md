@@ -1,4 +1,60 @@
-# DEV_STATE.md - where we are (updated 2026-10-02 by Devin)
+# DEV_STATE.md - where we are (updated 2026-10-03 by Devin)
+
+## Stage 32: Second field-test follow-up - dxgi crash root-caused, FG override truly fixed (2026-10-03)
+
+Owner re-tested Witcher 3 Remastered DX12 / GTA IV / GTA SA / Metro / RDR2.
+Root causes found and fixed:
+
+- **Witcher 3 DX12 crash = our dxgi.dll** (WER: 0xc0000005 at module
+  offset 0x5f3b = the `cur[idx] = fn` vtable-write in hook_entry).
+  Root cause: `g_obj_copy` is keyed by raw COM address; when a hooked
+  object is released and its address is REUSED for a new COM object,
+  the stale entry claims our copy-vtable is already installed - the
+  hook write then lands on the new object's ORIGINAL read-only image
+  vtable -> access violation. Witcher's factory churn hits this
+  reliably (log shows repeated "stale hook entry evicted ... address
+  reused"). Fix: compare the live vptr to the recorded copy on every
+  hook_entry; evict stale bookkeeping on mismatch (632388e). Same
+  stale-reuse check added to attach_swapchain's g_objects map.
+  VERIFIED: witcher3.exe now survives past the churn, swapchain
+  attaches, in-process engine loads, 1200+ presents before manual
+  kill. bin\x64_dx12 is the correct registered entry now (the dx11
+  bin\x64 entry was the same install's other mode - removed, stale
+  dlls cleaned from it).
+- **Secondary QI hardening** (same commit): the hooked factory
+  QueryInterface used to run the full factory patch on EVERY returned
+  interface. Now only IDXGIFactoryN IIDs get the factory slots;
+  everything else gets just slot-0 QI hooked so factory views reached
+  through non-factory views still route back.
+- **GTA IV/GTA SA "still ghosts/judder" = FG was silently ON.**
+  The M12_LIVE edit had deleted the `meta = games[exe]` lookup in
+  gamelaunch, leaving `meta = {}` - every game launched with the
+  GLOBAL frame_gen switch regardless of per-game overrides
+  (ef21787). E2E-verified after fix: GTA IV 7800 presents,
+  0 generated frames, daemon 74ms/frame, no +fg.
+- **GTA SA mouse: NOT ours.** Full-stack input audit found nothing
+  that can swallow input: the layer's WndProc guard eats only
+  WM_PAINT/WM_ERASEBKGND and forwards all input; SA uses DirectInput
+  which bypasses WndProc entirely; daemon/overlay/deploy touch no
+  input APIs. Symptom (cursor moves, clicks dead, camera dead) is the
+  classic SA-modpack focus/DPI issue. Deprioritized - document only.
+  SA windowed flag: the game ignores -windowed/-window args (no
+  native windowed mode) - expected, not a bug in our arg passing.
+- **Metro Exodus: NOT ours (this time).** A/B with zero deployed dlls:
+  the game idles at ~374 MB before any swapchain, identically with
+  and without our proxy. CPY build + intro-webm/codec stall suspect;
+  engine-side is clean now (new build verified on Witcher).
+- **RDR2 infinite loading: game-side.** Layer processed presents
+  normally the whole session (in-process, fg stats clean); loading
+  is independent of the present path. Menu judder/ghosts = same FG
+  root cause as GTA IV (framegen was globally on).
+
+Deploy/config state after this pass:
+- Witcher dx12: dxgi.dll (9ed0da4d) + d5c_chain.dll + m12_target.txt
+- Metro: dxgi.dll (9ed0da4d) + d5c_chain.dll + m12_target.txt
+- RDR2 / GTA5 / Stalker2 / GTA SA / GTA IV: no stale project dlls
+- gta_sa: framegen=false; GTA IV: framegen=false + 800x600 windowed
+- Config has ONLY the dx12 witcher3.exe (bin\x64_dx12) registered
 
 ## Stage 31: Field-test follow-up - launch lifecycle, m12 cadence/FG, deploy hygiene, UI rework (2026-10-02)
 
