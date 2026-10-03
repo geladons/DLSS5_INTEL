@@ -2205,3 +2205,20 @@ Fix in nr_layer_win.c (both arches rebuilt + deployed to production):
 - reuse_run caps near-identical replays (NR_LAYER_REUSE_CAP, default 8);
   bit-identical frames always replay free.
 - counter resets when fresh input is accepted for processing.
+
+## FG default OFF + label clarity (5e3d269)
+
+Owner asked why FG exists if it produces artifacts, and why the FG
+control appears twice. Decision: FG is now OPT-IN.
+
+- DEFAULTS["frame_gen"] = False; gamelaunch no-cfg fallback also False.
+- Global checkbox = "Frame Generation (default)" + hint that per-game
+  FG: overrides it; per-game values renamed auto -> default/on/off
+  (backward compatible - meta stores bool/absent, never the string).
+- Resolution verified e2e: per-game True forces FG=1/M12_LIVE=2 under a
+  False global; per-game False and inherit both resolve FG=0.
+- 30/30 m13 tests green; production/m13 synced.
+
+FG rework roadmap (LS-class target, XeSS/FSR-FG unreachable without
+engine MV/depth): delayed interpolation between two real frames,
+multi-scale flow, per-region confidence, scene-cut detection, pacing.
