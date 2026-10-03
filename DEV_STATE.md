@@ -56,6 +56,20 @@ Deploy/config state after this pass:
 - gta_sa: framegen=false; GTA IV: framegen=false + 800x600 windowed
 - Config has ONLY the dx12 witcher3.exe (bin\x64_dx12) registered
 
+- **Daemon robustness** (2674548): m11d lazily inits its engine inside
+  the first frame request (~4 s), blowing the layer's 1.5 s budget =
+  guaranteed raw burst at every x86 launch; and nothing restarted a
+  dead daemon -> permanent raw for the session. Now: launch `daemon`
+  step sends a synthetic NRN0 warmup at the expected extent (from
+  launch_args -width/-height, else 1920x1080; verified 3.9 s init inside
+  warmup, 0.1 s warm request), and StateMonitor restarts a dead daemon
+  while a managed x86 game runs (30 s backoff, cap 5).
+- **Remaining known gaps** (documented, not yet fixed): engine re-init
+  on extent change is a full rebuild (weights too) - mid-game res
+  switches still cost a burst; NRN2 failures latch FG off for the
+  session and can poison curW=0 re-inits; the layer accepts any
+  full-size payload as "processed" (no reply checksum).
+
 ## Stage 31: Field-test follow-up - launch lifecycle, m12 cadence/FG, deploy hygiene, UI rework (2026-10-02)
 
 Owner-tested GTA IV / Witcher 3 / Metro Exodus / RDR2. Evidence-backed
