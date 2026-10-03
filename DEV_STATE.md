@@ -2032,3 +2032,36 @@ the game accepts res args.
 
 LINGERING: moving-scene verification still needs the owner clicking
 through Sunshine (synthetic input cannot navigate the EFLC launcher).
+
+## FG judder/ghost verdict (owner-tested, DDA+probe measured 2026-10-03)
+
+Owner report after the mode-switch fix: fewer strobes but strong judder,
+blur, ghost trails tracing the mouse, face shaking. Logs showed the
+daemon-path FG was live (~50% generated frames at 1.6ms each).
+
+PROBE MEASUREMENTS (800x600 GTA IV frames, temporal off for clean
+ground truth): generated vs true processed - dx=0 px -> |G-P|=0.00
+exact; dx=4 -> 5.58 vs 13.30 raw baseline; dx=8 -> 6.18 vs 10.26;
+dx=16 -> ratio 0.78; dx=32 -> 1.07 (WORSE than raw). Root causes in
+framegen.comp: single-pixel matching shattered on film grain, search
+radius +-16 lost cursor-speed motion, and the occlusion gate almost
+never gated (it measured the post-match error - good by definition).
+
+SHIPPED (6567374): 3x3 SAD block match (grain-robust), +-24/+-16
+radius, distance prior 0.004/px, and a real confidence gate on the
+match error -> hopeless match emits raw instead of a stamped delta.
+
+VERDICT: even improved, FG on this path only helps static/slow scenes;
+real gameplay motion still alternates processed<->near-raw at ~13 Hz
+= the judder. Per-game "framegen"/"fg" config flag now overrides the
+global switch (7ce9878); GTA IV entry has framegen=false. x64 path
+keeps the global flag - same shader, verify on real motion there too.
+
+GTA IV launch_args now '-windowed -width 1280 -height 720': clean (no
+mode switch) AND playable (~15fps processed in-game) - the user
+cannot have all three of {fullscreen-native res, sub-desktop res,
+speed} on this hardware.
+
+NOTE on daemon ms: cold probes on an idle GPU read ~90-110ms at
+800x600 where an in-game session reads ~37ms - the B50 idles its
+clocks hard; measure perf only under real load.
