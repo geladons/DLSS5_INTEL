@@ -286,7 +286,17 @@ def launch_game(exe_path, mode, scale=None, gain=None, blend=None, cfg=None, sha
     env["NR_LAYER_SHARPNESS"] = str(sharp_val)
 
     fg_val = True
+    meta = {}
     if cfg is not None and hasattr(cfg, "get"):
+        meta = (cfg.get("games") or {}).get(exe_path) or {}
+    # Per-game "framegen"/"fg" flag overrides the global switch. Measured on
+    # the x86 daemon path (GTA IV, DDA-verified): residual-transfer FG only
+    # transfers detail for motion <= ~4 px/frame; real gameplay motion emits
+    # near-raw generated frames, and the P/G alternation pulses at ~13 Hz -
+    # the reported judder + mouse-trail ghosts. Disabled per-game there.
+    if isinstance(meta, dict) and ("framegen" in meta or "fg" in meta):
+        fg_val = bool(meta.get("framegen", meta.get("fg")))
+    elif cfg is not None and hasattr(cfg, "get"):
         fg_val = bool(cfg.get("frame_gen"))
     elif isinstance(cfg, dict):
         fg_val = bool(cfg.get("frame_gen"))
