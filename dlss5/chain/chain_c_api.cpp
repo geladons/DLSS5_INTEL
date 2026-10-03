@@ -365,6 +365,36 @@ public:
     }
 
 private:
+    // Last-resort resolution shared by weights/shaders: a tiny KEY=VALUE
+    // file the manager rewrites on every config save. Covers games launched
+    // outside our spawn (Steam client, Rockstar/CDPR launchers, a manual
+    // double-click) where the env block never reaches the game process and
+    // the module-dir candidates cannot match.
+    static std::string runtimePathsValue(const char* key) {
+        char dir[MAX_PATH] = {0};
+        DWORD n = GetEnvironmentVariableA("LOCALAPPDATA", dir, sizeof(dir));
+        if (!n || n >= sizeof(dir)) return {};
+        std::string p = std::string(dir) +
+                        "\\DLSS5Manager\\runtime_paths.txt";
+        FILE* f = std::fopen(p.c_str(), "rb");
+        if (!f) return {};
+        char line[1024];
+        std::string out;
+        const size_t klen = std::strlen(key);
+        while (std::fgets(line, sizeof(line), f)) {
+            if (!std::strncmp(line, key, klen) && line[klen] == '=') {
+                out.assign(line + klen + 1);
+                while (!out.empty() &&
+                       (out.back() == '\n' || out.back() == '\r' ||
+                        out.back() == ' ' || out.back() == '\t'))
+                    out.pop_back();
+                break;
+            }
+        }
+        std::fclose(f);
+        return out;
+    }
+
     void resolveWeights(const char* weights) {
         if (weights && weights[0]) {
             weightsPath_ = NormalizePath(weights);
@@ -384,6 +414,11 @@ private:
             "work\\mlxw\\dlssnr-logical.safetensors",
             modDir + "..\\..\\..\\work\\mlxw\\dlssnr-logical.safetensors",
             modDir + "..\\..\\..\\..\\work\\mlxw\\dlssnr-logical.safetensors",
+            // Production bundle layout: runtime\layer\x64|m12|m11d ->
+            // <bundle>\weights\dlssnr-logical.safetensors. Required for
+            // launcher/Steam-spawned games where our env never reaches the
+            // game process (dlss5_create must succeed without env).
+            modDir + "..\\..\\..\\weights\\dlssnr-logical.safetensors",
             modDir + "dlssnr-logical.safetensors"
         };
         for (const auto& c : candidates) {
@@ -392,7 +427,9 @@ private:
                 return;
             }
         }
-        weightsPath_ = "work\\mlxw\\dlssnr-logical.safetensors";
+        std::string w = runtimePathsValue("WEIGHTS");
+        weightsPath_ = !w.empty() ? NormalizePath(w)
+                                  : "work\\mlxw\\dlssnr-logical.safetensors";
     }
 
     void resolveShaders(const char* shaders) {
@@ -409,7 +446,8 @@ private:
             } else if (FileExists(".\\gemm.spv")) {
                 shaderDir_ = ".\\";
             } else {
-                shaderDir_ = modDir;
+                std::string s = runtimePathsValue("SHADER_DIR");
+                shaderDir_ = !s.empty() ? s : modDir;
             }
         }
 

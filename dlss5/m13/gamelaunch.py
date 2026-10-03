@@ -140,6 +140,30 @@ def shader_dir_for(mode=None, arch="x64"):
     return None
 
 
+def write_runtime_paths(cfg=None):
+    """Drop %LOCALAPPDATA%\\DLSS5Manager\\runtime_paths.txt - the shared
+    fallback the in-process chain reads when a game was spawned outside
+    our env (Steam client, Rockstar/CDPR launchers, a manual
+    double-click). chain_c_api consults it AFTER env vars and
+    module-relative candidates, so the file can never outrank an
+    explicit env."""
+    from . import config as _config
+    w = weights_path_for(cfg)
+    s = shader_dir_for()
+    if not w or not s:
+        return False
+    out = os.path.join(_config.CONFIG_DIR, "runtime_paths.txt")
+    try:
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        tmp = out + ".tmp"
+        with open(tmp, "w", encoding="ascii") as f:
+            f.write("WEIGHTS=%s\nSHADER_DIR=%s\n" % (w, s))
+        os.replace(tmp, out)
+        return True
+    except OSError:
+        return False
+
+
 def engine_env(cfg=None, mode=None, arch="x64"):
     """The env pairs above as a dict ready for env.update / os.environ.
     mode=None picks the first valid shader dir (process-env seeding)."""

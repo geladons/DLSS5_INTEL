@@ -114,6 +114,18 @@ class Config:
                 print("[config] dropped %d duplicate game entrie(s): %s"
                       % (len(dropped), ", ".join(dropped)), flush=True)
             self.data["games"] = deduped
+        self._write_runtime_paths()
+
+    def _write_runtime_paths(self):
+        # Only the real manager config refreshes the shared fallback file;
+        # tests pointing Config at tmp paths must not touch LOCALAPPDATA.
+        if os.path.abspath(self.path) != os.path.abspath(CONFIG_PATH):
+            return
+        try:
+            from . import gamelaunch
+            gamelaunch.write_runtime_paths(self)
+        except Exception:
+            pass
 
     def save(self):
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
@@ -121,6 +133,7 @@ class Config:
         with open(tmp, "w", encoding="ascii") as f:
             json.dump(self.data, f, indent=2, sort_keys=True)
         os.replace(tmp, self.path)   # atomic-ish: no half-written config
+        self._write_runtime_paths()
 
     def get(self, key, default=None):
         if key == "gain" and "gain" not in self.data and "intensity" in self.data:

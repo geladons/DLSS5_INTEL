@@ -7,6 +7,11 @@
 # the detected graphics API, the launch wrapper (pirate/GOG stubs) and the
 # live status (enabled / running / anti-cheat risk).
 #
+# Layout: scan row | centered expanding card grid | action row | bordered
+# per-game options strip (mode/window/args/fg) | anti-cheat warning.
+# The card grid scrolls via the app-level wheel router (ManagerUI.
+# register_wheel_region) and reflows its column count to the canvas width.
+#
 # All heavy work (drive scan, deploy, launch) runs off the Tk thread; this
 # class only renders and queues.
 # ============================================================================
@@ -28,6 +33,7 @@ MODE_COLORS = {"dx9": "#d29922", "dx11": "#58a6ff", "dx12": "#9a6bff",
 BG = "#0d1017"
 PANEL = "#161a23"
 PANEL2 = "#1f2430"
+BORDER = "#2a3040"
 FG = "#e6e9f0"
 MUTED = "#8a91a5"
 ACCENT = "#5b8cff"
@@ -37,7 +43,8 @@ AMBER = "#d29922"
 
 CARD_W = 150
 CARD_H = 172
-CARD_COLS = 4
+CARD_PAD = 6
+CARD_COLS = 4          # initial column count; reflows to the canvas width
 
 
 class GameCard:
@@ -119,6 +126,7 @@ class GamesTab:
         self.scanned = []
         self.cards = {}             # exe -> GameCard
         self._selected = None
+        self._cols = CARD_COLS
         self.icons = IconCache(size=48)
         self._build(nb)
         cached = load_cache()
@@ -144,65 +152,94 @@ class GamesTab:
                                    style="Muted.TLabel")
         self.scan_info.pack(side="left", padx=10)
 
-        # scrollable card grid
+        # Scrollable card grid: expands with the window (no fixed height),
+        # the card block stays horizontally centered and the column count
+        # reflows to the canvas width (_canvas_resized).
         wrap = tk.Frame(t, bg=BG)
-        wrap.pack(fill="both", expand=True, pady=6)
-        self.canvas = tk.Canvas(wrap, bg=BG, highlightthickness=0, height=380)
+        wrap.pack(fill="both", expand=True, pady=(0, 6))
+        self.canvas = tk.Canvas(wrap, bg=BG, highlightthickness=0)
         vsb = ttk.Scrollbar(wrap, orient="vertical",
                             command=self.canvas.yview)
         self.canvas.configure(yscrollcommand=vsb.set)
         vsb.pack(side="right", fill="y")
         self.canvas.pack(side="left", fill="both", expand=True)
         self.grid_frame = tk.Frame(self.canvas, bg=BG)
-        self.canvas.create_window((0, 0), window=self.grid_frame, anchor="nw")
+        self._grid_win = self.canvas.create_window(
+            (0, 0), window=self.grid_frame, anchor="n")
         self.grid_frame.bind("<Configure>", lambda _e: self.canvas.configure(
             scrollregion=self.canvas.bbox("all")))
-        self.canvas.bind_all("<MouseWheel>", self._wheel)
+        self.canvas.bind("<Configure>", self._canvas_resized)
+        # Mouse wheel: routed app-wide by ManagerUI.register_wheel_region
+        # (a second bind_all("<MouseWheel>") used to replace ours - the
+        # settings tab was built later and silently killed grid scroll).
+        # Unit-test stub UIs have no router; the Enter/Leave fallback
+        # keeps this tab self-contained.
+        register = getattr(self.ui, "register_wheel_region", None)
+        if callable(register):
+            register(wrap, self.canvas)
+        else:
+            self.canvas.bind("<Enter>", self._wheel_bind)
+            self.canvas.bind("<Leave>", self._wheel_unbind)
 
+        # Action row: the things you DO to the selected card. Pause/Resume
+        # acts on the running game (global processing toggle) - parked at
+        # the right end, away from the per-game options below.
         act = ttk.Frame(t)
-        act.pack(fill="x", pady=(2, 0))
-        ttk.Label(act, text=tr("mode_label")).pack(side="left")
-        self.mode_var = tk.StringVar(value=tr("mode_auto"))
-        self.mode_box = ttk.Combobox(
-            act, textvariable=self.mode_var, width=7, state="readonly",
-            values=(tr("mode_auto"), "DX9", "DX11", "DX12", "Vulkan"))
-        self.mode_box.pack(side="left", padx=(4, 10))
+        act.pack(fill="x", pady=(0, 4))
         ttk.Button(act, text=tr("enable"), style="Accent.TButton",
                    command=self._enable).pack(side="left")
         ttk.Button(act, text=tr("play"),
                    command=self._launch).pack(side="left", padx=6)
+        ttk.Button(act, text=tr("disable"),
+                   command=self._disable).pack(side="left")
+        ttk.Button(act, text=tr("remove"), style="Danger.TButton",
+                   command=self._remove).pack(side="left", padx=6)
+        ttk.Button(act, text=tr("pause_resume"),
+                   command=lambda: self.ctl.submit(
+                       self.ctl.processing_toggle)).pack(side="right")
+
+        # Per-game options strip (bordered, clearly "for <game>"): API mode
+        # override, windowed flag, explicit launch args (win over the
+        # windowed checkbox) and a framegen override (auto = the global
+        # switch). Args/fg save on focus-out; mode/window are carried by
+        # the Enable/Play paths - a re-register (add_game writes a fresh
+        # meta) must not silently drop them, so those paths carry the
+        # current field values into the new meta too.
+        ext = tk.Frame(t, bg=PANEL, highlightthickness=1,
+                       highlightbackground=BORDER)
+        ext.pack(fill="x")
+        inner = tk.Frame(ext, bg=PANEL)
+        inner.pack(fill="x", padx=10, pady=7)
+        self.ext_who = tk.Label(inner, text=tr("extras_none"), bg=PANEL,
+                                fg=MUTED, font=("Segoe UI", 8, "bold"))
+        self.ext_who.pack(side="left", padx=(0, 10))
+        tk.Label(inner, text=tr("mode_label"), bg=PANEL, fg=FG,
+                 font=("Segoe UI", 8)).pack(side="left")
+        self.mode_var = tk.StringVar(value=tr("mode_auto"))
+        self.mode_box = ttk.Combobox(
+            inner, textvariable=self.mode_var, width=7, state="readonly",
+            values=(tr("mode_auto"), "DX9", "DX11", "DX12", "Vulkan"))
+        self.mode_box.pack(side="left", padx=(4, 12))
         # Windowed checkbox: best effort - the launcher appends
         # gamelaunch.WINDOW_ARGS ("-windowed -window") when set and no
         # custom launch_args exist. Remembered per game.
         self.window_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(act, text=tr("window_cb"),
-                       variable=self.window_var).pack(side="left")
-        ttk.Button(act, text=tr("pause_resume"),
-                   command=lambda: self.ctl.submit(
-                       self.ctl.processing_toggle)).pack(side="left")
-        ttk.Button(act, text=tr("disable"),
-                   command=self._disable).pack(side="left", padx=6)
-        ttk.Button(act, text=tr("remove"), style="Danger.TButton",
-                   command=self._remove).pack(side="left")
-
-        # Per-game extras row: explicit launch args (win over the windowed
-        # checkbox) and a framegen override (auto = the global switch).
-        # Saved into games[exe] on focus-out; a re-register (add_game writes
-        # a fresh meta) must not silently drop them, so the Enable and Play
-        # paths carry the current field values into the new meta too.
-        ext = ttk.Frame(t)
-        ext.pack(fill="x", pady=(2, 0))
-        self.ext_who = ttk.Label(ext, text="", style="Muted.TLabel")
-        self.ext_who.pack(side="left", padx=(0, 8))
-        ttk.Label(ext, text=tr("game_args")).pack(side="left")
+        self.window_chk = ttk.Checkbutton(
+            inner, text=tr("window_cb"), variable=self.window_var,
+            style="Panel.TCheckbutton")
+        self.window_chk.pack(side="left", padx=(0, 12))
+        tk.Label(inner, text=tr("game_args"), bg=PANEL, fg=FG,
+                 font=("Segoe UI", 8)).pack(side="left")
         self.args_var = tk.StringVar()
-        self.args_entry = ttk.Entry(ext, textvariable=self.args_var, width=36)
-        self.args_entry.pack(side="left", padx=(4, 10))
+        self.args_entry = ttk.Entry(inner, textvariable=self.args_var,
+                                    width=30)
+        self.args_entry.pack(side="left", padx=(4, 12))
         self.args_entry.bind("<FocusOut>", lambda e: self._save_extras())
-        ttk.Label(ext, text=tr("game_fg")).pack(side="left")
+        tk.Label(inner, text=tr("game_fg"), bg=PANEL, fg=FG,
+                 font=("Segoe UI", 8)).pack(side="left")
         self.fg_var = tk.StringVar(value=tr("fg_auto"))
         self.fg_box = ttk.Combobox(
-            ext, textvariable=self.fg_var, width=6, state="readonly",
+            inner, textvariable=self.fg_var, width=6, state="readonly",
             values=(tr("fg_auto"), tr("fg_on"), tr("fg_off")))
         self.fg_box.pack(side="left", padx=(4, 0))
         self.fg_box.bind("<<ComboboxSelected>>", lambda e: self._save_extras())
@@ -213,32 +250,77 @@ class GamesTab:
                   wraplength=800).pack(anchor="w", pady=(6, 0))
 
     def _wheel(self, e):
+        """Standalone fallback handler (test stubs only - the real UI uses
+        ManagerUI's wheel router)."""
         try:
             if self.canvas.winfo_viewable():
                 self.canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
         except tk.TclError:
             pass
 
+    def _wheel_bind(self, _e):
+        self.canvas.bind_all("<MouseWheel>", self._wheel)
+
+    def _wheel_unbind(self, e):
+        """Fallback only: drop the global wheel binding when the pointer
+        leaves the canvas rect for real - stepping onto a card (an
+        embedded child) fires a spurious <Leave> whose root coords are
+        still inside the canvas."""
+        try:
+            x0, y0 = self.canvas.winfo_rootx(), self.canvas.winfo_rooty()
+            if (x0 <= e.x_root < x0 + self.canvas.winfo_width() and
+                    y0 <= e.y_root < y0 + self.canvas.winfo_height()):
+                return
+        except tk.TclError:
+            pass
+        self.canvas.unbind_all("<MouseWheel>")
+
+    def _canvas_resized(self, e):
+        """Re-center the card block and reflow the grid: as many CARD_W
+        columns as fit the new canvas width."""
+        self.canvas.coords(self._grid_win, e.width // 2, 0)
+        self.canvas.itemconfigure(self._grid_win, anchor="n")
+        cols = max(1, (e.width - 8) // (CARD_W + CARD_PAD * 2))
+        if cols != self._cols:
+            self._cols = cols
+            self._regrid()
+
+    def _regrid(self):
+        """Re-place the existing cards at the current column count."""
+        for i, card in enumerate(self.cards.values()):
+            card.frame.grid_configure(row=i // self._cols,
+                                      column=i % self._cols,
+                                      padx=CARD_PAD, pady=CARD_PAD,
+                                      sticky="n")
+
     # ---------------------------------------------------------- selection --
     def selected_exe(self):
         return self._selected
 
     def _extras_state(self, state):
-        """Enable/grey the extras widgets; state is tk.NORMAL or
-        tk.DISABLED. The combobox is readonly so 'normal' keeps it
+        """Enable/grey the per-game options strip; state is tk.NORMAL or
+        tk.DISABLED. The comboboxes are readonly so 'normal' keeps them
         pickable-but-not-typable."""
         self.args_entry.config(state=state)
-        self.fg_box.config(state="readonly" if state == tk.NORMAL else state)
+        combo = "readonly" if state == tk.NORMAL else "disabled"
+        self.fg_box.config(state=combo)
+        self.mode_box.config(state=combo)
+        self.window_chk.state(["!disabled"] if state == tk.NORMAL
+                              else ["disabled"])
 
     def select(self, exe):
         self._selected = exe
         for path, card in self.cards.items():
             card.set_selected(path == exe)
         meta = (self.ctl.cfg.get("games") or {}).get(exe or "") or {}
-        self.ext_who.config(
-            text=tr("extras_for", meta.get("name") or
-                    os.path.splitext(os.path.basename(exe))[0])
-                if exe else "")
+        if exe:
+            name = meta.get("name") or \
+                os.path.splitext(os.path.basename(exe))[0]
+            if len(name) > 38:          # long titles stay inside the strip
+                name = name[:35] + "..."
+            self.ext_who.config(text=tr("extras_for", name), fg=FG)
+        else:
+            self.ext_who.config(text=tr("extras_none"), fg=MUTED)
         self._extras_state(tk.NORMAL if exe else tk.DISABLED)
         if meta:
             self.mode_var.set(MODE_NAMES.get(meta["mode"], tr("mode_auto")))
@@ -342,10 +424,14 @@ class GamesTab:
         window = bool(self.window_var.get())
         games = self.ctl.cfg.get("games") or {}
         if exe in games:
+            # Only the window bit is owned by the launch click. The extras
+            # row persists itself on focus-out/combobox-pick; writing the
+            # field values again here could strip an override the moment a
+            # stale "auto" is showing (that exact wipe killed the GTA IV
+            # framegen=false during testing).
             if games[exe].get("window") != window:
                 games[exe]["window"] = window
-            self._save_extras()
-            self.ctl.cfg.save()
+                self.ctl.cfg.save()
         else:
             launch = None
             for g in self.scanned:
@@ -423,11 +509,12 @@ class GamesTab:
                     saved=True))
         for i, e in enumerate(entries):
             card = GameCard(self, self.grid_frame, **e)
-            card.frame.grid(row=i // CARD_COLS, column=i % CARD_COLS,
-                            padx=6, pady=6, sticky="n")
+            card.frame.grid(row=i // self._cols, column=i % self._cols,
+                            padx=CARD_PAD, pady=CARD_PAD, sticky="n")
             self.cards[e["exe"]] = card
         if self._selected in self.cards:
             self.cards[self._selected].set_selected(True)
+        self.canvas.yview_moveto(0)      # a refilled grid starts at the top
 
     # ------------------------------------------------------------- render --
     def render(self, snap):
