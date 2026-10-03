@@ -64,6 +64,20 @@ public:
     // uploaded; the prev processed/raw pair is refreshed by processFrame.
     bool transferFrame(uint32_t w, uint32_t h, const void* curRaw,
                        void* out, FrameStats* stats = nullptr);
+    // Mode-2 frame generation (+1 present of latency): synthesizes the
+    // midpoint between the two most recent processed anchors using the
+    // real captured middle frame as the confidence fallback. midRaw may
+    // be NULL (unwarped anchor blend fallback instead). Needs >=1 anchor;
+    // with <2 anchors it copies the newest processed anchor - always a
+    // presentable, on-time frame.
+    bool interpolateAnchors(uint32_t w, uint32_t h, const void* midRaw,
+                            void* out, float factor = 0.5f,
+                            FrameStats* stats = nullptr);
+    // Frame-generation mode: 1 = residual transfer (+0 latency), 2 =
+    // anchor interpolation (+1 frame). Setting 2 without the fginterp
+    // pipeline available clamps to 1; a mode switch drops the anchors.
+    void setFrameGenMode(int mode);
+    int frameGenMode() const { return fgMode_; }
     double lastFrameGenGpuMs() const { return lastFrameGenGpuMs_; }
     void shutdown();
 
@@ -92,7 +106,7 @@ public:
     // (histValid=0, plain compose). Use on stream switches (new game window,
     // a different photo in a batch) so stale history cannot bleed across
     // unrelated content.
-    void resetHistory() { framesDone_ = 0; }
+    void resetHistory() { framesDone_ = 0; resetAnchors(); }
 
     uint32_t netW() const { return netW_; }
     uint32_t netH() const { return netH_; }
@@ -105,12 +119,17 @@ private:
     // Emits the 71-block chain into cmd_: replays the cached secondary
     // chainCmd_, re-recording it first when chainDirty_.
     void recordChainCached();
-    // framegen tail: timestamps + dispatch + readback copies into cmd.
-    // rollPrev copies bufCurrFrame_ into bufPrevFrame_ (interpolate only).
-    void recordFrameGenTail(const struct Push& p, bool rollPrev);
+    // framegen tail: timestamps + dispatch (on `pipe`) + readback copies
+    // into cmd. rollPrev copies bufCurrFrame_ into bufPrevFrame_
+    // (interpolate only).
+    void recordFrameGenTail(const struct Push& p, VkPipeline pipe, bool rollPrev);
     bool submitAndReadback(void* out, size_t bytes,
                            std::chrono::steady_clock::time_point t0,
                            FrameStats* stats);
+    // Drop FG anchors (mode switch, extent change, stream reset): the next
+    // interpolateAnchors copies the newest processed anchor until a second
+    // pair exists.
+    void resetAnchors() { anchorCount_ = 0; havePrevProcessed_ = false; }
     void recordDebugCopies();     // frame==1 chain-path readback into bufDbg
     void writeDebugDumps();       // map bufDbg, write live_*.{bin,f16}
     void barrierAll();
@@ -145,7 +164,7 @@ private:
     VkPipeline pipeDecode_ = VK_NULL_HANDLE, pipeFeatures_ = VK_NULL_HANDLE,
                pipeCompose_ = VK_NULL_HANDLE, pipeEncode_ = VK_NULL_HANDLE;
     VkPipeline pipeRescale_ = VK_NULL_HANDLE, pipeFrameGen_ = VK_NULL_HANDLE,
-               pipeTemporalNr_ = VK_NULL_HANDLE;
+               pipeTemporalNr_ = VK_NULL_HANDLE, pipeFgInterp_ = VK_NULL_HANDLE;
     VkBuffer bufNetRgb_ = VK_NULL_HANDLE, bufFinLow_ = VK_NULL_HANDLE;
     VkDeviceMemory memNetRgb_ = VK_NULL_HANDLE, memFinLow_ = VK_NULL_HANDLE;
     VkDescriptorSet setDown_ = VK_NULL_HANDLE, setUp_ = VK_NULL_HANDLE, setFrameGen_ = VK_NULL_HANDLE;
@@ -157,7 +176,8 @@ private:
                    memDbg_ = VK_NULL_HANDLE, memImgFinal_ = VK_NULL_HANDLE,
                    memLastP_ = VK_NULL_HANDLE, memFbStats_ = VK_NULL_HANDLE, memHp_ = VK_NULL_HANDLE,
                    memPrevFrame_ = VK_NULL_HANDLE, memCurrFrame_ = VK_NULL_HANDLE, memInterpOut_ = VK_NULL_HANDLE,
-                   memPrevRaw_ = VK_NULL_HANDLE;
+                   memPrevRaw_ = VK_NULL_HANDLE, memCurProc_ = VK_NULL_HANDLE,
+                   memMidRaw_ = VK_NULL_HANDLE;
     VkImage imgIn_ = VK_NULL_HANDLE, imgFinal_ = VK_NULL_HANDLE;
     VkImageView imgInView_ = VK_NULL_HANDLE, viewFinal_ = VK_NULL_HANDLE;
     VkBuffer bufUpload_ = VK_NULL_HANDLE, bufRgb_ = VK_NULL_HANDLE, bufMax_ = VK_NULL_HANDLE,
@@ -165,9 +185,13 @@ private:
              bufHist_ = VK_NULL_HANDLE, bufRbFinal_ = VK_NULL_HANDLE, bufDbg_ = VK_NULL_HANDLE,
              bufLastPresented_ = VK_NULL_HANDLE, bufFbStats_ = VK_NULL_HANDLE, bufHp_ = VK_NULL_HANDLE,
              bufPrevFrame_ = VK_NULL_HANDLE, bufCurrFrame_ = VK_NULL_HANDLE, bufInterpOut_ = VK_NULL_HANDLE,
-             bufPrevRaw_ = VK_NULL_HANDLE;
+             bufPrevRaw_ = VK_NULL_HANDLE, bufCurProc_ = VK_NULL_HANDLE,
+             bufMidRaw_ = VK_NULL_HANDLE;
     double lastFrameGenGpuMs_ = 0.0;
     bool havePrevProcessed_ = false;   // set after a successful processFrame
+    int fgMode_ = 1;                   // 1 = transfer (+0), 2 = anchor interp (+1)
+    int anchorCount_ = 0;              // mode-2 anchors held (0..2); mode 1
+                                       // mirrors havePrevProcessed_ (0/1)
     uint64_t framesDone_ = 0;          // frames completed on THIS instance;
                                        // 0 -> first-frame path (no history)
     void* uploadPtr_ = nullptr;

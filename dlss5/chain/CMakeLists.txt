@@ -23,7 +23,7 @@ set(SHADER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../m8b-live/shaders)
 set(M8_SHADER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../m8b-live/shaders/m8)
 
 # transport/front-end shaders needed by ChainEngine in absolute mode
-set(SHADERS decode features compose encode rescale framegen temporal_nr)
+set(SHADERS decode features compose encode rescale framegen fginterp temporal_nr)
 set(SPV_OUTPUTS "")
 foreach(S ${SHADERS})
     set(SPV ${CMAKE_CURRENT_BINARY_DIR}/${S}.spv)
@@ -81,6 +81,7 @@ add_library(d5c_chain STATIC
     prof.cpp
     phase30.cpp
     engine.cpp
+    engine_framegen.cpp
     chain_c_api.cpp)
 add_dependencies(d5c_chain d5c_shaders)
 
@@ -110,7 +111,7 @@ add_dependencies(d5c_chain_dll d5c_shaders)
 set_property(GLOBAL PROPERTY D5C_SPV_DIR "${CMAKE_CURRENT_BINARY_DIR}")
 function(d5c_stage_shaders TGT)
     get_property(SPV_DIR GLOBAL PROPERTY D5C_SPV_DIR)
-    set(SHADERS decode features compose encode rescale framegen temporal_nr)
+    set(SHADERS decode features compose encode rescale framegen fginterp temporal_nr)
     set(M8_SHADERS gemm gemm_rn1 gemm_m8 gemm_i8 quant_act cosine cosine_win softmax elementwise
                    partition transpose_we gather_residual merge featpack headpack
                    pool2 upmerge attn_fused ffn_fused ffn1_fused attn_global)

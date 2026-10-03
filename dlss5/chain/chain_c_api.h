@@ -95,6 +95,18 @@ DLSS5_API int dlss5_framegen_transfer(void* handle, uint32_t w, uint32_t h,
 DLSS5_API void dlss5_set_framegen(void* handle, int enable);
 DLSS5_API int dlss5_get_framegen(void* handle);
 DLSS5_API float dlss5_get_framegen_gpu_ms(void* handle);
+// Frame-generation mode: 1 = residual transfer (+0 latency), 2 = anchor
+// interpolation (+1 frame, Lossless-Scaling-class). Mode 2 synthesizes the
+// midpoint of the two most recent processed anchors; mid_raw_bgra is the
+// REAL captured middle frame used as the confidence fallback (may be NULL -
+// unwarped anchor blend instead). factor is the interval position (0.5 for
+// the 1:2 cadence). Mode 2 requires >=1 processed anchor before it can
+// return a frame (copies the newest anchor until a second pair exists).
+DLSS5_API int dlss5_framegen_interpolate(void* handle, uint32_t w, uint32_t h,
+                                         const void* mid_raw_bgra,
+                                         void* out_bgra, float factor);
+DLSS5_API void dlss5_set_framegen_mode(void* handle, int mode);
+DLSS5_API int dlss5_get_framegen_mode(void* handle);
 
 // Function pointer types for dynamic loading via LoadLibraryA / GetProcAddress:
 typedef void* (*PFN_dlss5_create)(const char* weights_path, const char* shader_dir,
@@ -130,6 +142,11 @@ typedef int (*PFN_dlss5_framegen_transfer)(void* handle, uint32_t w, uint32_t h,
 typedef void (*PFN_dlss5_set_framegen)(void* handle, int enable);
 typedef int (*PFN_dlss5_get_framegen)(void* handle);
 typedef float (*PFN_dlss5_get_framegen_gpu_ms)(void* handle);
+typedef int (*PFN_dlss5_framegen_interpolate)(void* handle, uint32_t w, uint32_t h,
+                                              const void* mid_raw_bgra,
+                                              void* out_bgra, float factor);
+typedef void (*PFN_dlss5_set_framegen_mode)(void* handle, int mode);
+typedef int (*PFN_dlss5_get_framegen_mode)(void* handle);
 typedef void (*PFN_dlss5_set_temporal)(void* handle, int enable);
 typedef int (*PFN_dlss5_get_temporal)(void* handle);
 typedef void (*PFN_dlss5_reset_history)(void* handle);

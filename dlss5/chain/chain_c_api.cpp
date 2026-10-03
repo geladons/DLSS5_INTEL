@@ -71,6 +71,13 @@ public:
         const char* fg_env = std::getenv("DLSS5_FRAMEGEN");
         if (!fg_env) fg_env = std::getenv("NR_LAYER_FRAMEGEN");
         frameGenEnabled_ = (fg_env && std::strcmp(fg_env, "0") != 0);
+        // FG mode: 1 = residual transfer (+0 latency), 2 = anchor
+        // interpolation (+1 frame). Default 1 so a new dll under an old
+        // layer keeps the mode-1 anchor layout byte-identical; mode 2 is
+        // requested explicitly via env or set_framegen_mode.
+        const char* fm_env = std::getenv("DLSS5_FG_MODE");
+        if (!fm_env) fm_env = std::getenv("NR_LAYER_FG_MODE");
+        if (fm_env) fgMode_ = (std::atoi(fm_env) == 2) ? 2 : 1;
         // Temporal conditioning default ON - it anchors each reconstruction
         // to the previous output (the flicker fix). DLSS5_TEMPORAL=0 /
         // NR_LAYER_TEMPORAL=0 disables for A/B and determinism tests.
@@ -160,6 +167,7 @@ public:
         curH_ = h;
         curScale_ = scale_;
         initialized_ = true;
+        engine_.setFrameGenMode(fgMode_);   // clamps to 1 if fginterp.spv missing
         return true;
     }
 
@@ -244,6 +252,29 @@ public:
         d5c::FrameStats stats{};
         bool ok = engine_.transferFrame(w, h, cur, out, &stats);
         return ok ? 0 : -1;
+    }
+
+    // Mode-2 generated frame: midpoint of the two most recent processed
+    // anchors; mid may be NULL (unwarped blend fallback).
+    int framegenInterpolate(uint32_t w, uint32_t h, const void* mid,
+                            void* out, float factor) {
+        if (!ensure(w, h)) {
+            return -1;
+        }
+        d5c::FrameStats stats{};
+        bool ok = engine_.interpolateAnchors(w, h, mid, out, factor, &stats);
+        return ok ? 0 : -1;
+    }
+
+    void setFrameGenMode(int mode) {
+        fgMode_ = (mode == 2) ? 2 : 1;
+        if (initialized_) {
+            engine_.setFrameGenMode(fgMode_);
+        }
+    }
+
+    int getFrameGenMode() const {
+        return initialized_ ? engine_.frameGenMode() : fgMode_;
     }
 
     void setFrameGen(int enable) {
@@ -469,6 +500,7 @@ private:
     bool initialized_ = false;
     bool init_failed_ = false;   // latched until dimensions/scale change
     bool frameGenEnabled_ = false;
+    int fgMode_ = 1;               // 1 = transfer (+0), 2 = anchor interp (+1)
     bool temporal_ = true;
     std::vector<uint8_t> prevProcessed_;
     bool havePrev_ = false;
@@ -683,6 +715,39 @@ DLSS5_API float dlss5_get_framegen_gpu_ms(void* handle) {
         return ctx->getFrameGenGpuMs();
     } catch (...) {
         return 0.0f;
+    }
+}
+
+DLSS5_API int dlss5_framegen_interpolate(void* handle, uint32_t w, uint32_t h,
+                                         const void* mid_raw_bgra,
+                                         void* out_bgra, float factor) {
+    if (!handle || !out_bgra || !w || !h) {
+        return -1;
+    }
+    try {
+        auto* ctx = static_cast<EngineContext*>(handle);
+        return ctx->framegenInterpolate(w, h, mid_raw_bgra, out_bgra, factor);
+    } catch (...) {
+        return -1;
+    }
+}
+
+DLSS5_API void dlss5_set_framegen_mode(void* handle, int mode) {
+    if (!handle) return;
+    try {
+        auto* ctx = static_cast<EngineContext*>(handle);
+        ctx->setFrameGenMode(mode);
+    } catch (...) {
+    }
+}
+
+DLSS5_API int dlss5_get_framegen_mode(void* handle) {
+    if (!handle) return 0;
+    try {
+        auto* ctx = static_cast<EngineContext*>(handle);
+        return ctx->getFrameGenMode();
+    } catch (...) {
+        return 0;
     }
 }
 
