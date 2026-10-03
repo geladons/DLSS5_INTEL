@@ -140,6 +140,24 @@ class StateMonitor(threading.Thread):
         if has_running_x86:
             self._x86_empty_ticks = 0
             self._x86_seen = True
+            # Auto-recover: an x86 game is alive but no daemon answers -
+            # without a restart the layer would fall back to raw output for
+            # the rest of the session (daemon crash, manual kill, reaper
+            # racing a slow spawn). Bounded: one attempt per 30 ticks, max
+            # 5 per monitor lifetime, so a permanently broken daemon does
+            # not spin a restart loop.
+            if (not ctl.daemon.running and self._x86_seen
+                    and not ctl.client.alive()):
+                last = getattr(self, "_daemon_restart_at", 0.0)
+                tries = getattr(self, "_daemon_restarts", 0)
+                now = time.monotonic()
+                if tries < 5 and now - last >= 30.0:
+                    self._daemon_restart_at = now
+                    self._daemon_restarts = tries + 1
+                    msg = "[controller] x86 game alive but daemon dead - restarting (try %d)" % (tries + 1)
+                    print(msg, flush=True)
+                    ok, m2 = ctl.daemon_start()
+                    print("[controller] daemon restart: %s %s" % (ok, m2), flush=True)
         elif ctl.daemon.running:
             self._x86_empty_ticks = getattr(self, "_x86_empty_ticks", 0) + 1
         else:

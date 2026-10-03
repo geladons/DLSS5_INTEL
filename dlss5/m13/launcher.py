@@ -15,6 +15,7 @@
 #    stdout (lands in manager_err.log) and the optional log_fn.
 # ============================================================================
 import os
+import re
 import shlex
 import threading
 import time
@@ -230,12 +231,27 @@ class GameLauncher:
             def do_daemon():
                 nonlocal daemon_note
                 if meta.get("arch") == "x86":
-                    if ctl.daemon.running:
-                        return True, "daemon already running"
-                    ok2, m2 = ctl.daemon_start()
-                    if not ok2 and "already" not in m2:
-                        return False, m2
-                    return True, m2
+                    if not ctl.daemon.running:
+                        ok2, m2 = ctl.daemon_start()
+                        if not ok2 and "already" not in m2:
+                            return False, m2
+                    # Warm the engine at the extent the game is expected to
+                    # present at: the daemon inits lazily inside the first
+                    # request and re-inits on extent change, so a launch-args
+                    # -width/-height match hides the whole init cost behind
+                    # the launch step instead of a raw-frame burst in-game.
+                    ww, wh = 0, 0
+                    raw_args = meta.get("launch_args") or ""
+                    am = re.search(r"-width\s+(\d+)", raw_args)
+                    ah = re.search(r"-height\s+(\d+)", raw_args)
+                    if am and ah:
+                        ww, wh = int(am.group(1)), int(ah.group(1))
+                    if ww > 0 and wh > 0:
+                        okw = ctl.client.warmup(ww, wh)
+                    else:
+                        okw = ctl.client.warmup()
+                    return True, ("daemon running (warmup %s)"
+                                  % ("ok" if okw else "failed"))
                 if ctl.daemon.running:
                     ok2, m2 = ctl._ensure_daemon_stopped(log_fn=self._emit)
                     if ok2:
