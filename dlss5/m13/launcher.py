@@ -255,6 +255,19 @@ class GameLauncher:
                 raw_args = meta.get("launch_args")
                 if raw_args:
                     args = shlex.split(raw_args, posix=False)
+                    # {screen_w}/{screen_h} expand to the primary display
+                    # size at launch time. Legacy D3D9 titles that switch
+                    # display mode strobe raw frames past the layer (the
+                    # compositor alternates the exclusive surface with a
+                    # parallel raw surface the layer never sees); native-res
+                    # fullscreen avoids the mode switch entirely.
+                    if any("{" in a for a in args):
+                        import ctypes
+                        sw = ctypes.windll.user32.GetSystemMetrics(0)
+                        sh = ctypes.windll.user32.GetSystemMetrics(1)
+                        args = [a.replace("{screen_w}", str(sw))
+                                  .replace("{screen_h}", str(sh))
+                                for a in args]
                 elif meta.get("window"):
                     args = list(gamelaunch.WINDOW_ARGS)
                 ok2, m2 = gamelaunch.launch_game(
