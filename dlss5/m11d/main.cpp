@@ -793,18 +793,29 @@ int main(int argc, char** argv) {
                 prevW = w;
                 prevH = h;
             }
-            // Stream-gap reset: a >2 s silence means a new stream (game
-            // restart, alt-tab, different game) - the old history must not
-            // anchor unrelated content.
+            // Two gap thresholds (GTA IV stalls 2-4 s during world
+            // streaming - treating those as new streams emitted one
+            // un-damped brighter first-frame per hitch, the field report's
+            // "periodic bright pop"):
+            //  >2 s  - drop the FG anchor pair only; a seconds-stale prev
+            //          frame warps garbage in residual transfer, while the
+            //          AABB-clamped temporal history is safe to keep.
+            //  >10 s - a real new stream (restart, alt-tab, other game):
+            //          reset history too.
             {
                 static ULONGLONG lastFrameTick = 0;
                 const ULONGLONG now = GetTickCount64();
-                if (lastFrameTick && now - lastFrameTick > 2000) {
+                const ULONGLONG gap = lastFrameTick ? now - lastFrameTick : 0;
+                if (gap > 10000) {
                     engine.resetHistory();
-                    havePrev = false;   // pre-gap frames must not anchor a
-                                        // post-gap residual transfer either
+                    havePrev = false;
                     std::printf("[m11d] stream gap %llu ms - temporal history reset\n",
-                                (unsigned long long)(now - lastFrameTick));
+                                (unsigned long long)gap);
+                } else if (gap > 2000) {
+                    havePrev = false;   // stale anchors must not warp a
+                                        // transfer/interp across a hitch
+                    std::printf("[m11d] frame gap %llu ms - FG anchors dropped\n",
+                                (unsigned long long)gap);
                 }
                 lastFrameTick = now;
             }

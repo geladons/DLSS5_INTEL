@@ -47,7 +47,14 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
   ("no DDA frame within ~8s" at startup). First frame of a NEW duplication is a
   BLACK warm-up frame - m8b content-checks and skips it.
 - Injected MODIFIERS are dropped on this host (ctrl+alt combos via PostMessage
-  fail); SendInput-based input (ui.ps1 move/click, WiggleThread) WORKS.
+  fail); SendInput-based input (ui.ps1 move/click, WiggleThread) WORKS for
+  desktop windows. GAMES are different: GTA IV (DInput/raw-input) ignores
+  ALL injected input - mouse_event, SendInput mouse+key, PostMessage
+  WM_LBUTTONDOWN, MCP Click, UIA Invoke all no-op (verified 2026-10-03);
+  SetCursorPos DOES move the OS cursor and PostMessage BM_CLICK DOES click
+  native dialog buttons. Consequence: menu/gameplay progression cannot be
+  driven synthetically on this host - only Sunshine's virtual HID (the
+  owner's Moonlight session) or a physical mouse reaches the game.
 - Sunshine coexists with our DuplicateOutput (multiple duplications allowed).
 - **THE OWNER WATCHES THIS DESKTOP THROUGH THE MOONLIGHT STREAM** (Sunshine
   DDA capture 2560x1440). A WDA_EXCLUDEFROMCAPTURE overlay is INVISIBLE in
@@ -132,6 +139,18 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
     and `encode` mode b.w = 2 adds it onto the full-res native. Native detail
     is never replaced by a low-res blow-up. Scale 1.0 path is separate.
   - Deterministic noise seed pinned (`p.b[0] = 1`) to eliminate flickering.
+  - Temporal path (`temporal_nr.comp`): the vendor blend outp = pred +
+    alpha*(hist01 - pred) runs in-place on the head before compose; the
+    next history is the PRE-Phase30 output. features.comp sanitises the
+    history INPUT (ch 7-9) with a TAA-style AABB clamp: hist may only
+    reach colours in the current 3x3 neighbourhood (+/-0.004 scaled) -
+    kills cursor trails, stale-region drag, and the bright-patch
+    relaxation oscillator a scalar reject gate produced (field report
+    2026-10-03). Do NOT reintroduce a scalar alpha gate - it oscillates.
+  - Input contract = 16 feature channels exactly (input_adapter_weight
+    [16,32]): ch 0-2 noise, 3 const, 4-6 scaled colour, 7-9 history,
+    10-14 Phase30 controls, 15 zero. NO motion-vector/depth slots - the
+    model is an enhancer, not an engine-integrated temporal upscaler.
   - Frame generation (engine_framegen.cpp): mode 1 = residual transfer
     (`framegen.comp`, `dlss5_framegen_transfer`): generated = cur_raw +
     warp(prev_processed - prev_raw, motion(prev_raw -> cur_raw)). Mode 2 =
