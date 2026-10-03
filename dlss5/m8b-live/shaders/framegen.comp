@@ -166,34 +166,57 @@ vec2 findMotion(ivec2 pos) {
     return bestOffset;
 }
 
-// One-sided block match for mode 1: find offset d such that
-// prevRaw(pos+d) best matches cur(pos). Cost = rgb length diff + luma diff
-// + 0.001 * |d|1; early exit on a static pixel.
-vec2 findTransferMotion(ivec2 pos) {
-    vec4 cur = getPixel(pos.x, pos.y, 1);
-    float lCur = getLuma(cur.rgb);
+// 3x3 SAD block error between prevRaw(center0) and cur(center1): mean
+// abs rgb diff over the 3x3 neighbourhood. Single-pixel matching
+// shatters on animated film grain (every pixel matches *something*);
+// a 3x3 block keeps the match honest on noisy content.
+float transferBlockErr(ivec2 c0, ivec2 c1) {
+    float err = 0.0;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            vec4 p0 = getPixel(c0.x + dx, c0.y + dy, 2);
+            vec4 p1 = getPixel(c1.x + dx, c1.y + dy, 1);
+            vec3 d = abs(p0.rgb - p1.rgb);
+            err += (d.r + d.g + d.b) * 0.3333;
+        }
+    }
+    return err * 0.1111;
+}
 
+// One-sided block match for mode 1: find offset d such that
+// prevRaw(pos+d) best matches cur(pos). 3x3 SAD + a stronger distance
+// prior; the caller gates the transfer on the returned bestErr so a
+// hopeless match emits raw cur instead of a misplaced residual (the
+// observed ghost trails/judder).
+vec2 findTransferMotion(ivec2 pos, out float bestErr) {
+    vec4 cur = getPixel(pos.x, pos.y, 1);
     vec4 pv = getPixel(pos.x, pos.y, 2);
-    float minErr = abs(getLuma(pv.rgb) - lCur) + length(pv.rgb - cur.rgb) * 0.5;
+
+    float minErr = transferBlockErr(pos, pos);
     vec2 bestOffset = vec2(0.0);
 
-    if (minErr < 0.012) {
+    // Early exit for static pixels
+    float lDiff = abs(getLuma(pv.rgb) - getLuma(cur.rgb))
+                + length(pv.rgb - cur.rgb) * 0.5;
+    if (lDiff < 0.012) {
+        bestErr = 0.0;
         return vec2(0.0);
     }
 
-    // Coarse diamond search, 2x the interpolate radii (+-16 axial, +-8
-    // axial+diagonal so e.g. a 6 px shift is reachable via -8 + fine +2)
-    const ivec2 coarseCandidates[12] = ivec2[](
+    // Coarse search +-24 axial / +-16 diagonal: covers camera pans up to
+    // ~24 px/frame; faster motion (cursor sweeps) fails the match and the
+    // confidence gate falls back to raw rather than ghosting.
+    const ivec2 coarseCandidates[14] = ivec2[](
+        ivec2(-24, 0), ivec2(24, 0), ivec2(0, -24), ivec2(0, 24),
         ivec2(-16, 0), ivec2(16, 0), ivec2(0, -16), ivec2(0, 16),
-        ivec2(-8, 0), ivec2(8, 0), ivec2(0, -8), ivec2(0, 8),
-        ivec2(-8, -8), ivec2(8, -8), ivec2(-8, 8), ivec2(8, 8)
+        ivec2(-8, 0), ivec2(8, 0),
+        ivec2(-16, -16), ivec2(16, -16), ivec2(-16, 16), ivec2(16, 16)
     );
 
-    for (int i = 0; i < 12; ++i) {
+    for (int i = 0; i < 14; ++i) {
         ivec2 d = coarseCandidates[i];
-        vec4 s0 = getPixel(pos.x + d.x, pos.y + d.y, 2);
-        float err = length(s0.rgb - cur.rgb) + abs(getLuma(s0.rgb) - lCur)
-                  + float(abs(d.x) + abs(d.y)) * 0.001;
+        float err = transferBlockErr(pos + d, pos)
+                  + float(abs(d.x) + abs(d.y)) * 0.004;
         if (err < minErr) {
             minErr = err;
             bestOffset = vec2(d);
@@ -210,34 +233,35 @@ vec2 findTransferMotion(ivec2 pos) {
     for (int i = 0; i < 8; ++i) {
         ivec2 d = fineCandidates[i];
         vec2 cand = base + vec2(d);
-        vec4 s0 = getPixel(pos.x + int(cand.x), pos.y + int(cand.y), 2);
-        float err = length(s0.rgb - cur.rgb) + abs(getLuma(s0.rgb) - lCur)
-                  + float(abs(int(cand.x)) + abs(int(cand.y))) * 0.001;
+        float err = transferBlockErr(pos + ivec2(int(cand.x), int(cand.y)), pos)
+                  + float(abs(cand.x) + abs(cand.y)) * 0.004;
         if (err < minErr) {
             minErr = err;
             bestOffset = cand;
         }
     }
 
+    bestErr = minErr;
     return bestOffset;
 }
 
 // Mode 1: generated = cur + (prevProcessed - prevRaw) warped by the
-// raw->raw motion; occluded areas fall back to cur.
+// raw->raw motion; a match we do not trust emits the raw frame instead
+// of a residual stamped on the wrong content (ghost trail).
 void transferPixel(ivec2 pos) {
-    float occlThreshold = pc.c.y > 0.0 ? pc.c.y : 0.20;
-
     vec4 cur = getPixel(pos.x, pos.y, 1);
-    vec2 motion = findTransferMotion(pos);
+
+    float matchErr;
+    vec2 motion = findTransferMotion(pos, matchErr);
     vec2 srcPos = vec2(pos) + motion;
 
     vec4 prevProc = sampleBilinear(srcPos, 0);
     vec4 prevRaw = sampleBilinear(srcPos, 2);
     vec3 resid = prevProc.rgb - prevRaw.rgb;
 
-    vec3 diff = abs(prevRaw.rgb - cur.rgb);
-    float maxDiff = max(diff.r, max(diff.g, diff.b));
-    float occl = smoothstep(occlThreshold * 0.75, occlThreshold * 1.5, maxDiff);
+    // Confidence gate on the match quality itself (mean abs rgb error of
+    // the best 3x3 block). ~0.04 is a clean match; >=0.30 is hopeless.
+    float occl = smoothstep(0.05, 0.30, matchErr);
 
     vec3 outRgb = clamp(cur.rgb + resid * (1.0 - occl), 0.0, 1.0);
     uint outIdx = uint(pos.y * pc.a.x + pos.x);
