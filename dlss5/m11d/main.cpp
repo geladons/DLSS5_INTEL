@@ -286,6 +286,19 @@ int main(int argc, char** argv) {
     int benchN = 0;
     uint32_t benchW = 0, benchH = 0;
     std::string weights;   // REQUIRED: --weights PATH (no machine-specific default)
+    // Shader dir: exe-relative by default so the daemon is CWD-independent
+    // (a bare `.\` broke init whenever the launcher's cwd differed, e.g.
+    // manual/elevated spawns). DLSS5_SHADER_DIR / --shader-dir override.
+    char exePath[MAX_PATH]{};
+    DWORD exeLen = GetModuleFileNameA(nullptr, exePath, MAX_PATH);
+    std::string shaderDir(exePath, exeLen);
+    {
+        size_t sep = shaderDir.find_last_of("\\/");
+        shaderDir = (sep == std::string::npos) ? ".\\" : shaderDir.substr(0, sep + 1);
+    }
+    if (const char* sd = std::getenv("DLSS5_SHADER_DIR")) {
+        if (*sd) { shaderDir = sd; if (shaderDir.back() != '\\' && shaderDir.back() != '/') shaderDir += "\\"; }
+    }
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--port" && i + 1 < argc) port = std::atoi(argv[++i]);
@@ -302,6 +315,11 @@ int main(int argc, char** argv) {
         else if (a == "--scale" && i + 1 < argc) scale = (float)std::atof(argv[++i]);
         else if (a == "--framegen" && i + 1 < argc) frameGen = (std::atoi(argv[++i]) != 0);
         else if (a == "--weights" && i + 1 < argc) weights = argv[++i];
+        else if (a == "--shader-dir" && i + 1 < argc) {
+            shaderDir = argv[++i];
+            if (!shaderDir.empty() && shaderDir.back() != '\\' && shaderDir.back() != '/')
+                shaderDir += "\\";
+        }
         else if (a == "--dump") dump = true;
         else if (a == "--selftest" && i + 1 < argc) selftest = argv[++i];
         else if (a == "--intensity" && i + 1 < argc) {
@@ -376,7 +394,7 @@ int main(int argc, char** argv) {
         d5c::EngineConfig cfg{};
         cfg.canvasW = w; cfg.canvasH = h;
         cfg.weightsPath = weights;
-        cfg.shaderDir = ".\\";            // spv staged next to the exe
+        cfg.shaderDir = shaderDir;        // exe-relative unless overridden
         cfg.headGain = 1.0f;
         cfg.headBlend = p30Ctl.params().intensity;
         cfg.renderScale = scale;
