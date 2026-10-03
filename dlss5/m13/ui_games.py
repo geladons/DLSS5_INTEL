@@ -187,12 +187,16 @@ class GamesTab:
 
         # Per-game extras row: explicit launch args (win over the windowed
         # checkbox) and a framegen override (auto = the global switch).
-        # Saved into games[exe] on focus-out so a re-register keeps them.
+        # Saved into games[exe] on focus-out; a re-register (add_game writes
+        # a fresh meta) must not silently drop them, so the Enable and Play
+        # paths carry the current field values into the new meta too.
         ext = ttk.Frame(t)
         ext.pack(fill="x", pady=(2, 0))
+        self.ext_who = ttk.Label(ext, text="", style="Muted.TLabel")
+        self.ext_who.pack(side="left", padx=(0, 8))
         ttk.Label(ext, text=tr("game_args")).pack(side="left")
         self.args_var = tk.StringVar()
-        self.args_entry = ttk.Entry(ext, textvariable=self.args_var, width=40)
+        self.args_entry = ttk.Entry(ext, textvariable=self.args_var, width=36)
         self.args_entry.pack(side="left", padx=(4, 10))
         self.args_entry.bind("<FocusOut>", lambda e: self._save_extras())
         ttk.Label(ext, text=tr("game_fg")).pack(side="left")
@@ -202,6 +206,7 @@ class GamesTab:
             values=(tr("fg_auto"), tr("fg_on"), tr("fg_off")))
         self.fg_box.pack(side="left", padx=(4, 0))
         self.fg_box.bind("<<ComboboxSelected>>", lambda e: self._save_extras())
+        self._extras_state(tk.DISABLED)
 
         ttk.Label(t, text=tr("anticheat_warn"),
                   style="Muted.TLabel", foreground=AMBER,
@@ -218,15 +223,29 @@ class GamesTab:
     def selected_exe(self):
         return self._selected
 
+    def _extras_state(self, state):
+        """Enable/grey the extras widgets; state is tk.NORMAL or
+        tk.DISABLED. The combobox is readonly so 'normal' keeps it
+        pickable-but-not-typable."""
+        self.args_entry.config(state=state)
+        self.fg_box.config(state="readonly" if state == tk.NORMAL else state)
+
     def select(self, exe):
         self._selected = exe
         for path, card in self.cards.items():
             card.set_selected(path == exe)
-        meta = (self.ctl.cfg.get("games") or {}).get(exe or "")
+        meta = (self.ctl.cfg.get("games") or {}).get(exe or "") or {}
+        self.ext_who.config(
+            text=tr("extras_for", meta.get("name") or
+                    os.path.splitext(os.path.basename(exe))[0])
+                if exe else "")
+        self._extras_state(tk.NORMAL if exe else tk.DISABLED)
         if meta:
             self.mode_var.set(MODE_NAMES.get(meta["mode"], tr("mode_auto")))
             self.window_var.set(bool(meta.get("window")))
-        meta = meta or {}
+        else:
+            self.mode_var.set(tr("mode_auto"))
+            self.window_var.set(False)
         self.args_var.set(meta.get("launch_args") or "")
         fgm = meta.get("framegen")
         self.fg_var.set(tr("fg_on") if fgm is True else
@@ -290,12 +309,28 @@ class GamesTab:
             if g.exe == exe:
                 launch = g.launch_exe if g.via_wrapper else None
         self.ctl.submit(self._enable_worker, exe, self._chosen_mode(),
-                        launch)
+                        launch, self.args_var.get().strip(),
+                        self._chosen_fg(),
+                        bool(self.window_var.get()))
 
-    def _enable_worker(self, exe, mode, launch_exe=None):
+    def _enable_worker(self, exe, mode, launch_exe=None, args="",
+                       framegen=None, window=False):
         ok, msg = self.ctl.add_game(exe, mode, launch_exe=launch_exe)
         if not ok:
             return False, msg
+        # add_game wrote a fresh {mode, arch, name} meta - carry the extras
+        # row the user typed before hitting Enable (window, launch args,
+        # framegen override) into it or they are silently lost.
+        games = self.ctl.cfg.get("games") or {}
+        meta = games.get(exe)
+        if isinstance(meta, dict):
+            if window:
+                meta["window"] = True
+            if args:
+                meta["launch_args"] = args
+            if framegen is not None:
+                meta["framegen"] = framegen
+            self.ctl.cfg.save()
         return self.ctl.game_deploy(exe)
 
     def _launch(self):
@@ -309,7 +344,8 @@ class GamesTab:
         if exe in games:
             if games[exe].get("window") != window:
                 games[exe]["window"] = window
-                self.ctl.cfg.save()
+            self._save_extras()
+            self.ctl.cfg.save()
         else:
             launch = None
             for g in self.scanned:

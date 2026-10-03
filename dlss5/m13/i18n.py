@@ -168,6 +168,7 @@ _S = {
     "play": {"en": "Play", "ru": "Играть"},
     "window_cb": {"en": "Window (try: -windowed)",
                   "ru": "Окно (попробовать: -windowed)"},
+    "extras_for": {"en": "for %s:", "ru": "для %s:"},
     "game_args": {"en": "Args:", "ru": "Аргументы:"},
     "game_fg": {"en": "FG:", "ru": "FG:"},
     "fg_auto": {"en": "auto", "ru": "авто"},
