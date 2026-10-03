@@ -2315,3 +2315,28 @@ be gone (no oscillator left). If exposure "breathing" still shows during
 camera pans, the residual source is the network's own frame-to-frame tone
 jitter - next lever is a global-gain anchor in compose (needs a frame
 luma reduction) or stronger damping via alpha scaling.
+
+## 2026-10-03 (autonomous session 2 - gap reset split + live investigation)
+
+- m11d stream-gap reset split (dc88fde): >2 s now drops only the FG anchor
+  pair (stale anchors warp garbage in transfer/interp), >10 s resets
+  temporal history. GTA IV hitches 2-4 s during world streaming - every
+  such hitch used to emit one un-damped brighter first-frame (the owner's
+  "periodic bright frame pops while idle"). AABB-clamped history is safe
+  through hitches, stale FG anchors are not.
+- Live host finding (documented in AGENTS): GTA IV/DInput ignores ALL
+  synthetic input - mouse_event, SendInput keys+mouse, PostMessage
+  WM_LBUTTONDOWN, MCP Click, UIA all no-op; SetCursorPos moves the OS
+  cursor and PostMessage BM_CLICK clicks native dialogs. Menu
+  progression cannot be driven autonomously on this host; the owner's
+  Moonlight session (Sunshine virtual HID) is the only path.
+- Field-run state verified: EFLC episode-select menu renders clean under
+  the AABB build (no trails visible), daemon + x86 layer healthy
+  (presents flowing, processed ~= presents, native=0).
+- Retest guidance (GTA IV, Temporal ON, FG off): cursor trails should
+  die in ~1 frame, no sustained bright patch (clamp breaks the
+  history->pred->history feedback), no hitch-pops (10 s threshold).
+  Residual candidates if artifacts remain: network-side tone jitter on
+  pans (needs a global-gain anchor with a stats pass - deferred,
+  designed), local shimmer confined to the moving sprite (inherent
+  pixel-only trade).
