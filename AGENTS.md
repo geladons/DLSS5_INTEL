@@ -99,14 +99,17 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
     previous one reuses the last processed result (NR_LAYER_UI_MASK=0 disables;
     legacy env name). Phase30 `auto_mask` is the VENDOR skin/structure
     conditioning parameter (feature ch 12-14), unrelated to HUD masking.
-  - Frame generation (`nr_framegen.h/.c`, NrFrameGen): with FG on and the
-    in-process x64 engine loaded the layer processes every 2nd present and
-    GENERATES the one in between via `dlss5_framegen_transfer` (1:2 cadence,
-    no added latency). x86/daemon path: the same 1:2 cadence sends an NRN2
-    frame magic to m11d, whose resident engine runs the residual transfer
-    (falls back to a full process until a prev pair exists; an old daemon
-    that drops the unknown magic is latched FG-off for the session). Watch
-    `fg stats: presents/processed/generated/native` in %TEMP%\nr_layer_win.log.
+  - Frame generation (`nr_framegen.h/.c`, NrFrameGen): two algorithms.
+    Mode 2 (DEFAULT for opt-in FG, `*_FG_MODE=2`, LS-class): the layer keeps
+    a 1:2 cadence - on the mid present it captures the REAL middle frame
+    into `data->mid` and re-blits the held processed anchor; on the anchor
+    present it calls `dlss5_framegen_interpolate` (x64 in-process) or sends
+    the mid payload as an NRN3 magic to m11d (x86) - the generated midpoint
+    of the last two processed anchors goes out at a uniform +1-present
+    delay. Mode 1 (`dlss5_framegen_transfer`, NRN2) is the legacy +0-latency
+    residual transfer, kept for latency-critical games. Watch
+    `fg stats: presents/processed/generated/native` + `diag_path=fgi/mheld`
+    in %TEMP%\nr_layer_win.log.
   - Diagnostics: `NR_LAYER_DIAG=1` logs every present (path tag, upload/
     result CRC, transfer status) and stamps an 'NRM' marker into the
     upload buffer so DDA-captured frames can be attributed to the layer.
@@ -129,12 +132,20 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
     and `encode` mode b.w = 2 adds it onto the full-res native. Native detail
     is never replaced by a low-res blow-up. Scale 1.0 path is separate.
   - Deterministic noise seed pinned (`p.b[0] = 1`) to eliminate flickering.
-  - Frame generation = residual transfer (`framegen.comp` mode 1,
-    `dlss5_framegen_transfer`): generated = cur_raw + warp(prev_processed -
-    prev_raw, motion(prev_raw -> cur_raw)). Engine owns prev state
-    (`bufPrevFrame_`/`bufPrevRaw_`). Mode 0 (`dlss5_interpolate_frame`) is
-    the legacy F0/F1 interpolation, unused by the layer. No XeSS-FG: it needs
-    engine motion vectors/depth and is D3D12-only - a present hook has neither.
+  - Frame generation (engine_framegen.cpp): mode 1 = residual transfer
+    (`framegen.comp`, `dlss5_framegen_transfer`): generated = cur_raw +
+    warp(prev_processed - prev_raw, motion(prev_raw -> cur_raw)). Mode 2 =
+    anchor interpolation (`fginterp.comp`, `dlss5_framegen_interpolate`):
+    symmetric rawA<->rawB match, warps BOTH processed anchors to factor,
+    per-pixel confidence falls back to the real captured midRaw - honest
+    output on scene cuts and disocclusion. Engine owns the two-anchor
+    state (bufPrevFrame_/bufCurProc_ proc pair, bufPrevRaw_/bufCurrFrame_
+    raw pair, bufMidRaw_) rotated inside processFrame; `set_framegen_mode`
+    (env DLSS5_FG_MODE/NR_LAYER_FG_MODE/M12_FG_MODE) selects the rotation,
+    mode 2 clamps to 1 when fginterp.spv is absent. Mode 0
+    (`dlss5_interpolate_frame`) is the legacy F0/F1 interpolation, unused
+    by the layer. No XeSS-FG: it needs engine motion vectors/depth and is
+    D3D12-only - a present hook has neither.
 - m11d: DLSSNR frame daemon for 32-bit x86 titles (TCP 127.0.0.1:48990).
   Lifecycle is auto-managed by `m13`: starts for x86 games, stops after the
   x86 exit grace period, and is reclaimed immediately before an x64 launch.

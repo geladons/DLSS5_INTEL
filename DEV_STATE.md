@@ -2222,3 +2222,51 @@ control appears twice. Decision: FG is now OPT-IN.
 FG rework roadmap (LS-class target, XeSS/FSR-FG unreachable without
 engine MV/depth): delayed interpolation between two real frames,
 multi-scale flow, per-region confidence, scene-cut detection, pacing.
+
+## FG mode 2 Stage 1 SHIPPED: anchor-to-anchor interpolation (LS-class)
+
+The residual-transfer FG is replaced as the default opt-in algorithm by
+true interpolation between two REAL processed anchors - the Lossless-
+Scaling approach adapted to a present hook (no engine MV/depth available).
+
+Architecture (validated end to end):
+- New shader fginterp.comp: symmetric rawA<->rawB window match, warps BOTH
+  processed anchors to factor, per-pixel confidence -> real captured
+  midRaw fallback (scene cuts / disocclusion stay honest, T5: |G-mid|=3.5
+  vs naive-cut-dissolve 55.6).
+- Engine (engine_framegen.cpp - FG extracted from engine.cpp per the
+  600-line rule): bufPrevFrame_/bufCurProc_ proc pair + bufPrevRaw_/
+  bufCurrFrame_ raw pair rotated inside processFrame when fgMode_==2;
+  bufMidRaw_ binding 10. set_framegen_mode() clamps 2->1 when fginterp.spv
+  is missing (old deployment safety).
+- C ABI: dlss5_framegen_interpolate + dlss5_set/get_framegen_mode
+  (EngineContext reads DLSS5_FG_MODE/NR_LAYER_FG_MODE env at create).
+- x64 layer: mid present captures the REAL middle frame (data->mid) and
+  re-blits the held processed anchor; anchor present interpolates the
+  just-closed interval and outputs the generated midpoint - every
+  displayed frame sits at a uniform +1-present delay. NRN3 (0x334E524E)
+  is the daemon request magic; reply lands in data->interp so a dead
+  daemon cannot tear the P frame still in mapped.
+- m11d: fgMode int (0/1/2), MAGIC_FGI dispatch, sehInterpAnchors, NRCT
+  cmd 14 SETFGMODE live switch; NRN3 with fgMode<2 or !havePrev falls
+  back to a full process of the mid payload (verified: reply even closer
+  to truth, |G-mid|=1.32 vs interp 2.48 on the synthetic mover).
+- m12-dxgi: same two-phase cadence in-process (mid_ buffer, refreshDesc
+  invalidates it; onPresent interpolates on live presents).
+- m13: gamelaunch sets DLSS5_FG_MODE/NR_LAYER_FG_MODE/M12_FG_MODE=2 when
+  FG resolves on (setdefault - env override still wins); controller
+  passes --framegen 2 to m11d and seeds DLSS5_FG_MODE; launcher pushes
+  the per-game-resolved mode over NRCT 14 after daemon start so an x86
+  game with framegen:true gets mode 2 even under a global off; daemonctl
+  set_fg_mode() client.
+
+Validation: test_framegen_interp.py 6/6 (T4 motion: G-mid 3.5 vs naive
+4.98; T6 GPU 0.45 ms @640x384); mode-1 transfer regression byte-exact;
+noise-seed / scale-reconstruction / graceful-fail green; NRN3 e2e probe
+(T1 reply, T2 beats crossfade, T3 mode<2 fallback, T4 NRCT ack); all
+consumers + x86 layer rebuild clean; m13 30/30; production runtime +
+Metro deploy resynced.
+
+Not done (Stage 2+): multi-scale/pyramid flow, per-region confidence
+map, live mode switching through the knob file, field A/B on GTA IV +
+RDR2 + Metro.
