@@ -1987,3 +1987,48 @@ STILL OPEN: moving-scene/gameplay verification (needs the owner's physical
 PLAY click through Sunshine); daemon throughput ~188ms/frame at scale 1.0
 (~5fps) / ~70ms at 0.33 - on moving scenes held-frame mixing is still
 visible judder; that is a throughput wall, not a transport defect.
+
+## Raw-frame strobe root cause (found 2026-10-03, DDA-verified)
+
+SYMPTOM (owner): every few frames a single washed-out raw frame splices
+between processed ones - "colors jump" - in menu AND game, worse at
+higher fps. Layer log showed ZERO raw-out in steady state.
+
+PROOF CHAIN:
+- NR_LAYER_DIAG=1 (new, commit befd201): per-present log of path +
+  upload-buffer CRC + result CRC + transfer status. 3000+ presents all
+  reported the same processed upload CRC, tr=0 - no unlogged raw path
+  exists inside vkQueuePresentKHR.
+- Staging marker: 'NRM' + counter stamped into the upload buffer - DDA
+  frames split cleanly into A (marker present = our pipeline) and B
+  (no marker = never touched the layer). B == raw input byte-for-byte.
+- Pause hotkey control: CTRL+ALT+X -> all captured frames = raw (sanity).
+- WM_PAINT guard, per-frame window-DC repaint, desktop-DC repaint,
+  second-process/module scan, freeze-flag dangle: all eliminated.
+- dxvk.conf d3d9.enableDialogMode: mode still switches, strobe unchanged.
+
+ROOT CAUSE: GTA IV fullscreen SWITCHES THE DISPLAY MODE (800x600 on a
+2560x1440 desktop). While the mode is switched the compositor arbitrates
+between the exclusive swapchain surface (our processed frames) and a
+parallel surface carrying live raw frames - the layer cannot intercept
+it by construction. Frequency ~10-20% of compositor ticks at idle; any
+real input silences it (DWM recomposes).
+
+VERIFIED MITIGATIONS (GTA IV, DDA 90-150 frame captures):
+- Mode-switched 800x600 fullscreen: ~15% stray raw frames. BAD.
+- Windowed (-windowed): 0 strays.
+- Fullscreen at NATIVE desktop res (-width 2560 -height 1440): 0 strays.
+  No mode switch -> single surface path.
+- FSO off (DISABLEDXMAXIMIZEDWINDOWEDMODE): WORSE (reverted).
+
+FIX SHIPPED: m13 launch_args templating (commit 4f310e8) - per-game
+launch_args support {screen_w}/{screen_h} expanded to the primary
+display size at spawn. GTA IV entry now uses
+'-width {screen_w} -height {screen_h}'. Cost note: at 1440p extent the
+x86 daemon runs ~127ms/frame (was ~36ms at 800x600) - processed rate
+~8fps before framegen; lowering Scale trades it back. Other legacy
+D3D9 titles (GTA SA) share the mechanism - same template applies if
+the game accepts res args.
+
+LINGERING: moving-scene verification still needs the owner clicking
+through Sunshine (synthetic input cannot navigate the EFLC launcher).
