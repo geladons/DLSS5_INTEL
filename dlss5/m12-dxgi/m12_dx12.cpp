@@ -57,6 +57,7 @@ static PFN_dlss5_set_gain pfn_dlss5_set_gain = NULL;
 static PFN_dlss5_set_blend pfn_dlss5_set_blend = NULL;
 static PFN_dlss5_set_sharpness pfn_dlss5_set_sharpness = NULL;
 static PFN_dlss5_interpolate_frame pfn_dlss5_interpolate_frame = NULL;
+static PFN_dlss5_framegen_transfer pfn_dlss5_framegen_transfer = NULL;
 static PFN_dlss5_set_framegen pfn_dlss5_set_framegen = NULL;
 static PFN_dlss5_get_framegen pfn_dlss5_get_framegen = NULL;
 static PFN_dlss5_set_phase30 pfn_dlss5_set_phase30 = NULL;
@@ -266,6 +267,55 @@ static void ensure_inprocess()
         return;
     }
 
+    // Launcher-process gate: a dxgi proxy lands next to the GAME exe, but
+    // launcher exes in the same dir (Launcher.exe, PlayGTAV.exe, RED
+    // prelaunchers) load dxgi too - without this gate each spawns its own
+    // ~0.5 GB chain engine and the owner sees "engine init twice". The
+    // deployer writes m12_target.txt (the configured game exe basename);
+    // when the file exists and the host exe does not match, stay a pure
+    // passthrough proxy. Missing file = legacy deploy, activate as before.
+    {
+        char self_dir[MAX_PATH] = {0};
+        HMODULE hSelf = NULL;
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCSTR)ensure_inprocess, &hSelf) && hSelf) {
+            GetModuleFileNameA(hSelf, self_dir, sizeof(self_dir));
+            char *s = strrchr(self_dir, '\\');
+            if (!s) s = strrchr(self_dir, '/');
+            if (s) *(s + 1) = '\0';
+        }
+        if (self_dir[0]) {
+            char target_file[MAX_PATH];
+            _snprintf_s(target_file, sizeof(target_file), _TRUNCATE,
+                        "%sm12_target.txt", self_dir);
+            FILE *tf = fopen(target_file, "r");
+            if (tf) {
+                char target[MAX_PATH] = {0};
+                if (fgets(target, sizeof(target) - 1, tf)) {
+                    // strip whitespace/crlf
+                    size_t tl = strlen(target);
+                    while (tl && (target[tl - 1] == '\r' || target[tl - 1] == '\n'
+                                  || target[tl - 1] == ' ' || target[tl - 1] == '\t'))
+                        target[--tl] = '\0';
+                    char host[MAX_PATH] = {0};
+                    GetModuleFileNameA(NULL, host, sizeof(host));
+                    char *hb = strrchr(host, '\\');
+                    if (!hb) hb = strrchr(host, '/');
+                    hb = hb ? hb + 1 : host;
+                    if (target[0] && _stricmp(hb, target) != 0) {
+                        m12_logf("[m12_dxgi] host '%s' != target '%s' - passthrough "
+                                 "(no engine in launcher process)", hb, target);
+                        fclose(tf);
+                        LeaveCriticalSection(&g_inproc_cs);
+                        return;
+                    }
+                }
+                fclose(tf);
+            }
+        }
+    }
+
     HMODULE hDll = NULL;
     const char *custom_dll = getenv("M12_CHAIN_DLL");
     if (!custom_dll) custom_dll = getenv("NR_LAYER_CHAIN_DLL");
@@ -359,6 +409,7 @@ static void ensure_inprocess()
     pfn_dlss5_set_blend = (PFN_dlss5_set_blend)GetProcAddress(hDll, "dlss5_set_blend");
     pfn_dlss5_set_sharpness = (PFN_dlss5_set_sharpness)GetProcAddress(hDll, "dlss5_set_sharpness");
     pfn_dlss5_interpolate_frame = (PFN_dlss5_interpolate_frame)GetProcAddress(hDll, "dlss5_interpolate_frame");
+    pfn_dlss5_framegen_transfer = (PFN_dlss5_framegen_transfer)GetProcAddress(hDll, "dlss5_framegen_transfer");
     pfn_dlss5_set_framegen = (PFN_dlss5_set_framegen)GetProcAddress(hDll, "dlss5_set_framegen");
     pfn_dlss5_get_framegen = (PFN_dlss5_get_framegen)GetProcAddress(hDll, "dlss5_get_framegen");
     pfn_dlss5_set_phase30 = (PFN_dlss5_set_phase30)GetProcAddress(hDll, "dlss5_set_phase30");
@@ -748,6 +799,16 @@ static int safe_interpolate_frame(PFN_dlss5_interpolate_frame pfn, void *engine,
     }
 }
 
+static int safe_transfer_frame(PFN_dlss5_framegen_transfer pfn, void *engine, uint32_t w, uint32_t h,
+                               const uint8_t *cur_raw, uint8_t *out)
+{
+    __try {
+        return pfn(engine, w, h, cur_raw, out);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -999;
+    }
+}
+
 // raw_ -> in-process DLSS 5 (or daemon fallback) -> processed_.
 // Re-sending the same raw_ with a new daemon gain is exactly the "live knob on a frozen frame" reprocess.
 bool M12Dx12Processor::sendRaw()
@@ -999,25 +1060,29 @@ void M12Dx12Processor::onPresent()
     } else {
         bool interpolated = false;
         ensure_inprocess();
-        if (is_framegen_enabled() && g_engine && pfn_dlss5_interpolate_frame && have_processed_ &&
+        // Residual transfer, not a F0/F1 crossfade: interpolate_frame(prev
+        // processed, cur raw, 0.5) blended two temporally different frames
+        // and read as permanent smear on Metro. The transfer warps the
+        // engine-side (prev processed - prev raw) delta along raw->raw
+        // motion - the same path the x64 layer runs.
+        if (is_framegen_enabled() && g_engine && pfn_dlss5_framegen_transfer && have_processed_ &&
             processed_.size() == (std::size_t)width_ * height_ * 4) {
             if (grabRaw(bb.Get()) && !raw_.empty() && raw_.size() == (std::size_t)width_ * height_ * 4) {
                 std::size_t needed = (std::size_t)width_ * height_ * 4;
                 if (interp_.size() < needed) interp_.resize(needed);
-                int r = safe_interpolate_frame(pfn_dlss5_interpolate_frame, g_engine, width_, height_,
-                                                processed_.data(), raw_.data(),
-                                                interp_.data(), 0.5f);
+                int r = safe_transfer_frame(pfn_dlss5_framegen_transfer, g_engine, width_, height_,
+                                            raw_.data(), interp_.data());
                 if (r == 0) {
                     static UINT64 s_fg_count = 0;
                     s_fg_count++;
                     if (s_fg_count <= 5 || s_fg_count % 60 == 0) {
-                        m12_logf("[m12_dxgi] framegen interpolated %ux%u (frame %llu, fg #%llu)",
+                        m12_logf("[m12_dxgi] framegen transfer %ux%u (frame %llu, fg #%llu)",
                                  width_, height_, present_count_, s_fg_count);
                     }
                     blitToBackbuffer(bb.Get(), interp_);
                     interpolated = true;
                 } else {
-                    m12_logf("[m12_dxgi] dlss5_interpolate_frame failed (%d); falling back to stale frame", r);
+                    m12_logf("[m12_dxgi] dlss5_framegen_transfer failed (%d); falling back to stale frame", r);
                 }
             }
         }

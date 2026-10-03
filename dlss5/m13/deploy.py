@@ -41,6 +41,10 @@ MODE_DLLS = {
     "vulkan": (),     # nothing to deploy: the implicit layer self-loads
 }
 
+# Written next to the dx12 proxy: host-exe basename that may spawn the
+# in-process engine. Launcher exes sharing the dir stay passthrough.
+M12_TARGET_FILE = "m12_target.txt"
+
 
 def mode_dll_source(mode, arch, dll_name):
     """Source path for one dll of a mode. arch: 'x64' | 'x86'."""
@@ -168,9 +172,12 @@ class Deployer:
             raise DeployError("copy failed (%s) - game running?" % e) from e
         return self.status(dll_name, source_path) == "deployed"
 
-    def deploy_mode(self, mode, arch):
+    def deploy_mode(self, mode, arch, target_name=None):
         """Deploy every dll of an injection mode; auto-elevates on ACL
-        dirs (one UAC prompt copies them all). Returns status dict."""
+        dirs (one UAC prompt copies them all). Returns status dict.
+        target_name: basename of the game exe - for dx12 the proxy writes
+        m12_target.txt so launcher processes in the same dir stay a pure
+        passthrough instead of spawning a second engine."""
         if mode not in MODE_DLLS:
             raise DeployError("unknown mode: %s" % mode)
         if mode == "dx9":
@@ -190,11 +197,55 @@ class Deployer:
             _elevated_copy(self.game_dir, need_elevation)
             for _src, dll in need_elevation:
                 out[dll] = self.status(dll, mode_dll_source(mode, arch, dll))
+        if mode == "dx12":
+            self._write_m12_target(target_name)
         # NOTE: no dual-renderer sister-dir sync here (removed Stage 25):
         # auto-deploying our dxgi proxy into a sibling x64_dx12 dir crashed
         # Witcher 3 on the first processed present. Deploy only what was
         # asked; undeploy_mode still cleans sister dirs left by old builds.
         return out
+
+    def _write_m12_target(self, target_name):
+        """m12_target.txt = the exe the dxgi proxy may spawn an engine for.
+        Plain user-writable file; if the dir is ACL-protected the deploy
+        still succeeded - the gate simply stays open (legacy behavior)."""
+        path = self._target(M12_TARGET_FILE)
+        try:
+            if target_name:
+                with open(path, "w") as f:
+                    f.write(target_name.strip() + "\n")
+            elif os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            pass
+
+    def undeploy_other_modes(self, mode, arch):
+        """Remove OUR proxies left by OTHER injection modes (best effort).
+        A game that switched dx12->vulkan (or got re-registered with a
+        corrected mode) keeps the old dxgi.dll otherwise - and launcher
+        exes in that dir load it and spawn a second engine (RDR2). Only
+        files whose hash matches our sources are touched; foreign dlls and
+        the game's own files are left alone."""
+        removed = []
+        for other, dlls in MODE_DLLS.items():
+            if other == mode:
+                continue
+            for dll in dlls:
+                src = mode_dll_source(other, arch, dll)
+                try:
+                    if self._is_ours(dll, other, src):
+                        self.undeploy(dll, src, trust=True)
+                        removed.append(dll)
+                except (DeployError, OSError):
+                    pass   # foreign or ACL-protected - leave it
+        try:
+            tgt = self._target(M12_TARGET_FILE)
+            if mode != "dx12" and os.path.exists(tgt):
+                os.remove(tgt)
+                removed.append(M12_TARGET_FILE)
+        except OSError:
+            pass
+        return removed
 
     def undeploy_mode(self, mode, arch):
         """Remove every dll of a mode, restoring originals."""
@@ -203,6 +254,13 @@ class Deployer:
                 self.undeploy(dll, mode_dll_source(mode, arch, dll))
             except PermissionError:
                 _elevated_remove(self.game_dir, dll)
+        if mode == "dx12":
+            try:
+                tgt = self._target(M12_TARGET_FILE)
+                if os.path.exists(tgt):
+                    os.remove(tgt)
+            except OSError:
+                pass
 
         parent = os.path.dirname(self.game_dir)
         base = os.path.basename(self.game_dir).lower()
@@ -233,14 +291,17 @@ class Deployer:
             return "foreign"
         return "clean"
 
-    def undeploy(self, dll_name, source_path):
-        """Remove our DLL; restore the backed-up original if present."""
+    def undeploy(self, dll_name, source_path, trust=False):
+        """Remove our DLL; restore the backed-up original if present.
+        trust=True skips the hash check - used when provenance was already
+        proven by a binary marker (_is_ours), e.g. removing an OLD build
+        of our own proxy that no longer matches the current source hash."""
         tgt = self._target(dll_name)
         bak = self._backup(dll_name)
         try:
             if os.path.exists(tgt):
-                if (os.path.exists(source_path)
-                        and _sha1(tgt) == _sha1(source_path)):
+                if (trust or (os.path.exists(source_path)
+                        and _sha1(tgt) == _sha1(source_path))):
                     os.remove(tgt)
                 else:
                     raise DeployError("%s was replaced by something else - "
@@ -251,6 +312,31 @@ class Deployer:
             raise DeployError("undeploy failed (%s) - game running?" % e
                               ) from e
         return self.status(dll_name, source_path)
+
+    def _is_ours(self, dll_name, mode, source_path):
+        """Provenance beyond the current-source hash: our binaries carry
+        literal markers (m12_dxgi, DXVK, dlss5_* exports), so older builds
+        of our own proxies still classify as ours and get cleaned.
+        dxgi.dll exists in two modes (DXVK's for dx11, m12's for dx12) -
+        the marker decides which mode it belongs to."""
+        tgt = self._target(dll_name)
+        if not os.path.exists(tgt):
+            return False
+        if (os.path.exists(source_path)
+                and _sha1(tgt) == _sha1(source_path)):
+            return True
+        try:
+            with open(tgt, "rb") as f:
+                data = f.read()
+        except OSError:
+            return False
+        if mode == "dx12" and dll_name == "dxgi.dll":
+            return b"m12_dxgi" in data
+        if mode == "dx12" and dll_name == "d5c_chain.dll":
+            return b"dlss5_create" in data
+        if mode in ("dx9", "dx11"):
+            return b"DXVK" in data
+        return False
 
 
 class DeployNeedsElevation(DeployError):

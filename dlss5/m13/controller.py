@@ -847,9 +847,12 @@ class M13Controller:
         meta = (self.cfg.get("games") or {}).get(exe)
         if not meta:
             return False, "add the game first"
+        removed = []
         try:
-            out = Deployer(os.path.dirname(exe)).deploy_mode(meta["mode"],
-                                                             meta["arch"])
+            dep = Deployer(os.path.dirname(exe))
+            removed = dep.undeploy_other_modes(meta["mode"], meta["arch"])
+            out = dep.deploy_mode(meta["mode"], meta["arch"],
+                                  target_name=os.path.basename(exe))
         except deploy_mod.DeployError as e:
             return False, str(e)
         if not out:
@@ -858,8 +861,11 @@ class M13Controller:
         bad = {d: s for d, s in out.items() if s != "deployed"}
         if bad:
             return False, "deploy incomplete: %s" % bad
-        return True, "%s enabled (%s: %s)" % (
-            meta["name"], meta["mode"].upper(), ", ".join(out))
+        tail = ""
+        if removed:
+            tail = " (removed stale: %s)" % ", ".join(removed)
+        return True, "%s enabled (%s: %s)%s" % (
+            meta["name"], meta["mode"].upper(), ", ".join(out), tail)
 
     def game_undeploy(self, exe):
         meta = (self.cfg.get("games") or {}).get(exe)

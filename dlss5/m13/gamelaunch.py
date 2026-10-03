@@ -311,8 +311,6 @@ def launch_game(exe_path, mode, scale=None, gain=None, blend=None, cfg=None, sha
 
     fg_val = True
     meta = {}
-    if cfg is not None and hasattr(cfg, "get"):
-        meta = (cfg.get("games") or {}).get(exe_path) or {}
     # Per-game "framegen"/"fg" flag overrides the global switch. Measured on
     # the x86 daemon path (GTA IV, DDA-verified): residual-transfer FG only
     # transfers detail for motion <= ~4 px/frame; real gameplay motion emits
@@ -332,6 +330,13 @@ def launch_game(exe_path, mode, scale=None, gain=None, blend=None, cfg=None, sha
             fg_val = True
     env["DLSS5_FRAMEGEN"] = "1" if fg_val else "0"
     env["NR_LAYER_FRAMEGEN"] = "1" if fg_val else "0"
+    if mode == "dx12":
+        # m12 present cadence: FG on -> process every 2nd present and
+        # residual-transfer the one between (1:2, x64-layer parity); FG
+        # off -> every present is honestly processed (the old default of
+        # live-every-4 repeated/interpolated 75% of frames, which read as
+        # permanent smear on Metro).
+        env["M12_LIVE"] = "2" if fg_val else "1"
 
     # FG runs in-process inside the x64 engine; on the x86 TCP/daemon path
     # the daemon's resident engine answers NRN2 transfer requests instead
