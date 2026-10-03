@@ -57,11 +57,29 @@ class LauncherBase(unittest.TestCase):
 
     def _patches(self, launch_ret=(True, "launched pid 1"), deploy_ret=(True, "deployed")):
         """Common patches: no real spawn, no real deploy writes."""
-        return (patch("m13.gamelaunch.launch_game", return_value=launch_ret),
+        return (patch("m13.gamelaunch.launch_game",
+                      side_effect=self._fake_spawn(launch_ret)),
                 patch.object(self.ctl, "game_deploy", return_value=deploy_ret))
 
     def _launch_p(self, ret=(True, "launched pid 1")):
-        return patch("m13.gamelaunch.launch_game", return_value=ret)
+        return patch("m13.gamelaunch.launch_game",
+                     side_effect=self._fake_spawn(ret))
+
+    def _fake_spawn(self, ret):
+        """A successful fake spawn makes the spawned process 'exist': the
+        launcher's post-spawn verify step polls find_pid for it."""
+        def _se(target, *a, **kw):
+            if ret[0]:
+                self.pids[os.path.basename(target).lower()] = 4242
+                # the game exe is what verify looks for - for wrapper
+                # spawns register the child as well
+                for g_exe, meta in (self.cfg.get("games") or {}).items():
+                    if (meta.get("launch_exe")
+                            and os.path.basename(meta["launch_exe"]).lower()
+                            == os.path.basename(target).lower()):
+                        self.pids[os.path.basename(g_exe).lower()] = 4243
+            return ret
+        return _se
 
 
 class TestHappyPath(LauncherBase):
@@ -142,8 +160,9 @@ class TestGuards(LauncherBase):
         gate = threading.Event()
         done = []
 
-        def slow_launch(*a, **kw):
+        def slow_launch(target, *a, **kw):
             gate.wait(10)
+            self.pids[os.path.basename(target).lower()] = 9
             return True, "launched pid 9"
 
         with patch("m13.gamelaunch.launch_game", side_effect=slow_launch), \
@@ -165,7 +184,9 @@ class TestGuards(LauncherBase):
             t.join(10)
         self.assertTrue(done and done[0][0], done)
         self.assertFalse(self.launcher.busy())
-        # third launch proceeds once the guard is released
+        # third launch proceeds once the guard is released - the fake
+        # spawned process is gone by then (game exited)
+        self.pids.clear()
         with self._launch_p(), \
              patch.object(deploy_mod.Deployer, "mode_status",
                           return_value="deployed"):
@@ -257,11 +278,12 @@ class TestErrorsAndConfig(LauncherBase):
         calls = []
         res_a, res_b = [], []
 
-        def slow_launch(*a, **kw):
+        def slow_launch(target, *a, **kw):
             calls.append(1)
             # B may reach spawn before A (both race after their acquires), so
             # pick the gate by thread identity rather than call order.
             (gate_a if threading.current_thread() is ta else gate_b).wait(10)
+            self.pids[os.path.basename(target).lower()] = 9
             return True, "launched"
 
         with patch("m13.gamelaunch.launch_game", side_effect=slow_launch), \
@@ -306,8 +328,9 @@ class TestAsync(LauncherBase):
         self.ctl.worker.on_result = lambda ok, msg: results.append((ok, msg))
         gate = threading.Event()
 
-        def slow_launch(*a, **kw):
+        def slow_launch(target, *a, **kw):
             gate.wait(10)
+            self.pids[os.path.basename(target).lower()] = 5
             return True, "launched pid 5"
 
         exe = self._mk("game_x64.exe")

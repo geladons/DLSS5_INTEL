@@ -283,6 +283,36 @@ class GameLauncher:
                 return ok2, m2
 
             ok, msg = self._timed(game, "spawn", do_spawn)
+            if ok:
+                def do_verify():
+                    # Post-spawn liveness: a process that exits inside its
+                    # first seconds must read as a FAILED launch, not stay
+                    # "running" in the UI. Poll first so an already-alive
+                    # game costs zero wait; direct spawns get 4 s, wrapper
+                    # launches 25 s - the real exe is a launcher child that
+                    # may take a while to appear (and may never: broken
+                    # installs, a launcher UI waiting on a click, store
+                    # handshakes).
+                    want = os.path.basename(exe)          # the GAME exe
+                    spawned = os.path.basename(target)    # what we spawned
+                    budget = 4.0 if spawned.lower() == want.lower() else 25.0
+                    elapsed = 0.0
+                    while True:
+                        if self.find_pid(want):
+                            return True, "process alive"
+                        if elapsed >= budget:
+                            break
+                        time.sleep(1.0)
+                        elapsed += 1.0
+                    if spawned.lower() == want.lower():
+                        return False, ("%s exited within 4 s of launch - "
+                                       "check the game log" % want)
+                    return False, ("%s never appeared after %s - the "
+                                   "wrapper may be waiting on a click or "
+                                   "the game exited early" % (want, spawned))
+                ok, m2 = self._timed(game, "verify", do_verify)
+                if m2:
+                    msg = "%s (%s)" % (msg, m2) if ok else m2
             if ok and daemon_note:
                 msg = "%s | %s" % (daemon_note, msg)
             return self._finish(game, ok, msg)

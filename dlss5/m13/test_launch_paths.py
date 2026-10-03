@@ -47,11 +47,19 @@ with tempfile.TemporaryDirectory() as td:
             running_state[0] = False
             return True, "killed"
 
+        spawned = []
+
+        def fake_spawn(*a, **kw):
+            spawned.append(1)
+            return True, "launched pid 999"
+
         with patch.object(type(ctl.daemon), "running", property(fake_running)), \
              patch.object(type(ctl.daemon), "pid", property(fake_pid)), \
              patch.object(ctl.daemon, "stop", side_effect=fake_stop), \
              patch.object(ctl, "game_deploy", return_value=(True, "deployed")), \
-             patch("m13.gamelaunch.launch_game", return_value=(True, "launched pid 999")) as mock_lg, \
+             patch("m13.gamelaunch.launch_game", side_effect=fake_spawn) as mock_lg, \
+             patch.object(ctl.launcher, "find_pid",
+                          side_effect=lambda n: 999 if spawned else None), \
              patch("m13.controller.time.sleep"), \
              patch("m13.processes.stop_pid", side_effect=fake_kill) as mock_stop_pid:
             ok, msg = ctl.game_launch(dummy_x64)

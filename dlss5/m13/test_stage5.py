@@ -209,11 +209,19 @@ with tempfile.TemporaryDirectory() as td:
         })
 
         # A daemon still in its x86 grace period must be stopped before x64.
+        spawned = []
+
+        def fake_spawn_111(*a, **kw):
+            spawned.append(1)
+            return True, "launched pid 111"
+
         with patch.object(type(ctl.daemon), "running", True):
             with patch.object(ctl, "game_deploy", return_value=(True, "deployed")), \
                  patch.object(ctl, "daemon_start") as mock_dstart, \
                  patch.object(ctl, "_ensure_daemon_stopped", return_value=(True, "stopped")) as mock_dstop, \
-                 patch("m13.gamelaunch.launch_game", return_value=(True, "launched pid 111")) as mock_lg:
+                 patch("m13.gamelaunch.launch_game", side_effect=fake_spawn_111) as mock_lg, \
+                 patch.object(ctl.launcher, "find_pid",
+                              side_effect=lambda n: 111 if spawned else None):
                 ok, msg = ctl.game_launch(dummy_x64)
                 assert ok, "game_launch x64 failed: %s" % msg
                 mock_dstart.assert_not_called()
@@ -224,9 +232,17 @@ with tempfile.TemporaryDirectory() as td:
                 print("  controller.game_launch x64: lingering daemon stopped + config propagated [PASS]")
 
         # Test 32-bit game launch: SHOULD call daemon_start when daemon not running
+        spawned.clear()
+
+        def fake_spawn_222(*a, **kw):
+            spawned.append(1)
+            return True, "launched pid 222"
+
         with patch.object(ctl, "game_deploy", return_value=(True, "deployed")), \
              patch.object(ctl, "daemon_start", return_value=(True, "daemon started")) as mock_dstart, \
-             patch("m13.gamelaunch.launch_game", return_value=(True, "launched pid 222")) as mock_lg:
+             patch("m13.gamelaunch.launch_game", side_effect=fake_spawn_222) as mock_lg, \
+             patch.object(ctl.launcher, "find_pid",
+                          side_effect=lambda n: 222 if spawned else None):
 
             ok, msg = ctl.game_launch(dummy_x86)
             assert ok, "game_launch x86 failed: %s" % msg
