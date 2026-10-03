@@ -191,9 +191,32 @@ void main() {
     o[5]  = scaled[1];
     o[6]  = scaled[2];
     if (pc.d.x != 0) {   // temporal: reprojected (identity-UV) display history
-        o[7]  = hist[p * 3u + 0u];
-        o[8]  = hist[p * 3u + 1u];
-        o[9]  = hist[p * 3u + 2u];
+        // AABB colour clamp (TAA): the previous OUTPUT may only reach
+        // colours actually present in the 3x3 CURRENT-source neighbourhood.
+        // A stale bright spot on a now-dark region (moved cursor, panned
+        // clothing, FG interval gap) is pulled inside the local range
+        // instead of being dragged by the alpha blend - kills ghost trails,
+        // the sustained overbright patch the field showed (partial-blend
+        // equilibrium), and the periodic bright snaps at the threshold.
+        float lo[3] = { 1e9, 1e9, 1e9 };
+        float hi[3] = { -1e9, -1e9, -1e9 };
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                uint nx = uint(clamp(int(sx) + dx, 0, int(regW) - 1));
+                uint ny = uint(clamp(int(sy) + dy, 0, int(regH) - 1));
+                uint np = (uint(pc.b.z) + ny) * fullW + (uint(pc.b.y) + nx);
+                for (uint c = 0u; c < 3u; ++c) {
+                    float v = nat[np * 3u + c];
+                    v = halfr(v); v = halfr(v - 0.5); v = halfr(v * 0.125);
+                    lo[c] = min(lo[c], v);
+                    hi[c] = max(hi[c], v);
+                }
+            }
+        }
+        const float M = 0.004;   // ~8/255 slack in scaled space (grain wiggle)
+        o[7] = clamp(hist[p * 3u + 0u], lo[0] - M, hi[0] + M);
+        o[8] = clamp(hist[p * 3u + 1u], lo[1] - M, hi[1] + M);
+        o[9] = clamp(hist[p * 3u + 2u], lo[2] - M, hi[2] + M);
     } else {
         o[7]  = scaled[0];   // first-frame history layout (nr_image.c:99-101)
         o[8]  = scaled[1];

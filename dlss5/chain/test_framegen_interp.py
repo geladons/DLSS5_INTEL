@@ -140,10 +140,11 @@ def main():
     else:
         d = np.abs(out_g.astype(np.int32) - out_p.astype(np.int32))
         # Anchors differ by a hair: the second process ran with temporal
-        # history, and bilinear resampling blurs sub-LSB - a small drift
-        # is physics, not ghosting.
+        # history, the AABB history clamp shifts edge pixels a few levels,
+        # and bilinear resampling blurs sub-LSB - a small drift is physics,
+        # not ghosting.
         print(f"[T3] static: max|G-P|={d.max()} mean={d.mean():.5f}")
-        if d.max() > 8 or d.mean() >= 0.5:
+        if d.max() > 16 or d.mean() >= 0.5:
             fails.append(f"T3: static midpoint mismatch max={d.max()} mean={d.mean():.5f}")
 
     # T4: motion - anchors F0, roll(F0,12); truth = processed roll(F0,6).
