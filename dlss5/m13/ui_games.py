@@ -244,6 +244,15 @@ class GamesTab:
             values=(tr("fg_auto"), tr("fg_on"), tr("fg_off")))
         self.fg_box.pack(side="left", padx=(4, 0))
         self.fg_box.bind("<<ComboboxSelected>>", lambda e: self._save_extras())
+        tk.Label(inner, text=tr("game_temporal"), bg=PANEL, fg=FG,
+                 font=("Segoe UI", 8)).pack(side="left", padx=(8, 0))
+        self.temporal_var = tk.StringVar(value=tr("fg_auto"))
+        self.temporal_box = ttk.Combobox(
+            inner, textvariable=self.temporal_var, width=8, state="readonly",
+            values=(tr("fg_auto"), tr("fg_on"), tr("fg_off")))
+        self.temporal_box.pack(side="left", padx=(4, 0))
+        self.temporal_box.bind("<<ComboboxSelected>>",
+                               lambda e: self._save_extras())
         self._extras_state(tk.DISABLED)
 
         ttk.Label(t, text=tr("anticheat_warn"),
@@ -305,6 +314,7 @@ class GamesTab:
         self.args_entry.config(state=state)
         combo = "readonly" if state == tk.NORMAL else "disabled"
         self.fg_box.config(state=combo)
+        self.temporal_box.config(state=combo)
         self.mode_box.config(state=combo)
         self.window_chk.state(["!disabled"] if state == tk.NORMAL
                               else ["disabled"])
@@ -333,6 +343,9 @@ class GamesTab:
         fgm = meta.get("framegen")
         self.fg_var.set(tr("fg_on") if fgm is True else
                         tr("fg_off") if fgm is False else tr("fg_auto"))
+        tm = meta.get("temporal")
+        self.temporal_var.set(tr("fg_on") if tm is True else
+                              tr("fg_off") if tm is False else tr("fg_auto"))
 
     def _chosen_mode(self):
         v = self.mode_var.get().lower()
@@ -340,6 +353,14 @@ class GamesTab:
 
     def _chosen_fg(self):
         v = self.fg_var.get().strip().lower()
+        if v in (tr("fg_on").lower(), "on"):
+            return True
+        if v in (tr("fg_off").lower(), "off"):
+            return False
+        return None
+
+    def _chosen_temporal(self):
+        v = self.temporal_var.get().strip().lower()
         if v in (tr("fg_on").lower(), "on"):
             return True
         if v in (tr("fg_off").lower(), "off"):
@@ -371,6 +392,13 @@ class GamesTab:
                 meta.pop("framegen", None)
             else:
                 meta["framegen"] = fg
+            changed = True
+        tmeta = self._chosen_temporal()
+        if meta.get("temporal") != tmeta:
+            if tmeta is None:
+                meta.pop("temporal", None)
+            else:
+                meta["temporal"] = tmeta
             changed = True
         if changed:
             self.ctl.cfg.save()

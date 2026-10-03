@@ -23,6 +23,7 @@ CMD_STATUS = 2
 CMD_SETBLEND = 3
 CMD_SETSCALE = 4
 CMD_SETFRAMEGEN = 5
+CMD_SETTEMPORAL = 13         # temporal history feed on/off
 CMD_SETFGMODE = 14           # FG algorithm: 0 off, 1 transfer, 2 anchor interp
 CMD_SETLOCALTONE = 6
 CMD_SETLOCALSTRUCTURE = 7
@@ -104,6 +105,11 @@ class M11dClient:
     def set_framegen(self, enable):
         """Live frame generation toggle; next processed frame."""
         return self._roundtrip(CMD_SETFRAMEGEN, 1 if enable else 0)
+
+    def set_temporal(self, enable):
+        """Temporal history feed on/off (feature channels 7-9); off kills
+        the previous-output echo for trail/pump A/B tests."""
+        return self._roundtrip(CMD_SETTEMPORAL, 1 if enable else 0)
 
     def set_fg_mode(self, mode):
         """FG algorithm select: 0 disables, 1 residual transfer (+0 latency),

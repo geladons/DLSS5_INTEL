@@ -175,6 +175,7 @@ _S = {
                     "ru": "настройки игры - выбери карточку"},
     "game_args": {"en": "Args:", "ru": "Аргументы:"},
     "game_fg": {"en": "FG:", "ru": "FG:"},
+    "game_temporal": {"en": "Temporal:", "ru": "Temporal:"},
     "fg_auto": {"en": "default", "ru": "дефолт"},
     "fg_on": {"en": "on", "ru": "вкл"},
     "fg_off": {"en": "off", "ru": "выкл"},

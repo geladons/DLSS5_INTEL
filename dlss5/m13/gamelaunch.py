@@ -348,6 +348,15 @@ def launch_game(exe_path, mode, scale=None, gain=None, blend=None, cfg=None, sha
         # on Metro).
         env["M12_LIVE"] = "2" if fg_val else "1"
 
+    # Per-game temporal override (A/B for trails/pump - the history channels
+    # 7-9 echo the previous output; a game-drawn cursor or a global re-tone
+    # on camera pans smears/pumps through them. Absent -> engine default on;
+    # explicit False -> "0" kills history feed for this launch).
+    t_meta = meta.get("temporal") if isinstance(meta, dict) else None
+    if t_meta is not None:
+        env["DLSS5_TEMPORAL"] = "1" if t_meta else "0"
+        env["NR_LAYER_TEMPORAL"] = env["DLSS5_TEMPORAL"]
+
     # FG runs in-process inside the x64 engine; on the x86 TCP/daemon path
     # the daemon's resident engine answers NRN2 transfer requests instead
     # (degrades to a full process until a prev pair exists).

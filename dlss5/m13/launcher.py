@@ -261,6 +261,15 @@ class GameLauncher:
                         ctl.client.set_fg_mode(2 if fg_res else 1)
                     except Exception:
                         pass
+                    # Same per-game channel for the temporal feed: the daemon
+                    # env only knows the manager default, an explicit
+                    # meta.temporal override must reach it over NRCT.
+                    t_meta = meta.get("temporal")
+                    if t_meta is not None:
+                        try:
+                            ctl.client.set_temporal(bool(t_meta))
+                        except Exception:
+                            pass
                     return True, ("daemon running (warmup %s)"
                                   % ("ok" if okw else "failed"))
                 if ctl.daemon.running:
