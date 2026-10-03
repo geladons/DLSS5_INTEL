@@ -234,6 +234,7 @@ class M13Controller:
         os.environ["NR_LAYER_SCALE"] = s_val
         os.environ["M12_SCALE"] = s_val
         os.environ["DLSS5_FRAMEGEN"] = "1" if self.cfg.get("frame_gen") else "0"
+        os.environ["DLSS5_FG_MODE"] = "2" if self.cfg.get("frame_gen") else "1"
         os.environ["DLSS5_SHARPNESS"] = str(float(self.cfg.get("sharpness") or 0.8))
         p30 = self.cfg.get_phase30()
         os.environ.update(phase30_env_dict(p30))
@@ -425,7 +426,7 @@ class M13Controller:
                 "--style-index", str(p30["style_index"]),
                 "--color-strength", "%.3f" % p30["color_strength"],
                 "--scale", "%.2f" % float(self.cfg.get("scale") or 0.50),
-                "--framegen", "1" if self.cfg.get("frame_gen") else "0",
+                "--framegen", "2" if self.cfg.get("frame_gen") else "0",
                 "--weights", self.cfg.get("weights_path")]
         ok, msg = self.daemon.start(args)
         if notes:

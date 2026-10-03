@@ -332,12 +332,20 @@ def launch_game(exe_path, mode, scale=None, gain=None, blend=None, cfg=None, sha
             fg_val = (fg_env != "0")
     env["DLSS5_FRAMEGEN"] = "1" if fg_val else "0"
     env["NR_LAYER_FRAMEGEN"] = "1" if fg_val else "0"
+    if fg_val:
+        # FG algorithm: 2 = anchor-to-anchor interpolation between two real
+        # frames (LS-class, +1 frame latency - the default for opt-in FG);
+        # 1 = legacy residual transfer (+0 latency, worse motion quality).
+        # setdefault keeps a power-user env override working.
+        env.setdefault("DLSS5_FG_MODE", "2")
+        env.setdefault("NR_LAYER_FG_MODE", "2")
+        env.setdefault("M12_FG_MODE", "2")
     if mode == "dx12":
         # m12 present cadence: FG on -> process every 2nd present and
-        # residual-transfer the one between (1:2, x64-layer parity); FG
-        # off -> every present is honestly processed (the old default of
-        # live-every-4 repeated/interpolated 75% of frames, which read as
-        # permanent smear on Metro).
+        # generate the one between (1:2, x64-layer parity); FG off -> every
+        # present is honestly processed (the old default of live-every-4
+        # repeated/interpolated 75% of frames, which read as permanent smear
+        # on Metro).
         env["M12_LIVE"] = "2" if fg_val else "1"
 
     # FG runs in-process inside the x64 engine; on the x86 TCP/daemon path

@@ -250,6 +250,17 @@ class GameLauncher:
                         okw = ctl.client.warmup(ww, wh)
                     else:
                         okw = ctl.client.warmup()
+                    # The daemon's --framegen arg only knows the GLOBAL flag;
+                    # per-game resolution (meta.framegen -> cfg.frame_gen)
+                    # selects the actual FG algorithm over NRCT so an x86 game
+                    # with framegen:true gets mode 2 even with the global off.
+                    fg_meta = meta.get("framegen", meta.get("fg"))
+                    fg_res = bool(fg_meta) if fg_meta is not None else bool(
+                        ctl.cfg.get("frame_gen"))
+                    try:
+                        ctl.client.set_fg_mode(2 if fg_res else 1)
+                    except Exception:
+                        pass
                     return True, ("daemon running (warmup %s)"
                                   % ("ok" if okw else "failed"))
                 if ctl.daemon.running:

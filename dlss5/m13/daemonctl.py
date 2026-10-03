@@ -23,6 +23,7 @@ CMD_STATUS = 2
 CMD_SETBLEND = 3
 CMD_SETSCALE = 4
 CMD_SETFRAMEGEN = 5
+CMD_SETFGMODE = 14           # FG algorithm: 0 off, 1 transfer, 2 anchor interp
 CMD_SETLOCALTONE = 6
 CMD_SETLOCALSTRUCTURE = 7
 CMD_SETSKINSTRUCTURE = 8
@@ -103,6 +104,12 @@ class M11dClient:
     def set_framegen(self, enable):
         """Live frame generation toggle; next processed frame."""
         return self._roundtrip(CMD_SETFRAMEGEN, 1 if enable else 0)
+
+    def set_fg_mode(self, mode):
+        """FG algorithm select: 0 disables, 1 residual transfer (+0 latency),
+        2 anchor-to-anchor interpolation (+1 frame, LS-class). The daemon
+        resets its anchor state on a mode change."""
+        return self._roundtrip(CMD_SETFGMODE, int(mode))
 
     def set_local_tone(self, val):
         payload = struct.unpack("<I", struct.pack("<f", float(val)))[0]
