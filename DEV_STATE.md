@@ -2065,3 +2065,25 @@ speed} on this hardware.
 NOTE on daemon ms: cold probes on an idle GPU read ~90-110ms at
 800x600 where an in-game session reads ~37ms - the B50 idles its
 clocks hard; measure perf only under real load.
+
+## Reuse-gate ghost/judder fix (51e31bf)
+
+Owner report after FG disable: judder + "mouse history" ghost trails on ALL
+presets including Native. Daemon-side investigation exonerated the FG shader
+and temporal_nr (ghost-block probe: trails at old positions matched the
+processed-background baseline; no decay signature).
+
+Root cause found in the LAYER diag log (%TEMP%\nr_layer_win.log):
+99.9% of all recorded presents were p=reuse - the nearly_identical epsilon
+gate (mean<=1.2/255, big-share<=20 per-mille) replayed the previous processed
+result for dozens of consecutive frames. A moving cursor = ~600px of 921k
+(0.07%) sits far under the threshold forever -> frozen picture + snap =
+"history trails" and head judder. Bit-static menus were the intended case.
+
+Fix in nr_layer_win.c (both arches rebuilt + deployed to production):
+- nearly_identical now bounding-boxes the big-delta pixels; density >=4%
+  inside the bbox with >=48 big px = concentrated real motion -> process.
+  Diffuse film grain still reuses (anti-swim purpose preserved).
+- reuse_run caps near-identical replays (NR_LAYER_REUSE_CAP, default 8);
+  bit-identical frames always replay free.
+- counter resets when fresh input is accepted for processing.
