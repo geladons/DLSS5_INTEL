@@ -184,6 +184,25 @@ class GamesTab:
                    command=self._disable).pack(side="left", padx=6)
         ttk.Button(act, text=tr("remove"), style="Danger.TButton",
                    command=self._remove).pack(side="left")
+
+        # Per-game extras row: explicit launch args (win over the windowed
+        # checkbox) and a framegen override (auto = the global switch).
+        # Saved into games[exe] on focus-out so a re-register keeps them.
+        ext = ttk.Frame(t)
+        ext.pack(fill="x", pady=(2, 0))
+        ttk.Label(ext, text=tr("game_args")).pack(side="left")
+        self.args_var = tk.StringVar()
+        self.args_entry = ttk.Entry(ext, textvariable=self.args_var, width=40)
+        self.args_entry.pack(side="left", padx=(4, 10))
+        self.args_entry.bind("<FocusOut>", lambda e: self._save_extras())
+        ttk.Label(ext, text=tr("game_fg")).pack(side="left")
+        self.fg_var = tk.StringVar(value=tr("fg_auto"))
+        self.fg_box = ttk.Combobox(
+            ext, textvariable=self.fg_var, width=6, state="readonly",
+            values=(tr("fg_auto"), tr("fg_on"), tr("fg_off")))
+        self.fg_box.pack(side="left", padx=(4, 0))
+        self.fg_box.bind("<<ComboboxSelected>>", lambda e: self._save_extras())
+
         ttk.Label(t, text=tr("anticheat_warn"),
                   style="Muted.TLabel", foreground=AMBER,
                   wraplength=800).pack(anchor="w", pady=(6, 0))
@@ -207,10 +226,52 @@ class GamesTab:
         if meta:
             self.mode_var.set(MODE_NAMES.get(meta["mode"], tr("mode_auto")))
             self.window_var.set(bool(meta.get("window")))
+        meta = meta or {}
+        self.args_var.set(meta.get("launch_args") or "")
+        fgm = meta.get("framegen")
+        self.fg_var.set(tr("fg_on") if fgm is True else
+                        tr("fg_off") if fgm is False else tr("fg_auto"))
 
     def _chosen_mode(self):
         v = self.mode_var.get().lower()
         return None if v in ("авто", "auto") else v
+
+    def _chosen_fg(self):
+        v = self.fg_var.get().strip().lower()
+        if v in (tr("fg_on").lower(), "on"):
+            return True
+        if v in (tr("fg_off").lower(), "off"):
+            return False
+        return None
+
+    def _save_extras(self):
+        """Persist the extras row into the selected game's meta. Called on
+        focus-out/combobox pick - re-registering the exe later re-reads
+        these keys, unlike a hand-edited config.json."""
+        exe = self._selected
+        if not exe:
+            return
+        games = self.ctl.cfg.get("games") or {}
+        meta = games.get(exe)
+        if not isinstance(meta, dict):
+            return
+        args = self.args_var.get().strip()
+        fg = self._chosen_fg()
+        changed = False
+        if (meta.get("launch_args") or "") != args:
+            if args:
+                meta["launch_args"] = args
+            else:
+                meta.pop("launch_args", None)
+            changed = True
+        if meta.get("framegen") != fg:
+            if fg is None:
+                meta.pop("framegen", None)
+            else:
+                meta["framegen"] = fg
+            changed = True
+        if changed:
+            self.ctl.cfg.save()
 
     # ------------------------------------------------------------ actions --
     def _add_manual(self):
@@ -256,6 +317,12 @@ class GamesTab:
                     launch = g.launch_exe if g.via_wrapper else None
             reg = {"mode": self._chosen_mode(), "launch_exe": launch,
                    "window": window}
+            args = self.args_var.get().strip()
+            if args:
+                reg["launch_args"] = args
+            fg = self._chosen_fg()
+            if fg is not None:
+                reg["framegen"] = fg
         self.ctl.launch_game_async(exe, register=reg)
 
     def _disable(self):
