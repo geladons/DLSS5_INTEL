@@ -226,6 +226,13 @@ typedef struct device_data {
     int reproc_seen;
     unsigned char *interp;
     VkDeviceSize interp_size;
+    unsigned char *mid;          /* fg mode 2: the REAL middle frame captured
+                                  * at the non-anchor present; sent to the
+                                  * engine (in-process) or daemon (NRN3) as
+                                  * the occlusion/cut fallback anchor */
+    VkDeviceSize mid_size;
+    int mid_valid;               /* mid holds a frame of the current extent */
+    uint32_t mid_w, mid_h;       /* extent mid was captured at */
     PFN_vkGetDeviceProcAddr get_device_proc;
     PFN_vkQueuePresentKHR present;
     PFN_vkCreateSwapchainKHR create_swapchain;
@@ -352,8 +359,11 @@ static PFN_dlss5_set_gain pfn_dlss5_set_gain = NULL;
 static PFN_dlss5_set_blend pfn_dlss5_set_blend = NULL;
 static PFN_dlss5_set_sharpness pfn_dlss5_set_sharpness = NULL;
 static PFN_dlss5_framegen_transfer pfn_dlss5_framegen_transfer = NULL;
+static PFN_dlss5_framegen_interpolate pfn_dlss5_framegen_interpolate = NULL;
 static PFN_dlss5_set_framegen pfn_dlss5_set_framegen = NULL;
 static PFN_dlss5_get_framegen pfn_dlss5_get_framegen = NULL;
+static PFN_dlss5_set_framegen_mode pfn_dlss5_set_framegen_mode = NULL;
+static PFN_dlss5_get_framegen_mode pfn_dlss5_get_framegen_mode = NULL;
 static PFN_dlss5_set_phase30 pfn_dlss5_set_phase30 = NULL;
 static PFN_dlss5_set_intensity pfn_dlss5_set_intensity = NULL;
 static PFN_dlss5_set_local_tone pfn_dlss5_set_local_tone = NULL;
@@ -403,6 +413,22 @@ static int is_framegen_enabled(void)
         return pfn_dlss5_get_framegen(g_engine) == 1;
     }
     return 0;
+}
+
+/* FG algorithm: 1 = residual transfer (+0 latency), 2 = anchor-to-anchor
+ * interpolation (+1 frame). Env override NR_LAYER_FG_MODE/DLSS5_FG_MODE
+ * wins; else the in-process engine's effective mode; default 1 keeps the
+ * old extrapolation cadence for deployments without fginterp.spv. */
+static int framegen_mode(void)
+{
+    const char *fm = getenv("NR_LAYER_FG_MODE");
+    if (!fm) fm = getenv("DLSS5_FG_MODE");
+    if (fm && fm[0]) return (atoi(fm) == 2) ? 2 : 1;
+    if (g_engine && pfn_dlss5_get_framegen_mode) {
+        int m = pfn_dlss5_get_framegen_mode(g_engine);
+        return (m == 2) ? 2 : 1;
+    }
+    return 1;
 }
 
 static const char *knob_file_path(void)
@@ -786,8 +812,11 @@ static void ensure_inprocess(void)
     pfn_dlss5_set_blend = (PFN_dlss5_set_blend)GetProcAddress(hDll, "dlss5_set_blend");
     pfn_dlss5_set_sharpness = (PFN_dlss5_set_sharpness)GetProcAddress(hDll, "dlss5_set_sharpness");
     pfn_dlss5_framegen_transfer = (PFN_dlss5_framegen_transfer)GetProcAddress(hDll, "dlss5_framegen_transfer");
+    pfn_dlss5_framegen_interpolate = (PFN_dlss5_framegen_interpolate)GetProcAddress(hDll, "dlss5_framegen_interpolate");
     pfn_dlss5_set_framegen = (PFN_dlss5_set_framegen)GetProcAddress(hDll, "dlss5_set_framegen");
     pfn_dlss5_get_framegen = (PFN_dlss5_get_framegen)GetProcAddress(hDll, "dlss5_get_framegen");
+    pfn_dlss5_set_framegen_mode = (PFN_dlss5_set_framegen_mode)GetProcAddress(hDll, "dlss5_set_framegen_mode");
+    pfn_dlss5_get_framegen_mode = (PFN_dlss5_get_framegen_mode)GetProcAddress(hDll, "dlss5_get_framegen_mode");
     pfn_dlss5_set_phase30 = (PFN_dlss5_set_phase30)GetProcAddress(hDll, "dlss5_set_phase30");
     pfn_dlss5_set_intensity = (PFN_dlss5_set_intensity)GetProcAddress(hDll, "dlss5_set_intensity");
     pfn_dlss5_set_local_tone = (PFN_dlss5_set_local_tone)GetProcAddress(hDll, "dlss5_set_local_tone");
@@ -841,6 +870,12 @@ static void ensure_inprocess(void)
     if (fg_env && pfn_dlss5_set_framegen) {
         int enable = (fg_env[0] == '1' || !strcmp(fg_env, "true") || !strcmp(fg_env, "on")) ? 1 : 0;
         pfn_dlss5_set_framegen(g_engine, enable);
+    }
+    /* Push the resolved FG algorithm so the engine's per-frame anchor
+     * rotation runs in the mode the present cadence expects (mode 2 keeps a
+     * two-anchor pair; the engine clamps to 1 when fginterp.spv is absent). */
+    if (pfn_dlss5_set_framegen_mode) {
+        pfn_dlss5_set_framegen_mode(g_engine, framegen_mode());
     }
 
     g_cur_scale = scale;
@@ -1362,8 +1397,12 @@ static void release_device(device_data *data)
     free(data->earlier);
     free(data->raw);
     free(data->interp);
+    free(data->mid);
     data->interp = NULL;
     data->interp_size = 0;
+    data->mid = NULL;
+    data->mid_size = 0;
+    data->mid_valid = 0;
 }
 
 VKAPI_ATTR void VKAPI_CALL nr_DestroyDevice(VkDevice device,
@@ -2381,15 +2420,19 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
          */
         {
         int fg_enabled = is_framegen_enabled();
+        int fg_mode = fg_enabled ? framegen_mode() : 1;
         /* Two FG producers: the in-process x64 engine answers
-         * dlss5_framegen_transfer directly; the x86 daemon answers the NRN2
-         * frame-magic request (the resident engine owns the prev pair).
+         * dlss5_framegen_transfer (mode 1) / dlss5_framegen_interpolate
+         * (mode 2) directly; the x86 daemon answers the NRN2/NRN3
+         * frame-magic requests (the resident engine owns the anchors).
          * Daemon requests only flow once the daemon has proven itself on the
          * socket (daemon_known_up) - a daemon that is down keeps FG silent
          * instead of paying a refused connect every 2nd present; a failed
-         * NRN2 latches g_daemon_fg=-1 for the session. */
+         * NRN2/NRN3 latches g_daemon_fg=-1 for the session. */
         int fg_inprocess = g_inprocess_active && g_engine
-                           && pfn_dlss5_framegen_transfer;
+                           && (fg_mode == 2
+                               ? (pfn_dlss5_framegen_interpolate != NULL)
+                               : (pfn_dlss5_framegen_transfer != NULL));
         int fg_daemon = !fg_inprocess && nr_port
                         && g_daemon_fg >= 0 && g_dg.daemon_known_up;
         int fg_avail = fg_inprocess || fg_daemon;
@@ -2426,11 +2469,119 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                 nr_fg_note(&g_fg, NR_FG_PROCESSED);
                 data->holding = 1;
                 data->holding_chain = chain->swapchain;
+                if (fg_mode == 2 && fg_avail) {
+                    /* Mode-2 anchor present: data->mapped currently holds P
+                     * (the newest processed anchor). Overwrite it with the
+                     * generated midpoint of the just-closed anchor interval
+                     * {Pprev, Pcur} around the REAL middle frame captured at
+                     * the previous mid present - every displayed frame then
+                     * sits at a uniform +1-present delay. On any failure P
+                     * stays in mapped and goes out on time. */
+                    int gen_ok = 0;
+                    if (data->mid_valid && data->mid
+                        && data->mid_size >= want
+                        && data->mid_w == chain->extent.width
+                        && data->mid_h == chain->extent.height) {
+                        if (fg_inprocess) {
+                            if (data->interp_size < want) {
+                                unsigned char *grown = (unsigned char *)realloc(data->interp, (size_t)want);
+                                if (grown) { data->interp = grown; data->interp_size = want; }
+                            }
+                            if (data->interp && data->interp_size >= want) {
+                                int r = pfn_dlss5_framegen_interpolate(
+                                    g_engine, chain->extent.width,
+                                    chain->extent.height,
+                                    data->mid, data->interp, 0.5f);
+                                if (r == 0) {
+                                    memcpy(data->mapped, data->interp,
+                                           (size_t)want);
+                                    gen_ok = 1;
+                                }
+                            }
+                        } else {
+                            /* x86 daemon NRN3: the mid frame payload -> the
+                             * resident engine replies the interpolated frame
+                             * (or a full process fallback - either way a
+                             * presentable frame). Reply lands in interp so a
+                             * dead daemon cannot tear the P frame still
+                             * sitting in mapped as the fallback. */
+                            if (data->interp_size < want) {
+                                unsigned char *grown = (unsigned char *)realloc(data->interp, (size_t)want);
+                                if (grown) { data->interp = grown; data->interp_size = want; }
+                            }
+                            if (data->interp && data->interp_size >= want) {
+                                uint32_t fgi_hdr[4] = { 0x334E524Eu,
+                                    chain->extent.width, chain->extent.height,
+                                    (uint32_t)chain->format };
+                                int erc = exchange(fgi_hdr, sizeof fgi_hdr,
+                                                   data->mid, (size_t)want,
+                                                   data->interp, (size_t)want);
+                                if (erc == 0) {
+                                    g_daemon_fg = 1;
+                                    nr_degrade_note_success(&g_dg, nr_now_ms());
+                                    memcpy(data->mapped, data->interp,
+                                           (size_t)want);
+                                    gen_ok = 1;
+                                } else {
+                                    g_daemon_fg = -1;
+                                    nr_log("[nr_layer] daemon NRN3 refused/failed "
+                                           "(rc %d); daemon FG off for this session",
+                                           erc);
+                                }
+                            }
+                        }
+                    }
+                    if (gen_ok) {
+                        static unsigned long fgi_count = 0;
+                        fgi_count++;
+                        nr_fg_note(&g_fg, NR_FG_GENERATED);
+                        if (fgi_count <= 5 || fgi_count % 60 == 0) {
+                            nr_log("[nr_layer] framegen interpolated %ux%u "
+                                   "(frame %lu, fgi #%lu)",
+                                   chain->extent.width, chain->extent.height,
+                                   frame_counter, fgi_count);
+                        }
+                        diag_path = "fgi";
+                    }
+                }
                 diag_tr = transfer(data, chain, queue, index, 1);
                 if (diag_tr)
                     nr_log("[nr_layer] write-back failed; raw out (frame %lu)",
                            frame_counter);
             }
+        } else if (fg_enabled && fg_avail && fg_mode == 2) {
+            /* Mode-2 mid present: capture the REAL middle frame for the next
+             * anchor interval and re-blit the held processed anchor - no
+             * engine call, no daemon round-trip at this slot. */
+            int held = 0;
+            int deg_log = NR_DEGRADE_LOG_NONE;
+            int deg = nr_degrade_is_degenerate(&g_dg, chain->extent.width,
+                                               chain->extent.height, &deg_log);
+            if (!deg
+                && ensure_resources(data, want) == 0
+                && transfer(data, chain, queue, index, 0) == 0) {
+                if (data->mid_size < want) {
+                    unsigned char *grown = (unsigned char *)realloc(data->mid, (size_t)want);
+                    if (grown) { data->mid = grown; data->mid_size = want; }
+                }
+                if (data->mid && data->mid_size >= want) {
+                    memcpy(data->mid, data->mapped, (size_t)want);
+                    data->mid_valid = 1;
+                    data->mid_w = chain->extent.width;
+                    data->mid_h = chain->extent.height;
+                }
+                if (data->result_valid && data->result
+                    && data->result_size >= want
+                    && data->result_w == chain->extent.width
+                    && data->result_h == chain->extent.height
+                    && data->holding_chain == chain->swapchain) {
+                    memcpy(data->mapped, data->result, (size_t)want);
+                    diag_tr = transfer(data, chain, queue, index, 1);
+                    held = (diag_tr == 0);
+                }
+            }
+            nr_fg_note(&g_fg, held ? NR_FG_PROCESSED : NR_FG_NATIVE);
+            diag_path = held ? "mheld" : "mnat";
         } else if (fg_enabled && fg_avail) {
             /* Framegen: generate this present from the engine's copy of the
              * last processed frame + its raw input (residual transfer).
@@ -2660,8 +2811,11 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
         pfn_dlss5_set_blend = NULL;
         pfn_dlss5_set_sharpness = NULL;
         pfn_dlss5_framegen_transfer = NULL;
+        pfn_dlss5_framegen_interpolate = NULL;
         pfn_dlss5_set_framegen = NULL;
         pfn_dlss5_get_framegen = NULL;
+        pfn_dlss5_set_framegen_mode = NULL;
+        pfn_dlss5_get_framegen_mode = NULL;
         pfn_dlss5_set_phase30 = NULL;
         pfn_dlss5_set_intensity = NULL;
         pfn_dlss5_set_local_tone = NULL;
