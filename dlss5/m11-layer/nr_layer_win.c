@@ -211,6 +211,9 @@ typedef struct device_data {
     VkSemaphore present_signal;
     int present_plain;
     int have_earlier;
+    unsigned reuse_run;          /* consecutive near-identical replays; capped
+                                  * so a moving-but-small element (cursor,
+                                  * head edge) cannot ride a stale result */
     unsigned char *raw;          /* freeze mode: the held UNPROCESSED frame */
     VkDeviceSize raw_size;
     int raw_held;
@@ -1741,15 +1744,32 @@ static void eps_init(void)
     e = getenv("NR_LAYER_EPS_BIG");  if (e) eps_big_pm = atoi(e);
 }
 
+/* Max consecutive near-identical replays before a forced reprocess. Bounds
+ * the staleness any missed-motion pattern can accumulate; 0 disables the
+ * near-identical path entirely (bit-identical repeats still reuse free). */
+static unsigned reuse_cap(void)
+{
+    static int cap = -1;
+    if (cap < 0) {
+        const char *e = getenv("NR_LAYER_REUSE_CAP");
+        cap = e ? atoi(e) : 8;
+        if (cap < 0) cap = 0;
+    }
+    return (unsigned)cap;
+}
+
 /* Sampled near-equality of two BGRA frames: every 4th pixel, rgb channels
- * (alpha is often garbage). ~0.3 ms on 800x600. */
+ * (alpha is often garbage). ~0.3 ms on 800x600. w = frame width in pixels;
+ * used to bound-box the big-delta pixels for the concentration test below. */
 static int nearly_identical(const unsigned char *a, const unsigned char *b,
-                            size_t n)
+                            size_t n, uint32_t w)
 {
     uint64_t sum = 0, big = 0, samples = 0;
     size_t npix = n >> 2, p;
+    uint32_t xmin = 0xFFFFFFFFu, xmax = 0, ymin = 0xFFFFFFFFu, ymax = 0;
     eps_init();
     if (!eps_state) return 0;
+    if (!w) return 0;
     for (p = 0; p < npix; p += 4) {
         size_t o = p << 2;
         int d0 = (int)a[o]   - (int)b[o];
@@ -1761,10 +1781,28 @@ static int nearly_identical(const unsigned char *a, const unsigned char *b,
         if (d2 < 0) d2 = -d2;
         m = d0 > d1 ? (d0 > d2 ? d0 : d2) : (d1 > d2 ? d1 : d2);
         sum += (uint64_t)(d0 + d1 + d2);
-        if (m > eps_pix) big++;
+        if (m > eps_pix) {
+            uint32_t x = (uint32_t)(p % w), y = (uint32_t)(p / w);
+            if (x < xmin) xmin = x;
+            if (x > xmax) xmax = x;
+            if (y < ymin) ymin = y;
+            if (y > ymax) ymax = y;
+            big++;
+        }
         samples++;
     }
     if (!samples) return 0;
+    /* Concentrated change = a real moving element (cursor sprite, blinking
+     * HUD bit, the edge of a nodding head) riding under the global share
+     * limit. Film grain is diffuse: its big pixels scatter over the whole
+     * frame so the density inside their bounding box stays tiny, while a
+     * moving sprite packs them densely. Reusing a stale result over a
+     * concentrated move reads as ghost trails and judder on screen. */
+    if (big >= 48 && xmax > xmin && ymax > ymin) {
+        uint64_t area = (uint64_t)(xmax - xmin + 1) * (ymax - ymin + 1);
+        if (area && (big * 100) / area >= 4)
+            return 0;
+    }
     return (sum * 100) / (samples * 3) <= (uint64_t)eps_mean_x100 &&
            (big * 1000) / samples <= (uint64_t)eps_big_pm;
 }
@@ -1836,19 +1874,28 @@ static int process_frame(device_data *data, swapchain_data *chain,
 
     /* Exact-repeat reuse: a frame identical to the previous one reuses the
      * last processed result instead of running the chain again. data->result
-     * holds the last processed frame (in-process or TCP path). */
+     * holds the last processed frame (in-process or TCP path). Bit-identical
+     * input always replays free (static content, deterministic output);
+     * near-identical input replays at most reuse_cap() times in a row so a
+     * slow drift or an unfelt motion pattern cannot freeze the picture. */
     if (static_reuse && data->have_earlier && !data->earlier_pending &&
         data->earlier_size >= needed &&
-        (memcmp(data->mapped, data->earlier, (size_t)needed) == 0 ||
-         nearly_identical((const unsigned char *)data->mapped,
-                          data->earlier, (size_t)needed)) &&
         data->result_valid && data->result && data->result_size >= needed &&
         data->result_w == chain->extent.width &&
         data->result_h == chain->extent.height &&
         data->holding_chain == chain->swapchain) {
-        memcpy(data->mapped, data->result, (size_t)needed);
-        diag_path = "reuse";
-        return 0;
+        int bit_ident =
+            memcmp(data->mapped, data->earlier, (size_t)needed) == 0;
+        if (bit_ident ||
+            (data->reuse_run < reuse_cap() &&
+             nearly_identical((const unsigned char *)data->mapped,
+                              data->earlier, (size_t)needed,
+                              chain->extent.width))) {
+            memcpy(data->mapped, data->result, (size_t)needed);
+            if (!bit_ident) data->reuse_run++;
+            diag_path = "reuse";
+            return 0;
+        }
     }
 
     /* Save native input into data->earlier before processing */
@@ -1869,6 +1916,8 @@ static int process_frame(device_data *data, swapchain_data *chain,
     data->earlier_pending = 1;   /* no matching result yet - if the exchange
                                   * below fails, next frame must not reuse
                                   * `result` as this input's output */
+    data->reuse_run = 0;         /* fresh input accepted for processing - the
+                                  * staleness counter restarts here */
 
     uint32_t header[4] = { 0x304E524Eu, chain->extent.width,
                            chain->extent.height, (uint32_t)chain->format };
