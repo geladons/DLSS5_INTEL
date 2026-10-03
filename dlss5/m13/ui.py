@@ -15,7 +15,7 @@
 # Layout:
 #   header     logo + title + daemon state + gain + in-game overlay button
 #   checklist  auto-driven setup steps (weights/layers/daemon/games)
-#   notebook   Games (icon cards) | Screen | Settings
+#   notebook   Games (icon cards) | Screen | Media | Settings
 #   log pane   threaded tails of m11d/m12/layer/m8blive logs
 #
 # RESPONSIVENESS RULE: this file NEVER calls a blocking probe. All state
@@ -40,11 +40,13 @@ from .ui_games import GamesTab
 POLL_MS = 500
 
 # Window geometry: every tab's control rows must fit INSIDE the startup
-# width (pack clips any widget that does not fit - that was the "controls
-# are invisible until near-fullscreen" bug). Values are verified against
-# winfo_reqwidth() dumps of the live widget tree.
-WIN_W, WIN_H = 1280, 900
-MIN_W, MIN_H = 980, 720
+# size (pack clips any widget that does not fit - that was the "controls
+# are invisible until near-fullscreen" bug). WIN_* is the comfortable
+# default; _fit_to_content() grows it to the measured widget tree and
+# centers the window. MIN_* is the resizable floor - shrinking below the
+# content only scrolls the tab canvases, it never clips a control row.
+WIN_W, WIN_H = 1360, 940
+MIN_W, MIN_H = 1000, 700
 # Cap for paragraph-style labels so they wrap instead of forcing the
 # window wider (was wraplength=900, which alone nearly ate the window).
 WRAP_PX = 820
@@ -95,6 +97,7 @@ class ManagerUI:
         self._egg_clicks = 0
         self._style()
         self._build()
+        self._fit_to_content()
         self.ctl.start_worker(self._on_action_result)
         self.hub.start()
         self.root.after(200, self._drain_log)
@@ -158,16 +161,38 @@ class ManagerUI:
         s.configure("Horizontal.TScale", background=BG, troughcolor=PANEL)
         s.configure("TCheckbutton", background=BG, foreground=FG)
         s.map("TCheckbutton", background=[("active", BG)])
+        # variant for controls sitting on a PANEL strip (games extras row)
+        s.configure("Panel.TCheckbutton", background=PANEL, foreground=FG)
+        s.map("Panel.TCheckbutton", background=[("active", PANEL)])
         s.configure("TCombobox", fieldbackground=PANEL, foreground=FG,
                     background=PANEL)
         s.configure("Vertical.TScrollbar", background=PANEL,
                     troughcolor=BG, borderwidth=0, arrowcolor=FG)
+        # Kill the TCombobox class wheel binding (ttk::combobox::Scroll
+        # cycles the value even while closed): scrolling the mouse over a
+        # combobox must never silently change render scale, game mode or
+        # framegen. "break" also stops the chain before the 'all'-level
+        # wheel router, so the combo neither cycles nor scrolls the pane.
+        # The posted popdown is a Listbox, not TCombobox - it still
+        # scrolls normally.
+        self.root.bind_class("TCombobox", "<MouseWheel>",
+                             lambda _e: "break")
 
     # ------------------------------------------------------------- build ---
     def _build(self):
+        # Mouse wheel routing: ONE bind_all for the whole app. A second
+        # bind_all("<MouseWheel>") REPLACES the previous script on the
+        # 'all' bindtag - the Settings tab used to install its own and
+        # silently killed the games-grid wheel. Instead every scrollable
+        # pane registers (container, canvas) and _route_wheel scrolls the
+        # canvas whose region holds the pointer.
+        self._wheel_regions = []
+        self.root.bind_all("<MouseWheel>", self._route_wheel)
         self.overlay = ControlOverlay(
             self.root, self.ctl, on_log=lambda m: self.log("mgr", m))
         self.knob = self.overlay          # back-compat alias
+        # the overlay panel is a scrollable canvas too
+        self.register_wheel_region(self.overlay.win, self.overlay.body_canvas)
         self._build_header()
         self._build_checklist()
 
@@ -182,10 +207,65 @@ class ManagerUI:
         self.logtxt = ScrolledText(self.root, height=8, state="disabled",
                                    font=("Consolas", 9), bg="#0a0c11",
                                    fg=FG, insertbackground=FG,
-                                   relief="flat", bd=6)
+                                   relief="flat", bd=4,
+                                   highlightthickness=1,
+                                   highlightbackground=BORDER,
+                                   highlightcolor=BORDER)
         self.logtxt.pack(fill="both", expand=False, padx=10, pady=6)
         for tag, color in TAG_COLORS.items():
             self.logtxt.tag_config(tag, foreground=color)
+
+    # ------------------------------------------------------ wheel routing --
+    def register_wheel_region(self, container, canvas):
+        """Wheel events anywhere inside `container` (the canvas itself,
+        widgets embedded in it, the scrollbar beside it) scroll `canvas`.
+        The pointer widget's parent chain is walked, so embedded content
+        and sibling scrollbars inside the container all count."""
+        self._wheel_regions.append((container, canvas))
+
+    def _route_wheel(self, e):
+        """Dispatch <MouseWheel> to the registered region holding the
+        pointer. On Windows Tk fires the wheel on the widget UNDER the
+        cursor (e.widget); widgets embedded in a scroll canvas do not
+        share its bindtags, so a plain canvas.bind() only sees bare
+        canvas pixels and per-pane bind_all handlers silently replace
+        each other (that is how the games grid lost its wheel). Walking
+        e.widget's master chain is the robust fix - winfo_containing is
+        NOT (it returns None at valid coordinates on this host). Widgets
+        outside every region - log text, listboxes, Tcl-made combobox
+        popdowns (e.widget stays a string) - keep their own class
+        bindings untouched."""
+        try:
+            w = e.widget
+            while w is not None and not isinstance(w, str):
+                for region, canvas in self._wheel_regions:
+                    if w is region:
+                        if e.delta and canvas.winfo_viewable():
+                            steps = -e.delta / 120.0
+                            canvas.yview_scroll(
+                                int(steps) or (-1 if steps > 0 else 1),
+                                "units")
+                        return
+                w = getattr(w, "master", None)
+        except (tk.TclError, AttributeError):
+            pass
+
+    # ------------------------------------------------------ window sizing --
+    def _fit_to_content(self):
+        """Measure the built widget tree and pick the startup size: at
+        least WIN_W x WIN_H, enough for the requested layout, never
+        bigger than the screen work area. Centers the result. The old
+        fixed geometry is what opened too compact on tall content."""
+        self.root.update_idletasks()
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        w = min(max(WIN_W, self.root.winfo_reqwidth() + 24),
+                max(MIN_W, sw - 48))
+        h = min(max(WIN_H, self.root.winfo_reqheight() + 24),
+                max(MIN_H, sh - 96))
+        self._restore_size = (w, h)
+        self.root.geometry("%dx%d+%d+%d" % (
+            w, h, max(0, (sw - w) // 2), max(0, (sh - h) // 2)))
 
     def _build_header(self):
         head = tk.Frame(self.root, bg=BG)
@@ -360,7 +440,9 @@ class ManagerUI:
         grow to ~1020 px high just to show its bottom rows."""
         outer = ttk.Frame(nb)
         nb.add(outer, text=tr("tab_settings"))
-        canvas = tk.Canvas(outer, bg=BG, highlightthickness=0, height=420)
+        # no fixed height: the canvas expands with the window and scrolls
+        # when the content is taller than the visible area
+        canvas = tk.Canvas(outer, bg=BG, highlightthickness=0)
         vsb = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
         canvas.configure(yscrollcommand=vsb.set)
         vsb.pack(side="right", fill="y")
@@ -371,8 +453,7 @@ class ManagerUI:
             scrollregion=canvas.bbox("all")))
         canvas.bind("<Configure>", lambda e: canvas.itemconfigure(
             inner, width=e.width))
-        canvas.bind_all("<MouseWheel>", self._settings_wheel)
-        self.settings_canvas = canvas
+        self.register_wheel_region(outer, canvas)
         row = ttk.Frame(t)
         row.pack(anchor="w", pady=4, fill="x")
         ttk.Label(row, text=tr("weights_label")).pack(side="left")
@@ -498,9 +579,6 @@ class ManagerUI:
     def _on_action_result(self, ok, msg):
         """Worker-thread callback: marshal into the Tk thread via the queue."""
         self.logq.put(("mgr", msg))
-
-    def _daemon_start(self):
-        self.ctl.submit(self.ctl.daemon_start)
 
     # ------------------------------------------------------- clean traces --
     def _clean_traces(self):
@@ -672,23 +750,14 @@ class ManagerUI:
     def log(self, tag, msg):
         self.logq.put((tag, msg))
 
-    def _settings_wheel(self, e):
-        """Mouse wheel over the scrollable Settings tab (same pattern as
-        GamesTab._wheel - guarded so it only scrolls while shown)."""
-        try:
-            if self.settings_canvas.winfo_viewable():
-                self.settings_canvas.yview_scroll(
-                    int(-1 * (e.delta / 120)), "units")
-        except tk.TclError:
-            pass
-
     def _on_focus_in(self, event=None):
         """When returning to desktop from an exclusive fullscreen game (e.g. 800x600),
         Windows may shrink the UI window. Restore the startup size immediately."""
         if event is not None and event.widget != self.root:
             return
         if self.root.winfo_width() < MIN_W or self.root.winfo_height() < MIN_H:
-            self.root.geometry("%dx%d" % (WIN_W, WIN_H))
+            w, h = getattr(self, "_restore_size", (WIN_W, WIN_H))
+            self.root.geometry("%dx%d" % (w, h))
             self.root.update_idletasks()
             if hasattr(self, "games_tab") and self.games_tab:
                 self.games_tab.cards_fill()

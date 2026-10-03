@@ -172,11 +172,12 @@ class GamesTab:
         # Mouse wheel: routed app-wide by ManagerUI.register_wheel_region
         # (a second bind_all("<MouseWheel>") used to replace ours - the
         # settings tab was built later and silently killed grid scroll).
-        # Unit-test stub UIs have no router; the Enter/Leave fallback
-        # keeps this tab self-contained.
+        # The whole tab is the region, so the wheel works over cards, the
+        # scrollbar and the option strip alike. Unit-test stub UIs have
+        # no router; the Enter/Leave fallback keeps this tab contained.
         register = getattr(self.ui, "register_wheel_region", None)
         if callable(register):
-            register(wrap, self.canvas)
+            register(t, self.canvas)
         else:
             self.canvas.bind("<Enter>", self._wheel_bind)
             self.canvas.bind("<Leave>", self._wheel_unbind)

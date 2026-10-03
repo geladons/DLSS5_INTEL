@@ -19,8 +19,10 @@ _S = {
     "scale_native": {"en": "Native (100%)", "ru": "Нативное (100%)"},
     "scale_quality": {"en": "Quality (67%)", "ru": "Качество (67%)"},
     "scale_balanced": {"en": "Balanced (58%)", "ru": "Баланс (58%)"},
-    "scale_perf": {"en": "Performance (50%)", "ru": "Производительность (50%)"},
-    "scale_ultra": {"en": "Ultra Performance (33%)", "ru": "Ультра производительность (33%)"},
+    # preset labels must stay short: the overlay scale combobox is 18
+    # chars wide, the settings one 24 - long translations get truncated
+    "scale_perf": {"en": "Performance (50%)", "ru": "Скорость (50%)"},
+    "scale_ultra": {"en": "Ultra Perf. (33%)", "ru": "Ультра (33%)"},
     "framegen": {"en": "Frame Generation (1:2)",
                  "ru": "Генерация кадров (1:2)"},
     "framegen_hint": {
@@ -162,13 +164,15 @@ _S = {
                  "ru": "сканирую диски (до ~20 с)..."},
     "scan_failed": {"en": "scan failed: %s", "ru": "ошибка сканирования: %s"},
     "games_found": {"en": "games found: %d", "ru": "найдено игр: %d"},
-    "mode_label": {"en": "mode:", "ru": "режим:"},
+    "mode_label": {"en": "Mode:", "ru": "Режим:"},
     "mode_auto": {"en": "auto", "ru": "авто"},
     "enable": {"en": "Enable DLSS 5", "ru": "Включить DLSS 5"},
     "play": {"en": "Play", "ru": "Играть"},
-    "window_cb": {"en": "Window (try: -windowed)",
-                  "ru": "Окно (попробовать: -windowed)"},
+    "window_cb": {"en": "Windowed (-windowed)",
+                  "ru": "В окне (-windowed)"},
     "extras_for": {"en": "for %s:", "ru": "для %s:"},
+    "extras_none": {"en": "per-game options - select a card",
+                    "ru": "настройки игры - выбери карточку"},
     "game_args": {"en": "Args:", "ru": "Аргументы:"},
     "game_fg": {"en": "FG:", "ru": "FG:"},
     "fg_auto": {"en": "auto", "ru": "авто"},
@@ -266,9 +270,11 @@ _S = {
     "p30_style_index_tip": {
         "en": "Neural processing style preset (0 = Default, 1 = Natural, 2 = Cinematic)",
         "ru": "Стиль нейросетевой обработки (0 = Стандартный, 1 = Натуральный, 2 = Кино)"},
+    # the style combobox is 15/18 chars wide (compact/normal) - keep these
+    # labels short so they never truncate
     "p30_style_0": {"en": "0: Default", "ru": "0: Стандартный"},
     "p30_style_1": {"en": "1: Natural", "ru": "1: Натуральный"},
-    "p30_style_2": {"en": "2: Cinematic", "ru": "2: Кинематографичный"},
+    "p30_style_2": {"en": "2: Cinematic", "ru": "2: Кино"},
     "p30_color_strength": {"en": "Color Strength", "ru": "Насыщенность цвета"},
     "p30_color_strength_tip": {
         "en": "Color component strength and chroma preservation (0.0..2.0, default 1.0)",
