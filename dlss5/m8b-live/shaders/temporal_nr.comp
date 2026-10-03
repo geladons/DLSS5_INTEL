@@ -103,11 +103,30 @@ void main() {
     float logit = halfr(head[hP + 3u]);
     float alpha = clamp(1.0 / (1.0 + exp(-logit)) * halfr(0.73974609375), 0.0, 1.0);
 
+    // Per-pixel history trust (owner field report: cursor/menu trails and a
+    // global 'breathing' on camera pans). The vendor blend trusts history
+    // blindly; where the previous OUTPUT disagrees with the CURRENT input
+    // colour the history is stale (moved content, cursor, cut, FG interval
+    // doubling the gap) and must not be dragged: attenuate alpha by a
+    // soft-reject weight on the max per-channel |hist01 - col01|.
+    // pc.c.x/pc.c.y = lo/hi trust band in 0..1 space (0 -> defaults);
+    // film grain keeps ~full trust, a dead cursor is rejected outright.
+    float colA[3], hA[3];
+    float dmax = 0.0;
     for (uint c = 0u; c < 3u; ++c) {
-        float col01 = fv[p * 16u + 4u + c] * 8.0 + 0.5;
-        float h01   = fv[p * 16u + 7u + c] * 8.0 + 0.5;
+        colA[c] = fv[p * 16u + 4u + c] * 8.0 + 0.5;
+        hA[c]   = fv[p * 16u + 7u + c] * 8.0 + 0.5;
+        dmax = max(dmax, abs(hA[c] - colA[c]));
+    }
+    const float LO = pc.c.x > 0.0 ? pc.c.x : 0.02;
+    const float HI = pc.c.y > 0.0 ? pc.c.y : 0.15;
+    float w = 1.0 - smoothstep(LO, HI, dmax);
+
+    for (uint c = 0u; c < 3u; ++c) {
+        float col01 = colA[c];
+        float h01   = hA[c];
         float pred  = clamp(col01 + halfr(head[hP + c]) * 0.25, 0.0, 1.0);
-        float outp  = pred + alpha * (h01 - pred);
+        float outp  = pred + alpha * w * (h01 - pred);
         head[hP + c] = halfr((outp - col01) * 4.0);
         float s = halfr(clamp(outp, 0.0, 1.0));          // scaled_color(outp)
         s = halfr(s - 0.5);
