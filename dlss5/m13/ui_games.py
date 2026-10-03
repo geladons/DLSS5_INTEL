@@ -240,7 +240,7 @@ class GamesTab:
                  font=("Segoe UI", 8)).pack(side="left")
         self.fg_var = tk.StringVar(value=tr("fg_auto"))
         self.fg_box = ttk.Combobox(
-            inner, textvariable=self.fg_var, width=6, state="readonly",
+            inner, textvariable=self.fg_var, width=8, state="readonly",
             values=(tr("fg_auto"), tr("fg_on"), tr("fg_off")))
         self.fg_box.pack(side="left", padx=(4, 0))
         self.fg_box.bind("<<ComboboxSelected>>", lambda e: self._save_extras())

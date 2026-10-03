@@ -41,7 +41,7 @@ def tab(monkeypatch, tmp_path):
 def test_extras_survive_every_path(tab):
     t, ui = tab
     t.select(EXE)
-    assert t.args_var.get() == "" and t.fg_var.get() == "auto"
+    assert t.args_var.get() == "" and t.fg_var.get() == "default"
     assert not t.window_var.get()
 
     t.args_var.set("-windowed -w 1280")
@@ -61,7 +61,7 @@ def test_extras_survive_every_path(tab):
     t.args_var.set("-y")
     t._save_extras()
     assert ui.ctl.cfg.get("games")[EXE]["launch_args"] == "-y"
-    t.fg_var.set("auto")
+    t.fg_var.set("default")
     t._save_extras()
     assert "framegen" not in ui.ctl.cfg.get("games")[EXE]
 

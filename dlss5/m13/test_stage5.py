@@ -15,10 +15,10 @@ print("=== 1. Testing DEFAULTS ===")
 assert "scale" in DEFAULTS, "Missing scale in DEFAULTS"
 assert DEFAULTS["scale"] == 0.50, "scale default != 0.50"
 assert "frame_gen" in DEFAULTS, "Missing frame_gen in DEFAULTS"
-assert DEFAULTS["frame_gen"] is True, "frame_gen default != True"
+assert DEFAULTS["frame_gen"] is False, "frame_gen default != False"
 assert "sharpness" in DEFAULTS, "Missing sharpness in DEFAULTS"
 assert DEFAULTS["sharpness"] == 0.8, "sharpness default != 0.8"
-print("DEFAULTS: scale=0.50, frame_gen=True, sharpness=0.8 [PASS]")
+print("DEFAULTS: scale=0.50, frame_gen=False, sharpness=0.8 [PASS]")
 
 print("\n=== 2. Testing i18n keys ===")
 keys_to_test = [
@@ -48,16 +48,16 @@ with tempfile.TemporaryDirectory() as td:
     cfg_file = os.path.join(td, "test_cfg.json")
     c1 = Config(cfg_file)
     assert c1.get("scale") == 0.50
-    assert c1.get("frame_gen") is True
+    assert c1.get("frame_gen") is False
     assert c1.get("sharpness") == 0.8
 
     c1.set("scale", 0.67)
-    c1.set("frame_gen", False)
+    c1.set("frame_gen", True)
     c1.set("sharpness", 0.95)
 
     c2 = Config(cfg_file)
     assert c2.get("scale") == 0.67, "Config reload scale mismatch"
-    assert c2.get("frame_gen") is False, "Config reload frame_gen mismatch"
+    assert c2.get("frame_gen") is True, "Config reload frame_gen mismatch"
     assert c2.get("sharpness") == 0.95, "Config reload sharpness mismatch"
     print("Config persistence verified [PASS]")
 

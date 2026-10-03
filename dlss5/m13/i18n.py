@@ -23,15 +23,15 @@ _S = {
     # chars wide, the settings one 24 - long translations get truncated
     "scale_perf": {"en": "Performance (50%)", "ru": "Скорость (50%)"},
     "scale_ultra": {"en": "Ultra Perf. (33%)", "ru": "Ультра (33%)"},
-    "framegen": {"en": "Frame Generation (1:2)",
-                 "ru": "Генерация кадров (1:2)"},
+    "framegen": {"en": "Frame Generation (default)",
+                 "ru": "Генерация кадров (по умолч.)"},
     "framegen_hint": {
-        "en": "Every 2nd frame is neural-processed, the frame between is "
-              "generated from it (motion-compensated). On x86 titles the "
-              "daemon synthesizes it via residual transfer.",
-        "ru": "Каждый 2-й кадр обрабатывается нейросетью, промежуточный "
-              "генерируется из него (с компенсацией движения). На x86-играх "
-              "генерирует демон через residual transfer."},
+        "en": "Default for all games - each game's own FG: option overrides "
+              "it. Every 2nd frame is neural-processed, the frame between "
+              "is generated (motion-compensated).",
+        "ru": "Дефолт для всех игр - у каждой игры свой пункт FG: "
+              "перекрывает его. Каждый 2-й кадр обрабатывается нейросетью, "
+              "промежуточный генерируется (с компенсацией движения)."},
     "sharpness": {"en": "Sharpness", "ru": "Резкость (RCAS)"},
     "autosetup": {"en": "Auto-setup:", "ru": "Автонастройка:"},
     "step_weights": {"en": "Weights", "ru": "Веса"},
@@ -175,7 +175,7 @@ _S = {
                     "ru": "настройки игры - выбери карточку"},
     "game_args": {"en": "Args:", "ru": "Аргументы:"},
     "game_fg": {"en": "FG:", "ru": "FG:"},
-    "fg_auto": {"en": "auto", "ru": "авто"},
+    "fg_auto": {"en": "default", "ru": "дефолт"},
     "fg_on": {"en": "on", "ru": "вкл"},
     "fg_off": {"en": "off", "ru": "выкл"},
     "pause_resume": {"en": "Pause / Resume", "ru": "Пауза / продолжить"},

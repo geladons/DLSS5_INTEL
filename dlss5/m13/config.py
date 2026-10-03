@@ -27,7 +27,11 @@ DEFAULTS = {
     "color_strength": 1.0,       # Phase30: color component strength (0.0..2.0)
     "blend": 1.0,                # effect mix: 0 = original, 1 = full network
     "scale": 0.50,               # Preset options: 1.00 Native, 0.67 Quality, 0.58 Balanced, 0.50 Performance, 0.33 Ultra Performance
-    "frame_gen": True,           # Frame Generation enabled by default
+    "frame_gen": False,          # Frame Generation default - opt-in per
+                                 # game; the residual-transfer FG is an
+                                 # experimental path (LS-class rework
+                                 # planned), field tests show artifacts on
+                                 # most titles at low fps/high motion
     "sharpness": 0.8,            # bounded CAS sharpness 0.0 to 1.0 (encode.comp)
     "language": "en",            # UI language: en (primary) | ru
     "overlay_hotkey": "control+alt+g",   # show/hide the in-game overlay

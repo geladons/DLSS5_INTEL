@@ -309,7 +309,7 @@ def launch_game(exe_path, mode, scale=None, gain=None, blend=None, cfg=None, sha
     env["DLSS5_SHARPNESS"] = str(sharp_val)
     env["NR_LAYER_SHARPNESS"] = str(sharp_val)
 
-    fg_val = True
+    fg_val = False
     meta = {}
     if cfg is not None and hasattr(cfg, "get"):
         meta = (cfg.get("games") or {}).get(exe_path) or {}
@@ -330,8 +330,6 @@ def launch_game(exe_path, mode, scale=None, gain=None, blend=None, cfg=None, sha
         fg_env = os.environ.get("DLSS5_FRAMEGEN")
         if fg_env is not None:
             fg_val = (fg_env != "0")
-        else:
-            fg_val = True
     env["DLSS5_FRAMEGEN"] = "1" if fg_val else "0"
     env["NR_LAYER_FRAMEGEN"] = "1" if fg_val else "0"
     if mode == "dx12":
