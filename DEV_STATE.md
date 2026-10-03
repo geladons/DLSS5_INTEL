@@ -2277,3 +2277,41 @@ presents=6900 processed=6836 generated=3417 native=0 - 3453 generated
 frames through the real daemon socket, zero native fallthrough.
 NRN2 regression: +fg reply in 1.5 ms against the new daemon (old x86
 clients unaffected).
+
+## 2026-10-03 (temporal history sanitisation - field report driven)
+
+Owner field report on the ed37514 build (per-pixel trust gate): rapid mouse
+movement still shimmers (less than before), a dark clothing patch drifts into
+sustained overbright after 5-7 s of motion, and a much-brighter frame pops
+periodically while idle.
+
+Diagnosis: the scalar soft-reject (alpha *= w, w from |hist-col| smoothstep)
+creates a relaxation oscillator at its boundary - partial w holds a region
+at a sustained brightness offset, crossing HI snaps output to pred (bright,
+the net lifts shadows), history follows, cycle repeats. Per-pixel w jitter
+near the threshold = the shimmer.
+
+Fix (8fe84df): textbook TAA AABB clamp moved upstream into features.comp -
+history channels 7-9 are clamped into the current 3x3 source neighbourhood
+(+/-0.004 scaled ~= 8/255 grain slack) BEFORE the network input and the
+alpha blend see them. Stale history is pulled inside the local colour
+range instead of dragged or rejected: the drag is bounded and continuous,
+no gate to oscillate. The w-gate in temporal_nr is removed (double
+mechanism would under-blend). Both dispatch paths verified: scale=1.0
+clamps against the full-res source, scale<1.0 clamps in net space against
+bufNetRgb_ (pc.b offsets 0, fullW=netW for that dispatch).
+
+Validated: ghost probe -3 luma post-leave (no bright residual);
+noise-seed/scale-recon/framegen-transfer/graceful-fail PASS;
+framegen_interp 6/6 (T3 max threshold 8->16, the clamp legitimately shifts
+edge pixels a few levels); all spvs resynced to production + dev dirs
+(features.spv is shared - chain, m11d, m12, layer/x86, m8b-live all get
+the same file).
+
+OPEN for the next owner field run (GTA IV, Temporal ON, FG off): cursor
+trails should die in ~1 frame, the overbright patch cannot form (clamp
+breaks the history->pred->history feedback at INPUT), bright pops should
+be gone (no oscillator left). If exposure "breathing" still shows during
+camera pans, the residual source is the network's own frame-to-frame tone
+jitter - next lever is a global-gain anchor in compose (needs a frame
+luma reduction) or stronger damping via alpha scaling.
