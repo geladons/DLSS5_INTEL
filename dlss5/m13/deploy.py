@@ -162,9 +162,11 @@ class Deployer:
         bak = self._backup(dll_name)
         try:
             if os.path.exists(tgt) and not os.path.exists(bak):
-                st = self.status(dll_name, source_path)
-                if st != "deployed":
-                    shutil.copy2(tgt, bak)          # park the game's own dll
+                # park the game's own dll - but never back up an older
+                # build of OURS: restore-on-undeploy would resurrect a
+                # stale proxy as if it were the game's original
+                if not self._is_ours_any_mode(dll_name, source_path):
+                    shutil.copy2(tgt, bak)
             shutil.copy2(source_path, tgt)
         except PermissionError:
             raise DeployNeedsElevation(dll_name)
@@ -336,6 +338,17 @@ class Deployer:
             return b"dlss5_create" in data
         if mode in ("dx9", "dx11"):
             return b"DXVK" in data
+        return False
+
+    def _is_ours_any_mode(self, dll_name, source_path):
+        """True when the target is any known build of our own proxy,
+        regardless of which mode produced it (marker-based)."""
+        if (os.path.exists(source_path)
+                and _sha1(self._target(dll_name)) == _sha1(source_path)):
+            return True
+        for mode in MODE_DLLS:
+            if self._is_ours(dll_name, mode, source_path):
+                return True
         return False
 
 
