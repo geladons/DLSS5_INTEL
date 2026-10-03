@@ -1,5 +1,53 @@
 # DEV_STATE.md - where we are (updated 2026-10-02 by Devin)
 
+## Stage 31: Field-test follow-up - launch lifecycle, m12 cadence/FG, deploy hygiene, UI rework (2026-10-02)
+
+Owner-tested GTA IV / Witcher 3 / Metro Exodus / RDR2. Evidence-backed
+findings and fixes:
+
+- **Metro "smeared to impossibility"**: m12 dxgi ran `live every 4` and
+  framegen'd the other 3 presents via `dlss5_interpolate_frame(prev
+  processed, cur raw, 0.5)` - a literal 50% crossfade on 75% of frames
+  (m12_dxgi.log: `framegen interpolated` on frames 6,7,8,9,10...).
+  Now: `dlss5_framegen_transfer` (same residual transfer as the x64
+  layer) + `M12_LIVE=2/1` from the effective FG flag (f80d4fb).
+- **RDR2 "engine twice"**: dx12->vulkan mode switch left our stale
+  `dxgi.dll`+`d5c_chain.dll` in the game dir; `Launcher.exe` loaded the
+  proxy and spawned a second ~0.5 GB engine. Fixed three ways: proxy
+  now reads `m12_target.txt` (deployer writes the game exe basename -
+  launcher hosts stay passthrough), `undeploy_other_modes` cleans
+  marker-proven stale builds on every deploy, and `deploy()` no longer
+  backs our own old builds up as `.m13bak` (6d10031).
+- **Launch honesty**: new `verify` step polls the GAME exe after spawn
+  (4 s direct / 25 s wrapper) - dead-on-arrival launches now fail with
+  "exited within 4 s" instead of staying "running" (16c5b2e).
+- **Witcher 3 does not launch at all on this host** - not our stack:
+  direct `witcher3.exe`, `REDprelauncher.exe`, AND `steam://rungameid`
+  all die ~20 s in with zero error output (DXVK log ends at the
+  monitor-fallback warn). The layer DID init the engine in-process
+  inside witcher3.exe while it lived. Broken install/Steam context -
+  needs an owner-side verify/repair, not code.
+- **m11d CWD bug**: `cfg.shaderDir = ".\\"` - the daemon only worked
+  when launched with cwd=its own dir; any other cwd died at
+  `cannot open .\gemm.spv` inside engine.init. Now exe-dir resolved
+  (49d05a1).
+- **UI rework** (a152c14): single app-wide wheel router fixes the dead
+  games-grid scroll (two `bind_all` calls had been replacing each
+  other); `_fit_to_content` sizes/centers the window on the real widget
+  tree; TCombobox wheel-cycling killed (a scroll over a closed combo
+  silently flipped values - plausible mechanism behind the earlier
+  "framegen:true resurrected" mystery); extras strip is a labeled
+  bordered panel; truncated i18n labels shortened.
+- **Daemon-side ghost probe**: moving-block test through production
+  m11d shows vacated-position residual <=2.0 luma decaying in 2-3
+  frames with temporal ON - no engine-side trail; GTA IV artifacts in
+  the last test were with `framegen:true` still in config.
+
+Open: Metro loading-hang root cause unconfirmed (likely device
+contention during in-process engine init inside Present + the 4x
+present cadence); RDR2 vulkan-mode retest pending; Witcher needs a
+working install first.
+
 ## Stage 30: int8 attention extension EVALUATED - regression, kept OFF
 
 Extended `work/mlxw/dlssnr-int8.bin` coverage to qkv/proj at l4/l5
