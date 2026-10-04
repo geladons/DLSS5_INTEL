@@ -81,6 +81,9 @@ add_library(d5c_chain STATIC
     prof.cpp
     phase30.cpp
     engine.cpp
+    engine_frontend.cpp
+    engine_record.cpp
+    engine_debug.cpp
     engine_framegen.cpp
     engine_temporal.cpp
     chain_c_api.cpp)
