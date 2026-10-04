@@ -91,10 +91,49 @@ layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 layout(std430, set = 0, binding = 3) readonly buffer FeatV { float fv[]; };
 layout(std430, set = 0, binding = 13) writeonly buffer Hist { float hs[]; };
 layout(std430, set = 0, binding = 14) buffer HeadRaw { float head[]; };
+// Gain-anchor luma sums (see temporal_stats.comp for the slot layout).
+// Read by every invocation (uniform value -> broadcast); slots [4],[5]
+// are written by invocation 0 only, disjoint from the read range.
+layout(std430, set = 0, binding = 16) buffer Stats { uint stats[]; };
 layout(push_constant) uniform Push { ivec4 a; ivec4 b; vec4 c; vec4 d; } pc;
 
 void main() {
     uint p = gl_GlobalInvocationID.x;
+    // Gain anchor (pc.c.x = max |gain| change per frame, 0 = off): the
+    // network's mean output/input gain gNet is clamped to the previous
+    // frame's achieved gain +/- R. Real exposure shifts still track
+    // because input and output scale together; the free-run "breathing"
+    // (network re-toning the same scene on pans) becomes a slow ramp.
+    float k = 1.0;
+    if (pc.c.x > 0.0) {
+        // Residual-domain gain anchor. The network's global tone lift is
+        // the mean residual dSum = pred_luma_sum - in_luma_sum (Q8 units,
+        // same N both sides). stats[6] holds its EMA (Q16 signed). The
+        // applied residual is forced to the EMA -> per-frame breathing is
+        // low-passed out while real tone shifts track within ~1/alpha
+        // frames (a jump > 50% + floor snaps instantly = scene change).
+        float sIn  = float(stats[0]);
+        float dCur = float(stats[1]) - sIn;
+        float ema  = float(int(stats[6])) * (1.0 / 65536.0);
+        float npx  = float(pc.a.x);
+        // gate: residual DC too small to anchor reliably (flat input)
+        if (abs(dCur) > npx * 0.5) {          // mean residual > ~0.5/256
+            float snap = abs(ema) * 0.5 + npx * 2.0;  // +2/256 mean floor
+            if (ema == 0.0 || abs(dCur - ema) > snap) ema = dCur;
+            else ema += (dCur - ema) * pc.c.x;
+            k = clamp(ema / dCur, 0.25, 4.0);
+        } else if (ema == 0.0) {
+            // first contact on a flat frame - seed the EMA at 0, no scale
+        }
+        if (p == 0u) {
+            stats[4] = stats[0];
+            stats[5] = stats[1];
+            // new EMA goes to the spare slot - temporal_stats moves it to
+            // [6] at the top of next frame, so no invocation ever reads
+            // stats[6] while it is being written (intra-dispatch race).
+            stats[7] = uint(int(ema * 65536.0));
+        }
+    }
     if (p >= uint(pc.a.x)) return;
     // head is compact [TOK,4] fp32 in the chain (only channels 0..3 exist);
     // temporal_nr is chain-only - m8b-live never builds this shader.
@@ -112,6 +151,7 @@ void main() {
         float h01   = fv[p * 16u + 7u + c] * 8.0 + 0.5;
         float pred  = clamp(col01 + halfr(head[hP + c]) * 0.25, 0.0, 1.0);
         float outp  = pred + alpha * (h01 - pred);
+        outp = col01 + (outp - col01) * k;              // gain anchor
         head[hP + c] = halfr((outp - col01) * 4.0);
         float s = halfr(clamp(outp, 0.0, 1.0));          // scaled_color(outp)
         s = halfr(s - 0.5);

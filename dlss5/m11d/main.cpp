@@ -432,6 +432,12 @@ int main(int argc, char** argv) {
         if (!tenv) tenv = std::getenv("NR_LAYER_TEMPORAL");
         if (!tenv) tenv = std::getenv("D5C_TEMPORAL");
         cfg.temporal = !(tenv && std::strcmp(tenv, "0") == 0);
+        // Gain anchor: EMA smoothing of the global output/input gain
+        // (default 0.08). DLSS5_GAIN_LOCK / NR_LAYER_GAIN_LOCK / D5C_GAIN_LOCK.
+        if (const char* genv = std::getenv("DLSS5_GAIN_LOCK")) cfg.gainLock = (float)std::atof(genv);
+        else if ((genv = std::getenv("NR_LAYER_GAIN_LOCK")))    cfg.gainLock = (float)std::atof(genv);
+        else if ((genv = std::getenv("D5C_GAIN_LOCK")))         cfg.gainLock = (float)std::atof(genv);
+        if (cfg.gainLock < 0.0f) cfg.gainLock = 0.0f;
         cfg.debugDumps = dump;
         cfg.dumpDir = "out";
         cfg.vkCfg.appName = "m11d";

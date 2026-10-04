@@ -1,0 +1,69 @@
+#version 460
+// SPDX-License-Identifier: Apache-2.0
+// ============================================================================
+// Gain-anchor statistics pass (chain only). Runs AFTER the 71-block chain,
+// BEFORE temporal_nr rewrites the head. Two jobs:
+//
+//   1. Accumulate this frame's PRE-SCALE output luma (the network's
+//      reconstruction blended toward history by learned alpha - exactly
+//      what temporal_nr emits before the gain-anchor multiply) into
+//      stats[1] -
+//      fixed-point Q8 per pixel, one shared-memory partial per workgroup.
+//      stats[0] was already accumulated by features.comp on the input.
+//   2. Rotate last frame's next-slots into the prev slots:
+//      stats[2]=stats[4] (prev input sum), stats[3]=stats[5] (prev achieved
+//      output sum), stats[6]=stats[7] (gain EMA produced by temporal_nr).
+//      The rotation lives HERE, not in temporal_nr, so no invocation can
+//      observe torn prev sums mid-dispatch, and temporal_nr's read of the
+//      EMA never races its own write (it writes the spare slot [7]).
+//
+// temporal_nr then forces the frame's global gain to an EMA of gNet
+// (pc.c.x = smoothing alpha there), so network exposure "breathing" and
+// jitter are low-passed while real lighting changes still track.
+//
+// stats layout (u32, Q8 luma sums):
+//   [0] cur input luma sum      (features.comp, zeroed each frame)
+//   [1] cur predicted luma sum  (here, zeroed each frame)
+//   [2] prev input luma sum     (rotated from [4]; diagnostic)
+//   [3] prev achieved out sum   (rotated from [5]; diagnostic)
+//   [4] next input sum          (temporal_nr, single-invocation store)
+//   [5] next achieved out sum   (temporal_nr, single-invocation store)
+//   [6] gain EMA, Q16           (temporal_nr reads; rotated here from [7])
+//   [7] next gain EMA, Q16      (temporal_nr writes; survives across frames)
+// ============================================================================
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(std430, set = 0, binding = 3) readonly buffer FeatV { float fv[]; };
+layout(std430, set = 0, binding = 14) readonly buffer HeadRaw { float head[]; };
+layout(std430, set = 0, binding = 16) buffer Stats { uint stats[]; };
+layout(push_constant) uniform Push { ivec4 a; ivec4 b; vec4 c; vec4 d; } pc;
+
+shared uint sLum;
+void main() {
+    uint p = gl_GlobalInvocationID.x;
+    if (gl_LocalInvocationIndex == 0u) sLum = 0u;
+    barrier();
+    // rotate next -> prev BEFORE this frame's temporal_nr reads/writes
+    if (p == 0u) {
+        stats[2] = stats[4];
+        stats[3] = stats[5];
+        stats[6] = stats[7];
+    }
+    if (p < uint(pc.a.x)) {
+        // accumulate the PRE-SCALE output luma: what temporal_nr will emit
+        // before the gain-anchor multiply - i.e. pred blended toward the
+        // (already AABB-clamped) history by learned alpha.
+        float logit = head[p * 4u + 3u];
+        float alpha = clamp(1.0 / (1.0 + exp(-logit)) * 0.73974609375, 0.0, 1.0);
+        float luma = 0.0;
+        const vec3 W = vec3(0.299, 0.587, 0.114);
+        for (uint c = 0u; c < 3u; ++c) {
+            float col01 = fv[p * 16u + 4u + c] * 8.0 + 0.5;
+            float h01   = fv[p * 16u + 7u + c] * 8.0 + 0.5;
+            float pred  = clamp(col01 + head[p * 4u + c] * 0.25, 0.0, 1.0);
+            luma += W[c] * (pred + alpha * (h01 - pred));
+        }
+        atomicAdd(sLum, uint(luma * 256.0 + 0.5));
+    }
+    barrier();
+    if (gl_LocalInvocationIndex == 0u && sLum != 0u) atomicAdd(stats[1], sLum);
+}

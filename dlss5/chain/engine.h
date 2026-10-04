@@ -37,6 +37,13 @@ struct EngineConfig {
                                                        // + temporal_nr compose). Damps per-frame
                                                        // reconstruction jitter on moving content.
     Phase30Params phase30{};                           // NVIDIA Phase 30 condition parameters
+    // Gain anchor: EMA smoothing factor for the GLOBAL mean gain
+    // (processed-luma / input-luma). The frame's output gain is forced to
+    // the smoothed value, so network exposure "breathing" and per-frame
+    // gain jitter are low-passed away while real lighting changes track
+    // within ~1/alpha frames (>40% jumps snap instantly - scene cuts).
+    // 0 disables. Requires temporal_stats.spv alongside temporal_nr.spv.
+    float gainLock = 0.08f;
     VkContextConfig vkCfg{};                           // device selection (headless default)
     bool debugDumps = false;                           // dump live_*.bin on frame index 1
     std::string dumpDir = "out";                       // dump destination
@@ -164,7 +171,8 @@ private:
     VkPipeline pipeDecode_ = VK_NULL_HANDLE, pipeFeatures_ = VK_NULL_HANDLE,
                pipeCompose_ = VK_NULL_HANDLE, pipeEncode_ = VK_NULL_HANDLE;
     VkPipeline pipeRescale_ = VK_NULL_HANDLE, pipeFrameGen_ = VK_NULL_HANDLE,
-               pipeTemporalNr_ = VK_NULL_HANDLE, pipeFgInterp_ = VK_NULL_HANDLE;
+               pipeTemporalNr_ = VK_NULL_HANDLE, pipeFgInterp_ = VK_NULL_HANDLE,
+               pipeStats_ = VK_NULL_HANDLE;
     VkBuffer bufNetRgb_ = VK_NULL_HANDLE, bufFinLow_ = VK_NULL_HANDLE;
     VkDeviceMemory memNetRgb_ = VK_NULL_HANDLE, memFinLow_ = VK_NULL_HANDLE;
     VkDescriptorSet setDown_ = VK_NULL_HANDLE, setUp_ = VK_NULL_HANDLE, setFrameGen_ = VK_NULL_HANDLE;
@@ -177,7 +185,7 @@ private:
                    memLastP_ = VK_NULL_HANDLE, memFbStats_ = VK_NULL_HANDLE, memHp_ = VK_NULL_HANDLE,
                    memPrevFrame_ = VK_NULL_HANDLE, memCurrFrame_ = VK_NULL_HANDLE, memInterpOut_ = VK_NULL_HANDLE,
                    memPrevRaw_ = VK_NULL_HANDLE, memCurProc_ = VK_NULL_HANDLE,
-                   memMidRaw_ = VK_NULL_HANDLE;
+                   memMidRaw_ = VK_NULL_HANDLE, memStats_ = VK_NULL_HANDLE;
     VkImage imgIn_ = VK_NULL_HANDLE, imgFinal_ = VK_NULL_HANDLE;
     VkImageView imgInView_ = VK_NULL_HANDLE, viewFinal_ = VK_NULL_HANDLE;
     VkBuffer bufUpload_ = VK_NULL_HANDLE, bufRgb_ = VK_NULL_HANDLE, bufMax_ = VK_NULL_HANDLE,
@@ -186,7 +194,7 @@ private:
              bufLastPresented_ = VK_NULL_HANDLE, bufFbStats_ = VK_NULL_HANDLE, bufHp_ = VK_NULL_HANDLE,
              bufPrevFrame_ = VK_NULL_HANDLE, bufCurrFrame_ = VK_NULL_HANDLE, bufInterpOut_ = VK_NULL_HANDLE,
              bufPrevRaw_ = VK_NULL_HANDLE, bufCurProc_ = VK_NULL_HANDLE,
-             bufMidRaw_ = VK_NULL_HANDLE;
+             bufMidRaw_ = VK_NULL_HANDLE, bufStats_ = VK_NULL_HANDLE;
     double lastFrameGenGpuMs_ = 0.0;
     bool havePrevProcessed_ = false;   // set after a successful processFrame
     int fgMode_ = 1;                   // 1 = transfer (+0), 2 = anchor interp (+1)

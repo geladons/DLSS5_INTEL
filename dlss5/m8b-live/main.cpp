@@ -1654,7 +1654,7 @@ int main(int argc, char** argv) {
     // ===================================================================
     VkDescriptorSetLayout dsLayout;
     {
-        VkDescriptorSetLayoutBinding binds[16]{};
+        VkDescriptorSetLayoutBinding binds[17]{};
         binds[0] = {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
         for (uint32_t i = 1; i <= 8; ++i)
             binds[i] = {i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
@@ -1665,8 +1665,9 @@ int main(int argc, char** argv) {
         binds[13] = {13, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};  // bufHist (temporal history)
         binds[14] = {14, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};  // oHEAD range (raw head)
         binds[15] = {15, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};  // oHeadDC range (row DC)
+        binds[16] = {16, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};  // gain-anchor luma stats (features writes; chain-only readers)
         VkDescriptorSetLayoutCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        ci.bindingCount = 16; ci.pBindings = binds;
+        ci.bindingCount = 17; ci.pBindings = binds;
         VK_CHECK(vkCreateDescriptorSetLayout(c.dev, &ci, nullptr, &dsLayout));
     }
     VkPipelineLayout pipeLayout;
@@ -2183,12 +2184,19 @@ int main(int argc, char** argv) {
     VkBuffer bufHp = CreateBuf(c, 65536,
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memHp);
+    // binding 16: gain-anchor luma stats (shared features.comp writes the
+    // input luma sum; only the chain's temporal_nr/temporal_stats read it).
+    VkDeviceMemory memStats = VK_NULL_HANDLE;
+    VkBuffer bufStats = CreateBuf(c, 32,
+                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memStats);
     uint32_t* fbStatsPtr = nullptr;
     VK_CHECK(vkMapMemory(c.dev, memFbStats, 0, 8, 0, (void**)&fbStatsPtr));
     {
         VkCommandBuffer one = beginOneShot();
         vkCmdFillBuffer(one, bufLastPresented, 0, VK_WHOLE_SIZE, 0);
         vkCmdFillBuffer(one, bufFbStats, 0, VK_WHOLE_SIZE, 0);
+        vkCmdFillBuffer(one, bufStats, 0, VK_WHOLE_SIZE, 0);
         submitOneShot(one);
         std::printf("[fb] cancellation state up: lastPresented %llu B (zeroed, device-local), stats mapped\n",
                     (unsigned long long)((uint64_t)W * H * 4));
@@ -2368,6 +2376,7 @@ int main(int argc, char** argv) {
         writeBuf(setFinal, 13, bufHist, (uint64_t)st[0].TOK * 3 * 4);   // temporal history (OFF on M9b)
         writeBufRange(setFinal, 14, bufOf(oHEAD), localOff(oHEAD), (uint64_t)st[0].TOK * 16 * 4);  // raw head (temporal, OFF)
         writeBufRange(setFinal, 15, bufOf(oHeadDC), localOff(oHeadDC), 1024);            // head row-DC (temporal, OFF)
+        writeBuf(setFinal, 16, bufStats, 32);                         // gain-anchor luma stats (written by features)
     }
     writeImg(setFinal, 9, viewFinal);
     for (size_t i = 0; i < setBlit.size(); ++i) {

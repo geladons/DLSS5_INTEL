@@ -221,15 +221,15 @@ bool ChainEngine::createFrontEnd() {
     // shared 16-binding descriptor layout (identical to m8b: the same
     // transport shaders are used; legacy bindings stay bound to dummies)
     {
-        VkDescriptorSetLayoutBinding binds[16]{};
+        VkDescriptorSetLayoutBinding binds[17]{};
         binds[0] = {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
         for (uint32_t i = 1; i <= 8; ++i)
             binds[i] = {i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
         binds[9] = {9, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
-        for (uint32_t i = 10; i <= 15; ++i)
+        for (uint32_t i = 10; i <= 16; ++i)
             binds[i] = {i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
         VkDescriptorSetLayoutCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        ci.bindingCount = 16; ci.pBindings = binds;
+        ci.bindingCount = 17; ci.pBindings = binds;
         D5C_VK_RET(vkCreateDescriptorSetLayout(c.dev, &ci, nullptr, &dsLayout_));
     }
     {
@@ -272,14 +272,25 @@ bool ChainEngine::createFrontEnd() {
             std::fprintf(stderr, "[VK] temporal_nr unavailable (%s) - temporal off\n", e.what());
             cfg_.temporal = false;
         }
+        try {
+            pipeStats_ = makePipe("temporal_stats");
+        } catch (const std::exception& e) {
+            // Missing temporal_stats.spv only disables the gain anchor -
+            // temporal_nr runs with pc.c.x = 0 and never touches binding 16.
+            std::fprintf(stderr, "[VK] temporal_stats unavailable (%s) - gain lock off\n", e.what());
+            pipeStats_ = VK_NULL_HANDLE;
+        }
     }
+    const int tpipes = cfg_.temporal ? (pipeStats_ ? 2 : 1) : 0;
     if (cfg_.renderScale < 1.0f) {
         pipeRescale_ = makePipe("rescale");
-        std::printf("[VK] %d pipelines up (decode/rescale/features/compose/encode/framegen%s; absolute mode)\n",
-                    cfg_.temporal ? 7 : 6, cfg_.temporal ? "/temporal" : "");
+        std::printf("[VK] %d pipelines up (decode/rescale/features/compose/encode/framegen%s%s; absolute mode)\n",
+                    6 + tpipes, tpipes ? "/temporal" : "",
+                    pipeStats_ ? "+stats" : "");
     } else {
-        std::printf("[VK] %d pipelines up (decode/features/compose/encode/framegen%s; absolute mode)\n",
-                    cfg_.temporal ? 6 : 5, cfg_.temporal ? "/temporal" : "");
+        std::printf("[VK] %d pipelines up (decode/features/compose/encode/framegen%s%s; absolute mode)\n",
+                    5 + tpipes, tpipes ? "/temporal" : "",
+                    pipeStats_ ? "+stats" : "");
     }
 
     // buffers (m8b parity: same bindings, dummy sizes where the M9b absolute
@@ -317,6 +328,14 @@ bool ChainEngine::createFrontEnd() {
     bufFbStats_ = CreateBuf(c, 8,
                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memFbStats_);
+    // Gain-anchor luma sums (binding 16): 8 x u32. [0] current input luma
+    // (features), [1] current predicted luma (temporal_stats), [2:3]
+    // previous frame's input/achieved-output sums (rotated in by
+    // temporal_stats), [4:5] next-frame sums (temporal_nr). recordFrame
+    // zeroes [0:1] every frame and the whole buffer on a history reset.
+    bufStats_ = CreateBuf(c, 32,
+                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memStats_);
     bufHp_ = CreateBuf(c, 65536, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memHp_);
 
@@ -414,6 +433,7 @@ bool ChainEngine::createFrontEnd() {
         writeBuf(setFinal_, 13, bufHist_, (uint64_t)st_[0].TOK * 3 * 4);
         writeBufRange(setFinal_, 14, arena_.bufOf(O.oHEAD), arena_.localOff(O.oHEAD), (uint64_t)st_[0].TOK * 4 * 4);
         writeBufRange(setFinal_, 15, arena_.bufOf(O.oHeadDC), arena_.localOff(O.oHeadDC), 1024);
+        writeBuf(setFinal_, 16, bufStats_, 32);
     } else {
         writeImg(setFinal_, 0, imgInView_);
         writeBuf(setFinal_, 1, bufNetRgb_, (uint64_t)netW_ * netH_ * 3 * 4);
@@ -432,6 +452,7 @@ bool ChainEngine::createFrontEnd() {
         writeBuf(setFinal_, 13, bufHist_, (uint64_t)st_[0].TOK * 3 * 4);
         writeBufRange(setFinal_, 14, arena_.bufOf(O.oHEAD), arena_.localOff(O.oHEAD), (uint64_t)st_[0].TOK * 4 * 4);
         writeBufRange(setFinal_, 15, arena_.bufOf(O.oHeadDC), arena_.localOff(O.oHeadDC), 1024);
+        writeBuf(setFinal_, 16, bufStats_, 32);
 
         writeImg(setDown_, 0, imgInView_);
         writeBuf(setDown_, 1, bufRgb_, (uint64_t)W_ * H_ * 3 * 4);
@@ -504,6 +525,19 @@ void ChainEngine::recordFrame(long frameIndex) {
     const uint32_t rl = cfg_.regionLeft, rt = cfg_.regionTop;
     if (prof_.enabled()) prof_.begin(cmd_);
     vkCmdResetQueryPool(cmd_, tsPool_, 0, 6);
+    // Gain-anchor stats: [0]=cur input luma sum, [1]=cur predicted luma
+    // sum (both accumulated this frame). A history reset (framesDone_==0)
+    // zeroes ALL slots so the anchor restarts with prev=0 => off until
+    // temporal_stats/temporal_nr fill two frames of sums.
+    vkCmdFillBuffer(cmd_, bufStats_, 0, framesDone_ == 0 ? 32 : 8, 0);
+    {
+        VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             0, 1, &mb, 0, nullptr, 0, nullptr);
+    }
     {   // upload -> imgIn
         VkBufferMemoryBarrier bb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
         bb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -588,12 +622,26 @@ void ChainEngine::recordFrame(long frameIndex) {
             vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 4);
         }
         if (cfg_.temporal) {
+            // temporal_stats (optional): predicted-output luma sum feeding
+            // the gain anchor in temporal_nr; also rotates next-frame sums
+            // into the prev slots. Runs on the raw head BEFORE temporal_nr
+            // rewrites it.
+            if (pipeStats_) {
+                Push sp{};
+                sp.a[0] = (int32_t)st_[0].TOK;
+                vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeStats_);
+                push(sp);
+                vkCmdDispatch(cmd_, (st_[0].TOK + 255) / 256, 1, 1);
+                barrierAll();
+            }
             // temporal_nr: blend the head toward the previous OUTPUT via the
             // learned per-pixel alpha (head[3]) - damps per-frame reconstruction
             // jitter (the "swim"/flicker on moving content). In-place head
             // rewrite + next-frame history write; compose below runs unchanged.
+            // tp.c[0] = gain anchor strength (0 = off / no stats pass).
             Push tp{};
             tp.a[0] = (int32_t)st_[0].TOK;
+            tp.c[0] = pipeStats_ ? cfg_.gainLock : 0.0f;
             vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeTemporalNr_);
             push(tp);
             vkCmdDispatch(cmd_, (st_[0].TOK + 255) / 256, 1, 1);
@@ -721,10 +769,21 @@ void ChainEngine::recordFrame(long frameIndex) {
             vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 4);
         }
         if (cfg_.temporal) {
-            // temporal_nr pre-pass (see the scale==1.0 branch): in-place head
-            // rewrite toward the previous output + next-frame history write.
+            // temporal_stats + temporal_nr (see the scale==1.0 branch):
+            // predicted-luma accumulation for the gain anchor, then the
+            // in-place head rewrite toward the previous output +
+            // next-frame history write.
+            if (pipeStats_) {
+                Push sp{};
+                sp.a[0] = (int32_t)st_[0].TOK;
+                vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeStats_);
+                push(sp);
+                vkCmdDispatch(cmd_, (st_[0].TOK + 255) / 256, 1, 1);
+                barrierAll();
+            }
             Push tp{};
             tp.a[0] = (int32_t)st_[0].TOK;
+            tp.c[0] = pipeStats_ ? cfg_.gainLock : 0.0f;
             vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeTemporalNr_);
             push(tp);
             vkCmdDispatch(cmd_, (st_[0].TOK + 255) / 256, 1, 1);
@@ -985,9 +1044,9 @@ void ChainEngine::shutdown() {
     if (rbFinalPtr_) vkUnmapMemory(c.dev, memRbFinal_);
     uploadPtr_ = nullptr; rbFinalPtr_ = nullptr;
     rec_.destroy(c);
-    for (VkPipeline p : {pipeDecode_, pipeFeatures_, pipeCompose_, pipeEncode_, pipeRescale_, pipeFrameGen_, pipeTemporalNr_, pipeFgInterp_})
+    for (VkPipeline p : {pipeDecode_, pipeFeatures_, pipeCompose_, pipeEncode_, pipeRescale_, pipeFrameGen_, pipeTemporalNr_, pipeFgInterp_, pipeStats_})
         if (p) vkDestroyPipeline(c.dev, p, nullptr);
-    pipeDecode_ = pipeFeatures_ = pipeCompose_ = pipeEncode_ = pipeRescale_ = pipeFrameGen_ = pipeTemporalNr_ = pipeFgInterp_ = VK_NULL_HANDLE;
+    pipeDecode_ = pipeFeatures_ = pipeCompose_ = pipeEncode_ = pipeRescale_ = pipeFrameGen_ = pipeTemporalNr_ = pipeFgInterp_ = pipeStats_ = VK_NULL_HANDLE;
     if (pipeLayout_) vkDestroyPipelineLayout(c.dev, pipeLayout_, nullptr);
     pipeLayout_ = VK_NULL_HANDLE;
     if (dpool_) vkDestroyDescriptorPool(c.dev, dpool_, nullptr);
@@ -998,21 +1057,21 @@ void ChainEngine::shutdown() {
     for (VkBuffer b : {bufRgb_, bufMax_, bufT_, bufFin_, bufNr_, bufRbFinal_, bufDbg_,
                        bufUpload_, bufLastPresented_, bufFbStats_, bufHp_, bufHist_,
                        bufNetRgb_, bufFinLow_, bufPrevFrame_, bufCurrFrame_, bufInterpOut_,
-                       bufPrevRaw_, bufCurProc_, bufMidRaw_})
+                       bufPrevRaw_, bufCurProc_, bufMidRaw_, bufStats_})
         if (b) vkDestroyBuffer(c.dev, b, nullptr);
     bufRgb_ = bufMax_ = bufT_ = bufFin_ = bufNr_ = bufRbFinal_ = bufDbg_ =
         bufUpload_ = bufLastPresented_ = bufFbStats_ = bufHp_ = bufHist_ =
         bufNetRgb_ = bufFinLow_ = bufPrevFrame_ = bufCurrFrame_ = bufInterpOut_ =
-        bufPrevRaw_ = bufCurProc_ = bufMidRaw_ = VK_NULL_HANDLE;
+        bufPrevRaw_ = bufCurProc_ = bufMidRaw_ = bufStats_ = VK_NULL_HANDLE;
     for (VkDeviceMemory m : {memRgb_, memMax_, memT_, memFin_, memNr_, memRbFinal_, memDbg_,
                              memImgFinal_, memImgIn_, memUpload_, memLastP_, memFbStats_, memHp_, memHist_,
                              memNetRgb_, memFinLow_, memPrevFrame_, memCurrFrame_, memInterpOut_,
-                             memPrevRaw_, memCurProc_, memMidRaw_})
+                             memPrevRaw_, memCurProc_, memMidRaw_, memStats_})
         if (m) vkFreeMemory(c.dev, m, nullptr);
     memRgb_ = memMax_ = memT_ = memFin_ = memNr_ = memRbFinal_ = memDbg_ =
         memImgFinal_ = memImgIn_ = memUpload_ = memLastP_ = memFbStats_ = memHp_ = memHist_ =
         memNetRgb_ = memFinLow_ = memPrevFrame_ = memCurrFrame_ = memInterpOut_ =
-        memPrevRaw_ = memCurProc_ = memMidRaw_ = VK_NULL_HANDLE;
+        memPrevRaw_ = memCurProc_ = memMidRaw_ = memStats_ = VK_NULL_HANDLE;
     resetAnchors();
     fgMode_ = 1;
     framesDone_ = 0;
