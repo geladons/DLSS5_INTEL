@@ -18,8 +18,12 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 
+#include <atomic>
 #include <cstdint>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "engine.h"
@@ -39,17 +43,37 @@ public:
     d5c::Phase30Controller p30Ctl;
 
     // ---- engine + stream state -------------------------------------------
-    d5c::ChainEngine engine;
+    // shared_ptr + shutdown deleter: the async builder hot-swaps a fully
+    // initialized engine, an in-flight frame keeps the outgoing engine
+    // alive through its own copy, and the deleter runs sehEngineShutdown
+    // once the last reference drops. Access on the serving path goes
+    // through requestEngine()/liveEngine() (engMu_-locked copies) - a raw
+    // read while the builder swaps is a shared_ptr race.
+    std::shared_ptr<d5c::ChainEngine> engine;
     uint32_t curW = 0, curH = 0;
     long frameCounter = 0;
-    bool havePrev = false;
+    std::atomic<bool> havePrev{false};   // the builder clears it on swap
     uint32_t prevW = 0, prevH = 0;
     ULONGLONG lastFrameTick = 0;
 
-    // Re-inits the engine when the extent or render scale changed (or the
-    // engine is down). curW/curH == 0 is the single source of truth for
-    // "engine down" - a failed init must not masquerade as healthy.
+    // Synchronous re-init for the one-shot modes (selftest/bench). The
+    // serving path uses requestEngine() instead - a synchronous init on
+    // the accept thread wedges frames AND NRCT behind a multi-second
+    // build (the old behavior: ~10% of a GTA IV session ran native).
     bool ensureEngine(uint32_t w, uint32_t h);
+
+    // Serving-path engine acquisition. Returns the live engine when it
+    // can serve this extent - a same-extent engine keeps serving at the
+    // old scale while a rebuilt one loads in the background. nullptr when
+    // nothing usable exists (cold start / extent migration): the caller
+    // must then fail the frame FAST so the layer holds its last processed
+    // frame instead of stalling inside init.
+    std::shared_ptr<d5c::ChainEngine> requestEngine(uint32_t w, uint32_t h);
+
+    // Engine lifecycle for STATUS replies lives inside handleCtrlLocked:
+    // resident engine OR a pending build = alive (the manager restarts a
+    // daemon it believes dead - killing a mid-init daemon is the restart
+    // loop this async model exists to prevent).
 
     // NRCT control dispatch: applies the command to engine/p30Ctl/local
     // state and writes the 16-byte reply {magic, ok, gainBits, frames}.
@@ -65,4 +89,20 @@ public:
     void handleFrame(SOCKET s, const uint32_t hdr[4], ULONGLONG deadline,
                      std::vector<uint8_t>& inBuf, std::vector<uint8_t>& outBuf,
                      std::vector<uint8_t>& maskBuf);
+
+private:
+    // EngineConfig assembly shared by ensureEngine and the builder thread.
+    // renderScale comes from the pending build, not the live member, so a
+    // mid-build SETSCALE cannot be silently baked into the wrong engine.
+    d5c::EngineConfig makeEngineConfig(uint32_t w, uint32_t h,
+                                       float renderScale) const;
+    void kickBuildLocked(uint32_t w, uint32_t h);     // engMu_ held
+    void builderLoop();                               // async engine builds
+    void handleCtrlLocked(const uint32_t hdr[4], uint32_t rep[4]);  // engMu_ held
+
+    std::mutex engMu_;
+    struct PendingBuild { uint32_t w, h; float scale; };
+    std::unique_ptr<PendingBuild> pending_;           // config to realize next
+    std::thread builder_;
+    bool builderRunning_ = false;                     // guarded by engMu_
 };

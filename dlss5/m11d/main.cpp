@@ -213,7 +213,7 @@ int main(int argc, char** argv) {
         if (!core.ensureEngine(w, h)) return 1;
         std::vector<uint8_t> out(in.size());
         d5c::FrameStats st{};
-        if (!core.engine.processFrame(in.data(), out.data(), 1, &st)) return 1;
+        if (!core.engine->processFrame(in.data(), out.data(), 1, &st)) return 1;
         CreateDirectoryA("out", nullptr);
         if (!WriteBmpBGRA("out\\selftest_out.bmp", out, w, h)) {
             std::fprintf(stderr, "[FAIL] write out\\selftest_out.bmp\n");
@@ -297,7 +297,7 @@ int main(int argc, char** argv) {
         std::printf("[selftest] processed in %.1f ms wall (gpu %.1f | fe %.1f fp %.1f chain %.1f tail %.1f)\n",
                     st.wallMs, st.gpuTotalMs, st.feMs, st.fpMs, st.chainMs, st.tailMs);
         std::printf("[selftest] out\\selftest_out.bmp + out\\live_* dumps written\n");
-        core.engine.shutdown();
+        core.engine.reset();   // shared_ptr deleter runs sehEngineShutdown
         return 0;
     }
 
@@ -320,7 +320,7 @@ int main(int argc, char** argv) {
         std::vector<double> wall(benchN), gpu(benchN), chain(benchN);
         for (int f = 0; f < benchN; ++f) {
             d5c::FrameStats st{};
-            if (!core.engine.processFrame(in.data(), out.data(), f + 1, &st)) return 1;
+            if (!core.engine->processFrame(in.data(), out.data(), f + 1, &st)) return 1;
             wall[f] = st.wallMs; gpu[f] = st.gpuTotalMs; chain[f] = st.chainMs;
             std::printf("[bench] frame %d: wall %.1f ms (gpu %.1f | chain %.1f)\n",
                         f + 1, st.wallMs, st.gpuTotalMs, st.chainMs);
@@ -332,7 +332,7 @@ int main(int argc, char** argv) {
         std::printf("[bench] MEDIAN of %d frames at %ux%u: wall %.1f ms | gpu %.1f | chain %.1f"
                     "  =>  %.2f fps\n", benchN, benchW, benchH,
                     med(wall), med(gpu), med(chain), 1000.0 / med(wall));
-        core.engine.shutdown();
+        core.engine.reset();   // shared_ptr deleter runs sehEngineShutdown
         return 0;
     }
 
