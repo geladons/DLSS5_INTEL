@@ -130,6 +130,10 @@ private:
     // into cmd. rollPrev copies bufCurrFrame_ into bufPrevFrame_
     // (interpolate only).
     void recordFrameGenTail(const struct Push& p, VkPipeline pipe, bool rollPrev);
+    // temporal section: temporal_stats (gain-anchor luma sums + slot
+    // rotation, optional) then temporal_nr (history blend + head rewrite).
+    // Shared by the scale==1.0 and scale<1.0 record paths; engine_temporal.cpp.
+    void recordTemporal();
     bool submitAndReadback(void* out, size_t bytes,
                            std::chrono::steady_clock::time_point t0,
                            FrameStats* stats);

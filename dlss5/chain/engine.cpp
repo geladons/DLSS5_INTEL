@@ -622,30 +622,8 @@ void ChainEngine::recordFrame(long frameIndex) {
             vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 4);
         }
         if (cfg_.temporal) {
-            // temporal_stats (optional): predicted-output luma sum feeding
-            // the gain anchor in temporal_nr; also rotates next-frame sums
-            // into the prev slots. Runs on the raw head BEFORE temporal_nr
-            // rewrites it.
-            if (pipeStats_) {
-                Push sp{};
-                sp.a[0] = (int32_t)st_[0].TOK;
-                vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeStats_);
-                push(sp);
-                vkCmdDispatch(cmd_, (st_[0].TOK + 255) / 256, 1, 1);
-                barrierAll();
-            }
-            // temporal_nr: blend the head toward the previous OUTPUT via the
-            // learned per-pixel alpha (head[3]) - damps per-frame reconstruction
-            // jitter (the "swim"/flicker on moving content). In-place head
-            // rewrite + next-frame history write; compose below runs unchanged.
-            // tp.c[0] = gain anchor strength (0 = off / no stats pass).
-            Push tp{};
-            tp.a[0] = (int32_t)st_[0].TOK;
-            tp.c[0] = pipeStats_ ? cfg_.gainLock : 0.0f;
-            vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeTemporalNr_);
-            push(tp);
-            vkCmdDispatch(cmd_, (st_[0].TOK + 255) / 256, 1, 1);
-            barrierAll();
+            // temporal_stats + temporal_nr: engine_temporal.cpp
+            recordTemporal();
         }
         {   // compose (vendor compose_head on the raw head, absolute mode) + encode
             Push p{};
@@ -769,25 +747,8 @@ void ChainEngine::recordFrame(long frameIndex) {
             vkCmdWriteTimestamp(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool_, 4);
         }
         if (cfg_.temporal) {
-            // temporal_stats + temporal_nr (see the scale==1.0 branch):
-            // predicted-luma accumulation for the gain anchor, then the
-            // in-place head rewrite toward the previous output +
-            // next-frame history write.
-            if (pipeStats_) {
-                Push sp{};
-                sp.a[0] = (int32_t)st_[0].TOK;
-                vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeStats_);
-                push(sp);
-                vkCmdDispatch(cmd_, (st_[0].TOK + 255) / 256, 1, 1);
-                barrierAll();
-            }
-            Push tp{};
-            tp.a[0] = (int32_t)st_[0].TOK;
-            tp.c[0] = pipeStats_ ? cfg_.gainLock : 0.0f;
-            vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeTemporalNr_);
-            push(tp);
-            vkCmdDispatch(cmd_, (st_[0].TOK + 255) / 256, 1, 1);
-            barrierAll();
+            // temporal_stats + temporal_nr: engine_temporal.cpp
+            recordTemporal();
         }
         {   // compose on (netW_, netH_) with output into bufFinLow_
             Push p{};

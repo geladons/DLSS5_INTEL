@@ -82,6 +82,7 @@ add_library(d5c_chain STATIC
     phase30.cpp
     engine.cpp
     engine_framegen.cpp
+    engine_temporal.cpp
     chain_c_api.cpp)
 add_dependencies(d5c_chain d5c_shaders)
 
