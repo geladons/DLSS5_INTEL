@@ -13,7 +13,12 @@ add_compile_definitions(
 # the shared chain module (shaders compile there; d5c_stage_shaders stages spv)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../chain ${CMAKE_CURRENT_BINARY_DIR}/chain)
 
-add_executable(m11d main.cpp)
+add_executable(m11d
+    main.cpp
+    daemon_core.cpp
+    daemon_io.cpp
+    engine_seh.cpp
+    crash_witness.cpp)
 add_dependencies(m11d d5c_chain)
 target_link_libraries(m11d PRIVATE d5c_chain ws2_32)
 
