@@ -1,5 +1,52 @@
 # DEV_STATE.md - where we are (updated 2026-10-03 by Devin)
 
+## Stage 34: Modularization sweep + m8b 4-chunk TDR finding (2026-10-03)
+
+Owner flagged two standing rule violations: work not delegated to
+subagents (they were used for the structure maps this time), and code
+being added to already-oversized TUs. Full modularization program run:
+
+- **Stage 1** (dc0a31a area): `m11d/main.cpp` 925 -> 386; daemon core,
+  protocol/config, I/O, SEH boundary, witness extracted. Protocol
+  smoke PASS.
+- **Stage 2** (0982372): `chain/engine.cpp` 1054 -> 291;
+  frontend/record/debug/temporal TUs, shared recordTemporalPasses().
+  Chain tests 5/5.
+- **Stage 3a** (ba79599): `m8b-live/main.cpp` 4115 -> 3354; 8 leaf TUs
+  (f16, bmp_io, win_util, vk_util, knobs, weights_file, chain_bufs,
+  capture_dda) + dead ActiveRegion/chainFullBarrier dropped.
+- **Stage 3b** (0a57871): -> 3187; CursorMirror (pointer shape/pos/
+  dirty/composite) + OverlayControl (hwnd, echo/excluded flags, stop/
+  hidden/resume/quit atomics, WndProc, hotkey drain) - 11 file-scope
+  globals became member state.
+- **Stage 4** (021afc0): `nr_layer_win.c` 2839 -> 2632; nr_util
+  (nr_log/nr_now_ms/global lock), daemon_client (exchange/nr_ctrl/
+  nr_port), gdi_guard. x64+x86 builds green, production synced.
+
+- **Stage 3c deferred (deliberate)**: ChainRecorder/arena-loader are
+  the remaining big block (~3000 lines inside main()). The rules only
+  allow extraction "covered by the validation rig" - and m8b's runtime
+  rig is currently down on this host (below), so splitting the
+  recorder now would be an unverifiable heroic rewrite. Resume after
+  the TDR is fixed.
+
+- **NEW BUG - m8b-live device-lost on the 4-chunk arena (pre-existing,
+  now deterministic)**: `--novideo --frames N` and video runs both die
+  at the first frame submit (vkQueueSubmit -4, igfxnd TDR in Event
+  Log). Baseline A/B proves it is NOT the refactor: a HEAD worktree
+  fails identically, and the same signature is in the 2026-09-25 docs
+  log (4 chunks, run 5313 fail then run 5365 pass = historically
+  flaky). Bisected and exonerated: gain-anchor host code
+  (pre-2667132 main.cpp fails too), features stats write, AABB,
+  perf m8 kernels (pre-449ddf1 shaders fail too), temporal pass.
+  GPU itself is healthy - m11d chain tests pass. Working theory:
+  one of the batched chain dispatches BDA-spans >2 GB across the
+  4-chunk arena (the documented B50 driver limit); address layout
+  decides whether the crossing dispatch exists, which is why it was
+  flaky before and is deterministic on this boot. Fix candidates:
+  split any dispatch whose src/dst BDA span exceeds ~2 GB at record
+  time, or pin arena layout so no dispatch crosses chunk boundaries.
+
 ## Stage 33: Temporal AABB clamp + gain-anchor exposure sync + game-test harness (2026-10-03)
 
 Owner field report after Stage 32: mouse/movement ghosts mostly gone
