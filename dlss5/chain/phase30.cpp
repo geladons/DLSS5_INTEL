@@ -160,9 +160,9 @@ bool Phase30Controller::loadFromEnv() {
     const char* inten = std::getenv("DLSS5_INTENSITY");
     if (!inten) inten = std::getenv("NR_LAYER_INTENSITY");
     if (!inten) inten = std::getenv("M12_INTENSITY");
-    if (!inten) inten = std::getenv("DLSS5_GAIN");
-    if (!inten) inten = std::getenv("NR_LAYER_GAIN");
-    if (!inten) inten = std::getenv("M12_GAIN");
+    // *_GAIN envs are the residual multiplier (engine headGain), NOT this
+    // slot - feeding them into intensity was the source of the conflated
+    // "gain" semantics on the daemon path.
     if (inten) {
         float val = static_cast<float>(std::atof(inten));
         if (std::abs(val - params_.intensity) > 1e-4f) {
@@ -239,6 +239,31 @@ bool Phase30Controller::loadFromEnv() {
         float val = static_cast<float>(std::atof(cstr));
         if (std::abs(val - params_.colorStrength) > 1e-4f) {
             setColorStrength(val);
+            changed = true;
+        }
+    }
+
+    // Engine knobs: residual gain multiplier and compose blend. These are
+    // the env baseline for consumers that read them via engineGain()/
+    // engineBlend() (the daemon); in-process paths push them through the
+    // C ABI setters directly.
+    const char* genv = std::getenv("DLSS5_GAIN");
+    if (!genv) genv = std::getenv("NR_LAYER_GAIN");
+    if (!genv) genv = std::getenv("M12_GAIN");
+    if (genv) {
+        float v = static_cast<float>(std::atof(genv));
+        if (v >= 0.0f && v <= 16.0f && std::abs(v - engineGain_) > 1e-4f) {
+            engineGain_ = v;
+            changed = true;
+        }
+    }
+    const char* benv = std::getenv("DLSS5_BLEND");
+    if (!benv) benv = std::getenv("NR_LAYER_BLEND");
+    if (!benv) benv = std::getenv("M12_BLEND");
+    if (benv) {
+        float v = static_cast<float>(std::atof(benv));
+        if (v >= 0.0f && std::abs(v - engineBlend_) > 1e-4f) {
+            engineBlend_ = v;
             changed = true;
         }
     }
@@ -322,6 +347,24 @@ bool Phase30Controller::pollKnobsFile(const std::string& customPath) {
         float v = static_cast<float>(std::atof(val.c_str()));
         if (std::abs(v - params_.colorStrength) > 1e-4f) {
             setColorStrength(v);
+            changed = true;
+        }
+    }
+
+    // Engine knobs riding the same file (gain = residual headGain,
+    // blend = compose mix/headBlend). They are not Phase30Params - the
+    // consumer (daemon) applies them via engineGain()/engineBlend().
+    if (extractJsonField(json, "gain", val)) {
+        float v = static_cast<float>(std::atof(val.c_str()));
+        if (v >= 0.0f && v <= 16.0f && std::abs(v - engineGain_) > 1e-4f) {
+            engineGain_ = v;
+            changed = true;
+        }
+    }
+    if (extractJsonField(json, "blend", val)) {
+        float v = static_cast<float>(std::atof(val.c_str()));
+        if (v >= 0.0f && std::abs(v - engineBlend_) > 1e-4f) {
+            engineBlend_ = v;
             changed = true;
         }
     }

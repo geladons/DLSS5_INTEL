@@ -265,15 +265,15 @@ class MediaTab:
     # ------------------------------------------------------------ state ---
     def _init_knobs(self):
         """Seed the knob dict from config: the 7 phase30 keys plus the
-        overlay's blend/sharpness. gain mirrors intensity (same convention
-        as gamelaunch: DLSS5_GAIN == intensity)."""
+        overlay's blend/sharpness and the residual gain (independent of
+        intensity - the same knob contract as the game paths)."""
         p30 = self.ctl.cfg.get_phase30()
         self._p30_init = p30
         self._knobs.update(p30)
         self._knobs["sharpness"] = float(self.ctl.cfg.get("sharpness")
                                          or 0.8)
         self._knobs["blend"] = float(self.ctl.cfg.get("blend") or 1.0)
-        self._knobs["gain"] = float(p30.get("intensity", 1.0))
+        self._knobs["gain"] = float(self.ctl.cfg.get("gain") or 1.0)
 
     def _call_ui(self, fn):
         """Marshal a callable back to the Tk thread (ui.py drains the
@@ -776,8 +776,6 @@ class MediaTab:
     # ------------------------------------------------------------- knobs --
     def _knob_changed(self, key, val):
         self._knobs[key] = val
-        if key == "intensity":
-            self._knobs["gain"] = float(val)   # gain mirrors intensity
         if self._deb_id is not None:
             self.ui.root.after_cancel(self._deb_id)
         self._deb_id = self.ui.root.after(DEBOUNCE_MS,
@@ -791,7 +789,6 @@ class MediaTab:
         p30 = {k: v for k, v in self.p30.get_values().items()
                if k in PHASE30_VENDOR_KEYS}
         self._knobs.update(p30)
-        self._knobs["gain"] = float(p30.get("intensity", 1.0))
         self._debounced_preview()
 
     def _debounced_preview(self):

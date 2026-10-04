@@ -132,23 +132,28 @@ dispatch lines 445-530) and the client `dlss5/m13/daemonctl.py`.
 | `0x314E524E` | frame | BGRA payload + `w*h` mask bytes (held-still UI hint; the daemon still accepts it for protocol compatibility - the current layer no longer sends it since HUD masking was removed) |
 | `0x5443524E` ("NRCT") | control | 16-byte header `{magic, cmd, payload, reserved}` |
 
-NRCT commands (all produce a 16-byte reply `{magic, ok, gainBits, frames}`
-- the reply carries the *active* gain and the processed-frame counter so a
-caller can confirm a live change):
+NRCT commands (all produce a 16-byte reply `{magic, ok, valueBits, frames}`
+- the reply echoes the knob the command touched, or the residual gain for
+STATUS/valueless commands):
 
-| cmd | Name | Payload | Verified at |
+| cmd | Name | Payload | Engine slot |
 |---|---|---|---|
-| 1 | SETGAIN | float bits | `m11d/main.cpp:445`, `daemonctl.py:20` |
-| 2 | STATUS | none | `daemonctl.py:21` |
-| 3 | SETBLEND | float bits 0..1 | `m11d/main.cpp:458` |
-| 4 | SETSCALE | float bits | `m11d/main.cpp:472` |
-| 5 | SETFRAMEGEN | int 0/1 | `m11d/main.cpp:486` |
-| 6 | SETLOCALTONE | float bits | `m11d/main.cpp:490` |
-| 7 | SETLOCALSTRUCTURE | float bits | `m11d/main.cpp:497` |
-| 8 | SETSKINSTRUCTURE | float bits | `m11d/main.cpp:504` |
-| 9 | SETAUTOMASK | int 0/1 | `m11d/main.cpp:511` |
-| 10 | SETSTYLEINDEX | int 0/1/2 | `m11d/main.cpp:517` |
-| 11 | SETCOLORSTRENGTH | float bits | `m11d/main.cpp:523` |
+| 1 | SETGAIN | float bits 0..16 | residual multiplier (`headGain`, compose `pc.c.z`) |
+| 2 | STATUS | none | — |
+| 3 | SETBLEND | float bits 0..2 | compose mix (`pc.c.w`, same slot as intensity) |
+| 4 | SETSCALE | float bits | render scale (engine re-init) |
+| 5 | SETFRAMEGEN | int 0/1 | frame generation on/off |
+| 6 | SETLOCALTONE | float bits | Phase30 feature channel |
+| 7 | SETLOCALSTRUCTURE | float bits | Phase30 feature channel |
+| 8 | SETSKINSTRUCTURE | float bits | Phase30 feature channel |
+| 9 | SETAUTOMASK | int 0/1 | Phase30 feature channel |
+| 10 | SETSTYLEINDEX | int 0/1/2 | Phase30 feature channel |
+| 11 | SETCOLORSTRENGTH | float bits | Phase30 color strength |
+| 15 | SETINTENSITY | float bits 0..2 | Phase30 compose mix (`pc.c.w`) |
+
+`gain` and `intensity` are independent knobs on every path: `gain` is the
+residual multiplier (user-facing effect strength, neutral 1.0),
+`intensity` is the Phase30 compose mix (public baseline 1.0).
 
 Timeouts: daemon-side sockets use 20 s send/recv (`m11d/main.cpp:434-436`,
 "a full-extent chain can take ~1 s"); the Vulkan layer exchange timeout is
@@ -215,7 +220,8 @@ them at engine init / per frame.
 | `DLSS5_WEIGHTS_PATH` / `NR_LAYER_WEIGHTS` | absolute path to `dlssnr-logical.safetensors` - passed to *every* launch since Stage 25 (previously only the daemon got `--weights`, which killed x64 in-process games at frame 0) |
 | `DLSS5_SHADER_DIR` / `NR_LAYER_SHADERS` | directory with the compiled `.spv` kernels |
 | `DLSS5_SCALE` / `NR_LAYER_SCALE` / `M12_SCALE` | render scale preset (1.0 / 0.67 / 0.58 / 0.50 / 0.33) |
-| `DLSS5_GAIN` / `NR_LAYER_GAIN` / `M12_GAIN` (+ `*_INTENSITY`) | effect intensity 0..16 |
+| `DLSS5_GAIN` / `NR_LAYER_GAIN` / `M12_GAIN` | residual gain multiplier 0..16 (`headGain`, neutral 1.0) |
+| `DLSS5_INTENSITY` / `NR_LAYER_INTENSITY` / `M12_INTENSITY` | Phase30 compose mix 0..2 (`pc.c.w`, baseline 1.0) |
 | `DLSS5_BLEND` / `NR_LAYER_BLEND` / `M12_BLEND` | effect mix 0..1 (0 = bit-exact passthrough) |
 | `DLSS5_FRAMEGEN` / `NR_LAYER_FRAMEGEN` | frame generation on/off |
 | `DLSS5_SHARPNESS` / `NR_LAYER_SHARPNESS` | CAS sharpening 0..1 |

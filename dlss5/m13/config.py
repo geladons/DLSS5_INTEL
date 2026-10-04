@@ -140,18 +140,12 @@ class Config:
         self._write_runtime_paths()
 
     def get(self, key, default=None):
-        if key == "gain" and "gain" not in self.data and "intensity" in self.data:
-            return self.data["intensity"]
-        if key == "intensity" and "intensity" not in self.data and "gain" in self.data:
-            return self.data["gain"]
         return self.data.get(key, default)
 
     def set(self, key, value):
+        # gain (residual multiplier) and intensity (Phase30 compose mix)
+        # are INDEPENDENT knobs on every engine path - no cross-mirroring.
         self.data[key] = value
-        if key == "gain":
-            self.data["intensity"] = float(value)
-        elif key == "intensity":
-            self.data["gain"] = float(value)
         self.save()
 
     def get_phase30(self, exe=None):
@@ -187,10 +181,9 @@ class Config:
                 self.data["games"] = games
         else:
             for k, v in params.items():
-                if k in ("intensity", "gain"):
-                    self.data["intensity"] = float(v)
-                    self.data["gain"] = float(v)
-                elif k in self.data:
+                # Each key owns its slot: "gain" is the residual multiplier,
+                # "intensity" the Phase30 compose mix - no cross-writes.
+                if k in self.data:
                     self.data[k] = v
         self.save()
 

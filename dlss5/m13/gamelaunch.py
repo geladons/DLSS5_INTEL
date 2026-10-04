@@ -372,13 +372,12 @@ def launch_game(exe_path, mode, scale=None, gain=None, blend=None, cfg=None, sha
         env["DLSS5_SCALE"] = s_val
         env["M12_SCALE"] = s_val
     if gain is not None:
+        # gain = residual multiplier only; intensity envs come from the
+        # Phase30 dict below - never the same slot.
         g_val = str(gain)
         env["NR_LAYER_GAIN"] = g_val
         env["DLSS5_GAIN"] = g_val
         env["M12_GAIN"] = g_val
-        env["NR_LAYER_INTENSITY"] = g_val
-        env["DLSS5_INTENSITY"] = g_val
-        env["M12_INTENSITY"] = g_val
     if blend is not None:
         b_val = str(blend)
         env["NR_LAYER_BLEND"] = b_val

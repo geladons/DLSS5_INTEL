@@ -65,11 +65,21 @@ public:
     bool loadFromEnv();
     bool pollKnobsFile(const std::string& customPath = "");
 
+    // Engine knobs carried by the same knob file (the x64 layer and
+    // m12-dxgi read them themselves; the daemon applies them via these
+    // accessors). "gain" = residual multiplier (engine headGain, neutral
+    // 1.0) - NOT the compose intensity slot; "blend" = compose mix
+    // (engine headBlend, same slot as intensity - last write wins).
+    float engineGain() const { return engineGain_; }
+    float engineBlend() const { return engineBlend_; }
+
     // Default file path for Phase30 live knobs (%TEMP%\m13_phase30_knobs.json)
     static std::string defaultKnobFilePath();
 
 private:
     Phase30Params params_{};
+    float engineGain_ = 1.0f;
+    float engineBlend_ = 1.0f;
     std::string knobFilePath_;
     uint64_t lastFileWriteTime_ = 0;
 };

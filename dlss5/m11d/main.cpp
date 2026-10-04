@@ -86,8 +86,8 @@ int main(int argc, char** argv) {
     DaemonCore core;
     core.p30Ctl.loadFromEnv();
     core.p30Ctl.pollKnobsFile();
-    core.gain = core.p30Ctl.params().intensity;
-    core.blend = core.p30Ctl.params().intensity;
+    core.gain = core.p30Ctl.engineGain();   // residual multiplier (headGain)
+    core.blend = core.p30Ctl.params().intensity;   // compose mix slot
     const char* fg_env = std::getenv("DLSS5_FRAMEGEN");
     if (!fg_env) fg_env = std::getenv("NR_LAYER_FRAMEGEN");
     if (fg_env) {
@@ -120,14 +120,14 @@ int main(int argc, char** argv) {
         std::string a = argv[i];
         if (a == "--port" && i + 1 < argc) port = std::atoi(argv[++i]);
         else if (a == "--gain" && i + 1 < argc) {
+            // Residual multiplier (engine headGain) - the same slot the
+            // x64 layer reaches via dlss5_set_gain. NOT compose intensity.
             core.gain = (float)std::atof(argv[++i]);
-            core.p30Ctl.setIntensity(core.gain);
-            core.blend = core.gain;
         }
         else if (a == "--blend" && i + 1 < argc) {
+            // Compose mix (engine headBlend / Phase30 intensity slot).
             core.blend = (float)std::atof(argv[++i]);
             core.p30Ctl.setIntensity(core.blend);
-            core.gain = core.blend;
         }
         else if (a == "--scale" && i + 1 < argc) core.scale = (float)std::atof(argv[++i]);
         else if (a == "--framegen" && i + 1 < argc) {
@@ -146,7 +146,7 @@ int main(int argc, char** argv) {
         else if (a == "--intensity" && i + 1 < argc) {
             float v = (float)std::atof(argv[++i]);
             core.p30Ctl.setIntensity(v);
-            core.gain = v; core.blend = v;
+            core.blend = v;
         }
         else if (a == "--local-tone" && i + 1 < argc) {
             core.p30Ctl.setLocalTone((float)std::atof(argv[++i]));

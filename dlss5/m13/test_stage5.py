@@ -272,8 +272,9 @@ with tempfile.TemporaryDirectory() as td:
             assert values["--local-structure"] == "1.000"
             assert values["--skin-structure"] == "-1.000"
             assert values["--auto-mask"] == "0"
-            assert "--gain" not in args and "--blend" not in args
-            print("  controller.daemon_start passes public Phase30 values separately from legacy gain [PASS]")
+            assert values["--gain"] == "1.000", "residual gain must reach the daemon"
+            assert "--blend" not in args
+            print("  controller.daemon_start passes Phase30 values + independent residual gain [PASS]")
     finally:
         ctl.shutdown()
 

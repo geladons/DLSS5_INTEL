@@ -31,6 +31,7 @@ CMD_SETSKINSTRUCTURE = 8
 CMD_SETAUTOMASK = 9
 CMD_SETSTYLEINDEX = 10
 CMD_SETCOLORSTRENGTH = 11
+CMD_SETINTENSITY = 15        # Phase30 compose mix slot (distinct from gain)
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = int(os.environ.get("NR_LAYER_PORT") or os.environ.get("DLSS5_PORT") or 48990)
 
@@ -78,15 +79,18 @@ class M11dClient:
         return self._roundtrip(CMD_STATUS)
 
     def set_gain(self, gain):
-        """Live gain update; applies to the next processed frame."""
+        """Live residual-gain update (engine headGain); next processed frame."""
         if not 0.0 <= gain <= 16.0:
             raise DaemonError("gain %.3f out of range 0..16" % gain)
         payload = struct.unpack("<I", struct.pack("<f", gain))[0]
         return self._roundtrip(CMD_SETGAIN, payload)
 
     def set_intensity(self, intensity):
-        """Live Phase30 intensity update (alias for compose gain)."""
-        return self.set_gain(intensity)
+        """Live Phase30 compose-mix update (headBlend slot); next frame."""
+        if not 0.0 <= intensity <= 2.0:
+            raise DaemonError("intensity %.3f out of range 0..2" % intensity)
+        payload = struct.unpack("<I", struct.pack("<f", intensity))[0]
+        return self._roundtrip(CMD_SETINTENSITY, payload)
 
     def set_blend(self, blend):
         """Live blend (vendor mix factor 0..1) update; next processed frame."""

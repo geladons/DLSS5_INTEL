@@ -418,6 +418,7 @@ class M13Controller:
             notes.append("screen overlay stopped (%s)" % msg)
         p30 = self.cfg.get_phase30()
         args = ["--port", str(DEFAULT_PORT),
+                "--gain", "%.3f" % float(self.cfg.get("gain") or 1.0),
                 "--intensity", "%.3f" % p30["intensity"],
                 "--local-tone", "%.3f" % p30["local_tone"],
                 "--local-structure", "%.3f" % p30["local_structure"],
@@ -458,7 +459,10 @@ class M13Controller:
         the ~30 s weights upload and looks like a crash). Always persisted."""
         gain = max(0.0, min(16.0, float(gain)))
         self.cfg.set("gain", gain)
-        self.cfg.set("intensity", gain)
+        g_val = str(gain)
+        os.environ["DLSS5_GAIN"] = g_val
+        os.environ["NR_LAYER_GAIN"] = g_val
+        os.environ["M12_GAIN"] = g_val
         p30 = self.cfg.get_phase30()
         os.environ.update(phase30_env_dict(p30))
         write_phase30_knobs(self._knob_blob(p30))
@@ -476,7 +480,8 @@ class M13Controller:
             from .screenmode import write_knobs
             write_knobs(gain, float(self.cfg.get("blend")),
                         float(self.cfg.get("scale") or 0.50),
-                        bool(self.cfg.get("frame_gen")))
+                        bool(self.cfg.get("frame_gen")),
+                        phase30=self.cfg.get_phase30())
             return True, "gain -> %.3f (live, screen mode)" % gain
         if gamelaunch.freeze_active():
             # No daemon to race: the knob file/env are already written.
@@ -512,7 +517,8 @@ class M13Controller:
             from .screenmode import write_knobs
             write_knobs(float(self.cfg.get("gain")), blend,
                         float(self.cfg.get("scale") or 0.50),
-                        bool(self.cfg.get("frame_gen")))
+                        bool(self.cfg.get("frame_gen")),
+                        phase30=self.cfg.get_phase30())
             return True, "blend -> %.3f (live, screen mode)" % blend
         if gamelaunch.freeze_active():
             gamelaunch.reproc_bump()
@@ -549,7 +555,8 @@ class M13Controller:
             write_knobs(float(self.cfg.get("gain")),
                         float(self.cfg.get("blend")),
                         scale,
-                        bool(self.cfg.get("frame_gen")))
+                        bool(self.cfg.get("frame_gen")),
+                        phase30=self.cfg.get_phase30())
             return True, "scale -> %.2f (live, screen mode)" % scale
         if gamelaunch.freeze_active():
             gamelaunch.reproc_bump()
@@ -574,7 +581,8 @@ class M13Controller:
             write_knobs(float(self.cfg.get("gain")),
                         float(self.cfg.get("blend")),
                         float(self.cfg.get("scale") or 0.50),
-                        enable)
+                        enable,
+                        phase30=self.cfg.get_phase30())
             return True, "framegen -> %s (live, screen mode)" % ("ON" if enable else "OFF")
         if gamelaunch.freeze_active():
             gamelaunch.reproc_bump()
@@ -594,8 +602,30 @@ class M13Controller:
 
     # ------------------------------------------------------------- phase30 --
     def set_intensity(self, intensity, exe=None):
-        """Phase 30 compose mix (0.0..2.0, public baseline 1.0)."""
-        return self.set_gain(intensity)
+        """Phase 30 compose mix (0.0..2.0, public baseline 1.0). Owns the
+        headBlend compose slot - independent from the residual gain knob.
+        Same routing as set_gain: config+env+knob file always, NRCT cmd 15
+        when a daemon is up, frozen-frame reprocess afterwards."""
+        intensity = max(0.0, min(2.0, float(intensity)))
+        self.cfg.set("intensity", intensity)
+        p30 = self.cfg.get_phase30(exe)
+        os.environ.update(phase30_env_dict(p30))
+        write_phase30_knobs(self._knob_blob(p30))
+        if self.daemon.running:
+            try:
+                self.client.set_intensity(intensity)
+            except DaemonError as e:
+                return False, "intensity saved but daemon push failed: %s" % e
+            if gamelaunch.freeze_active():
+                gamelaunch.reproc_bump()
+                return True, ("intensity -> %.3f (live; frozen frame "
+                              "reprocessing)" % intensity)
+            return True, "intensity -> %.3f (live)" % intensity
+        if gamelaunch.freeze_active():
+            gamelaunch.reproc_bump()
+            return True, ("intensity -> %.3f (live; frozen frame "
+                          "reprocessing)" % intensity)
+        return True, "intensity -> %.3f" % intensity
 
     def set_local_tone(self, val, exe=None):
         val = max(0.0, min(2.0, float(val)))
@@ -702,7 +732,9 @@ class M13Controller:
         if self.daemon.running:
             for k, v in params.items():
                 try:
-                    if k in ("intensity", "gain"):
+                    if k == "intensity":
+                        self.client.set_intensity(float(v))
+                    elif k == "gain":
                         self.client.set_gain(float(v))
                     elif k == "local_tone":
                         self.client.set_local_tone(float(v))
@@ -730,7 +762,7 @@ class M13Controller:
         write_phase30_knobs(self._knob_blob(p30))
         if self.daemon.running:
             try:
-                self.client.set_gain(p30["intensity"])
+                self.client.set_intensity(p30["intensity"])
             except Exception:
                 pass
         if gamelaunch.freeze_active():

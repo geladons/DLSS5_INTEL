@@ -38,9 +38,9 @@ def write_knobs(gain, blend, scale=None, framegen=None, phase30=None):
             f.write(" ".join(parts))
     except OSError:
         pass
-    p = {"intensity": gain}
-    if phase30:
-        p.update(phase30)
+    # Phase30 vendor keys ride along when the caller supplies them; the
+    # gain value must never be seeded into "intensity" (separate knobs).
+    p = dict(phase30) if phase30 else {}
     # Engine knobs for the live file: the in-process layer/proxy polls it
     # (a running child's env is static), so carry the current values.
     p["gain"] = float(gain)

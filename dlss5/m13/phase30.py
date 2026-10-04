@@ -92,10 +92,11 @@ def phase30_env_dict(params):
     amask = 1 if p.get("auto_mask", False) else 0
     sidx = int(p.get("style_index", 0))
     cstrength = float(p.get("color_strength", 1.0))
+    # *_GAIN envs are deliberately NOT set here: gain is an engine knob
+    # (residual multiplier), pushed by the gain-aware paths (set_gain env
+    # writes, launch env) - this dict carries only the Phase30 vendor
+    # params so a Phase30 update can never pin gain back to a default.
     return {
-        "DLSS5_GAIN": "1.000",
-        "NR_LAYER_GAIN": "1.000",
-        "M12_GAIN": "1.000",
         "DLSS5_INTENSITY": "%.3f" % inten,
         "NR_LAYER_INTENSITY": "%.3f" % inten,
         "M12_INTENSITY": "%.3f" % inten,

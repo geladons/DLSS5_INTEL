@@ -218,7 +218,10 @@ public:
             alphaBuf_[i] = inBytes[i * 4 + 3];
         }
 
-        if (p30Ctl_.pollKnobsFile() || p30Ctl_.loadFromEnv()) {
+        // Env is frozen at context creation (loadFromEnv ran in the ctor);
+        // re-reading it per frame here reverted live knob pushes to the
+        // launch baseline within one frame. The knob file is the live channel.
+        if (p30Ctl_.pollKnobsFile()) {
             engine_.setPhase30(p30Ctl_.params());
         }
 

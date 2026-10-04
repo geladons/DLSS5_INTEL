@@ -76,7 +76,8 @@ class TestPhase30DefaultsAndEnv(unittest.TestCase):
     def test_env_dict(self):
         env = phase30.phase30_env_dict(phase30.PHASE30_DEFAULTS)
         self.assertEqual(env["DLSS5_INTENSITY"], "1.000")
-        self.assertEqual(env["DLSS5_GAIN"], "1.000")
+        # gain envs are pushed by the gain-aware paths, not this dict
+        self.assertNotIn("DLSS5_GAIN", env)
         self.assertEqual(env["DLSS5_LOCAL_TONE"], "1.000")
         self.assertEqual(env["DLSS5_LOCAL_STRUCTURE"], "1.000")
         self.assertEqual(env["DLSS5_SKIN_STRUCTURE"], "-1.000")
@@ -109,17 +110,17 @@ class TestConfigPhase30(unittest.TestCase):
         self.assertEqual(self.cfg.get("gain"), 1.0)
         self.assertEqual(p30["local_structure"], 1.0)
 
-    def test_set_phase30_and_gain_sync(self):
+    def test_set_phase30_and_gain_independence(self):
         self.cfg.set_phase30({"intensity": 1.25, "local_tone": 0.8})
         p30 = self.cfg.get_phase30()
         self.assertEqual(p30["intensity"], 1.25)
         self.assertEqual(p30["local_tone"], 0.8)
-        # Gain should sync with intensity
-        self.assertEqual(self.cfg.get("gain"), 1.25)
+        # gain (residual multiplier) is independent of intensity
+        self.assertEqual(self.cfg.get("gain"), 1.0)
 
-        # Gain change should sync back to intensity
+        # gain change must not touch intensity
         self.cfg.set("gain", 1.85)
-        self.assertEqual(self.cfg.get_phase30()["intensity"], 1.85)
+        self.assertEqual(self.cfg.get_phase30()["intensity"], 1.25)
 
     def test_reset_phase30(self):
         self.cfg.set_phase30({"intensity": 0.5, "local_structure": 0.2})

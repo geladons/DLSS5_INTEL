@@ -398,8 +398,6 @@ class ControlOverlay:
             self._suppress_scale = None      # echo of a status-driven sync
             return
         self._suppress_scale = None
-        if hasattr(self, "p30_panel") and self.p30_panel:
-            self.p30_panel.set_values({"intensity": g})
         self._pending_push = (g, time.time())
         if self._after_id:
             self.win.after_cancel(self._after_id)
@@ -413,18 +411,13 @@ class ControlOverlay:
     def _reset_gain(self):
         self.var.set(1.0)
         self._debounced_push(1.0)
-        if hasattr(self, "p30_panel") and self.p30_panel:
-            self.p30_panel.set_values({"intensity": 1.0})
 
     def _on_phase30_change(self, key, val):
-        if key == "intensity":
-            self.var.set(val)
         self.ctl.submit(self.ctl.set_phase30, {key: val})
         self.on_log("[overlay] Phase30 %s -> %s" % (key, val))
 
     def _on_phase30_reset(self):
         self.ctl.submit(self.ctl.reset_phase30)
-        self.var.set(1.0)
         self.on_log("[overlay] Phase30 reset to defaults")
 
     def sync_phase30(self, p):

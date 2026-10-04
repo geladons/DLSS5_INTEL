@@ -1,4 +1,47 @@
-# DEV_STATE.md - where we are (updated 2026-10-04 by Devin)
+# DEV_STATE.md - where we are (updated 2026-10-05 by Devin)
+
+## Stage 36: unified gain contract - one knob, one slot, all paths (2026-10-05)
+
+- **Regression history** (verified by git archaeology): Sep 23-29
+  NRCT `SETGAIN` drove `engine.setHeadGain` -> compose `pc.c.z`
+  (residual multiplier) on the daemon - that is the strong "gain 1.65"
+  behavior field reports remember. Stage 20 (Sep 29, `06cd142`-era)
+  remapped the knob to Phase30 `intensity` (`pc.c.w`, vendor baseline
+  ~1.6) and pinned `headGain=1.0` on m11d - the knob became ~neutral
+  there while x64/m12 kept the residual mapping (and media/x64
+  double-dipped via the gain<->intensity alias = ~g^2).
+- **Unified contract now**: `gain` = residual multiplier (`headGain`,
+  `pc.c.z`, neutral 1.0, range 0..16) on EVERY path (x64 layer,
+  m12-dxgi, x86 daemon, m8b-live, media). `intensity` = Phase30 compose
+  mix (`pc.c.w`, baseline 1.0, range 0..2) - its own channel and its own
+  panel slider. `blend` shares the `pc.c.w` slot (intensity wins
+  deterministically when both keys are present).
+- **Changes**: m11d `--gain`/NRCT cmd1/knob `"gain"`/env `*_GAIN` ->
+  `setHeadGain`; new NRCT cmd 15 SETINTENSITY -> the mix slot;
+  `Phase30Controller` now parses `gain`/`blend` engine keys + `*_GAIN`
+  env (as `engineGain_`/`engineBlend_`, applied by the daemon);
+  `loadFromEnv` no longer folds `*_GAIN` into intensity; per-frame
+  `loadFromEnv()` removed from m11d `handleFrame` and `chain_c_api.cpp`
+  (the "env leash" that reverted live pushes); m13 `set_gain` writes
+  only `gain` + pushes `*_GAIN` envs, `set_intensity` is a real method
+  (NRCT 15); config gain/intensity aliasing removed; `phase30_env_dict`
+  no longer pins GAIN envs to "1.000"; daemon spawn gets `--gain`;
+  screenmode knob blob stops seeding `{"intensity": gain}`; ui_media
+  intensity->gain mirror removed; overlay label "Intensity" -> "Gain",
+  cross-widget mirrors removed.
+- **Validated**: m11d rebuilt clean; deterministic selftest
+  `--gain 5.0 --intensity 1.0` -> mean|delta| 23.07 vs 4.64 baseline
+  (5x residual); live TCP daemon: NRCT SETGAIN 5.0 echo 5.000,
+  SETINTENSITY 1.0 echo 1.000, STATUS gain field = 5.000; 800x600 frame
+  at gain 5.0 vs 1.0 = mean|delta| 25.77 vs 5.10 (**residual x5, clearly
+  visible**). Gain-lock EMA A/B byte-identical - the anchor normalizes
+  the network's own DC drift and does not absorb the user knob.
+- **m13 tests updated** (encoded the conflated semantics):
+  `test_stage5.py` asserts `--gain` reaches the daemon,
+  `test_phase30_cache.py` asserts gain/intensity independence and that
+  env dict omits `*_GAIN`. 12/12 + full stage5 suite pass.
+- **Docs**: `docs/TECHNICAL.md` NRCT table rewritten per-slot (cmd 1 =
+  headGain, cmd 15 = intensity, reply echoes touched knob).
 
 ## Stage 35: Stage 3c done - m8b recorder extracted to M8bRec (2026-10-04)
 

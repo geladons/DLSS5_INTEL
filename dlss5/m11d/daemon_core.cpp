@@ -40,7 +40,7 @@ bool DaemonCore::ensureEngine(uint32_t w, uint32_t h) {
     cfg.canvasW = w; cfg.canvasH = h;
     cfg.weightsPath = weights;
     cfg.shaderDir = shaderDir;        // exe-relative unless overridden
-    cfg.headGain = 1.0f;
+    cfg.headGain = gain;
     cfg.headBlend = p30Ctl.params().intensity;
     cfg.renderScale = scale;
     cfg.phase30 = p30Ctl.params();
@@ -78,21 +78,31 @@ bool DaemonCore::ensureEngine(uint32_t w, uint32_t h) {
 // is needed). Reply: {magic, ok, gainBits, frames}.
 void DaemonCore::handleCtrl(SOCKET s, const uint32_t hdr[4]) {
     uint32_t rep[4] = { MAGIC_CTRL, 0, 0, 0 };
-    if (hdr[1] == 1) {                   // SETGAIN / SETINTENSITY: hdr[2] = float bits
-        float g = 0.0f;
-        std::memcpy(&g, &hdr[2], 4);
+    if (hdr[1] == 1) {                   // SETGAIN: hdr[2] = float bits
+        float g = 0.0f;                  // -> residual multiplier (headGain),
+        std::memcpy(&g, &hdr[2], 4);     //    same slot as dlss5_set_gain on x64
         if (g >= 0.0f && g <= 16.0f) {
             gain = g;
-            blend = g;
-            p30Ctl.setIntensity(g);
-            engine.setIntensity(g);       // next processed frame uses it
+            engine.setHeadGain(g);        // next processed frame uses it
             rep[1] = 1;
-            std::printf("[m11d] ctrl: intensity/gain -> %.3f\n", (double)g);
+            std::printf("[m11d] ctrl: gain -> %.3f\n", (double)g);
         } else {
             std::fprintf(stderr, "[m11d] ctrl: gain %.3f out of range\n", (double)g);
         }
-    } else if (hdr[1] == 3) {            // SETBLEND / SETINTENSITY: hdr[2] = float bits
-        float b = 0.0f;
+    } else if (hdr[1] == 15) {           // SETINTENSITY: hdr[2] = float bits
+        float v = 0.0f;                  // -> Phase30 compose mix (headBlend)
+        std::memcpy(&v, &hdr[2], 4);
+        if (v >= 0.0f && v <= 2.0f) {
+            blend = v;
+            p30Ctl.setIntensity(v);
+            engine.setIntensity(v);       // next processed frame uses it
+            rep[1] = 1;
+            std::printf("[m11d] ctrl: intensity -> %.3f\n", (double)v);
+        } else {
+            std::fprintf(stderr, "[m11d] ctrl: intensity %.3f out of range\n", (double)v);
+        }
+    } else if (hdr[1] == 3) {            // SETBLEND: hdr[2] = float bits -> same
+        float b = 0.0f;                  // compose mix slot as intensity
         std::memcpy(&b, &hdr[2], 4);
         if (b >= 0.0f && b <= 2.0f) {
             blend = b;
@@ -189,8 +199,15 @@ void DaemonCore::handleCtrl(SOCKET s, const uint32_t hdr[4]) {
     } else {
         std::fprintf(stderr, "[m11d] ctrl: unknown cmd %u\n", hdr[1]);
     }
-    float curInten = p30Ctl.params().intensity;
-    std::memcpy(&rep[2], &curInten, 4);
+    // rep[2] echoes the knob the command touched (or the residual gain
+    // for STATUS and valueless commands - the field is named "gain" in
+    // the protocol and the manager displays it as such).
+    if (hdr[1] == 3 || hdr[1] == 15) {
+        float v = p30Ctl.params().intensity;
+        std::memcpy(&rep[2], &v, 4);
+    } else {
+        std::memcpy(&rep[2], &gain, 4);
+    }
     rep[3] = (uint32_t)frameCounter;
     writeAll(s, (const uint8_t*)rep, 16);
 }
@@ -200,8 +217,18 @@ void DaemonCore::handleFrame(SOCKET s, const uint32_t hdr[4], ULONGLONG deadline
                              std::vector<uint8_t>& inBuf, std::vector<uint8_t>& outBuf,
                              std::vector<uint8_t>& maskBuf) {
     // Live knobs ride the frame channel (once per connection, same as the
-    // old accept loop) - NRCT requests bypass it by construction.
-    if (p30Ctl.pollKnobsFile() || p30Ctl.loadFromEnv()) {
+    // old accept loop) - NRCT requests bypass it by construction. Env is
+    // spawn-frozen and was already applied at startup: re-reading it per
+    // frame here reverted live knob pushes to the launch baseline
+    // (the "env leash" - knob turned, effect reverted within a frame).
+    if (p30Ctl.pollKnobsFile()) {
+        // Engine knobs riding the same file: residual gain + compose
+        // blend (same slot family as the x64 layer pushes via the C ABI).
+        // Blend/intensity share the engine's headBlend slot: apply blend
+        // first so the Phase30 "intensity" key wins deterministically
+        // when both are present (same precedence as the x64 path).
+        engine.setHeadBlend(p30Ctl.engineBlend());
+        engine.setHeadGain(p30Ctl.engineGain());
         engine.setPhase30(p30Ctl.params());
     }
     const bool masked = hdr[0] == MAGIC_MASKED;
