@@ -1,5 +1,81 @@
 # DEV_STATE.md - where we are (updated 2026-10-05 by Devin)
 
+## Stage 37: async m11d re-init + never-silent daemon + overlay spec (2026-10-05)
+
+- **Async engine rebuild** (`7463f4e`): engine init (3-14 s of device +
+  weights + arena) no longer runs inside the serial accept loop.
+  `DaemonCore::engine` is a `shared_ptr` with a `sehEngineShutdown`
+  deleter; a detached builder thread realizes `pending_ {extent,scale}`
+  configs and hot-swaps under `engMu_`. `requestEngine()`: same-extent +
+  scale drift -> kick the rebuild and keep serving at the OLD scale
+  (zero-outage retune); nothing usable -> nullptr and `handleFrame`
+  closes BEFORE the payload read so the layer's send hits RST and it
+  holds its last processed frame in ~ms. SETSCALE replies ok in ~1 ms;
+  pending builds coalesce (newest wins); mid-build knob pushes are
+  re-applied after the swap; STATUS reports alive while an engine is
+  resident OR a build is in flight (m13 restarts a "dead" daemon - a
+  mid-init kill was the restart loop this removes). Validated live:
+  cold frame fast-fails, engine up ~5 s; SETSCALE 0.5 -> rebuild
+  scheduled, 29/29 frames served during the rebuild window, 0 dropped.
+- **Never-silent daemon** (`582a402`): `--log PATH` / `M11D_LOG` env
+  freopens stdout+stderr (append, `_IONBF` re-applied - a killed daemon
+  loses nothing buffered). Serving mode with no explicit target and no
+  real console (`GetConsoleMode`, NOT isatty - NUL is also a char
+  device) falls back to `%TEMP%\m11d_last.log`. m13 `daemon_start`
+  passes `--log <logs>\m11d.log` (the file `logtail` already reads).
+- **Field note**: `ManagedProcess`/`start_detached` always logged the
+  daemon it spawns - the silent game session meant that day's m11d was
+  NOT m13-spawned (orphan/manual launch). The fallback above covers
+  that class permanently.
+
+### In-layer UI overlay - architecture spec (Steam/Xbox-class)
+
+Current state: the overlay is an external Tk window (`overlay_win32.py`,
+`WS_EX_NOACTIVATE`). Documented dead ends: raw-input games expose no OS
+cursor to click it; confined/hidden cursors can't reach its rect;
+exclusive fullscreen buries topmost windows; the m13 mainloop starves
+redraws. An external window cannot become a Steam-class overlay - the
+UI must render INSIDE the game frame with in-process input capture.
+
+Design (P0 - agreed contract, not yet implemented):
+
+- **UI transport**: m13 renders the panel into a BGRA bitmap in a named
+  shared-memory section (`Local\DLSS5_UI_<gamepid>`; header: seq, w, h,
+  dirty rect, flags). Pragmatic renderer: keep ALL existing Tk widget
+  code - host the Tk toplevel off-screen and `PrintWindow` it into the
+  shared DIB on a ~15 Hz timer (GDI render of a hidden window works on
+  this host; verify per-Windows-version). No Tk window is ever shown
+  when in-layer mode is active.
+- **Compositor**: `m11-layer` already owns the present hook, a VkDevice
+  path (frame staging for TCP/in-process), and the game's HWND (the
+  gdi_guard subclass). When the overlay flag is on it uploads the UI
+  bitmap to a VkImage and alpha-blends it over the outgoing frame -
+  post-processing, pre-present, on the SAME code path for x64 and
+  x86/TCP (composition is local; the engine transport is irrelevant).
+  Synthetic cursor is a second quad drawn from layer-tracked position.
+- **Input capture**: while the overlay is open the WndProc subclass
+  eats `WM_MOUSE*`/`WM_KEY*` (the game sees neither movement nor the
+  swallowed cursor), the layer accumulates its own logical cursor
+  position (deltas - survives games that hide/confine the OS cursor),
+  and forwards events to m13 over a small local channel (named pipe or
+  a second loopback port; NRCT stays engine-only). Hotkey toggle stays
+  m13-side (`RegisterHotKey` already works); m13 flips a flag the layer
+  polls (shared-mem byte, not a file).
+- **Hit-testing/flow**: m13 receives the event stream, runs it through
+  the SAME widget handlers as today (Tk `event_generate` on the hidden
+  toplevel keeps all bindings), repaints the bitmap, bumps seq. The
+  layer just composites whatever bitmap is newest - no UI logic
+  in-process.
+- **Scope honesty**: exclusive-fullscreen remains a documented weak
+  spot (Windows arbitrates the surface; Steam has the same limit);
+  windowed + borderless are the supported modes. The external Tk
+  overlay remains as an opt-out fallback (`overlay_mode=external`) for
+  games where the hook cannot attach.
+- **Phases**: P1 shared-mem bitmap + in-layer composite (static
+  content, no input). P2 WndProc capture + synthetic cursor + event
+  IPC. P3 hit-test loop + focus/activation semantics. P4 polish
+  (animations, multi-panel nav, Gamepad-UI parity notes).
+
 ## Stage 36: unified gain contract - one knob, one slot, all paths (2026-10-05)
 
 - **Regression history** (verified by git archaeology): Sep 23-29

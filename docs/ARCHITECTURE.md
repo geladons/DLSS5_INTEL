@@ -12,7 +12,7 @@ engineers who want to understand — or contribute to — the pipeline.
                         │  scan games · deploy DLLs · launch · knobs │
                         └───────┬───────────────────────┬────────────┘
                                 │ ENABLE_NR_LAYER=1     │ knob files / NRCT
-                                │                       │ (TCP 47990, masked magic)
+                                │                       │ (TCP 48990, masked magic)
    ┌────────────────────────────┼───────────┐   ┌───────┴────────┐
    │ game, Vulkan     │ game, DX9-11        │   │ game, DX12     │   screen / window mode
    │ (native)         │ (DXVK deployed)     │   │ (dxgi proxy)   │
@@ -20,7 +20,7 @@ engineers who want to understand — or contribute to — the pipeline.
           │ vkQueuePresentKHR    │ vkQueuePresentKHR     │ IDXGISwapChain::Present
    ┌──────┴──────────────────────┴───────────────────────┴────────┐
    │  frame grab → 16-byte header {magic,w,h,format} + BGRA        │
-   │  TCP 127.0.0.1:47990 → m11d daemon                            │
+   │  TCP 127.0.0.1:48990 → m11d daemon                            │
    └──────────────────────────────┬───────────────────────────────┘
                                   ▼
    decode → features → featpack → 71-block DLSSNR chain → head
@@ -72,16 +72,24 @@ untouched original (validated end-to-end on vkcube: "frame frozen" → 4×
 
 ### `dlss5/m11d` — frame daemon
 
-TCP daemon on `127.0.0.1:47990`; protocol = 16-byte header
+TCP daemon on `127.0.0.1:48990`; protocol = 16-byte header
 (`magic=0x304E524E`, width, height, VkFormat) + `w*h*4` BGRA payload in both
 directions. The masked magic variant carries a held-still UI mask that passes
-through untouched; input alpha is preserved. Lazy engine init per frame size
-(first frame ~6 s — weights upload). `--selftest file.bmp` runs the one-shot
-validation against the torch goldens. `--weights` is mandatory.
+through untouched; input alpha is preserved. Engine init/re-init is ASYNC:
+a detached builder thread realizes `{extent,scale}` configs and hot-swaps
+the `shared_ptr<ChainEngine>` under `engMu_`, so a running engine keeps
+serving frames at the old scale during a retune and a cold-start frame
+fast-fails (the layer holds its last processed frame) instead of stalling
+the accept loop for seconds. `--selftest file.bmp` runs the one-shot
+validation against the torch goldens. `--weights` is mandatory;
+`--log PATH` (or `M11D_LOG` env) captures output — with no console a
+serving daemon falls back to `%TEMP%\m11d_last.log` (never runs silent).
 
-Runtime control channel (NRCT, same TCP port): `STATUS`, `SETGAIN`,
-`SETBLEND` — this is how the manager and the in-game overlay retune the two
-knobs live.
+Runtime control channel (NRCT, same TCP port): `STATUS`, `SETGAIN`
+(residual multiplier), `SETINTENSITY`, `SETBLEND`, `SETSCALE` and the
+Phase30 feature knobs — how the manager and the in-game overlay retune
+live. `gain` and `intensity` are independent slots on every path
+(`pc.c.z` vs `pc.c.w`); see `docs/TECHNICAL.md` for the full table.
 
 ### `dlss5/m12-dxgi` — DX12 proxy
 

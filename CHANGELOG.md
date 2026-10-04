@@ -4,6 +4,30 @@ All notable changes to this project. The day-by-day engineering log with
 measured numbers lives in [DEV_STATE.md](DEV_STATE.md); this file tracks
 user-visible milestones.
 
+## Unreleased — universal gain contract + daemon resilience (2026-10-05)
+
+### Fixed (E2E verified)
+- **"gain" meant different things on different paths**: since the Phase30
+  rework the knob drove Phase30 intensity (vendor-neutral ~1.6, nearly
+  invisible) on the x86 daemon while x64/DX12 kept the residual
+  multiplier — and an alias made x64 double-apply it. One contract now
+  on every path: `gain` = residual multiplier (neutral 1.0, up to 16),
+  `intensity` = separate Phase30 compose mix with its own slider. Live
+  daemon proof: 800x600 frame at gain 5.0 vs 1.0 = 5x mean delta.
+- **Multi-second daemon outages on scale retune / first frames**: engine
+  init ran inside the serial accept loop — every queued frame timed out
+  and rendered natively (~10% of a field session). Rebuilds are now
+  async: the old engine keeps serving until the new one is hot-swapped
+  (scale retune = zero dropped frames; verified 29/29 served during a
+  rebuild window), and a cold-start frame fast-fails so the layer holds
+  its last processed frame.
+- **Silent daemons**: m11d without a console or explicit `--log` now
+  writes `%TEMP%\m11d_last.log`; m13 passes `--log` explicitly.
+
+### Added
+- NRCT `SETINTENSITY` (cmd 15) as a first-class control next to
+  `SETGAIN`; replies echo the knob actually touched.
+
 ## Unreleased — temporal stability batch (2026-10-03)
 
 ### Fixed (field + synthetic verified)
