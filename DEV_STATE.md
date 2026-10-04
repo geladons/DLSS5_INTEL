@@ -1,5 +1,53 @@
 # DEV_STATE.md - where we are (updated 2026-10-03 by Devin)
 
+## Stage 33: Temporal AABB clamp + gain-anchor exposure sync + game-test harness (2026-10-03)
+
+Owner field report after Stage 32: mouse/movement ghosts mostly gone
+but (a) continuous mouse motion still shimmered, (b) a dark region of
+the character crept to overbright over ~5-7s, (c) rare much-brighter
+single frames while idle, (d) global exposure "breathed" on camera
+pans. Three fixes shipped:
+
+- **AABB history clamp** (features.comp, 8fe84df): history channels
+  7-9 are clamped into the 3x3 neighborhood of the CURRENT frame
+  before the net and the temporal_nr blend see them. Stale history is
+  pulled into the local color range instead of being gated out -
+  kills both the trust-gate boundary oscillation (which produced the
+  stable bright patch) and residual ghost trails. Scalar w-gate in
+  temporal_nr removed.
+- **Split gap thresholds** (m11d, dc88fde): >2s frame gap drops only
+  the FG anchors (a stale anchor warps garbage); >10s = real stream
+  switch -> history reset. GTA IV's 2-4s world-streaming hitches no
+  longer fire a reset (each used to emit one undamped bright frame).
+- **Gain anchor** (temporal_stats.comp + temporal_nr, 2667132): the
+  frame's global residual DC (pred_luma_sum - in_luma_sum) is
+  EMA-smoothed (alpha = DLSS5_GAIN_LOCK, default 0.08, 0=off) and the
+  per-pixel residual is rescaled to the EMA - the net can no longer
+  pump/breathe mean brightness frame to frame, while >50% residual
+  jumps (scene changes) snap through instantly and real exposure
+  tracks within ~12 frames. New binding 16 luma-stats buffer;
+  features.comp accumulates input luma, temporal_stats rotates
+  next->prev slots + accumulates predicted luma, temporal_nr applies.
+  m8b-live binds the buffer without a reader (shared features.comp).
+  Missing temporal_stats.spv degrades to gain-lock off.
+- **Validation**: chain tests 5/5 PASS; synthetic stable-region
+  residual p2p 1.72 -> 0.69 luma; live GTA IV menu A/B (DDA 60fps):
+  median frame-to-frame luma delta 5.39 -> 0.09 (-98%) while scene
+  pixel diff stayed ~65 (motion preserved, DC pinned). Hitch-pop e2e
+  (2.5s pause on live daemon): luma +-0.12, log shows
+  "frame gap 2609 ms - FG anchors dropped".
+- **Test harness** (same commit set): dlss5/m14-ddarec (ddarec.exe)
+  streams CFR rawvideo over DDA to stdout; tools/gamerec/gamerec.py
+  crops a named window's rect, encodes h264_qsv via ffmpeg, and
+  `analyze` reports luma flicker/outliers per clip. Usage:
+  `python tools/gamerec/gamerec.py record --sec 15 --out x.mp4
+  --window GTAIV.exe` then `... analyze x.mp4`. Input injection for
+  camera moves remains blocked on this host (SendInput/mouse_event
+  filtered; keyboard reaches only focused real windows).
+- Open tuning item: breathing was confirmed DC-anchored; if regional
+  tone drift persists on pans the next lever is per-region luma stats
+  (same buffer, more slots), not a bigger alpha.
+
 ## Stage 32: Second field-test follow-up - dxgi crash root-caused, FG override truly fixed (2026-10-03)
 
 Owner re-tested Witcher 3 Remastered DX12 / GTA IV / GTA SA / Metro / RDR2.

@@ -4,6 +4,28 @@ All notable changes to this project. The day-by-day engineering log with
 measured numbers lives in [DEV_STATE.md](DEV_STATE.md); this file tracks
 user-visible milestones.
 
+## Unreleased — temporal stability batch (2026-10-03)
+
+### Fixed (field + synthetic verified)
+- **Exposure "breathing" on camera pans**: new gain-anchor pass
+  (`temporal_stats.comp` + residual-EMA rescale in `temporal_nr.comp`)
+  low-passes the frame's mean reconstruction gain — the network can no
+  longer re-tone global brightness per frame. GTA IV menu A/B (DDA
+  60fps): median frame-to-frame luma delta 5.39 -> 0.09. Tunable via
+  `DLSS5_GAIN_LOCK` (default 0.08; 0 disables).
+- **Mouse/movement ghosting and slow bright-patch drift**: history fed
+  to the network is now clamped to the current frame's 3x3 colour
+  neighbourhood (TAA-style AABB in `features.comp`), replacing the
+  scalar trust gate that oscillated at its threshold.
+- **Bright single-frame pops during world-streaming hitches**: the
+  daemon's 2s frame-gap reset now only drops frame-generation anchors;
+  temporal history resets only after 10s (a real stream switch). Safe
+  because the AABB clamp sanitises stale history anyway.
+
+### Added
+- `dlss5/m14-ddarec` + `tools/gamerec`: DDA-based 60fps game recorder
+  and luma/flicker analyzer for repeatable field evidence.
+
 ## Unreleased — live-test fixes batch (2026-10-01)
 
 ### Fixed (field-verified)

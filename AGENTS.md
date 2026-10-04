@@ -86,6 +86,10 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
 
 ## Architecture map (dlss5\)
 - m1-frame-capture: DDA probe/snapshots (diagnostic tool - use it!).
+- m14-ddarec: CFR DDA streamer (ddarec.exe secs fps x,y,w,h -) - pipes
+  rawvideo BGRA to stdout for ffmpeg; repeats last frame on timeout so
+  VFR games land as clean doubles. Pair with tools/gamerec/gamerec.py
+  (record --window <exe> + analyze -> per-frame luma/flicker CSV).
 - m2/m3: interop + neural slice. m4-present-simple: CPU-bridge transport (used).
 - m5-zerocopy: BACKLOGGED (deadlock on frame-4 handoff; needs validation layers).
 - m6/m7/m8: weights loader, graph proto numerics (bit-exact), full 71-block chain.
@@ -151,6 +155,16 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
     [16,32]): ch 0-2 noise, 3 const, 4-6 scaled colour, 7-9 history,
     10-14 Phase30 controls, 15 zero. NO motion-vector/depth slots - the
     model is an enhancer, not an engine-integrated temporal upscaler.
+  - Gain anchor (binding 16, `temporal_stats.comp`): features accumulates
+    the input luma sum, temporal_stats the pre-anchor output sum, and
+    temporal_nr rescales the per-pixel residual so the frame's mean
+    residual follows an EMA (`DLSS5_GAIN_LOCK`/`NR_LAYER_GAIN_LOCK`/
+    `D5C_GAIN_LOCK`, default 0.08, 0=off). Kills DC breathing on pans;
+    >50% residual jumps snap through (scene changes). m8b-live binds the
+    stats buffer for shared features.comp but never reads it; missing
+    temporal_stats.spv = graceful gain-lock off. The EMA is written to
+    spare slot [7] and rotated into [6] by temporal_stats next frame -
+    never write [6] from temporal_nr (intra-dispatch race).
   - Frame generation (engine_framegen.cpp): mode 1 = residual transfer
     (`framegen.comp`, `dlss5_framegen_transfer`): generated = cur_raw +
     warp(prev_processed - prev_raw, motion(prev_raw -> cur_raw)). Mode 2 =
