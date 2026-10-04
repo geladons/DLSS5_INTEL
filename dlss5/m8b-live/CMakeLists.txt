@@ -76,7 +76,16 @@ endforeach()
 
 add_custom_target(m8b_shaders ALL DEPENDS ${SPV_OUTPUTS})
 
-add_executable(m8blive main.cpp)
+add_executable(m8blive
+    main.cpp
+    f16.cpp
+    bmp_io.cpp
+    win_util.cpp
+    vk_util.cpp
+    knobs.cpp
+    weights_file.cpp
+    chain_bufs.cpp
+    capture_dda.cpp)
 add_dependencies(m8blive m8b_shaders)
 
 target_include_directories(m8blive PRIVATE "${VULKAN_SDK}/Include")
