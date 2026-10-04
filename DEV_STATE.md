@@ -24,6 +24,22 @@
   (verify frame 10 PASS) and 45-frame video run PASS
   (verify {10,30,60} ALL PASS, 45x segs=1409, ~1.3 s/frame,
   dump stats = healthy historical values).
+- **Golden validation (2026-10-04)**: torch goldens regenerated at the
+  full padded extent via `work\_ref_test\dump_torch_f1.py` on
+  `out\m8b_dda_overlay1.bmp` (the exact frame-1 DDA input the live_*
+  dumps captured). `live_featV`/`live_x16` = **99.98% bitwise equal**
+  to the golden (historical signature: only noise ch0-2 differ, ~1 f16
+  ulp; ch4-15 bit-exact -> input identity proven). Head/intermediates
+  diverge vs the fp32 reference (quantized e4m3/int8 pipeline, values
+  saturate +-448) - consistent with the documented pre-Phase30 drift
+  in `_validate.py` expectations, not a regression signal.
+- **A/B determinism check**: pre-extraction binary (worktree @93a414b,
+  own build) vs extracted binary, `--novideo --frames 2` each on a
+  static desktop: 31,170 input pixels differed between the two
+  captures; **all 31,170 featV diffs fell exactly on those pixels**
+  (0 outside the 3x3-neighborhood), head/intermediate diffs decay
+  away from them (corr 0.978-0.9999 everywhere) -> the extraction is
+  numerically behavior-preserving; diffs = input drift only.
 - **d5c_chain TDR probe**: ran d5c_chain.dll at full 2560x1440
   scale 1.0, 10 frames PASS (~1.15-1.25 s/frame) + 5 frames at
   scale 0.5 (~270 ms/frame). The production engine's monolithic
