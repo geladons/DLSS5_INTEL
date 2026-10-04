@@ -23,29 +23,26 @@ being added to already-oversized TUs. Full modularization program run:
   (nr_log/nr_now_ms/global lock), daemon_client (exchange/nr_ctrl/
   nr_port), gdi_guard. x64+x86 builds green, production synced.
 
-- **Stage 3c deferred (deliberate)**: ChainRecorder/arena-loader are
-  the remaining big block (~3000 lines inside main()). The rules only
-  allow extraction "covered by the validation rig" - and m8b's runtime
-  rig is currently down on this host (below), so splitting the
-  recorder now would be an unverifiable heroic rewrite. Resume after
-  the TDR is fixed.
+- **Stage 3c unblocked**: ChainRecorder/arena-loader remain the big
+  block (~3000 lines inside main()). Extraction was deferred while the
+  runtime rig was down - the rig is back (below), so the recorder can
+  now be split safely under the 45-frame rig.
 
-- **NEW BUG - m8b-live device-lost on the 4-chunk arena (pre-existing,
-  now deterministic)**: `--novideo --frames N` and video runs both die
-  at the first frame submit (vkQueueSubmit -4, igfxnd TDR in Event
-  Log). Baseline A/B proves it is NOT the refactor: a HEAD worktree
-  fails identically, and the same signature is in the 2026-09-25 docs
-  log (4 chunks, run 5313 fail then run 5365 pass = historically
-  flaky). Bisected and exonerated: gain-anchor host code
-  (pre-2667132 main.cpp fails too), features stats write, AABB,
-  perf m8 kernels (pre-449ddf1 shaders fail too), temporal pass.
-  GPU itself is healthy - m11d chain tests pass. Working theory:
-  one of the batched chain dispatches BDA-spans >2 GB across the
-  4-chunk arena (the documented B50 driver limit); address layout
-  decides whether the crossing dispatch exists, which is why it was
-  flaky before and is deterministic on this boot. Fix candidates:
-  split any dispatch whose src/dst BDA span exceeds ~2 GB at record
-  time, or pin arena layout so no dispatch crosses chunk boundaries.
+- **FIXED - m8b-live device-lost (pre-existing, was deterministic)**:
+  `--novideo` and video runs died at frame submit (vkQueueSubmit -4,
+  igfxnd TDR). Root cause found by probe instrumentation (2026-10-04):
+  NOT the >2GB BDA span (spanTag proved every dispatch <1.5GB), NOT
+  barriers/events/timestamps (all in-buffer primitives failed) - the
+  driver co-executes certain producer->consumer dispatch pairs from
+  one submission and hangs (nondeterministic; explains the historic
+  2026-09-25 flaky signature). Only submission boundaries enforce real
+  ordering on this driver. Fix shipped: every bar()/barrierAll() op
+  boundary inside the compute region is a timeline-semaphore-chained
+  submission (SegSubmitter, new TU seg_submit.h/.cpp) - 1409
+  segments/frame, GPU-side serialization, no CPU fence stall, ~65us
+  per boundary. Validated: 10/10 --novideo frames and 30-frame video
+  run (fbcancel+present+overlay) PASS, 0 device-lost, ~1.3 s/frame.
+  D5_NOHAZ remains as a diagnostic kill-switch.
 
 ## Stage 33: Temporal AABB clamp + gain-anchor exposure sync + game-test harness (2026-10-03)
 

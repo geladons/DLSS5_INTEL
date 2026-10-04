@@ -125,6 +125,7 @@
 #include "capture_dda.h"
 #include "cursor_mirror.h"
 #include "overlay_control.h"
+#include "seg_submit.h"
 
 
 #include <immintrin.h>
@@ -820,7 +821,8 @@ int main(int argc, char** argv) {
     std::printf("[VK] 9 transport pipelines up (+ blit + fbcancel + hpfilter + temporal); standin REMOVED\n");
 
     VkCommandPool cmdPool;
-    VkCommandBuffer cmd;
+    SegSubmitter sub;
+    VkCommandBuffer &cmd = sub.cmd;
     {
         VkCommandPoolCreateInfo ci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
         ci.queueFamilyIndex = c.qf;
@@ -834,6 +836,16 @@ int main(int argc, char** argv) {
     {
         VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
         VK_CHECK(vkCreateFence(c.dev, &fci, nullptr, &fence));
+    }
+    if (sub.init(c.dev, c.queue, cmdPool, fence)) return 1;   // timeline semaphore
+    // TDR probe: event-based execution serialization between dispatches
+    // (D5_BAR_MODE=4) - a SetEvent/WaitEvents pair creates a harder execution
+    // dependency than a memory barrier on drivers where barriers only order
+    // visibility, not launch.
+    VkEvent barEvent = VK_NULL_HANDLE;
+    {
+        VkEventCreateInfo eci{VK_STRUCTURE_TYPE_EVENT_CREATE_INFO};
+        VK_CHECK(vkCreateEvent(c.dev, &eci, nullptr, &barEvent));
     }
     // per-stage GPU timestamp instrumentation (Task 2 perf diagnosis):
     // slots 0..5 written at front-end start/end, featpack end, chain end,
@@ -877,21 +889,18 @@ int main(int argc, char** argv) {
         VK_FATAL(vkBeginCommandBuffer(cb, &bi));
         return cb;
     };
-    auto submitAndWait = [&]() -> double {
-        VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-        si.commandBufferCount = 1; si.pCommandBuffers = &cmd;
-        auto t0 = clk::now();
-        VK_CHECK(vkQueueSubmit(c.queue, 1, &si, fence));
-        VK_CHECK(vkWaitForFences(c.dev, 1, &fence, VK_TRUE, UINT64_MAX));
-        vkResetFences(c.dev, 1, &fence);
-        return std::chrono::duration<double, std::milli>(clk::now() - t0).count();
-    };
-    auto begin = [&]() {
-        VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        VK_CHECK(vkBeginCommandBuffer(cmd, &bi));
-    };
+    // Large-grid hazard zone: on this driver (Arc Pro B50) co-submitting
+    // big producer->consumer compute dispatches can TDR the device even
+    // with in-buffer barriers/events/timestamps. Inside a hazard zone
+    // bar()/barrierAll() become semaphore-chained submission boundaries
+    // instead - real GPU-side execution ordering, no CPU fence stall.
+    // Implementation: SegSubmitter (seg_submit.h).
+    bool &hazZone = sub.hazZone;
+    long &segsChained = sub.segsChained;   // perf accounting
+    auto submitSeg = [&]() -> int { return sub.submitSeg(); };
     auto barrierAll = [&]() {
+        static const bool hazOff = getenv("D5_NOHAZ") != nullptr;   // diag kill-switch
+        if (hazZone && !hazOff) { sub.submitChained(); return; }
         VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
         mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
@@ -1358,7 +1367,7 @@ int main(int argc, char** argv) {
     // ---- record-once upload + decode for the initial frame (the letterbox
     //      content scan is gone: the M9b region is fixed since section 7)
     {
-        begin();
+        sub.begin();
         {
             VkBufferMemoryBarrier bb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
             bb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -1395,7 +1404,7 @@ int main(int argc, char** argv) {
         vkCmdDispatch(cmd, W / 16, H / 16, 1);
         barrierAll();
         VK_CHECK(vkEndCommandBuffer(cmd));
-        double ms = submitAndWait();
+        double ms = sub.submitAndWait();
         std::printf("[stage] frame0 upload+decode: %.3f ms\n", ms);
         std::printf("[geometry] region FIXED rows [%d,%d) cols [%d,%d) of %ux%u -> extent %dx%d\n",
                     region.top, region.bottom, region.left, region.right, W, H, netW, netH);
@@ -1501,7 +1510,55 @@ int main(int argc, char** argv) {
     // 11. Chain dispatch machinery (M9 U-Net port — per-scale Stage geometry,
     //     pool2/upmerge transitions, padded global blocks).
     // ===================================================================
+    // D5_BAR_MODE diagnostic (B50 device-lost bisect, 2026-10-03):
+    //   0 = per-chunk VkBufferMemoryBarrier, size=VK_WHOLE_SIZE (original)
+    //   1 = single global VkMemoryBarrier (same ordering, coarser scope)
+    //   2 = no barrier at all (ordering broken; diagnosis only)
+    const int barMode = getenv("D5_BAR_MODE") ? atoi(getenv("D5_BAR_MODE")) : 0;
     auto bar = [&](VkCommandBuffer cb) {
+        static const bool hazOff = getenv("D5_NOHAZ") != nullptr;
+        if (hazZone && !hazOff) { sub.submitChained(); return; }
+        if (barMode == 2) return;
+        if (barMode == 5) {
+            // Interpose a different command class between dispatches: a
+            // timestamp write forces the front-end to re-sync launch state
+            // (probe for a launch-phase hazard between adjacent dispatches).
+            static uint32_t tsq = 0;
+            vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                tsPool, (tsq = (tsq + 1) % 6));
+            VkBufferMemoryBarrier bs[8];
+            uint32_t n = 0;
+            for (auto &ch : chunks) {
+                if (n >= 8) break;
+                bs[n] = {VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER, nullptr,
+                         VK_ACCESS_SHADER_WRITE_BIT,
+                         VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                         VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
+                         ch.b.buf, 0, VK_WHOLE_SIZE};
+                n++;
+            }
+            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0,
+                                 nullptr, n, bs, 0, nullptr);
+            return;
+        }
+        if (barMode == 4) {
+            vkCmdSetEvent(cb, barEvent, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+            vkCmdWaitEvents(cb, 1, &barEvent, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, nullptr,
+                            0, nullptr, 0, nullptr);
+            return;
+        }
+        if (barMode == 1 || barMode == 3) {
+            VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+            mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+            const VkPipelineStageFlags st =
+                barMode == 3 ? VK_PIPELINE_STAGE_ALL_COMMANDS_BIT
+                             : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+            vkCmdPipelineBarrier(cb, st, st, 0, 1, &mb, 0, nullptr, 0, nullptr);
+            return;
+        }
         // M9b: full compute barrier across every arena chunk.
         VkBufferMemoryBarrier bs[8];
         uint32_t n = 0;
@@ -1518,8 +1575,131 @@ int main(int argc, char** argv) {
                              VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr,
                              n, bs, 0, nullptr);
     };
+    // ---- TDR probe: per-dispatch BDA span audit + optional submit bisect.
+    // The B50 driver device-losts on a single dispatch whose accessed BDA
+    // byte-span exceeds ~2 GB (cross-chunk operand pairs do this silently
+    // when the arena splits). spanTag is called at record time with each
+    // dispatch's (ptr, accessedBytes) operand list and reports violations
+    // decoded back to arena chunks. D5_SUBMIT_EVERY=N additionally ends/
+    // submits/waits the frame cmd buffer every N dispatches so a hang or
+    // device-lost localises to the guilty segment even if the cause is not
+    // a span (e.g. a watchdog timeout on a single kernel).
+    long dispSeq = 0;
+    const long submitEvery = getenv("D5_SUBMIT_EVERY") ? atol(getenv("D5_SUBMIT_EVERY")) : 0;
+    // Reverse map BDA -> remaining bytes in the containing arena slot (a
+    // kernel can never legally touch past its slot end, so this clamps the
+    // caller's extent estimates). Weights pack region (before ar.base) has
+    // no seg entry -> falls back to the chunk end, an intentional
+    // over-estimate so cross-chunk weight reads still flag.
+    auto slotRemain = [&](uint64_t bda) -> uint64_t {
+        for (auto &ch : chunks) {
+            if (bda < ch.baseA || bda >= ch.baseA + (ch.end - ch.start)) continue;
+            VkDeviceSize o = ch.start + (VkDeviceSize)(bda - ch.baseA);
+            for (auto &sg : ar.segs)
+                if (o >= sg.first && o < sg.first + sg.second)
+                    return (uint64_t)(sg.first + sg.second - o);
+            return (uint64_t)(ch.end - o);
+        }
+        return 0;
+    };
+    // D5_SEG_MB: split the frame command buffer whenever the segment's
+    // merged BDA footprint (union of operand ranges, slot-clamped) would
+    // exceed N MB. Diagnosis + mitigation for submissions whose aggregate
+    // referenced address space trips the driver.
+    const uint64_t segBudget =
+        (getenv("D5_SEG_MB") ? (uint64_t)atol(getenv("D5_SEG_MB")) : 0) * 1048576ull;
+    std::vector<std::pair<uint64_t, uint64_t>> segRanges;
+    uint64_t segDisp = 0;
+    auto segUnion = [&]() -> uint64_t {
+        if (segRanges.empty()) return 0;
+        auto v = segRanges;
+        std::sort(v.begin(), v.end());
+        uint64_t tot = 0, lo = v[0].first, hi = v[0].second;
+        for (size_t i = 1; i < v.size(); ++i) {
+            if (v[i].first <= hi) hi = std::max(hi, v[i].second);
+            else { tot += hi - lo; lo = v[i].first; hi = v[i].second; }
+        }
+        return tot + hi - lo;
+    };
+    auto segFlush = [&]() {
+        if (!segDisp) return;
+        std::printf("[segf] submit: %llu disp, union %.2f GB\n",
+                    (unsigned long long)segDisp, segUnion() / 1073741824.0);
+        std::fflush(stdout);
+        submitSeg();
+        segRanges.clear();
+        segDisp = 0;
+    };
+    auto spanTag = [&](const char* tag,
+                       std::initializer_list<std::pair<uint64_t, uint64_t>> ops) {
+        uint64_t lo = ~0ull, hi = 0;
+        for (auto &e : ops) {
+            if (!e.first) continue;
+            uint64_t ext = std::min(e.second, slotRemain(e.first));
+            lo = std::min(lo, e.first);
+            hi = std::max(hi, e.first + ext);
+            segRanges.push_back({e.first, e.first + ext});
+        }
+        ++segDisp;
+        if (segBudget && segUnion() > segBudget) segFlush();
+        static const bool spanLog = getenv("D5_SPANTAG") != nullptr;
+        if (!spanLog) return;
+        if (lo == ~0ull || hi - lo <= 1500ull * 1024 * 1024) return;
+        auto dec = [&](uint64_t a) {
+            for (int i = 0; i < (int)chunks.size(); ++i) {
+                uint64_t sz = chunks[i].end - chunks[i].start;
+                if (a >= chunks[i].baseA && a < chunks[i].baseA + sz)
+                    std::printf("c%d+0x%llx", i, (unsigned long long)(a - chunks[i].baseA));
+            }
+        };
+        std::printf("[tdr-span] %s (disp ~%ld) span %.2f GB | lo=0x%llx(", tag, dispSeq + 1,
+                    (hi - lo) / 1073741824.0, (unsigned long long)lo);
+        dec(lo);
+        std::printf(") hi=0x%llx(", (unsigned long long)hi);
+        dec(hi);
+        std::printf(")\n");
+        std::fflush(stdout);
+    };
+    const PFN_vkCmdDispatch realDispatch = vkCmdDispatch;
+    const long splitFrom = getenv("D5_SPLIT_FROM") ? atol(getenv("D5_SPLIT_FROM")) : -1;
+    const long tailMono = getenv("D5_TAIL_MONO") ? atol(getenv("D5_TAIL_MONO")) : -1;
+    long coA = -1, coB = -1;
+    if (getenv("D5_CO")) sscanf(getenv("D5_CO"), "%ld:%ld", &coA, &coB);
+    auto m8bDispatch = [&](VkCommandBuffer cb, uint32_t x, uint32_t y, uint32_t z) {
+        realDispatch(cb, x, y, z);
+        if (cb != cmd) return;
+        ++dispSeq;
+        bool hit;
+        if (tailMono >= 0) {
+            // Singles (waited) for the first tailMono dispatches, then the
+            // remainder rides in one monolithic segment - probes whether all
+            // hazard edges live in the early (large-grid) zone.
+            hit = (dispSeq < tailMono);
+        } else if (coA >= 0) {
+            // Co-submission window probe: every dispatch submits alone EXCEPT
+            // [coA..coB), which rides in one submission. If that window holds
+            // a hang-inducing cluster, the device dies at its flush.
+            hit = !(dispSeq >= coA && dispSeq < coB);
+        } else {
+            // Split policy: an exact boundary at splitFrom (isolates the
+            // prefix), then every submitEvery dispatches from there.
+            hit = (dispSeq == splitFrom) ||
+                  (submitEvery > 0 && dispSeq >= (splitFrom > 0 ? splitFrom : 1) &&
+                   (dispSeq - (splitFrom > 0 ? splitFrom : 0)) % submitEvery == 0);
+        }
+        if (!hit) return;
+        if (submitEvery > 0 || splitFrom > 0 || coA >= 0 || tailMono >= 0) {
+            std::printf("[seg] submit through disp #%ld (union %.2f GB)\n",
+                        dispSeq, segUnion() / 1073741824.0);
+            std::fflush(stdout);
+            segRanges.clear();
+            segDisp = 0;
+            submitSeg();
+        }
+    };
+#define vkCmdDispatch m8bDispatch
     auto gflags = [&](uint32_t epi, bool narrow) { return (epi << 8) | (narrow ? F_NARROW : 0u); };
-    auto dGemm = [&](VkCommandBuffer cb, int fam, uint64_t a, uint64_t b, uint64_t c2,
+    auto dGemm = [&](VkCommandBuffer &cb, int fam, uint64_t a, uint64_t b, uint64_t c2,
                      uint32_t m, uint32_t n, uint32_t k, uint32_t batch,
                      uint32_t sa, uint32_t sb, uint32_t sc,
                      uint32_t flags, uint32_t lda, uint32_t ldb, uint32_t ldc) {
@@ -1527,90 +1707,115 @@ int main(int argc, char** argv) {
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pGemm.pipe);
         GemmPush p{a, b, c2, m, n, k, batch, sa, sb, sc, flags, lda, ldb, ldc};
         vkCmdPushConstants(cb, pGemm.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
+        spanTag("gemm", {{a, (uint64_t)batch * std::max<uint64_t>(sa, (uint64_t)m * lda) * 4},
+                         {b, (uint64_t)batch * std::max<uint64_t>(sb, (uint64_t)k * ldb) * 4},
+                         {c2, (uint64_t)batch * std::max<uint64_t>(sc, (uint64_t)m * ldc) * 4}});
         vkCmdDispatch(cb, n / 32, m / 16, batch);
     };
-    auto dEw = [&](VkCommandBuffer cb, uint64_t a, uint64_t b, uint64_t c2, uint64_t d,
+    auto dEw = [&](VkCommandBuffer &cb, uint64_t a, uint64_t b, uint64_t c2, uint64_t d,
                    uint64_t h, uint32_t n, uint32_t kind, uint32_t ch) {
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pEw.pipe);
         EWPush p{a, b, c2, d, h, n, kind, ch};
         vkCmdPushConstants(cb, pEw.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
+        spanTag("ew", {{a, (uint64_t)n * 4}, {b, (uint64_t)n * 4}, {c2, (uint64_t)n * 4},
+                       {d, (uint64_t)n * 4}, {h, (uint64_t)n * 4}});
         vkCmdDispatch(cb, (n + 255) / 256, 1, 1);
     };
-    auto dPart = [&](VkCommandBuffer cb, uint64_t a, uint64_t c2, const Stage &s, uint32_t C,
+    auto dPart = [&](VkCommandBuffer &cb, uint64_t a, uint64_t c2, const Stage &s, uint32_t C,
                      uint32_t padTop, uint32_t padLeft, uint32_t wp8, bool in16) {
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pPart.pipe);
         uint32_t hp8 = (s.H + padTop + 7) / 8;
         PartPush p{a, c2, s.H, s.W, C, padTop, padLeft, wp8, in16 ? 1u : 0u};
         vkCmdPushConstants(cb, pPart.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
+        spanTag("part", {{a, (uint64_t)s.TOK * C * 4},
+                         {c2, (uint64_t)hp8 * wp8 * 64 * C * 4}});
         vkCmdDispatch(cb, hp8 * wp8 * 64, 1, 1);
     };
-    auto dGather = [&](VkCommandBuffer cb, uint64_t a, uint64_t b, uint64_t d, uint64_t c2,
+    auto dGather = [&](VkCommandBuffer &cb, uint64_t a, uint64_t b, uint64_t d, uint64_t c2,
                        uint64_t h, const Stage &s, uint32_t C, uint32_t padTop, uint32_t padLeft,
                        uint32_t wp8, bool pub, bool b16) {
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pGather.pipe);
         GatherPush p{a, b, d, c2, h, s.H, s.W, C, padTop, padLeft, wp8,
                      (pub ? 1u : 0u) | (b16 ? 2u : 0u)};
         vkCmdPushConstants(cb, pGather.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
+        spanTag("gather", {{a, (uint64_t)s.TOK * C * 8}, {b, (uint64_t)s.TOK * C * 8},
+                           {d, (uint64_t)s.TOK * C * 8}, {c2, (uint64_t)s.TOK * C * 8},
+                           {h, (uint64_t)s.TOK * C * 8}});
         vkCmdDispatch(cb, s.TOK, 1, 1);
     };
-    auto dTrans = [&](VkCommandBuffer cb, uint64_t a, uint64_t c2, uint32_t Ww, uint32_t H) {
+    auto dTrans = [&](VkCommandBuffer &cb, uint64_t a, uint64_t c2, uint32_t Ww, uint32_t H) {
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pTrans.pipe);
         TransWePush p{a, c2, Ww, H};
         vkCmdPushConstants(cb, pTrans.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
+        spanTag("trans", {{a, (uint64_t)Ww * 64 * H * 512}, {c2, (uint64_t)Ww * 64 * H * 512}});
         vkCmdDispatch(cb, Ww * 64, 1, 1);
     };
-    auto dCosW = [&](VkCommandBuffer cb, uint64_t a, uint64_t c2, uint64_t sc,
+    auto dCosW = [&](VkCommandBuffer &cb, uint64_t a, uint64_t c2, uint64_t sc,
                      uint32_t Ww, uint32_t H, uint32_t C, uint32_t kind) {
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pCosW.pipe);
         CosWinPush p{a, c2, sc, Ww * 64 * H, kind, C, H};
         vkCmdPushConstants(cb, pCosW.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
+        spanTag("cosw", {{a, (uint64_t)Ww * 64 * H * C * 4},
+                         {c2, (uint64_t)Ww * 64 * H * C * 4}, {sc, 8192}});
         vkCmdDispatch(cb, (Ww * 64 * H + 31) / 32, 1, 1);
     };
-    auto dCosG = [&](VkCommandBuffer cb, uint64_t a, uint64_t c2, uint64_t sc, uint32_t kind) {
+    auto dCosG = [&](VkCommandBuffer &cb, uint64_t a, uint64_t c2, uint64_t sc, uint32_t kind) {
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pCos.pipe);
         CosPush p{a, c2, sc, T6P * 32, kind};
         vkCmdPushConstants(cb, pCos.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
+        spanTag("cosg", {{a, (uint64_t)T6P * 32 * 1024 * 4},
+                         {c2, (uint64_t)T6P * 32 * 1024 * 4}, {sc, 8192}});
         vkCmdDispatch(cb, (T6P * 32 + 31) / 32, 1, 1);
     };
-    auto dSmaxW = [&](VkCommandBuffer cb, uint64_t a, uint64_t c2, uint32_t Ww, uint32_t H,
+    auto dSmaxW = [&](VkCommandBuffer &cb, uint64_t a, uint64_t c2, uint32_t Ww, uint32_t H,
                       uint64_t bias) {
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pSmax.pipe);
         SMaxPush p{a, c2, Ww * H * 64, 64, 0.0f, bias, H, 0};
         vkCmdPushConstants(cb, pSmax.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
+        spanTag("smaxw", {{a, (uint64_t)Ww * H * 64 * 64 * 4},
+                          {c2, (uint64_t)Ww * H * 64 * 64 * 4},
+                          {bias, (uint64_t)Ww * H * 64 * 4}});
         vkCmdDispatch(cb, (Ww * H * 64 + 31) / 32, 1, 1);
     };
-    auto dSmaxG = [&](VkCommandBuffer cb, uint64_t a, uint64_t c2) {
+    auto dSmaxG = [&](VkCommandBuffer &cb, uint64_t a, uint64_t c2) {
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pSmax.pipe);
         SMaxPush p{a, c2, 32 * T6P, T6P, 3.0f, 0, 0, st[6].TOK};
         vkCmdPushConstants(cb, pSmax.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
+        spanTag("smaxg", {{a, 32ull * T6P * T6P * 4}, {c2, 32ull * T6P * T6P * 4}});
         vkCmdDispatch(cb, 32 * T6P, 1, 1);
     };
-    auto dMerge = [&](VkCommandBuffer cb, uint64_t a, uint64_t b, uint64_t c2, uint64_t d,
+    auto dMerge = [&](VkCommandBuffer &cb, uint64_t a, uint64_t b, uint64_t c2, uint64_t d,
                       uint64_t e, uint64_t h, uint32_t n, uint32_t ch, uint32_t kind) {
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pMerge.pipe);
         MergePush p{a, b, c2, d, e, h, n, ch, kind};
         vkCmdPushConstants(cb, pMerge.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
+        spanTag("merge", {{a, (uint64_t)n * 4}, {b, (uint64_t)n * 4}, {c2, (uint64_t)n * 4},
+                          {d, (uint64_t)n * 4}, {e, (uint64_t)n * 4}, {h, (uint64_t)n * 4}});
         vkCmdDispatch(cb, (n + 255) / 256, 1, 1);
     };
     struct PoolPush { uint64_t a, c; uint32_t Hin, Win, Wpad, C, n, flags; };
-    auto dPool = [&](VkCommandBuffer cb, uint64_t a, uint64_t c2, uint32_t Hin, uint32_t Win,
+    auto dPool = [&](VkCommandBuffer &cb, uint64_t a, uint64_t c2, uint32_t Hin, uint32_t Win,
                      uint32_t Wpad, uint32_t Hpad, uint32_t C, uint32_t flags) {
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pPool.pipe);
         uint32_t n = (Hpad / 2) * (Wpad / 2);
         PoolPush p{a, c2, Hin, Win, Wpad, C, n, flags};
         vkCmdPushConstants(cb, pPool.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
+        spanTag("pool", {{a, (uint64_t)Hin * Win * C * 4}, {c2, (uint64_t)Hpad * Wpad * C * 4}});
         vkCmdDispatch(cb, (n + 255) / 256, 1, 1);
     };
     struct UpMergePush {
         uint64_t a, b, c, d, e, h;
         uint32_t Wt, Ht, Wl, C, kind;
     };
-    auto dUpMerge = [&](VkCommandBuffer cb, uint64_t a, uint64_t b, uint64_t c2, uint64_t sin,
+    auto dUpMerge = [&](VkCommandBuffer &cb, uint64_t a, uint64_t b, uint64_t c2, uint64_t sin,
                         uint64_t cos, uint64_t h, const Stage &tgt, const Stage &low,
                         uint32_t C, uint32_t kind) {
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pUpM.pipe);
         UpMergePush p{a, b, c2, sin, cos, h, tgt.W, tgt.H, low.W, C, kind};
         vkCmdPushConstants(cb, pUpM.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
+        spanTag("upmerge", {{a, (uint64_t)tgt.TOK * C * 4}, {b, (uint64_t)tgt.TOK * C * 4},
+                            {c2, (uint64_t)tgt.TOK * C * 4}, {sin, 8192}, {cos, 8192},
+                            {h, (uint64_t)tgt.TOK * C * 4}});
         vkCmdDispatch(cb, (tgt.TOK + 255) / 256, 1, 1);
     };
 
@@ -1644,9 +1849,13 @@ int main(int argc, char** argv) {
         dGemm(cb, famIdx, A(oWIN), A(poff[qkvN]), A(oPROJW), 64, 3 * C, C, Ww,
               64 * C, 0, 64 * 3 * C, gflags(EPI_NONE, false), C, 3 * C, 3 * C);
         bar(cb);
-        // M10: Q/K/V read the same oPROJW and write disjoint slots -> one bar.
+        // Q/K/V read the same oPROJW and write disjoint slots; under a
+        // hazard stage each bar() is a chained submission boundary, so the
+        // transforms are still fully serialized.
         dCosW(cb, A(oPROJW), A(oQW), A(poff[scN]), Ww, H, C, 0);
+        bar(cb);
         dCosW(cb, A(oPROJW), A(oKW), A(poff[scN]), Ww, H, C, 1);
+        bar(cb);
         dCosW(cb, A(oPROJW), A(oVW), A(poff[scN]), Ww, H, C, 2);
         bar(cb);
         dGemm(cb, famIdx, A(oQW), A(oKW), A(oSCW), 64, 64, 32, Ww * H,
@@ -1671,6 +1880,9 @@ int main(int argc, char** argv) {
     auto recordWindowBlock = [&](VkCommandBuffer &cb, int famIdx, int idx, const Stage &s,
                                  int C, int H, int fam, int oy, int ox, bool publish, Cur &cur,
                                  VkDeviceSize rawOff, VkDeviceSize pubOff) {
+        const bool hzSave = hazZone;
+        hazZone = true;   // co-executed producer->consumer pairs TDR this
+                          // driver at any stage size - isolate every op
         uint32_t TOKS = s.TOK;
         uint32_t G = C / 32;
         VkDeviceSize x16 = cur.is16 ? cur.off : oG2;
@@ -1730,12 +1942,15 @@ int main(int argc, char** argv) {
             bar(cb);
             recordWindowAttn(cb, famIdx, idx, s, C, H, fam, oy, ox, oG3, false, rawOff, pubOff, publish);
         }
+        hazZone = hzSave;
     };
 
     // downsample transition: avgpool2 (pad-to-8 optional) -> e4m3 -> gemm w0 -> e4m3
-    auto recordDs = [&](VkCommandBuffer cb, int famIdx, int idx, int C, int Cn,
+    auto recordDs = [&](VkCommandBuffer &cb, int famIdx, int idx, int C, int Cn,
                         VkDeviceSize rawOff, VkDeviceSize outOff,
                         const Stage &inS, const Stage &outS, bool pad8) {
+        const bool hzSave = hazZone;
+        hazZone = true;
         uint32_t Hp = pad8 ? pad8u(inS.H) : inS.H;
         uint32_t Wp = pad8 ? pad8u(inS.W) : inS.W;
         dPool(cb, A(rawOff), A(oPOOL), inS.H, inS.W, Wp, Hp, (uint32_t)C, 2u);
@@ -1744,12 +1959,15 @@ int main(int argc, char** argv) {
               outS.TOK, (uint32_t)Cn, (uint32_t)C, 1, 0, 0, 0, gflags(EPI_E4M3, true),
               (uint32_t)C, (uint32_t)Cn, (uint32_t)Cn);
         bar(cb);
+        hazZone = hzSave;
     };
 
     // upsample transition: gemm w0 -> nearest-x2 crop merge with skip*sin -> e4m3
-    auto recordUp = [&](VkCommandBuffer cb, int famIdx, int idx, int Ci, int Co,
+    auto recordUp = [&](VkCommandBuffer &cb, int famIdx, int idx, int Ci, int Co,
                         Cur &cur, VkDeviceSize skipOff, VkDeviceSize out16Off,
                         const Stage &lowS, const Stage &tgtS) {
+        const bool hzSave = hazZone;
+        hazZone = true;
         dGemm(cb, famIdx, A(cur.off), A(poff[tname("block%d.layer0.weight0", idx)]), A(oG3),
               lowS.TOK, (uint32_t)Co, (uint32_t)Ci, 1, 0, 0, 0, gflags(EPI_NONE, false),
               (uint32_t)Ci, (uint32_t)Co, (uint32_t)Co);
@@ -1758,11 +1976,14 @@ int main(int argc, char** argv) {
                  A(out16Off), tgtS, lowS, (uint32_t)Co, 0);
         bar(cb);
         cur = {out16Off, true, (uint32_t)Co};
+        hazZone = hzSave;
     };
 
     // global block (L6 grid, input f16, padded to T6P rows)
-    auto recordGlobal = [&](VkCommandBuffer cb, int famIdx, int idx, Cur &cur,
+    auto recordGlobal = [&](VkCommandBuffer &cb, int famIdx, int idx, Cur &cur,
                             VkDeviceSize rawOff, VkDeviceSize pubOff) {
+        const bool hzSave = hazZone;
+        hazZone = true;   // global blocks died co-executed (TDR at ~762)
         uint32_t TOKG = T6P;
         dGemm(cb, famIdx, A(cur.off), A(poff[tname("block%d.layer0.weight", idx)]), A(oHG),
               TOKG, 4096, 1024, 1, 0, 0, 0, gflags(EPI_GATE_E4M3, true), 1024, 4096, 4096);
@@ -1778,9 +1999,12 @@ int main(int argc, char** argv) {
         dGemm(cb, famIdx, A(oG2), A(poff[tname("block%d.layer2.qkv_weight", idx)]), A(oPROJG),
               TOKG, 3072, 1024, 1, 0, 0, 0, gflags(EPI_NONE, false), 1024, 3072, 3072);
         bar(cb);
-        // M10: Q/K/V read the same oPROJG and write disjoint slots -> one bar.
+        // Q/K/V read the same oPROJG and write disjoint slots; under
+        // hazZone each bar() is a chained submission boundary.
         dCosG(cb, A(oPROJG), A(oQG), A(vecOff[tname("block%d.layer2.attn_scale.q32", idx)]), 0);
+        bar(cb);
         dCosG(cb, A(oPROJG), A(oKG), A(vecOff[tname("block%d.layer2.attn_scale.q32", idx)]), 1);
+        bar(cb);
         dCosG(cb, A(oPROJG), A(oVG), A(vecOff[tname("block%d.layer2.attn_scale.q32", idx)]), 2);
         bar(cb);
         dGemm(cb, famIdx, A(oQG), A(oKG), A(oSCG), TOKG, TOKG, 32, 32,
@@ -1799,6 +2023,7 @@ int main(int argc, char** argv) {
         dEw(cb, A(oABG), A(oG3), A(oBRG), A(vecOff[tname("block%d.layer4.attn_cos_skip", idx)]),
             A(pubOff), TOKG * 1024, 0, 1024);
         bar(cb);
+        hazZone = hzSave;
     };
 
     auto originOf = [](int blockIndex) -> std::pair<int, int> {
@@ -1821,7 +2046,7 @@ int main(int argc, char** argv) {
 
     // ---- the 71-block chain (M9 U-Net walk: per-scale extents, pool/up
     //      transitions, padded global stage; validated vs torch reference) ----
-    auto recordChain = [&](VkCommandBuffer cb) {
+    auto recordChain = [&](VkCommandBuffer &cb) {
         Cur cur{oADA, false, 32};
 
         // adapter GEMM at L0: x16 @ input_adapter_weight -> fp32
@@ -2000,6 +2225,8 @@ int main(int argc, char** argv) {
             GemmPush p{A(oG2), A(oHeadW), A(oHEAD), st[0].TOK, 16, 32, 1, 0, 0, 0,
                        gflags(EPI_NONE, false), 32, 16, 16};
             vkCmdPushConstants(cb, pGemm1.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
+            spanTag("gemm1", {{A(oG2), (uint64_t)st[0].TOK * 32 * 4}, {A(oHeadW), 1024},
+                              {A(oHEAD), (uint64_t)st[0].TOK * 16 * 4}});
             vkCmdDispatch(cb, 1, st[0].TOK / 16, 1);
             bar(cb);
         }
@@ -2534,7 +2761,7 @@ int main(int argc, char** argv) {
         // content scan and encode alpha.
         const bool verify = !probeOnly && (verifyIdx < 3 && verifyFrames[verifyIdx] == frame);
         const auto tFrameStart = clk::now();
-        begin();
+        sub.begin();
         vkCmdResetQueryPool(cmd, tsPool, 0, 6);
         if (!novideo) {
             vkCmdFillBuffer(cmd, bufFbStats, 0, 8, 0);
@@ -2586,6 +2813,11 @@ int main(int argc, char** argv) {
         // raw capture like --novideo, compose/encode in absolute mode.
         const bool echoFree = !novideo && ovl.excluded;
         if (echoFree) needReseed = false;   // no fbcancel state to reseed
+        // Co-execution hazard policy: the whole compute region runs with
+        // hazZone on, so every bar()/barrierAll() op boundary is a
+        // timeline-chained submission (SegSubmitter) - full per-op
+        // serialization; partial stage-level cuts proved nondeterministic.
+        hazZone = true;
         if (!novideo && !echoFree) {   // fbcancel: corrected = clamp(capture - lastPresented, +/-4*maxDelta)
                           // (safety clamp only — real content must pass; the tight
                           // divergence bound is the composite residual clamp in
@@ -2653,6 +2885,8 @@ int main(int argc, char** argv) {
             }
             vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool, 0);
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeFeatures);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLayout, 0, 1,
+                                    &setFinal, 0, nullptr);   // binds do not survive a segment cut
             p.a[0] = netW; p.a[1] = netH; p.a[2] = regionW; p.a[3] = regionH;
             // Pinned vendor noise seed (engine.cpp parity): a per-frame seed
             // redraws the feature noise field every frame and shimmers static
@@ -2673,6 +2907,8 @@ int main(int argc, char** argv) {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pFeatpack.pipe);
             PackPush fp{A(oFeatV), A(oX16), st[0].TOK * 16};
             vkCmdPushConstants(cmd, pFeatpack.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(fp), &fp);
+            spanTag("featpack", {{A(oFeatV), (uint64_t)st[0].TOK * 16 * 4},
+                                 {A(oX16), (uint64_t)st[0].TOK * 16 * 2}});
             vkCmdDispatch(cmd, (st[0].TOK * 16 + 255) / 256, 1, 1);
             barrierAll();
             vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool, 2);
@@ -2686,6 +2922,8 @@ int main(int argc, char** argv) {
             headGain = knobs.gain; headBlend = knobs.blend;
             Push p{};
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeCompose);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLayout, 0, 1,
+                                    &setFinal, 0, nullptr);
             p.a[0] = (int32_t)W; p.a[1] = region.top; p.a[2] = region.left; p.a[3] = netW;
             p.b[0] = regionW; p.b[1] = regionH;
             p.c[0] = (float)maxDelta / 255.0f;             // accumulate-mode clamp (legacy)
@@ -2696,6 +2934,8 @@ int main(int argc, char** argv) {
             vkCmdDispatch(cmd, ((uint64_t)regionW * regionH + 255) / 256, 1, 1);
             barrierAll();
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeEncode);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeLayout, 0, 1,
+                                    &setFinal, 0, nullptr);
             p.a[0] = (int32_t)W; p.a[1] = (int32_t)H; p.a[2] = region.left; p.a[3] = region.top;
             p.b[0] = regionW; p.b[1] = regionH; p.b[2] = 0;
             p.b[3] = (novideo || echoFree) ? 0 : 1;        // accumulate: add delta onto lastPresented
@@ -2730,6 +2970,7 @@ int main(int argc, char** argv) {
             }
             vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool, 5);
         }
+        hazZone = false;   // end of the large-grid compute region
         }   // !probeOnly (chain/compose/encode skipped on detect-only probes)
         if (frame == 1) {   // one-shot debug: copy chain-path buffers for stats
             // M9b: sources live in different arena chunks -> one copy per entry
@@ -2868,6 +3109,8 @@ int main(int argc, char** argv) {
             }
             VK_CHECK(vkWaitForFences(c.dev, 1, &fence, VK_TRUE, UINT64_MAX));
             vkResetFences(c.dev, 1, &fence);
+            sub.freeSegs();      // in-order queue: the frame fence covers all segs
+            hazZone = false;   // never leak across a probeOnly continue
             if (resumeForce && !novideo && ovl.hwnd) {
                 // Re-show only AFTER the fresh resume frame is rendered and
                 // presented (the window was still hidden during the present,
@@ -2919,11 +3162,12 @@ int main(int argc, char** argv) {
             struct tm ltNow{};
             localtime_s(&ltNow, &tNowT);
             std::printf("[frame] %ld processed @ %02d:%02d:%02d.%03d%s in %.1f ms (acq %.1f fbmean %.2f bridge %.1f rec %.1f gpu %.1f "
-                        "| fe %.1f fp %.1f chain %.1f hp %.1f tail %.1f)\n",
+                        "| fe %.1f fp %.1f chain %.1f hp %.1f tail %.1f | segs %ld)\n",
                         frame, ltNow.tm_hour, ltNow.tm_min, ltNow.tm_sec, msNow,
                         resumeForce ? " RESUME" : "",
                         gpuTotMs, acqMs, fbMeanLast, bridgeMs, recMs, gpuMs,
-                        feMs, fpMs, chMs, hpMs, tailMs);
+                        feMs, fpMs, chMs, hpMs, tailMs, segsChained);
+            segsChained = 0;
         }
         if (frame == 1) {   // one-shot chain-path statistics (min/max/mean/nonzero%)
             auto dumpF = [](const char* nm, const float* p, size_t n) {
@@ -3132,6 +3376,8 @@ int main(int argc, char** argv) {
     vkUnmapMemory(c.dev, memMax);
     if (wiggler.joinable()) { g_wiggleStop.store(true); wiggler.join(); }
     vkDestroyFence(c.dev, fence, nullptr);
+    if (barEvent) vkDestroyEvent(c.dev, barEvent, nullptr);
+    sub.shutdown();
     vkDestroyQueryPool(c.dev, tsPool, nullptr);
     vkDestroySemaphore(c.dev, semImage, nullptr);
     vkDestroySemaphore(c.dev, semRender, nullptr);
