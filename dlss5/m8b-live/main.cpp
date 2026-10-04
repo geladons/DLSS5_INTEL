@@ -123,6 +123,8 @@
 #include "weights_file.h"
 #include "chain_bufs.h"
 #include "capture_dda.h"
+#include "cursor_mirror.h"
+#include "overlay_control.h"
 
 
 #include <immintrin.h>
@@ -171,14 +173,6 @@ static uint32_t W = 2560, H = 1440;
 // -------------------------------------------------- vulkan small helpers --
 
 // ------------------------------------------------------- overlay window ----
-static HWND g_hwnd = nullptr;
-static bool g_overlayExcluded = false;   // WDA_EXCLUDEFROMCAPTURE applied
-static bool g_echoFreeWanted = true;     // --echo-free 0|1 (default 1)
-static std::atomic<bool> g_stop{false};
-static std::atomic<bool> g_overlayHidden{false};  // CTRL+ALT+X: hidden = capture-only warm loop
-static std::atomic<bool> g_resumeRequested{false}; // hidden->shown: loop must force fresh frame+reseed
-static std::atomic<bool> g_quitHotkey{false};     // CTRL+ALT+Q: clean shutdown -> exit 0
-enum { HK_QUIT = 1, HK_TOGGLE = 2 };
 
 // ------------------------------------------- live knob file (M13) -----------
 // Screen-mode knobs WITHOUT a restart (owner feedback 2026-09-25: turning the
@@ -197,89 +191,6 @@ enum { HK_QUIT = 1, HK_TOGGLE = 2 };
 // corrected = (capture+cursorNow) - lastPresented(cursorPrev) cancels the
 // desktop and leaves the cursor delta as gentle live signal.
 //
-// BUG #3 (2026-09-21, REPRODUCED): the painted cursor NEVER erases. It enters
-// bufLastPresented -> the next capture echoes it -> fbcancel sees
-// echo(cursorOld) - lastPresented(cursorOld) = 0 -> nothing subtracts it ->
-// every cursor position paints a PERMANENT ghost (measured: a 5x5 grid of 25
-// ghost cursors after one wiggle pass). The user sees the REAL hardware
-// cursor anyway (DWM draws it above our topmost overlay), so the paint is
-// pure harm. DEFAULT IS NOW OFF; --cursor-draw keeps the legacy path.
-static bool g_cursorDraw = false;                // --cursor-draw enables (default OFF, bug #3)
-static std::vector<uint8_t> g_shapeBuf;          // raw DXGI pointer-shape buffer
-static uint32_t g_shapeW = 0, g_shapeH = 0, g_shapePitch = 0;
-static int  g_shapeType = 0;                     // DXGI_OUTDUPL_POINTER_SHAPE_TYPE_*
-static bool g_shapeValid = false;
-static int  g_curX = -1000000, g_curY = -1000000; // last-known pointer pos (desktop px)
-static bool g_curVisible = false;
-static int  g_lastDrawnX = -1000000, g_lastDrawnY = -1000000;
-static bool g_lastDrawnVis = false;
-static bool g_curDirty = false;                  // pointer state changed since last processed frame
-static long g_curDrawFrames = 0;
-static double g_curDrawUsSum = 0.0;              // avg CPU draw overhead accounting
-
-// alpha-blend the cached DXGI pointer shape over a tight WxH B8G8R8A8 frame.
-// posX/posY = pointer position (shape top-left, per the MS DDA sample), clipped.
-static void DrawCursorBGRA(uint8_t* dst, int posX, int posY) {
-    if (!g_shapeValid) return;
-    if (g_shapeType == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR ||
-        g_shapeType == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR) {
-        for (uint32_t y = 0; y < g_shapeH; ++y) {
-            const int dy = posY + (int)y;
-            if (dy < 0 || dy >= (int)H) continue;
-            const uint8_t* srow = g_shapeBuf.data() + (size_t)y * g_shapePitch;
-            for (uint32_t x = 0; x < g_shapeW; ++x) {
-                const int dx = posX + (int)x;
-                if (dx < 0 || dx >= (int)W) continue;
-                const uint8_t* s = srow + (size_t)x * 4;
-                const unsigned a = s[3];
-                if (a == 0) continue;
-                uint8_t* d = dst + ((size_t)dy * W + (size_t)dx) * 4;
-                if (a == 255) { d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = 255; continue; }
-                for (int k = 0; k < 3; ++k)
-                    d[k] = (uint8_t)((s[k] * a + d[k] * (255u - a) + 127u) / 255u);
-                d[3] = 255;
-            }
-        }
-        return;
-    }
-    // MONOCHROME: buffer = AND mask (H/2 rows, 1bpp) then XOR mask (H/2 rows, 32bpp)
-    if (g_shapeType == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME) {
-        const uint32_t halfH = g_shapeH / 2;
-        for (uint32_t y = 0; y < halfH; ++y) {
-            const int dy = posY + (int)y;
-            if (dy < 0 || dy >= (int)H) continue;
-            const uint8_t* andRow = g_shapeBuf.data() + (size_t)y * g_shapePitch;
-            const uint8_t* xorRow = g_shapeBuf.data() + ((size_t)halfH + y) * g_shapePitch;
-            for (uint32_t x = 0; x < g_shapeW; ++x) {
-                const int dx = posX + (int)x;
-                if (dx < 0 || dx >= (int)W) continue;
-                const unsigned andBit = (andRow[x >> 3] >> (7 - (x & 7))) & 1u;
-                if (andBit) continue;                    // transparent: keep desktop
-                const uint32_t xc = *(const uint32_t*)(xorRow + (size_t)x * 4);
-                if (xc == 0xFF000000u) continue;         // encoded transparent
-                uint8_t* d = dst + ((size_t)dy * W + (size_t)dx) * 4;
-                d[0] = (uint8_t)(xc & 0xFF); d[1] = (uint8_t)((xc >> 8) & 0xFF);
-                d[2] = (uint8_t)((xc >> 16) & 0xFF); d[3] = 255;
-            }
-        }
-    }
-}
-static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    if (msg == WM_DESTROY) { PostQuitMessage(0); return 0; }
-    return DefWindowProcW(hwnd, msg, wp, lp);
-}
-static DWORD WINAPI MsgPumpThread(LPVOID) {
-    MSG m;
-    while (GetMessageW(&m, nullptr, 0, 0) > 0) {
-        TranslateMessage(&m);
-        DispatchMessageW(&m);
-    }
-    return 0;
-}
-static BOOL WINAPI CtrlHandler(DWORD) {
-    g_stop.store(true);
-    return TRUE;
-}
 
 // ===========================================================================
 // M8a chain constants + safetensors parser (verbatim from m8-full-chain;
@@ -294,6 +205,8 @@ int main(int argc, char** argv) {
     using clk = std::chrono::steady_clock;
     const auto tStart = clk::now();
     setvbuf(stdout, nullptr, _IONBF, 0);   // live diagnostics: crash/hang forensics
+    OverlayControl ovl;
+    CursorMirror cursor;
     // Respawned child (display-mode change): the launcher log handle is not
     // inheritable, so our stdout would write into a void. Re-anchor to our
     // own log so the respawn chain stays observable.
@@ -365,8 +278,8 @@ int main(int argc, char** argv) {
         if (a == "--frames" && i + 1 < argc) framesTarget = std::atol(argv[++i]);
         else if (a == "--nowiggle") wiggleForbidden = true;
         else if (a == "--novideo") novideo = 1;
-        else if (a == "--nocursor") g_cursorDraw = false;
-        else if (a == "--cursor-draw") g_cursorDraw = true;
+        else if (a == "--nocursor") cursor.drawEnabled = false;
+        else if (a == "--cursor-draw") cursor.drawEnabled = true;
         else if (a == "--output" && i + 1 < argc) outPref = argv[++i];
         else if (a == "--wiggle-idle" && i + 1 < argc) wiggleIdleSec = std::atol(argv[++i]);
         else if (a == "--max-delta" && i + 1 < argc) maxDelta = std::atoi(argv[++i]);
@@ -380,7 +293,7 @@ int main(int argc, char** argv) {
         else if (a == "--temporal" && i + 1 < argc) temporal = std::atoi(argv[++i]);
         else if (a == "--gain" && i + 1 < argc) headGain = (float)std::atof(argv[++i]);
         else if (a == "--blend" && i + 1 < argc) headBlend = (float)std::atof(argv[++i]);
-        else if (a == "--echo-free" && i + 1 < argc) g_echoFreeWanted = std::atoi(argv[++i]) != 0;
+        else if (a == "--echo-free" && i + 1 < argc) ovl.echoFreeWanted = std::atoi(argv[++i]) != 0;
         else if (a == "--acc-park-thresh" && i + 1 < argc) accParkThresh = std::atof(argv[++i]);
         else if (a == "--acc-park-frames" && i + 1 < argc) accParkFrames = std::atol(argv[++i]);
         else if (a == "--acc-resume-thresh" && i + 1 < argc) accResumeThresh = std::atof(argv[++i]);
@@ -418,7 +331,7 @@ int main(int argc, char** argv) {
     colorpass = colorpass ? 1 : 0;
     if (resGate < 0) resGate = 0;
     if (resGate > 255) resGate = 255;
-    SetConsoleCtrlHandler(CtrlHandler, TRUE);
+    ovl.installCtrlHandler();
     std::printf("=== M8B-LIVE (M9b U-Net): REAL DLSS 5 graph (71 blocks, 7 scales) live on the desktop, Intel Arc Pro B50 ===\n");
     std::printf("transport: m4-present-simple (CPU bridge) | core: M9 U-Net chain at vendor-aligned extent\n");
     std::printf("frame target: %ux%u B8G8R8A8, frames=%ld (processed), wiggle-idle=%lds, video=%d\n",
@@ -426,7 +339,7 @@ int main(int argc, char** argv) {
     if (!novideo)
         std::printf("feedback-cancellation: ON (echo subtract + accumulate, max-delta=%d/255, settle-thresh=%.3f)\n",
                     maxDelta, settleThresh);
-    if (!novideo && !g_echoFreeWanted)
+    if (!novideo && !ovl.echoFreeWanted)
         std::printf("accumulate stop-loss: park below %.2f/255 for %ld frames, resume at %.2f, probe every %ld ms\n",
                     accParkThresh, accParkFrames, accResumeThresh, accProbeMs);
     std::printf("composite: vendor compose_head, gain=%.2f (legacy strength/colorpass/resgate ignored on the M9b path)\n",
@@ -509,7 +422,7 @@ int main(int argc, char** argv) {
         auto acquireUntil = [&](std::chrono::steady_clock::time_point deadline) -> bool {
             bool got = false;
             int tries = 0, acquired = 0, skippedBlack = 0;
-            while (clk::now() < deadline && !got && !g_stop.load()) {
+            while (clk::now() < deadline && !got && !ovl.stop.load()) {
                 ++tries;
                 DXGI_OUTDUPL_FRAME_INFO fi{};
                 ComPtr<IDXGIResource> res;
@@ -549,7 +462,7 @@ int main(int argc, char** argv) {
         // yields NO DDA frames at all. Unless --nowiggle, jiggle the cursor
         // for up to 12 more seconds — desktop updates then flow and the first
         // frame lands (the generator stops the moment one does).
-        if (!got && !wiggleForbidden && !g_stop.load()) {
+        if (!got && !wiggleForbidden && !ovl.stop.load()) {
             std::printf("[info] desktop idle - temporary wiggle for first frame\n");
             g_wiggleStop.store(false);
             wiggler = std::thread(WiggleThread);
@@ -655,7 +568,7 @@ int main(int argc, char** argv) {
     if (!novideo) {
         HINSTANCE hinst = GetModuleHandleW(nullptr);
         WNDCLASSW wc{};
-        wc.lpfnWndProc = WndProc;
+        wc.lpfnWndProc = OverlayWndProc;
         wc.hInstance = hinst;
         wc.lpszClassName = L"DLSS5M8bLiveOverlay";
         wc.hCursor = LoadCursorW(nullptr, (LPCWSTR)IDC_ARROW);
@@ -665,11 +578,11 @@ int main(int argc, char** argv) {
         const int ovlY = winMode ? outY + winRegion.top : outY;
         const int ovlW = winMode ? (winRegion.right - winRegion.left) : (int)W;
         const int ovlH = winMode ? (winRegion.bottom - winRegion.top) : (int)H;
-        g_hwnd = CreateWindowExW(exStyle, wc.lpszClassName, L"DLSS5_INTEL m8b",
+        ovl.hwnd = CreateWindowExW(exStyle, wc.lpszClassName, L"DLSS5_INTEL m8b",
                                  WS_POPUP, ovlX, ovlY, ovlW, ovlH,
                                  nullptr, nullptr, hinst, nullptr);
-        if (!g_hwnd) { std::fprintf(stderr, "[FAIL] CreateWindowExW %lu\n", GetLastError()); return 1; }
-        SetLayeredWindowAttributes(g_hwnd, 0, 255, LWA_ALPHA);
+        if (!ovl.hwnd) { std::fprintf(stderr, "[FAIL] CreateWindowExW %lu\n", GetLastError()); return 1; }
+        SetLayeredWindowAttributes(ovl.hwnd, 0, 255, LWA_ALPHA);
         // ECHO-FREE PIPELINE (fundamental fix, 2026-09-22): exclude the overlay
         // from ALL screen capture (WDA_EXCLUDEFROMCAPTURE = 0x11, Win10 2004+).
         // DDA then delivers the TRUE desktop (windows BEHIND the overlay are
@@ -682,9 +595,9 @@ int main(int argc, char** argv) {
         //     above the overlay"; fbmean sat at ~11/255);
         //   - windows opened under the overlay BECOME VISIBLE in the next
         //     processed frame (the Layer-A "overlay hides everything" pain).
-        if (g_echoFreeWanted) {
-            if (SetWindowDisplayAffinity(g_hwnd, 0x11)) {
-                g_overlayExcluded = true;
+        if (ovl.echoFreeWanted) {
+            if (SetWindowDisplayAffinity(ovl.hwnd, 0x11)) {
+                ovl.excluded = true;
                 std::printf("[win] overlay EXCLUDED from capture (WDA_EXCLUDEFROMCAPTURE) - echo-free absolute pipeline\n");
             } else {
                 std::fprintf(stderr, "[warn] SetWindowDisplayAffinity failed (%lu) - legacy feedback pipeline\n", GetLastError());
@@ -705,10 +618,10 @@ int main(int argc, char** argv) {
                     ovlW, ovlH, ovlX, ovlY, winMode ? " WINDOW-MODE" : "");
         VkWin32SurfaceCreateInfoKHR sci{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
         sci.hinstance = GetModuleHandleW(nullptr);
-        sci.hwnd = g_hwnd;
+        sci.hwnd = ovl.hwnd;
         VK_CHECK(vkCreateWin32SurfaceKHR(c.inst, &sci, nullptr, &surface));
         DWORD mtid = 0;
-        msgThread = CreateThread(nullptr, 0, MsgPumpThread, nullptr, 0, &mtid);
+        msgThread = CreateThread(nullptr, 0, OverlayMsgPumpThread, nullptr, 0, &mtid);
     }
 
     // ---------------- global hotkeys (UX fix 2026-09-20) -------------------
@@ -722,57 +635,14 @@ int main(int argc, char** argv) {
     // Test note: this host drops injected modifiers, so tests PostMessage the
     // WM_HOTKEY (0x0312) directly to our own window — same code path.
     {
-        HWND regHwnd = g_hwnd ? g_hwnd : nullptr;
-        bool okQ = RegisterHotKey(regHwnd, HK_QUIT, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'Q') != FALSE;
-        bool okX = RegisterHotKey(regHwnd, HK_TOGGLE, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'X') != FALSE;
-        if (!okQ) std::fprintf(stderr, "[warn] RegisterHotKey CTRL+ALT+Q failed: %lu\n", GetLastError());
-        if (!okX) std::fprintf(stderr, "[warn] RegisterHotKey CTRL+ALT+X failed: %lu\n", GetLastError());
-        if (okQ || okX)
-            std::printf("[hotkey] registered: CTRL+ALT+Q=quit CTRL+ALT+X=toggle overlay (%s%s)\n",
-                        okQ ? "Q" : "", okX ? "X" : "");
+        ovl.registerHotkeys();
         std::printf("[cursor] drawing hardware cursor into mirror (DDA never captures it); %s\n",
-                    g_cursorDraw ? "ON (--cursor-draw, LEGACY: painted cursors never erase - bug #3)"
+                    cursor.drawEnabled ? "ON (--cursor-draw, LEGACY: painted cursors never erase - bug #3)"
                                  : "OFF (default; the real hardware cursor stays visible above the overlay)");
     }
     // Drain the main-thread queue; handles WM_HOTKEY actions. Called on every
     // acquire-wake so hotkeys stay live even while the loop blocks on DDA.
-    auto drainHotkeys = [&]() {
-        MSG m;
-        while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) {
-            if (m.message == WM_HOTKEY) {
-                if (m.wParam == HK_QUIT) {
-                    std::printf("[hotkey] CTRL+ALT+Q - quit requested (clean shutdown)\n");
-                    g_stop.store(true);
-                    g_quitHotkey.store(true);
-                } else if (m.wParam == HK_TOGGLE) {
-                    bool h = !g_overlayHidden.load();
-                    g_overlayHidden.store(h);
-                    // HIDE: drop the overlay immediately, desktop goes native.
-                    // SHOW: defer the ShowWindow to the live loop — it first
-                    // processes the current capture (kept warm while hidden)
-                    // with a reseeded fbcancel, presents, THEN shows the window
-                    // (no stale launch-time frame flash). Without this the
-                    // swapchain still held the pre-hide image and the settle
-                    // gate (capture==our own stale output) latched forever.
-                    if (h) {
-                        if (g_hwnd) ShowWindow(g_hwnd, SW_HIDE);
-                    } else {
-                        g_resumeRequested.store(true);
-                    }
-                    std::printf("[hotkey] CTRL+ALT+X - overlay %s: processing %s, desktop %s\n",
-                                h ? "HIDDEN" : "SHOWN",
-                                h ? "PAUSED (warm capture only, no chain/present)"
-                                  : "RESUMED (fresh capture + fbcancel reseed)",
-                                h ? "NATIVE (feedback loop dead)" : "ENHANCED");
-                }
-            } else if (m.message == WM_QUIT) {
-                g_stop.store(true);
-            } else {
-                TranslateMessage(&m);
-                DispatchMessageW(&m);
-            }
-        }
-    };
+    auto drainHotkeys = [&]() { ovl.drainHotkeys(); };
 
     // ---------------- device with swapchain + cooperative-matrix support
     {
@@ -2144,23 +2014,7 @@ int main(int argc, char** argv) {
     // last processed frame so the settle gate cannot swallow cursor updates.
     // Must be called between a successful AcquireNextFrame and ReleaseFrame.
     auto fetchPointerState = [&](DXGI_OUTDUPL_FRAME_INFO& fi) {
-        if (fi.PointerShapeBufferSize > 0) {
-            g_shapeBuf.resize(fi.PointerShapeBufferSize);
-            UINT filled = 0;
-            DXGI_OUTDUPL_POINTER_SHAPE_INFO si{};
-            HRESULT hs = dup->GetFramePointerShape(fi.PointerShapeBufferSize, g_shapeBuf.data(),
-                                                   &filled, &si);
-            if (SUCCEEDED(hs)) {
-                g_shapeW = si.Width; g_shapeH = si.Height;
-                g_shapePitch = si.Pitch; g_shapeType = (int)si.Type;
-                g_shapeValid = true;
-            }
-        }
-        g_curX = fi.PointerPosition.Position.x;
-        g_curY = fi.PointerPosition.Position.y;
-        g_curVisible = fi.PointerPosition.Visible != FALSE;
-        g_curDirty = (g_curX != g_lastDrawnX || g_curY != g_lastDrawnY ||
-                      g_curVisible != g_lastDrawnVis);
+        cursor.fetchPointerState(dup.Get(), fi);
     };
     const uint32_t regionOff = (uint32_t)(region.top * (int)W + region.left);
     const long verifyFrames[3] = {10, 30, 60};
@@ -2245,7 +2099,7 @@ int main(int argc, char** argv) {
             }
             std::fprintf(stderr, "[FAIL] respawn failed (%lu) - stopping\n",
                          (unsigned long)GetLastError());
-            g_stop.store(true);
+            ovl.stop.store(true);
             return false;
         }
         if (np.adapterLuid.LowPart == curAdapterLuid.LowPart &&
@@ -2299,7 +2153,7 @@ int main(int argc, char** argv) {
     uint8_t prevSamples[512]{};   // last frame's sparse samples (wiggle discriminator)
     uint64_t prevSampleCnt = 0;
 
-    while (!g_stop.load() && frame < framesTarget) {
+    while (!ovl.stop.load() && frame < framesTarget) {
         // ---- (a-1) --window tracking: follow moves (same size), pause while
         // minimized (overlay hidden), exit cleanly on close/resize (region-
         // sized GPU buffers are allocated once, so a resize needs a restart).
@@ -2310,7 +2164,7 @@ int main(int argc, char** argv) {
             }
             if (IsIconic(targetHwnd)) {
                 if (shownOnce && !iconicHidden) {
-                    ShowWindow(g_hwnd, SW_HIDE);
+                    ShowWindow(ovl.hwnd, SW_HIDE);
                     iconicHidden = true;
                     std::printf("[win] target minimized - overlay paused\n");
                 }
@@ -2323,7 +2177,7 @@ int main(int argc, char** argv) {
             }
             if (iconicHidden) {   // restored: re-show with a fresh frame
                 iconicHidden = false;
-                g_resumeRequested.store(true);
+                ovl.resumeRequested.store(true);
                 std::printf("[win] target restored - resuming\n");
             }
             RECT crc{}; GetClientRect(targetHwnd, &crc);
@@ -2338,8 +2192,8 @@ int main(int argc, char** argv) {
             if (wl != region.left || wt != region.top) {
                 region.left = wl; region.top = wt;
                 region.right = wl + regionW; region.bottom = wt + regionH;
-                if (g_hwnd && shownOnce && !g_overlayHidden.load())
-                    SetWindowPos(g_hwnd, HWND_TOPMOST, outX + wl, outY + wt, 0, 0,
+                if (ovl.hwnd && shownOnce && !ovl.hidden.load())
+                    SetWindowPos(ovl.hwnd, HWND_TOPMOST, outX + wl, outY + wt, 0, 0,
                                  SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
             }
         }
@@ -2352,13 +2206,13 @@ int main(int argc, char** argv) {
         // processes the CURRENT desktop (no stale launch-time frame) with a
         // reseeded fbcancel, presents, and only then re-shows the window.
         // Keep draining the queue so show-again / quit hotkeys stay live.
-        if (g_overlayHidden.load()) {
+        if (ovl.hidden.load()) {
             DXGI_OUTDUPL_FRAME_INFO fi{};
             ComPtr<IDXGIResource> res;
             HRESULT hr = dup->AcquireNextFrame(50, &fi, &res);
             if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
                 drainHotkeys();   // hotkeys stay live while parked in acquire
-                if (g_stop.load()) break;
+                if (ovl.stop.load()) break;
                 continue;
             } else if (FAILED(hr)) {
                 if (hr == DXGI_ERROR_ACCESS_LOST) {
@@ -2367,7 +2221,7 @@ int main(int argc, char** argv) {
                         ++dropped;
                     } else {
                         std::fprintf(stderr, "[FAIL] duplication lost for good\n");
-                        g_stop.store(true);
+                        ovl.stop.store(true);
                     }
                 } else {
                     std::fprintf(stderr, "[error] hidden AcquireNextFrame: %s\n", HrName(hr));
@@ -2419,7 +2273,7 @@ int main(int argc, char** argv) {
         // without this forced frame the overlay would latch its stale
         // pre-hide content forever (the bug: unhide showed the launch frame).
         bool resumeForce = false;
-        if (g_resumeRequested.exchange(false)) {
+        if (ovl.resumeRequested.exchange(false)) {
             resumeForce = true;
             needReseed = true;   // fbcancel reseed: zero lastPresented + seed flag
         }
@@ -2440,7 +2294,7 @@ int main(int argc, char** argv) {
             if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
                 ++dropped;
                 drainHotkeys();   // hotkeys stay live while parked in acquire
-                if (g_stop.load()) break;
+                if (ovl.stop.load()) break;
                 const double idleSec =
                     std::chrono::duration<double>(clk::now() - tLastAcquired).count();
                 if (idleSec - lastIdleLogSec >= 5.0) {
@@ -2461,18 +2315,9 @@ int main(int argc, char** argv) {
                 // poll the real cursor on each 100 ms wake; a moved/shown/
                 // hidden pointer forces one cursor-only process+present using
                 // the last clean capture (the mirror then tracks the mouse).
-                if (g_cursorDraw && !novideo) {
-                    CURSORINFO ci{sizeof(CURSORINFO)};
-                    if (GetCursorInfo(&ci)) {
-                        g_curX = ci.ptScreenPos.x; g_curY = ci.ptScreenPos.y;
-                        g_curVisible = (ci.flags & CURSOR_SHOWING) != 0;
-                        g_curDirty = (g_curX != g_lastDrawnX || g_curY != g_lastDrawnY ||
-                                      g_curVisible != g_lastDrawnVis);
-                        if (g_curDirty) {
-                            fresh = true;          // reuse last clean capture
-                            estMeanDelta = 1e9;    // bypass the settle gate
-                        }
-                    }
+                if (cursor.drawEnabled && !novideo && cursor.pollCursorFallback()) {
+                    fresh = true;          // reuse last clean capture
+                    estMeanDelta = 1e9;    // bypass the settle gate
                 }
                 continue;
             } else if (FAILED(hr)) {
@@ -2483,7 +2328,7 @@ int main(int argc, char** argv) {
                         ++dropped;
                     } else {
                         std::fprintf(stderr, "[FAIL] duplication lost for good\n");
-                        g_stop.store(true);
+                        ovl.stop.store(true);
                     }
                 } else {
                     std::fprintf(stderr, "[error] AcquireNextFrame: %s\n", HrName(hr));
@@ -2563,10 +2408,10 @@ int main(int argc, char** argv) {
             }
             // cursor moved while a real desktop update arrived: don't let the
             // settle gate swallow the frame (the drawn cursor must be repainted).
-            if (g_cursorDraw && g_curDirty) estMeanDelta = 1e9;
+            if (cursor.drawEnabled && cursor.curDirty) estMeanDelta = 1e9;
             if (fresh) stale = 0;
         }
-        if (g_stop.load()) break;
+        if (ovl.stop.load()) break;
         const double acqMs = std::chrono::duration<double, std::milli>(clk::now() - tLoopTop).count();
 
         // ---- (b) SETTLE SKIP (video mode): the visible screen (which under
@@ -2600,7 +2445,7 @@ int main(int argc, char** argv) {
         // (sparse est >= resume thresh; a moved cursor forces est to 1e9, so
         // the mirror repaints too) or on a GPU probe that detects one.
         bool probeOnly = false;
-        if (!novideo && !g_overlayExcluded && !resumeForce) {
+        if (!novideo && !ovl.excluded && !resumeForce) {
             if (!accParked && fbFrames >= 3) {
                 if (fbMeanLast < accParkThresh) ++accSmallStreak; else accSmallStreak = 0;
                 if (accSmallStreak >= accParkFrames) {
@@ -2644,25 +2489,13 @@ int main(int argc, char** argv) {
         // capture in the upload buffer only (`original` stays cursor-free for
         // diagnostics/verify). fbcancel then sees (capture+cursorNow) -
         // lastPresented(cursorPrev): cursor deltas ride the corrected signal.
-        double cursorUs = 0.0;
-        if (g_cursorDraw && !novideo) {
-            if (g_curVisible && g_shapeValid) {
-                const auto tCur0 = clk::now();
-                // g_curX/Y are VIRTUAL-screen coords; the captured frame starts
-                // at (outX,outY). Identical while the picked output sits at the
-                // origin (today's topology); keeps the mirror cursor correct if
-                // an ACCESS_LOST switch ever lands on an offset display.
-                DrawCursorBGRA((uint8_t*)uploadPtr, g_curX - outX, g_curY - outY);
-                cursorUs = std::chrono::duration<double, std::micro>(clk::now() - tCur0).count();
-                g_curDrawUsSum += cursorUs;
-                ++g_curDrawFrames;
-            }
-            g_lastDrawnX = g_curX; g_lastDrawnY = g_curY; g_lastDrawnVis = g_curVisible;
-            g_curDirty = false;
-            if (g_curDrawFrames > 0 && (g_curDrawFrames % 200) == 0)
-                std::printf("[cursor] avg draw %.1f us over %ld drawn frames (shape %ux%u type %d)\n",
-                            g_curDrawUsSum / (double)g_curDrawFrames, g_curDrawFrames,
-                            g_shapeW, g_shapeH, g_shapeType);
+        if (cursor.drawEnabled && !novideo) {
+            // cursor.curX/Y are VIRTUAL-screen coords; the captured frame starts
+            // at (outX,outY). Identical while the picked output sits at the
+            // origin (today's topology); keeps the mirror cursor correct if
+            // an ACCESS_LOST switch ever lands on an offset display.
+            cursor.mirrorInto((uint8_t*)uploadPtr, cursor.curX - outX, cursor.curY - outY, W, H);
+            cursor.markDrawn();
         }
         const double bridgeMs =
             std::chrono::duration<double, std::milli>(clk::now() - tBridge0).count();
@@ -2678,18 +2511,18 @@ int main(int argc, char** argv) {
         if (!novideo && !probeOnly) {
             VkResult ar = VK_NOT_READY;
             bool got = false;
-            for (int tries = 0; tries < 4 && !g_stop.load(); ++tries) {
+            for (int tries = 0; tries < 4 && !ovl.stop.load(); ++tries) {
                 ar = vkAcquireNextImageKHR(c.dev, swapchain, 50000000ull, semImage, VK_NULL_HANDLE, &imageIndex);
                 if (ar == VK_SUCCESS || ar == VK_SUBOPTIMAL_KHR) { got = true; break; }
                 if (ar == VK_ERROR_OUT_OF_DATE_KHR) {
                     std::fprintf(stderr, "[warn] swapchain OUT_OF_DATE - ending run\n");
-                    g_stop.store(true);
+                    ovl.stop.store(true);
                     break;
                 }
                 if (ar == VK_TIMEOUT || ar == VK_NOT_READY) { drainHotkeys(); continue; }
                 break;   // any other error: fall through to the old behavior
             }
-            if (g_stop.load() && ar != VK_SUCCESS) break;
+            if (ovl.stop.load() && ar != VK_SUCCESS) break;
             if (!got && (ar == VK_TIMEOUT || ar == VK_NOT_READY)) continue;   // skip frame, stay responsive
         }
 
@@ -2751,7 +2584,7 @@ int main(int argc, char** argv) {
         // echoFree: overlay excluded from capture -> DDA delivers the TRUE
         // desktop; no echo, no feedback: skip fbcancel entirely, decode the
         // raw capture like --novideo, compose/encode in absolute mode.
-        const bool echoFree = !novideo && g_overlayExcluded;
+        const bool echoFree = !novideo && ovl.excluded;
         if (echoFree) needReseed = false;   // no fbcancel state to reseed
         if (!novideo && !echoFree) {   // fbcancel: corrected = clamp(capture - lastPresented, +/-4*maxDelta)
                           // (safety clamp only — real content must pass; the tight
@@ -3021,8 +2854,8 @@ int main(int argc, char** argv) {
                     // deferred show: the very first presented image is already
                     // on the swapchain, so the overlay appears with content —
                     // never a black rectangle over the captured desktop.
-                    ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
-                    SetWindowPos(g_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                    ShowWindow(ovl.hwnd, SW_SHOWNOACTIVATE);
+                    SetWindowPos(ovl.hwnd, HWND_TOPMOST, 0, 0, 0, 0,
                                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
                     shownOnce = true;
                     std::printf("[win] overlay shown (first present)\n");
@@ -3035,14 +2868,14 @@ int main(int argc, char** argv) {
             }
             VK_CHECK(vkWaitForFences(c.dev, 1, &fence, VK_TRUE, UINT64_MAX));
             vkResetFences(c.dev, 1, &fence);
-            if (resumeForce && !novideo && g_hwnd) {
+            if (resumeForce && !novideo && ovl.hwnd) {
                 // Re-show only AFTER the fresh resume frame is rendered and
                 // presented (the window was still hidden during the present,
                 // so DWM holds the CURRENT desktop image): the overlay
                 // reappears with current content, never the stale pre-hide
                 // swapchain frame.
-                ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
-                SetWindowPos(g_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                ShowWindow(ovl.hwnd, SW_SHOWNOACTIVATE);
+                SetWindowPos(ovl.hwnd, HWND_TOPMOST, 0, 0, 0, 0,
                              SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
                 std::printf("[win] overlay re-shown with fresh resume frame\n");
             }
@@ -3259,10 +3092,10 @@ int main(int argc, char** argv) {
         if (frameTimes.size() > 1)
             fps = (frameTimes.size() - 1) / (frameTimes.back() - frameTimes.front());
         fpsFinal = fps;
-        if (g_hwnd) {
+        if (ovl.hwnd) {
             wchar_t title[96];
             swprintf(title, 96, L"DLSS5_INTEL m8b | %.1f fps", fps);
-            SetWindowTextW(g_hwnd, title);
+            SetWindowTextW(ovl.hwnd, title);
         }
         if ((frame % 60) == 0 || frame == framesTarget - 1) {
             std::printf("[m8b] frame %ld | rolling %.1f fps | dropped %ld | %s\n",
@@ -3337,18 +3170,18 @@ int main(int argc, char** argv) {
     vkDestroyDevice(c.dev, nullptr);
     if (surface) vkDestroySurfaceKHR(c.inst, surface, nullptr);
     vkDestroyInstance(c.inst, nullptr);
-    if (g_hwnd) {
-        PostMessageW(g_hwnd, WM_CLOSE, 0, 0);
+    if (ovl.hwnd) {
+        PostMessageW(ovl.hwnd, WM_CLOSE, 0, 0);
         if (msgThread) {
             WaitForSingleObject(msgThread, 2000);
             CloseHandle(msgThread);
         }
-        if (g_hwnd) DestroyWindow(g_hwnd);
+        if (ovl.hwnd) DestroyWindow(ovl.hwnd);
     }
 
     // CTRL+ALT+Q is an intentional clean shutdown — always exit 0 (teardown
     // above already destroyed device/swapchain/buffers). Hotkeys are freed by
     // process exit.
-    if (g_quitHotkey.load()) return 0;
+    if (ovl.quitHotkey.load()) return 0;
     return pass ? 0 : 1;
 }

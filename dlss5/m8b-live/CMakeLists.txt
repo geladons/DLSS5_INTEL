@@ -85,7 +85,9 @@ add_executable(m8blive
     knobs.cpp
     weights_file.cpp
     chain_bufs.cpp
-    capture_dda.cpp)
+    capture_dda.cpp
+    cursor_mirror.cpp
+    overlay_control.cpp)
 add_dependencies(m8blive m8b_shaders)
 
 target_include_directories(m8blive PRIVATE "${VULKAN_SDK}/Include")
