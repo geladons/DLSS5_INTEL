@@ -18,6 +18,12 @@ import ctypes
 from pathlib import Path
 import numpy as np
 
+# The gain anchor rescales the processed frames' mean residual toward an
+# EMA; generated (warped) frames carry no such correction, so P-vs-G on a
+# static scene differs by the anchor's DC (~1.7 luma mean - the feature,
+# not a warp bug). This test measures interpolation mechanics only.
+os.environ.setdefault("DLSS5_GAIN_LOCK", "0")
+
 W, H = 640, 384
 
 
