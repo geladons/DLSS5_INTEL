@@ -32,8 +32,27 @@ if errorlevel 1 (
     echo [FAIL] cl x86 nr_degrade
     exit /b 1
 )
+cl /nologo /std:c11 /O2 /c /I"C:\VulkanSDK\1.4.357.0\Include" /I"%REPO%\dlss5\chain" ^
+   "%SRC%\nr_util.c" /Fo"%OUT%\nr_util.obj" 2>&1
+if errorlevel 1 (
+    echo [FAIL] cl x86 nr_util
+    exit /b 1
+)
+cl /nologo /std:c11 /O2 /c /I"C:\VulkanSDK\1.4.357.0\Include" /I"%REPO%\dlss5\chain" ^
+   "%SRC%\daemon_client.c" /Fo"%OUT%\daemon_client.obj" 2>&1
+if errorlevel 1 (
+    echo [FAIL] cl x86 daemon_client
+    exit /b 1
+)
+cl /nologo /std:c11 /O2 /c /I"C:\VulkanSDK\1.4.357.0\Include" /I"%REPO%\dlss5\chain" ^
+   "%SRC%\gdi_guard.c" /Fo"%OUT%\gdi_guard.obj" 2>&1
+if errorlevel 1 (
+    echo [FAIL] cl x86 gdi_guard
+    exit /b 1
+)
 link /nologo /DLL /DEF:"%SRC%\nr_layer_win.def" ws2_32.lib user32.lib ^
    "%OUT%\nr_layer_win32.obj" "%OUT%\nr_framegen.obj" "%OUT%\nr_degrade.obj" ^
+   "%OUT%\nr_util.obj" "%OUT%\daemon_client.obj" "%OUT%\gdi_guard.obj" ^
    /OUT:"%OUT%\nr_layer_win32.dll" /PDB:"%OUT%\nr_layer_win32.pdb" 2>&1
 if errorlevel 1 (
     echo [FAIL] link x86

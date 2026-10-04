@@ -70,12 +70,14 @@
 #include "chain_c_api.h"
 #include "nr_framegen.h"
 #include "nr_degrade.h"
+#include "nr_util.h"
+#include "daemon_client.h"
+#include "gdi_guard.h"
 
 #define MAX_SWAPCHAINS 8
 #define MAX_IMAGES 8
 #define SYNC_SLOTS 4
 #define NR_MAX_WAITS 16
-#define NR_DEFAULT_PORT 48990
 
 static int sync_semaphores;
 
@@ -93,92 +95,6 @@ static int sync_semaphores;
  * EndPaint validates the region) and let the composited swapchain frame
  * stay authoritative. Kill switch: NR_LAYER_GDI_GUARD=0.
  * ---------------------------------------------------------------------- */
-static const WCHAR NR_GUARD_PROP[] = L"NR_OLD_WNDPROC";
-static HWND g_guard_hwnds[8];
-static int g_guard_count;
-
-static LRESULT CALLBACK nr_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
-{
-    if (msg == WM_ERASEBKGND)
-        return 1;
-    if (msg == WM_PAINT) {
-        PAINTSTRUCT ps;
-        BeginPaint(hwnd, &ps);
-        EndPaint(hwnd, &ps);
-        return 0;
-    }
-    WNDPROC prev = (WNDPROC)GetPropW(hwnd, NR_GUARD_PROP);
-    /* Self-chain defense: if a stale prop ever points back at us, fall to
-     * DefWindowProcW instead of recursing into ourselves forever. */
-    if (prev == (WNDPROC)nr_wnd_proc) prev = NULL;
-    return prev ? CallWindowProcW(prev, hwnd, msg, wp, lp)
-                : DefWindowProcW(hwnd, msg, wp, lp);
-}
-
-static void nr_log(const char *fmt, ...);   /* fwd: defined below */
-static void lock(void);                     /* fwd: defined below */
-static void unlock(void);
-
-static void nr_guard_window(HWND hwnd)
-{
-    static int guard_enabled = -1;
-    if (guard_enabled < 0) {
-        const char *e = getenv("NR_LAYER_GDI_GUARD");
-        guard_enabled = !(e && !strcmp(e, "0"));
-    }
-    if (!guard_enabled || !hwnd) return;
-    lock();
-    if (GetPropW(hwnd, NR_GUARD_PROP) || g_guard_count >= 8) {
-        unlock();
-        return;
-    }
-    SetLastError(0);
-    WNDPROC prev = (WNDPROC)SetWindowLongPtrW(hwnd, GWLP_WNDPROC,
-                                            (LONG_PTR)nr_wnd_proc);
-    if (!prev && GetLastError()) {          /* swap failed outright */
-        unlock();
-        return;
-    }
-    if (prev == nr_wnd_proc) {
-        /* Raced install: another surface create beat us between the prop
-         * check and the swap. Restoring to "prev" (=us) is a no-op; the
-         * first installer's prop still carries the real wndproc. */
-        SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (LONG_PTR)nr_wnd_proc);
-        unlock();
-        return;
-    }
-    if (prev && !SetPropW(hwnd, NR_GUARD_PROP, (HANDLE)prev)) {
-        SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (LONG_PTR)prev);  /* roll back */
-        unlock();
-        return;
-    }
-    if (prev) {
-        g_guard_hwnds[g_guard_count++] = hwnd;
-        nr_log("[nr_layer] GDI repaint guard armed on hwnd %p", (void *)hwnd);
-    }
-    unlock();
-}
-
-/* Restore every armed wndproc before the DLL can be unmapped (instance
- * destroy / FreeLibrary): a queued message into a dangling nr_wnd_proc is an
- * AV inside the game. Safe to call twice. */
-static void nr_unguard_all(void)
-{
-    lock();
-    for (int i = 0; i < g_guard_count; i++) {
-        HWND hwnd = g_guard_hwnds[i];
-        WNDPROC prev = (WNDPROC)GetPropW(hwnd, NR_GUARD_PROP);
-        if (prev) {
-            if ((WNDPROC)GetWindowLongPtrW(hwnd, GWLP_WNDPROC) == nr_wnd_proc)
-                SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (LONG_PTR)prev);
-            RemovePropW(hwnd, NR_GUARD_PROP);
-        }
-        g_guard_hwnds[i] = NULL;
-    }
-    g_guard_count = 0;
-    unlock();
-}
-
 typedef struct device_data {
     VkDevice device;
     VkPhysicalDevice physical;
@@ -266,8 +182,6 @@ static device_data devices[8];
 static swapchain_data swapchains[MAX_SWAPCHAINS];
 static queue_data queues[MAX_QUEUES];
 
-static CRITICAL_SECTION g_lock;
-static int g_lock_ready;
 static PFN_vkGetInstanceProcAddr next_instance_proc;
 static VkInstance layer_instance;
 static unsigned long frame_counter;
@@ -283,7 +197,6 @@ static NrDegrade g_dg;
  * request is self-probing: a new daemon always answers (a process fallback
  * when it cannot transfer yet), an old daemon drops the unknown magic. */
 static int g_daemon_fg;
-static long nr_port = NR_DEFAULT_PORT;
 static const char *trigger_path;
 static const char *freeze_path;
 static const char *reproc_path;
@@ -327,25 +240,6 @@ static void init_freeze_paths(void)
 /* ------------------------------------------------------------------ */
 /* logging                                                             */
 /* ------------------------------------------------------------------ */
-static void nr_log(const char *fmt, ...)
-{
-    char buf[1024];
-    va_list ap;
-    va_start(ap, fmt);
-    _vsnprintf(buf, sizeof buf - 1, fmt, ap);
-    va_end(ap);
-    buf[sizeof buf - 1] = 0;
-    char path[MAX_PATH];
-    if (GetTempPathA(MAX_PATH, path)) {
-        strncat(path, "nr_layer_win.log", MAX_PATH - strlen(path) - 1);
-        FILE *f = fopen(path, "a");
-        if (f) { fputs(buf, f); fputc('\n', f); fclose(f); }
-    }
-    OutputDebugStringA("[nr_layer] ");
-    OutputDebugStringA(buf);
-    OutputDebugStringA("\n");
-}
-
 /* ------------------------------------------------------------------ */
 /* In-process DLSS 5 engine integration (Stage 3: TCP elimination).    */
 /* ------------------------------------------------------------------ */
@@ -887,104 +781,6 @@ static void ensure_inprocess(void)
            scale, gain, blend, sharpness);
 }
 
-/* ------------------------------------------------------------------ */
-/* TCP exchange with the daemon (Unix socket in the Linux original).    */
-/* Protocol identical: 16-byte header, payload in, fixed reply out.     */
-/* ------------------------------------------------------------------ */
-static int winsock_up(void)
-{
-    static int attempted, ok;
-    if (attempted) return ok;
-    attempted = 1;
-    WSADATA wd;
-    ok = WSAStartup(MAKEWORD(2, 2), &wd) == 0;
-    return ok;
-}
-
-static uint64_t nr_now_ms(void) { return (uint64_t)GetTickCount64(); }
-
-/* 0 = ok; -1 = transport failure (connected, send/recv timed out or broke -
- * the daemon is alive but busy); -2 = connect refused (daemon absent). The
- * flap policy in nr_degrade.c treats the two differently. */
-static int exchange(const void *header, size_t header_size, const void *payload,
-                    size_t payload_size, void *reply, size_t reply_size)
-{
-    if (!winsock_up()) return -2;
-    SOCKET fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (fd == INVALID_SOCKET) return -2;
-    DWORD tv = 1500;
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)&tv, sizeof tv);
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof tv);
-    struct sockaddr_in address;
-    memset(&address, 0, sizeof address);
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    address.sin_port = htons((u_short)nr_port);
-    /* Bound the connect: a blocking connect() to a wedged daemon (listen
-     * backlog saturated while its serial accept loop is stuck inside a
-     * frame) stalls the game render thread for the full TCP SYN
-     * retransmission timeout (~21 s) -> AppHang. Do it non-blocking with
-     * the same 1.5 s budget as send/recv. */
-    u_long nbio = 1;
-    ioctlsocket(fd, FIONBIO, &nbio);
-    int conn_rc = connect(fd, (struct sockaddr *)&address, sizeof address);
-    if (conn_rc != 0 && WSAGetLastError() == WSAEWOULDBLOCK) {
-        fd_set wf, ef;
-        struct timeval ctv;
-        ctv.tv_sec = 1;
-        ctv.tv_usec = 500000;
-        FD_ZERO(&wf); FD_SET(fd, &wf);
-        FD_ZERO(&ef); FD_SET(fd, &ef);
-        int sel = select(0, NULL, &wf, &ef, &ctv);
-        if (sel > 0 && FD_ISSET(fd, &wf) && !FD_ISSET(fd, &ef)) {
-            int soerr = 0;
-            int slen = sizeof soerr;
-            getsockopt(fd, SOL_SOCKET, SO_ERROR, (char *)&soerr, &slen);
-            conn_rc = soerr ? -1 : 0;
-        } else {
-            conn_rc = -1;
-        }
-    }
-    nbio = 0;
-    ioctlsocket(fd, FIONBIO, &nbio);
-    if (conn_rc != 0) {
-        closesocket(fd);
-        return -2;
-    }
-    const unsigned char *out = (const unsigned char *)header;
-    for (size_t sent = 0; sent < header_size; ) {
-        int n = send(fd, (const char *)out + sent, (int)(header_size - sent), 0);
-        if (n <= 0) { closesocket(fd); return -1; }
-        sent += (size_t)n;
-    }
-    out = (const unsigned char *)payload;
-    for (size_t sent = 0; sent < payload_size; ) {
-        int n = send(fd, (const char *)out + sent, (int)(payload_size - sent), 0);
-        if (n <= 0) { closesocket(fd); return -1; }
-        sent += (size_t)n;
-    }
-    unsigned char *in = (unsigned char *)reply;
-    for (size_t got = 0; got < reply_size; ) {
-        int n = recv(fd, (char *)in + got, (int)(reply_size - got), 0);
-        if (n <= 0) { closesocket(fd); return -1; }
-        got += (size_t)n;
-    }
-    closesocket(fd);
-    return 0;
-}
-
-/* Fire a 16-byte NRCT control command through the same bounded exchange
- * (header-only, 16-byte reply). 0 = daemon ok; <0 transport; 1 = rejected. */
-static int nr_ctrl(uint32_t cmd, uint32_t payload_arg)
-{
-    uint32_t hdr[4] = { 0x5443524Eu, cmd, payload_arg, 0 };
-    uint32_t rep[4] = { 0 };
-    int rc = exchange(hdr, sizeof hdr, NULL, 0, rep, sizeof rep);
-    if (rc) return rc;
-    return (rep[0] == 0x5443524Eu && rep[1]) ? 0 : 1;
-}
-
-/* ------------------------------------------------------------------ */
 static device_data *find_device(VkDevice device)
 {
     for (int i = 0; i < 8; i++)
@@ -1020,8 +816,6 @@ static int family_can_capture(device_data *data, uint32_t family)
     return ok;
 }
 
-static void lock(void) { if (g_lock_ready) EnterCriticalSection(&g_lock); }
-static void unlock(void) { if (g_lock_ready) LeaveCriticalSection(&g_lock); }
 
 /* CTRL+ALT+X pauses processing (native frames, full fps), CTRL+ALT+Q turns
  * the layer off for good. Polled via GetAsyncKeyState (like
@@ -2788,8 +2582,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
     (void)inst; (void)reserved;
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(inst);
-        InitializeCriticalSection(&g_lock);
-        g_lock_ready = 1;
+        nr_lock_init();
     } else if (reason == DLL_PROCESS_DETACH) {
         /* reserved!=NULL means process termination: wndproc restoration is
          * pointless (windows die with the process) and DllMain is under the
@@ -2833,7 +2626,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
         g_knob_next_poll = 0;
         g_cur_framegen = -1;
         g_cur_scale = g_cur_gain = g_cur_blend = g_cur_sharpness = -1.0f;
-        if (g_lock_ready) { DeleteCriticalSection(&g_lock); g_lock_ready = 0; }
+        nr_lock_destroy();
     }
     return TRUE;
 }

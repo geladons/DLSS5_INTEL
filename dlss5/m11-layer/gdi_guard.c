@@ -1,0 +1,92 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* =====================================================================
+ * gdi_guard - GDI repaint guard (see gdi_guard.h). Verbatim move from
+ * nr_layer_win.c; uses nr_log + lock/unlock from nr_util.
+ * ===================================================================== */
+#include "gdi_guard.h"
+#include "nr_util.h"
+
+#include <stdlib.h>
+#include <string.h>
+
+static const WCHAR NR_GUARD_PROP[] = L"NR_OLD_WNDPROC";
+static HWND g_guard_hwnds[8];
+static int g_guard_count;
+
+static LRESULT CALLBACK nr_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (msg == WM_ERASEBKGND)
+        return 1;
+    if (msg == WM_PAINT) {
+        PAINTSTRUCT ps;
+        BeginPaint(hwnd, &ps);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    WNDPROC prev = (WNDPROC)GetPropW(hwnd, NR_GUARD_PROP);
+    /* Self-chain defense: if a stale prop ever points back at us, fall to
+     * DefWindowProcW instead of recursing into ourselves forever. */
+    if (prev == (WNDPROC)nr_wnd_proc) prev = NULL;
+    return prev ? CallWindowProcW(prev, hwnd, msg, wp, lp)
+                : DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+void nr_guard_window(HWND hwnd)
+{
+    static int guard_enabled = -1;
+    if (guard_enabled < 0) {
+        const char *e = getenv("NR_LAYER_GDI_GUARD");
+        guard_enabled = !(e && !strcmp(e, "0"));
+    }
+    if (!guard_enabled || !hwnd) return;
+    lock();
+    if (GetPropW(hwnd, NR_GUARD_PROP) || g_guard_count >= 8) {
+        unlock();
+        return;
+    }
+    SetLastError(0);
+    WNDPROC prev = (WNDPROC)SetWindowLongPtrW(hwnd, GWLP_WNDPROC,
+                                            (LONG_PTR)nr_wnd_proc);
+    if (!prev && GetLastError()) {          /* swap failed outright */
+        unlock();
+        return;
+    }
+    if (prev == nr_wnd_proc) {
+        /* Raced install: another surface create beat us between the prop
+         * check and the swap. Restoring to "prev" (=us) is a no-op; the
+         * first installer's prop still carries the real wndproc. */
+        SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (LONG_PTR)nr_wnd_proc);
+        unlock();
+        return;
+    }
+    if (prev && !SetPropW(hwnd, NR_GUARD_PROP, (HANDLE)prev)) {
+        SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (LONG_PTR)prev);  /* roll back */
+        unlock();
+        return;
+    }
+    if (prev) {
+        g_guard_hwnds[g_guard_count++] = hwnd;
+        nr_log("[nr_layer] GDI repaint guard armed on hwnd %p", (void *)hwnd);
+    }
+    unlock();
+}
+
+/* Restore every armed wndproc before the DLL can be unmapped (instance
+ * destroy / FreeLibrary): a queued message into a dangling nr_wnd_proc is an
+ * AV inside the game. Safe to call twice. */
+void nr_unguard_all(void)
+{
+    lock();
+    for (int i = 0; i < g_guard_count; i++) {
+        HWND hwnd = g_guard_hwnds[i];
+        WNDPROC prev = (WNDPROC)GetPropW(hwnd, NR_GUARD_PROP);
+        if (prev) {
+            if ((WNDPROC)GetWindowLongPtrW(hwnd, GWLP_WNDPROC) == nr_wnd_proc)
+                SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (LONG_PTR)prev);
+            RemovePropW(hwnd, NR_GUARD_PROP);
+        }
+        g_guard_hwnds[i] = NULL;
+    }
+    g_guard_count = 0;
+    unlock();
+}
