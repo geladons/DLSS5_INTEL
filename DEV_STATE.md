@@ -1,4 +1,37 @@
-# DEV_STATE.md - where we are (updated 2026-10-03 by Devin)
+# DEV_STATE.md - where we are (updated 2026-10-04 by Devin)
+
+## Stage 35: Stage 3c done - m8b recorder extracted to M8bRec (2026-10-04)
+
+- **Stage 3c** (this commit): `m8b-live/main.cpp` 3433 -> 2711 lines.
+  The whole section-11 block (bar separators, TDR instrumentation,
+  14 kernel dispatchers, window/global record walkers, the 71-block
+  recordChain) moved verbatim into `M8bRec` (m8b_rec.h, 180 lines):
+  - `m8b_rec.cpp` (~350): ctor binding borrowed state, BDA helpers
+    (chunkOf/A/bufOf/localOff), hazZone bar(), span audit + submit
+    bisect (spanTag/m8bDispatch/segFlush), gflags, 14 d* dispatchers,
+    winGeo.
+  - `m8b_rec_chain.cpp` (~420): recordWindowAttn/recordWindowBlock/
+    recordDs/recordUp/recordGlobal + recordChain.
+  - Borrowed state arrives as reference members with the SAME names
+    the lambdas captured (sub, chunks, segs, st, poff, vecOff,
+    hazZone, cmd, barEvent, tsPool, realDispatch, T6P) - bodies are
+    textual moves. Arena offsets and ChainPipes are public fields
+    main fills during setup; `struct Chunk` moved to the header.
+  - Dispatch instrumentation preserved: main keeps
+    `#define vkCmdDispatch rec.m8bDispatch` so the frame path is
+    still counted; all D5_* env gates behave identically.
+- **Validated on the real binary**: 12-frame --novideo PASS
+  (verify frame 10 PASS) and 45-frame video run PASS
+  (verify {10,30,60} ALL PASS, 45x segs=1409, ~1.3 s/frame,
+  dump stats = healthy historical values).
+- **d5c_chain TDR probe**: ran d5c_chain.dll at full 2560x1440
+  scale 1.0, 10 frames PASS (~1.15-1.25 s/frame) + 5 frames at
+  scale 0.5 (~270 ms/frame). The production engine's monolithic
+  submit (secondary chainCmd_ inside one primary) does NOT
+  reproduce the m8b co-execution TDR - different arena layout
+  (3 chunks, INT8/fused kernels) and op mix. No sync change made;
+  flagged as a config-specific risk to revisit if the engine's
+  arena/pipeline shape converges toward m8b's.
 
 ## Stage 34: Modularization sweep + m8b 4-chunk TDR finding (2026-10-03)
 

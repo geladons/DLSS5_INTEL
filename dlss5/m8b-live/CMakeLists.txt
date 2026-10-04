@@ -88,7 +88,9 @@ add_executable(m8blive
     capture_dda.cpp
     cursor_mirror.cpp
     overlay_control.cpp
-    seg_submit.cpp)
+    seg_submit.cpp
+    m8b_rec.cpp
+    m8b_rec_chain.cpp)
 add_dependencies(m8blive m8b_shaders)
 
 target_include_directories(m8blive PRIVATE "${VULKAN_SDK}/Include")

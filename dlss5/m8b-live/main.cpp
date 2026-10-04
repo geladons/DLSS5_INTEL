@@ -126,6 +126,7 @@
 #include "cursor_mirror.h"
 #include "overlay_control.h"
 #include "seg_submit.h"
+#include "m8b_rec.h"
 
 
 #include <immintrin.h>
@@ -1000,7 +1001,15 @@ int main(int argc, char** argv) {
         if (!vecOff.count(n)) { VkDeviceSize o = ar.alloc(4096); vecOff[n] = o; }
         return vecOff[n];
     };
-    VkDeviceSize oHeadW = ar.alloc(1024);   // folded [32,16] f16 head weight
+    // Chain recorder: borrowed refs to sub/chunks/ar.segs/st/poff/vecOff.
+    // Declared ahead of the arena slots because the o* offsets and the p*
+    // pipelines live on it (Stage 3c extraction - m8b_rec.h).
+    const PFN_vkCmdDispatch realDispatch = vkCmdDispatch;
+    std::vector<Chunk> chunks;
+    M8bRec rec(sub, chunks, ar.segs, st, T6P, poff, vecOff,
+               barEvent, tsPool, realDispatch);
+
+    rec.oHeadW = ar.alloc(1024);   // folded [32,16] f16 head weight
 
     auto slot = [&](VkDeviceSize bytes) { return ar.alloc(bytes); };
 
@@ -1022,44 +1031,44 @@ int main(int argc, char** argv) {
         wSc = std::max(wSc, Ww * Hd * 64 * 64);
     }
 
-    VkDeviceSize oX16 = slot((uint64_t)st[0].TOK * 16 * 2);
-    VkDeviceSize oADA = slot((uint64_t)st[0].TOK * 32 * 4);
-    VkDeviceSize oG1 = slot(maxTokC * 4);
-    VkDeviceSize oG2 = slot(maxTokC * 4);
-    VkDeviceSize oG3 = slot(maxTok4C * 4);
-    VkDeviceSize oG4 = slot(maxTokC * 4);
-    VkDeviceSize oRAW = slot(maxTokC * 4);
-    VkDeviceSize oPOOL = slot(maxTokC * 2);
+    rec.oX16 = slot((uint64_t)st[0].TOK * 16 * 2);
+    rec.oADA = slot((uint64_t)st[0].TOK * 32 * 4);
+    rec.oG1 = slot(maxTokC * 4);
+    rec.oG2 = slot(maxTokC * 4);
+    rec.oG3 = slot(maxTok4C * 4);
+    rec.oG4 = slot(maxTokC * 4);
+    rec.oRAW = slot(maxTokC * 4);
+    rec.oPOOL = slot(maxTokC * 2);
     // window attention set
-    VkDeviceSize oWIN = slot(wWin * 2);
-    VkDeviceSize oPROJW = slot(wProj * 4);
-    VkDeviceSize oQW = slot(wQkv * 2), oKW = slot(wQkv * 2), oVW = slot(wQkv * 2);
-    VkDeviceSize oSCW = slot(wSc * 4), oPRW = slot(wSc * 2);
-    VkDeviceSize oMGW = slot(wQkv * 4), oATW = slot(wWin * 2), oABW = slot(wWin * 4);
+    rec.oWIN = slot(wWin * 2);
+    rec.oPROJW = slot(wProj * 4);
+    rec.oQW = slot(wQkv * 2); rec.oKW = slot(wQkv * 2); rec.oVW = slot(wQkv * 2);
+    rec.oSCW = slot(wSc * 4); rec.oPRW = slot(wSc * 2);
+    rec.oMGW = slot(wQkv * 4); rec.oATW = slot(wWin * 2); rec.oABW = slot(wWin * 4);
     // global set (L6); token count padded to T6P (align 32) for the coopmat
     // score GEMM — softmax masks cols >= T6 (nReal), padded rows carry zeros.
-    VkDeviceSize oHG = slot((uint64_t)T6P * 4096 * 2);
-    VkDeviceSize oPROJG = slot((uint64_t)T6P * 3072 * 4);
-    VkDeviceSize oQG = slot((uint64_t)T6P * 1024 * 2), oKG = slot((uint64_t)T6P * 1024 * 2), oVG = slot((uint64_t)T6P * 1024 * 2);
-    VkDeviceSize oSCG = slot(32ull * T6P * T6P * 4), oPRG = slot(32ull * T6P * T6P * 2);
-    VkDeviceSize oMGG = slot((uint64_t)T6P * 1024 * 4), oATG = slot((uint64_t)T6P * 1024 * 2);
-    VkDeviceSize oABG = slot((uint64_t)T6P * 1024 * 4), oBRG = slot((uint64_t)T6P * 1024 * 4);
+    rec.oHG = slot((uint64_t)T6P * 4096 * 2);
+    rec.oPROJG = slot((uint64_t)T6P * 3072 * 4);
+    rec.oQG = slot((uint64_t)T6P * 1024 * 2); rec.oKG = slot((uint64_t)T6P * 1024 * 2); rec.oVG = slot((uint64_t)T6P * 1024 * 2);
+    rec.oSCG = slot(32ull * T6P * T6P * 4); rec.oPRG = slot(32ull * T6P * T6P * 2);
+    rec.oMGG = slot((uint64_t)T6P * 1024 * 4); rec.oATG = slot((uint64_t)T6P * 1024 * 2);
+    rec.oABG = slot((uint64_t)T6P * 1024 * 4); rec.oBRG = slot((uint64_t)T6P * 1024 * 4);
     // boundary / skip slots
-    VkDeviceSize oB0RAW = slot((uint64_t)st[0].TOK * 32 * 4), oFRS = slot((uint64_t)st[0].TOK * 32 * 2);
-    VkDeviceSize oSKIP0 = slot((uint64_t)st[1].TOK * 32 * 2), oSKIP1 = slot((uint64_t)st[2].TOK * 64 * 2);
-    VkDeviceSize oSKIP2 = slot((uint64_t)st[3].TOK * 128 * 2), oSKIP3 = slot((uint64_t)st[4].TOK * 256 * 2);
-    VkDeviceSize oSS = slot((uint64_t)st[5].TOK * 512 * 2);
-    VkDeviceSize oB4DS = slot((uint64_t)st[2].TOK * 64 * 2), oB22DS = slot((uint64_t)st[5].TOK * 512 * 2);
-    VkDeviceSize oBRIDGE = slot((uint64_t)T6P * 1024 * 2);
-    VkDeviceSize oB38 = slot((uint64_t)T6P * 1024 * 2), oB39 = slot((uint64_t)st[5].TOK * 512 * 2);
-    VkDeviceSize oB48 = slot((uint64_t)st[4].TOK * 256 * 2);
-    VkDeviceSize oB69 = slot((uint64_t)st[1].TOK * 32 * 2);
-    VkDeviceSize oMRG39 = slot((uint64_t)st[5].TOK * 512 * 4);
-    VkDeviceSize oMRG70 = slot((uint64_t)st[0].TOK * 32 * 4), oHEAD = slot((uint64_t)st[0].TOK * 16 * 4);
+    rec.oB0RAW = slot((uint64_t)st[0].TOK * 32 * 4); rec.oFRS = slot((uint64_t)st[0].TOK * 32 * 2);
+    rec.oSKIP0 = slot((uint64_t)st[1].TOK * 32 * 2); rec.oSKIP1 = slot((uint64_t)st[2].TOK * 64 * 2);
+    rec.oSKIP2 = slot((uint64_t)st[3].TOK * 128 * 2); rec.oSKIP3 = slot((uint64_t)st[4].TOK * 256 * 2);
+    rec.oSS = slot((uint64_t)st[5].TOK * 512 * 2);
+    rec.oB4DS = slot((uint64_t)st[2].TOK * 64 * 2); rec.oB22DS = slot((uint64_t)st[5].TOK * 512 * 2);
+    rec.oBRIDGE = slot((uint64_t)T6P * 1024 * 2);
+    rec.oB38 = slot((uint64_t)T6P * 1024 * 2); rec.oB39 = slot((uint64_t)st[5].TOK * 512 * 2);
+    rec.oB48 = slot((uint64_t)st[4].TOK * 256 * 2);
+    rec.oB69 = slot((uint64_t)st[1].TOK * 32 * 2);
+    rec.oMRG39 = slot((uint64_t)st[5].TOK * 512 * 4);
+    rec.oMRG70 = slot((uint64_t)st[0].TOK * 32 * 4); rec.oHEAD = slot((uint64_t)st[0].TOK * 16 * 4);
     // m8b bridge slots: features output (fp32 [TOK0,16]) + head row-DC scratch
     // (kept allocated: descriptor bindings 3/15 reference these ranges)
-    VkDeviceSize oFeatV = slot((uint64_t)st[0].TOK * 16 * 4);
-    VkDeviceSize oHeadDC = slot(1024);
+    rec.oFeatV = slot((uint64_t)st[0].TOK * 16 * 4);
+    rec.oHeadDC = slot(1024);
 
     auto preVec = [&](const std::string &n) { if (poff.count(n)) needVec(n); };
     for (int i = 0; i <= 70; ++i) {
@@ -1094,8 +1103,7 @@ int main(int argc, char** argv) {
     // split into chunks at slot boundaries (weights pack rides chunk 0).
     // BDA addressing resolves a logical arena offset via chunkOf/localOff.
     const VkDeviceSize CHUNK_CAP = 3500ull * 1024 * 1024;
-    struct Chunk { VkDeviceSize start, end; ChainBuf b; uint64_t baseA = 0; };
-    std::vector<Chunk> chunks;
+    // Chunk + chunks declared next to `rec` above (m8b_rec.h); filled here.
     {
         VkDeviceSize curStart = 0, curEnd = packTotal;
         for (auto &sg : ar.segs) {
@@ -1193,7 +1201,7 @@ int main(int argc, char** argv) {
         for (uint64_t j = 0; j < t.numel(); ++j) d[j] = s[j] * sq;
     }
     {
-        uint16_t *d = (uint16_t *)(sp + oHeadW);
+        uint16_t *d = (uint16_t *)(sp + rec.oHeadW);
         std::memset(d, 0, 1024);
         const uint16_t *sg = (const uint16_t *)(sp + poff["block70.layer0.out_gain"]);
         const uint16_t *sc = (const uint16_t *)(sp + poff["block70.layer0.out_conv_weight"]);
@@ -1233,36 +1241,24 @@ int main(int argc, char** argv) {
         exeDirStr = buf;
         exeDirStr.resize(exeDirStr.find_last_of('\\') + 1);
     }
-    ChainPipe pGemm, pGemm1, pCos, pCosW, pSmax, pEw, pPart, pTrans, pGather, pMerge, pFeatpack, pHeadpack, pPool, pUpM;
-    chainMakePipe(c, exeDirStr + "gemm.spv", pGemm);
-    chainMakePipe(c, exeDirStr + "gemm_rn1.spv", pGemm1);
-    chainMakePipe(c, exeDirStr + "cosine.spv", pCos);
-    chainMakePipe(c, exeDirStr + "cosine_win.spv", pCosW);
-    chainMakePipe(c, exeDirStr + "softmax.spv", pSmax);
-    chainMakePipe(c, exeDirStr + "elementwise.spv", pEw);
-    chainMakePipe(c, exeDirStr + "partition.spv", pPart);
-    chainMakePipe(c, exeDirStr + "transpose_we.spv", pTrans);
-    chainMakePipe(c, exeDirStr + "gather_residual.spv", pGather);
-    chainMakePipe(c, exeDirStr + "merge.spv", pMerge);
-    chainMakePipe(c, exeDirStr + "featpack.spv", pFeatpack);
-    chainMakePipe(c, exeDirStr + "headpack.spv", pHeadpack);
-    chainMakePipe(c, exeDirStr + "pool2.spv", pPool);
-    chainMakePipe(c, exeDirStr + "upmerge.spv", pUpM);
+    chainMakePipe(c, exeDirStr + "gemm.spv", rec.pGemm);
+    chainMakePipe(c, exeDirStr + "gemm_rn1.spv", rec.pGemm1);
+    chainMakePipe(c, exeDirStr + "cosine.spv", rec.pCos);
+    chainMakePipe(c, exeDirStr + "cosine_win.spv", rec.pCosW);
+    chainMakePipe(c, exeDirStr + "softmax.spv", rec.pSmax);
+    chainMakePipe(c, exeDirStr + "elementwise.spv", rec.pEw);
+    chainMakePipe(c, exeDirStr + "partition.spv", rec.pPart);
+    chainMakePipe(c, exeDirStr + "transpose_we.spv", rec.pTrans);
+    chainMakePipe(c, exeDirStr + "gather_residual.spv", rec.pGather);
+    chainMakePipe(c, exeDirStr + "merge.spv", rec.pMerge);
+    chainMakePipe(c, exeDirStr + "featpack.spv", rec.pFeatpack);
+    chainMakePipe(c, exeDirStr + "headpack.spv", rec.pHeadpack);
+    chainMakePipe(c, exeDirStr + "pool2.spv", rec.pPool);
+    chainMakePipe(c, exeDirStr + "upmerge.spv", rec.pUpM);
     for (auto &ch : chunks) {
         VkBufferDeviceAddressInfo bdai{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, nullptr, ch.b.buf};
         ch.baseA = vkGetBufferDeviceAddress(c.dev, &bdai);
     }
-    auto chunkOf = [&](VkDeviceSize o) -> int {
-        for (int i = 0; i < (int)chunks.size(); i++)
-            if (o >= chunks[i].start && o < chunks[i].end) return i;
-        return (int)chunks.size() - 1;
-    };
-    auto A = [&](VkDeviceSize o) {
-        int i = chunkOf(o);
-        return chunks[i].baseA + (uint64_t)(o - chunks[i].start);
-    };
-    auto bufOf = [&](VkDeviceSize o) -> VkBuffer { return chunks[chunkOf(o)].b.buf; };
-    auto localOff = [&](VkDeviceSize o) -> VkDeviceSize { return o - chunks[chunkOf(o)].start; };
     std::printf("[chain] 14 pipelines up (10 kernels + featpack/headpack + pool2/upmerge), %zu BDA chunk bases, chunk0 0x%llx\n",
                 chunks.size(), (unsigned long long)chunks[0].baseA);
 
@@ -1483,17 +1479,17 @@ int main(int argc, char** argv) {
     VkImageView viewNr = CreateView(c, imgNr, VK_FORMAT_B8G8R8A8_UNORM);
     {
         writeBuf(setFinal, 2, bufT, Tfloats * 4);
-        writeBufRange(setFinal, 3, bufOf(oFeatV), localOff(oFeatV), (uint64_t)st[0].TOK * 16 * 4);
-        writeBufRange(setFinal, 4, bufOf(oX16), localOff(oX16), (uint64_t)st[0].TOK * 16 * 2);   // features.comp emits the f16 chain input here (was headpack out)
-        writeBufRange(setFinal, 5, bufOf(oHEAD), localOff(oHEAD), (uint64_t)st[0].TOK * 16 * 4);   // compose reads the raw head here
+        writeBufRange(setFinal, 3, rec.bufOf(rec.oFeatV), rec.localOff(rec.oFeatV), (uint64_t)st[0].TOK * 16 * 4);
+        writeBufRange(setFinal, 4, rec.bufOf(rec.oX16), rec.localOff(rec.oX16), (uint64_t)st[0].TOK * 16 * 2);   // features.comp emits the f16 chain input here (was headpack out)
+        writeBufRange(setFinal, 5, rec.bufOf(rec.oHEAD), rec.localOff(rec.oHEAD), (uint64_t)st[0].TOK * 16 * 4);   // compose reads the raw head here
         writeBuf(setFinal, 6, bufFin, (uint64_t)regionW * regionH * 3 * 4);
         writeBuf(setFinal, 7, bufNr, (uint64_t)regionW * regionH * 3 * 4);
         writeBuf(setFinal, 10, bufLastPresented, (uint64_t)W * H * 4);  // feedback cancellation
         writeBuf(setFinal, 11, bufFbStats, 8);                          // settle stats
         writeBuf(setFinal, 12, bufHp, 65536);                           // hpfilter low-res scratch
         writeBuf(setFinal, 13, bufHist, (uint64_t)st[0].TOK * 3 * 4);   // temporal history (OFF on M9b)
-        writeBufRange(setFinal, 14, bufOf(oHEAD), localOff(oHEAD), (uint64_t)st[0].TOK * 16 * 4);  // raw head (temporal, OFF)
-        writeBufRange(setFinal, 15, bufOf(oHeadDC), localOff(oHeadDC), 1024);            // head row-DC (temporal, OFF)
+        writeBufRange(setFinal, 14, rec.bufOf(rec.oHEAD), rec.localOff(rec.oHEAD), (uint64_t)st[0].TOK * 16 * 4);  // raw head (temporal, OFF)
+        writeBufRange(setFinal, 15, rec.bufOf(rec.oHeadDC), rec.localOff(rec.oHeadDC), 1024);            // head row-DC (temporal, OFF)
         writeBuf(setFinal, 16, bufStats, 32);                         // gain-anchor luma stats (written by features)
     }
     writeImg(setFinal, 9, viewFinal);
@@ -1507,730 +1503,11 @@ int main(int argc, char** argv) {
     std::printf("[mem] intermediates device-local; readback host-coherent; blit sets %zu\n", setBlit.size());
 
     // ===================================================================
-    // 11. Chain dispatch machinery (M9 U-Net port — per-scale Stage geometry,
-    //     pool2/upmerge transitions, padded global blocks).
+    // 11. Chain dispatch machinery -> M8bRec (m8b_rec.h/.cpp, Stage 3c):
+    //     recorder, BDA helpers, span audit, submit bisect, hazZone bar.
+    //     Dispatches below route through the instrumented counter.
     // ===================================================================
-    // D5_BAR_MODE diagnostic (B50 device-lost bisect, 2026-10-03):
-    //   0 = per-chunk VkBufferMemoryBarrier, size=VK_WHOLE_SIZE (original)
-    //   1 = single global VkMemoryBarrier (same ordering, coarser scope)
-    //   2 = no barrier at all (ordering broken; diagnosis only)
-    const int barMode = getenv("D5_BAR_MODE") ? atoi(getenv("D5_BAR_MODE")) : 0;
-    auto bar = [&](VkCommandBuffer cb) {
-        static const bool hazOff = getenv("D5_NOHAZ") != nullptr;
-        if (hazZone && !hazOff) { sub.submitChained(); return; }
-        if (barMode == 2) return;
-        if (barMode == 5) {
-            // Interpose a different command class between dispatches: a
-            // timestamp write forces the front-end to re-sync launch state
-            // (probe for a launch-phase hazard between adjacent dispatches).
-            static uint32_t tsq = 0;
-            vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                tsPool, (tsq = (tsq + 1) % 6));
-            VkBufferMemoryBarrier bs[8];
-            uint32_t n = 0;
-            for (auto &ch : chunks) {
-                if (n >= 8) break;
-                bs[n] = {VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER, nullptr,
-                         VK_ACCESS_SHADER_WRITE_BIT,
-                         VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-                         VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
-                         ch.b.buf, 0, VK_WHOLE_SIZE};
-                n++;
-            }
-            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0,
-                                 nullptr, n, bs, 0, nullptr);
-            return;
-        }
-        if (barMode == 4) {
-            vkCmdSetEvent(cb, barEvent, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-            vkCmdWaitEvents(cb, 1, &barEvent, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, nullptr,
-                            0, nullptr, 0, nullptr);
-            return;
-        }
-        if (barMode == 1 || barMode == 3) {
-            VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-            mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-            mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-            const VkPipelineStageFlags st =
-                barMode == 3 ? VK_PIPELINE_STAGE_ALL_COMMANDS_BIT
-                             : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-            vkCmdPipelineBarrier(cb, st, st, 0, 1, &mb, 0, nullptr, 0, nullptr);
-            return;
-        }
-        // M9b: full compute barrier across every arena chunk.
-        VkBufferMemoryBarrier bs[8];
-        uint32_t n = 0;
-        for (auto &ch : chunks) {
-            if (n >= 8) break;
-            bs[n] = {VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER, nullptr,
-                     VK_ACCESS_SHADER_WRITE_BIT,
-                     VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-                     VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
-                     ch.b.buf, 0, VK_WHOLE_SIZE};
-            n++;
-        }
-        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr,
-                             n, bs, 0, nullptr);
-    };
-    // ---- TDR probe: per-dispatch BDA span audit + optional submit bisect.
-    // The B50 driver device-losts on a single dispatch whose accessed BDA
-    // byte-span exceeds ~2 GB (cross-chunk operand pairs do this silently
-    // when the arena splits). spanTag is called at record time with each
-    // dispatch's (ptr, accessedBytes) operand list and reports violations
-    // decoded back to arena chunks. D5_SUBMIT_EVERY=N additionally ends/
-    // submits/waits the frame cmd buffer every N dispatches so a hang or
-    // device-lost localises to the guilty segment even if the cause is not
-    // a span (e.g. a watchdog timeout on a single kernel).
-    long dispSeq = 0;
-    const long submitEvery = getenv("D5_SUBMIT_EVERY") ? atol(getenv("D5_SUBMIT_EVERY")) : 0;
-    // Reverse map BDA -> remaining bytes in the containing arena slot (a
-    // kernel can never legally touch past its slot end, so this clamps the
-    // caller's extent estimates). Weights pack region (before ar.base) has
-    // no seg entry -> falls back to the chunk end, an intentional
-    // over-estimate so cross-chunk weight reads still flag.
-    auto slotRemain = [&](uint64_t bda) -> uint64_t {
-        for (auto &ch : chunks) {
-            if (bda < ch.baseA || bda >= ch.baseA + (ch.end - ch.start)) continue;
-            VkDeviceSize o = ch.start + (VkDeviceSize)(bda - ch.baseA);
-            for (auto &sg : ar.segs)
-                if (o >= sg.first && o < sg.first + sg.second)
-                    return (uint64_t)(sg.first + sg.second - o);
-            return (uint64_t)(ch.end - o);
-        }
-        return 0;
-    };
-    // D5_SEG_MB: split the frame command buffer whenever the segment's
-    // merged BDA footprint (union of operand ranges, slot-clamped) would
-    // exceed N MB. Diagnosis + mitigation for submissions whose aggregate
-    // referenced address space trips the driver.
-    const uint64_t segBudget =
-        (getenv("D5_SEG_MB") ? (uint64_t)atol(getenv("D5_SEG_MB")) : 0) * 1048576ull;
-    std::vector<std::pair<uint64_t, uint64_t>> segRanges;
-    uint64_t segDisp = 0;
-    auto segUnion = [&]() -> uint64_t {
-        if (segRanges.empty()) return 0;
-        auto v = segRanges;
-        std::sort(v.begin(), v.end());
-        uint64_t tot = 0, lo = v[0].first, hi = v[0].second;
-        for (size_t i = 1; i < v.size(); ++i) {
-            if (v[i].first <= hi) hi = std::max(hi, v[i].second);
-            else { tot += hi - lo; lo = v[i].first; hi = v[i].second; }
-        }
-        return tot + hi - lo;
-    };
-    auto segFlush = [&]() {
-        if (!segDisp) return;
-        std::printf("[segf] submit: %llu disp, union %.2f GB\n",
-                    (unsigned long long)segDisp, segUnion() / 1073741824.0);
-        std::fflush(stdout);
-        submitSeg();
-        segRanges.clear();
-        segDisp = 0;
-    };
-    auto spanTag = [&](const char* tag,
-                       std::initializer_list<std::pair<uint64_t, uint64_t>> ops) {
-        uint64_t lo = ~0ull, hi = 0;
-        for (auto &e : ops) {
-            if (!e.first) continue;
-            uint64_t ext = std::min(e.second, slotRemain(e.first));
-            lo = std::min(lo, e.first);
-            hi = std::max(hi, e.first + ext);
-            segRanges.push_back({e.first, e.first + ext});
-        }
-        ++segDisp;
-        if (segBudget && segUnion() > segBudget) segFlush();
-        static const bool spanLog = getenv("D5_SPANTAG") != nullptr;
-        if (!spanLog) return;
-        if (lo == ~0ull || hi - lo <= 1500ull * 1024 * 1024) return;
-        auto dec = [&](uint64_t a) {
-            for (int i = 0; i < (int)chunks.size(); ++i) {
-                uint64_t sz = chunks[i].end - chunks[i].start;
-                if (a >= chunks[i].baseA && a < chunks[i].baseA + sz)
-                    std::printf("c%d+0x%llx", i, (unsigned long long)(a - chunks[i].baseA));
-            }
-        };
-        std::printf("[tdr-span] %s (disp ~%ld) span %.2f GB | lo=0x%llx(", tag, dispSeq + 1,
-                    (hi - lo) / 1073741824.0, (unsigned long long)lo);
-        dec(lo);
-        std::printf(") hi=0x%llx(", (unsigned long long)hi);
-        dec(hi);
-        std::printf(")\n");
-        std::fflush(stdout);
-    };
-    const PFN_vkCmdDispatch realDispatch = vkCmdDispatch;
-    const long splitFrom = getenv("D5_SPLIT_FROM") ? atol(getenv("D5_SPLIT_FROM")) : -1;
-    const long tailMono = getenv("D5_TAIL_MONO") ? atol(getenv("D5_TAIL_MONO")) : -1;
-    long coA = -1, coB = -1;
-    if (getenv("D5_CO")) sscanf(getenv("D5_CO"), "%ld:%ld", &coA, &coB);
-    auto m8bDispatch = [&](VkCommandBuffer cb, uint32_t x, uint32_t y, uint32_t z) {
-        realDispatch(cb, x, y, z);
-        if (cb != cmd) return;
-        ++dispSeq;
-        bool hit;
-        if (tailMono >= 0) {
-            // Singles (waited) for the first tailMono dispatches, then the
-            // remainder rides in one monolithic segment - probes whether all
-            // hazard edges live in the early (large-grid) zone.
-            hit = (dispSeq < tailMono);
-        } else if (coA >= 0) {
-            // Co-submission window probe: every dispatch submits alone EXCEPT
-            // [coA..coB), which rides in one submission. If that window holds
-            // a hang-inducing cluster, the device dies at its flush.
-            hit = !(dispSeq >= coA && dispSeq < coB);
-        } else {
-            // Split policy: an exact boundary at splitFrom (isolates the
-            // prefix), then every submitEvery dispatches from there.
-            hit = (dispSeq == splitFrom) ||
-                  (submitEvery > 0 && dispSeq >= (splitFrom > 0 ? splitFrom : 1) &&
-                   (dispSeq - (splitFrom > 0 ? splitFrom : 0)) % submitEvery == 0);
-        }
-        if (!hit) return;
-        if (submitEvery > 0 || splitFrom > 0 || coA >= 0 || tailMono >= 0) {
-            std::printf("[seg] submit through disp #%ld (union %.2f GB)\n",
-                        dispSeq, segUnion() / 1073741824.0);
-            std::fflush(stdout);
-            segRanges.clear();
-            segDisp = 0;
-            submitSeg();
-        }
-    };
-#define vkCmdDispatch m8bDispatch
-    auto gflags = [&](uint32_t epi, bool narrow) { return (epi << 8) | (narrow ? F_NARROW : 0u); };
-    auto dGemm = [&](VkCommandBuffer &cb, int fam, uint64_t a, uint64_t b, uint64_t c2,
-                     uint32_t m, uint32_t n, uint32_t k, uint32_t batch,
-                     uint32_t sa, uint32_t sb, uint32_t sc,
-                     uint32_t flags, uint32_t lda, uint32_t ldb, uint32_t ldc) {
-        (void)fam;
-        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pGemm.pipe);
-        GemmPush p{a, b, c2, m, n, k, batch, sa, sb, sc, flags, lda, ldb, ldc};
-        vkCmdPushConstants(cb, pGemm.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
-        spanTag("gemm", {{a, (uint64_t)batch * std::max<uint64_t>(sa, (uint64_t)m * lda) * 4},
-                         {b, (uint64_t)batch * std::max<uint64_t>(sb, (uint64_t)k * ldb) * 4},
-                         {c2, (uint64_t)batch * std::max<uint64_t>(sc, (uint64_t)m * ldc) * 4}});
-        vkCmdDispatch(cb, n / 32, m / 16, batch);
-    };
-    auto dEw = [&](VkCommandBuffer &cb, uint64_t a, uint64_t b, uint64_t c2, uint64_t d,
-                   uint64_t h, uint32_t n, uint32_t kind, uint32_t ch) {
-        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pEw.pipe);
-        EWPush p{a, b, c2, d, h, n, kind, ch};
-        vkCmdPushConstants(cb, pEw.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
-        spanTag("ew", {{a, (uint64_t)n * 4}, {b, (uint64_t)n * 4}, {c2, (uint64_t)n * 4},
-                       {d, (uint64_t)n * 4}, {h, (uint64_t)n * 4}});
-        vkCmdDispatch(cb, (n + 255) / 256, 1, 1);
-    };
-    auto dPart = [&](VkCommandBuffer &cb, uint64_t a, uint64_t c2, const Stage &s, uint32_t C,
-                     uint32_t padTop, uint32_t padLeft, uint32_t wp8, bool in16) {
-        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pPart.pipe);
-        uint32_t hp8 = (s.H + padTop + 7) / 8;
-        PartPush p{a, c2, s.H, s.W, C, padTop, padLeft, wp8, in16 ? 1u : 0u};
-        vkCmdPushConstants(cb, pPart.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
-        spanTag("part", {{a, (uint64_t)s.TOK * C * 4},
-                         {c2, (uint64_t)hp8 * wp8 * 64 * C * 4}});
-        vkCmdDispatch(cb, hp8 * wp8 * 64, 1, 1);
-    };
-    auto dGather = [&](VkCommandBuffer &cb, uint64_t a, uint64_t b, uint64_t d, uint64_t c2,
-                       uint64_t h, const Stage &s, uint32_t C, uint32_t padTop, uint32_t padLeft,
-                       uint32_t wp8, bool pub, bool b16) {
-        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pGather.pipe);
-        GatherPush p{a, b, d, c2, h, s.H, s.W, C, padTop, padLeft, wp8,
-                     (pub ? 1u : 0u) | (b16 ? 2u : 0u)};
-        vkCmdPushConstants(cb, pGather.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
-        spanTag("gather", {{a, (uint64_t)s.TOK * C * 8}, {b, (uint64_t)s.TOK * C * 8},
-                           {d, (uint64_t)s.TOK * C * 8}, {c2, (uint64_t)s.TOK * C * 8},
-                           {h, (uint64_t)s.TOK * C * 8}});
-        vkCmdDispatch(cb, s.TOK, 1, 1);
-    };
-    auto dTrans = [&](VkCommandBuffer &cb, uint64_t a, uint64_t c2, uint32_t Ww, uint32_t H) {
-        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pTrans.pipe);
-        TransWePush p{a, c2, Ww, H};
-        vkCmdPushConstants(cb, pTrans.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
-        spanTag("trans", {{a, (uint64_t)Ww * 64 * H * 512}, {c2, (uint64_t)Ww * 64 * H * 512}});
-        vkCmdDispatch(cb, Ww * 64, 1, 1);
-    };
-    auto dCosW = [&](VkCommandBuffer &cb, uint64_t a, uint64_t c2, uint64_t sc,
-                     uint32_t Ww, uint32_t H, uint32_t C, uint32_t kind) {
-        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pCosW.pipe);
-        CosWinPush p{a, c2, sc, Ww * 64 * H, kind, C, H};
-        vkCmdPushConstants(cb, pCosW.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
-        spanTag("cosw", {{a, (uint64_t)Ww * 64 * H * C * 4},
-                         {c2, (uint64_t)Ww * 64 * H * C * 4}, {sc, 8192}});
-        vkCmdDispatch(cb, (Ww * 64 * H + 31) / 32, 1, 1);
-    };
-    auto dCosG = [&](VkCommandBuffer &cb, uint64_t a, uint64_t c2, uint64_t sc, uint32_t kind) {
-        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pCos.pipe);
-        CosPush p{a, c2, sc, T6P * 32, kind};
-        vkCmdPushConstants(cb, pCos.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
-        spanTag("cosg", {{a, (uint64_t)T6P * 32 * 1024 * 4},
-                         {c2, (uint64_t)T6P * 32 * 1024 * 4}, {sc, 8192}});
-        vkCmdDispatch(cb, (T6P * 32 + 31) / 32, 1, 1);
-    };
-    auto dSmaxW = [&](VkCommandBuffer &cb, uint64_t a, uint64_t c2, uint32_t Ww, uint32_t H,
-                      uint64_t bias) {
-        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pSmax.pipe);
-        SMaxPush p{a, c2, Ww * H * 64, 64, 0.0f, bias, H, 0};
-        vkCmdPushConstants(cb, pSmax.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
-        spanTag("smaxw", {{a, (uint64_t)Ww * H * 64 * 64 * 4},
-                          {c2, (uint64_t)Ww * H * 64 * 64 * 4},
-                          {bias, (uint64_t)Ww * H * 64 * 4}});
-        vkCmdDispatch(cb, (Ww * H * 64 + 31) / 32, 1, 1);
-    };
-    auto dSmaxG = [&](VkCommandBuffer &cb, uint64_t a, uint64_t c2) {
-        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pSmax.pipe);
-        SMaxPush p{a, c2, 32 * T6P, T6P, 3.0f, 0, 0, st[6].TOK};
-        vkCmdPushConstants(cb, pSmax.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
-        spanTag("smaxg", {{a, 32ull * T6P * T6P * 4}, {c2, 32ull * T6P * T6P * 4}});
-        vkCmdDispatch(cb, 32 * T6P, 1, 1);
-    };
-    auto dMerge = [&](VkCommandBuffer &cb, uint64_t a, uint64_t b, uint64_t c2, uint64_t d,
-                      uint64_t e, uint64_t h, uint32_t n, uint32_t ch, uint32_t kind) {
-        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pMerge.pipe);
-        MergePush p{a, b, c2, d, e, h, n, ch, kind};
-        vkCmdPushConstants(cb, pMerge.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
-        spanTag("merge", {{a, (uint64_t)n * 4}, {b, (uint64_t)n * 4}, {c2, (uint64_t)n * 4},
-                          {d, (uint64_t)n * 4}, {e, (uint64_t)n * 4}, {h, (uint64_t)n * 4}});
-        vkCmdDispatch(cb, (n + 255) / 256, 1, 1);
-    };
-    struct PoolPush { uint64_t a, c; uint32_t Hin, Win, Wpad, C, n, flags; };
-    auto dPool = [&](VkCommandBuffer &cb, uint64_t a, uint64_t c2, uint32_t Hin, uint32_t Win,
-                     uint32_t Wpad, uint32_t Hpad, uint32_t C, uint32_t flags) {
-        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pPool.pipe);
-        uint32_t n = (Hpad / 2) * (Wpad / 2);
-        PoolPush p{a, c2, Hin, Win, Wpad, C, n, flags};
-        vkCmdPushConstants(cb, pPool.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
-        spanTag("pool", {{a, (uint64_t)Hin * Win * C * 4}, {c2, (uint64_t)Hpad * Wpad * C * 4}});
-        vkCmdDispatch(cb, (n + 255) / 256, 1, 1);
-    };
-    struct UpMergePush {
-        uint64_t a, b, c, d, e, h;
-        uint32_t Wt, Ht, Wl, C, kind;
-    };
-    auto dUpMerge = [&](VkCommandBuffer &cb, uint64_t a, uint64_t b, uint64_t c2, uint64_t sin,
-                        uint64_t cos, uint64_t h, const Stage &tgt, const Stage &low,
-                        uint32_t C, uint32_t kind) {
-        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pUpM.pipe);
-        UpMergePush p{a, b, c2, sin, cos, h, tgt.W, tgt.H, low.W, C, kind};
-        vkCmdPushConstants(cb, pUpM.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
-        spanTag("upmerge", {{a, (uint64_t)tgt.TOK * C * 4}, {b, (uint64_t)tgt.TOK * C * 4},
-                            {c2, (uint64_t)tgt.TOK * C * 4}, {sin, 8192}, {cos, 8192},
-                            {h, (uint64_t)tgt.TOK * C * 4}});
-        vkCmdDispatch(cb, (tgt.TOK + 255) / 256, 1, 1);
-    };
-
-    auto winGeo = [](const Stage &s, int oy, int ox,
-                     uint32_t &padTop, uint32_t &padLeft, uint32_t &Ww, uint32_t &wp8) {
-        padTop = (uint32_t)(-oy);
-        padLeft = (uint32_t)(-ox);
-        uint32_t hp8 = (s.H + padTop + 7) / 8;
-        wp8 = (s.W + padLeft + 7) / 8;
-        Ww = hp8 * wp8;
-    };
-
-    struct Cur { VkDeviceSize off; bool is16; uint32_t C; };
-
-    // ---- window attention shared tail (per-stage geometry) -----------------
-    auto recordWindowAttn = [&](VkCommandBuffer &cb, int famIdx, int idx, const Stage &s,
-                                int C, int H, int fam, int oy, int ox,
-                                VkDeviceSize ffnOff, bool ffn16,
-                                VkDeviceSize rawOff, VkDeviceSize pubOff, bool publish) {
-        uint32_t padTop, padLeft, Ww, wp8;
-        winGeo(s, oy, ox, padTop, padLeft, Ww, wp8);
-        auto lay = [&](const char *fmt) { return tname(fmt, idx); };
-        std::string qkvN = lay(fam == 2 ? "block%d.layer2.qkv_weight" : "block%d.layer0.qkv_weight");
-        std::string scN = lay(fam == 2 ? "block%d.layer2.attn_scale" : "block%d.layer0.attn_scale");
-        std::string biasN = lay(fam == 2 ? "block%d.layer2.attn_bias" : "block%d.layer0.attn_bias");
-        std::string projN = lay(fam == 2 ? "block%d.layer3.projection_weight" : "block%d.layer0.projection_weight");
-        std::string acosN = lay(fam == 2 ? "block%d.layer3.attn_cos_skip" : "block%d.layer0.attn_cos_skip");
-
-        dPart(cb, A(ffnOff), A(oWIN), s, (uint32_t)C, padTop, padLeft, wp8, ffn16);
-        bar(cb);
-        dGemm(cb, famIdx, A(oWIN), A(poff[qkvN]), A(oPROJW), 64, 3 * C, C, Ww,
-              64 * C, 0, 64 * 3 * C, gflags(EPI_NONE, false), C, 3 * C, 3 * C);
-        bar(cb);
-        // Q/K/V read the same oPROJW and write disjoint slots; under a
-        // hazard stage each bar() is a chained submission boundary, so the
-        // transforms are still fully serialized.
-        dCosW(cb, A(oPROJW), A(oQW), A(poff[scN]), Ww, H, C, 0);
-        bar(cb);
-        dCosW(cb, A(oPROJW), A(oKW), A(poff[scN]), Ww, H, C, 1);
-        bar(cb);
-        dCosW(cb, A(oPROJW), A(oVW), A(poff[scN]), Ww, H, C, 2);
-        bar(cb);
-        dGemm(cb, famIdx, A(oQW), A(oKW), A(oSCW), 64, 64, 32, Ww * H,
-              64 * 32, 64 * 32, 64 * 64, gflags(EPI_NONE, false) | F_TRANSPOSE, 32, 32, 64);
-        bar(cb);
-        dSmaxW(cb, A(oSCW), A(oPRW), Ww, H, A(poff[biasN]));
-        bar(cb);
-        dGemm(cb, famIdx, A(oPRW), A(oVW), A(oMGW), 64, 32, 64, Ww * H,
-              64 * 64, 64 * 32, 64 * 32, gflags(EPI_NONE, false), 64, 32, 32);
-        bar(cb);
-        dTrans(cb, A(oMGW), A(oATW), Ww, H);
-        bar(cb);
-        dGemm(cb, famIdx, A(oATW), A(poff[projN]), A(oABW), 64, C, C, Ww,
-              64 * C, 0, 64 * C, gflags(EPI_NONE, false), C, C, C);
-        bar(cb);
-        dGather(cb, A(oABW), A(ffnOff), A(vecOff[acosN]), A(rawOff), A(publish ? pubOff : rawOff),
-                s, (uint32_t)C, padTop, padLeft, wp8, publish, ffn16);
-        bar(cb);
-    };
-
-    // FFN + attention for one window block; writes raw (always) + pub (if publish).
-    auto recordWindowBlock = [&](VkCommandBuffer &cb, int famIdx, int idx, const Stage &s,
-                                 int C, int H, int fam, int oy, int ox, bool publish, Cur &cur,
-                                 VkDeviceSize rawOff, VkDeviceSize pubOff) {
-        const bool hzSave = hazZone;
-        hazZone = true;   // co-executed producer->consumer pairs TDR this
-                          // driver at any stage size - isolate every op
-        uint32_t TOKS = s.TOK;
-        uint32_t G = C / 32;
-        VkDeviceSize x16 = cur.is16 ? cur.off : oG2;
-        if (!cur.is16) { dEw(cb, A(cur.off), 0, 0, 0, A(oG2), TOKS * C, 2, 0); bar(cb); }
-        if (fam == 0) {
-            dGemm(cb, famIdx, A(x16), A(poff[tname("block%d.layer0.weight1", idx)]), A(oG3),
-                  TOKS, 4 * C, C, 1, 0, 0, 0, gflags(EPI_GATE_E4M3, true), C, 4 * C, 4 * C);
-            bar(cb);
-            dGemm(cb, famIdx, A(oG3), A(poff[tname("block%d.layer0.weight2", idx)]), A(oG4),
-                  TOKS, C, 4 * C, 1, 0, 0, 0, gflags(EPI_NONE, false), 4 * C, C, C);
-            bar(cb);
-            if (cur.is16)
-                dEw(cb, A(oG4), A(cur.off), A(oG4), A(vecOff[tname("block%d.layer0.ffn_cos_skip", idx)]), 0,
-                    TOKS * C, 4, C);
-            else
-                dEw(cb, A(oG4), A(cur.off), A(oG4), A(vecOff[tname("block%d.layer0.ffn_cos_skip", idx)]), 0,
-                    TOKS * C, 1, C);
-            bar(cb);
-            recordWindowAttn(cb, famIdx, idx, s, C, H, fam, oy, ox, oG4, false, rawOff, pubOff, publish);
-        } else if (fam == 1) {
-            uint64_t expBase = A(poff[tname("block%d.layer0.ffn_expand_weight", idx)]);
-            uint64_t prjBase = A(poff[tname("block%d.layer0.ffn_branch_projection_weight", idx)]);
-            for (uint32_t oh = 0; oh < G; ++oh) {
-                dGemm(cb, famIdx, A(x16), expBase + (uint64_t)oh * C * 128 * 2, A(oG3),
-                      TOKS, 128, C, 1, 0, 0, 0, gflags(EPI_GATE_E4M3, true), C, 128, 128);
-                bar(cb);
-                dGemm(cb, famIdx, A(oG3), prjBase + (uint64_t)oh * 128 * 32 * 2, A(oG4 + oh * 32 * 2),
-                      TOKS, 32, 128, 1, 0, 0, 0, gflags(EPI_E4M3, true), 128, 32, C);
-                bar(cb);
-            }
-            dGemm(cb, famIdx, A(oG4), A(poff[tname("block%d.layer0.ffn_output_projection_weight", idx)]),
-                  A(oG3), TOKS, C, C, 1, 0, 0, 0, gflags(EPI_NONE, false), C, C, C);
-            bar(cb);
-            dEw(cb, A(oG3), A(cur.off), A(oG3), A(vecOff[tname("block%d.layer0.ffn_cos_skip", idx)]),
-                A(oG2), TOKS * C, 5, C);
-            bar(cb);
-            recordWindowAttn(cb, famIdx, idx, s, C, H, fam, oy, ox, oG2, true, rawOff, pubOff, publish);
-        } else {
-            dGemm(cb, famIdx, A(x16), A(poff[tname("block%d.layer0.first_projection_weight", idx)]),
-                  A(oG2), TOKS, C, C, 1, 0, 0, 0, gflags(EPI_E4M3, true), C, C, C);
-            bar(cb);
-            dGemm(cb, famIdx, A(oG2), A(poff[tname("block%d.layer0.group_expand_weight", idx)]),
-                  A(oG3), TOKS, 256, 64, 8, 64, 64 * 256, TOKS * 256,
-                  gflags(EPI_GATE, true), C, 256, 256);
-            bar(cb);
-            dGemm(cb, famIdx, A(oG3), A(poff[tname("block%d.layer0.group_project_weight", idx)]),
-                  A(oG4), TOKS, 64, 256, 8, TOKS * 256, 256 * 64, 64,
-                  gflags(EPI_NONE, false), 256, 64, C);
-            bar(cb);
-            dEw(cb, A(oG4), 0, 0, 0, A(oG2), TOKS * C, 3, 0);
-            bar(cb);
-            dGemm(cb, famIdx, A(oG2), A(poff[tname("block%d.layer1.weight3", idx)]), A(oG3),
-                  TOKS, C, C, 1, 0, 0, 0, gflags(EPI_NONE, false), C, C, C);
-            bar(cb);
-            dEw(cb, A(oG3), A(cur.off), A(oG3), A(vecOff[tname("block%d.layer1.ffn_cos_skip", idx)]),
-                0, TOKS * C, 4, C);
-            bar(cb);
-            recordWindowAttn(cb, famIdx, idx, s, C, H, fam, oy, ox, oG3, false, rawOff, pubOff, publish);
-        }
-        hazZone = hzSave;
-    };
-
-    // downsample transition: avgpool2 (pad-to-8 optional) -> e4m3 -> gemm w0 -> e4m3
-    auto recordDs = [&](VkCommandBuffer &cb, int famIdx, int idx, int C, int Cn,
-                        VkDeviceSize rawOff, VkDeviceSize outOff,
-                        const Stage &inS, const Stage &outS, bool pad8) {
-        const bool hzSave = hazZone;
-        hazZone = true;
-        uint32_t Hp = pad8 ? pad8u(inS.H) : inS.H;
-        uint32_t Wp = pad8 ? pad8u(inS.W) : inS.W;
-        dPool(cb, A(rawOff), A(oPOOL), inS.H, inS.W, Wp, Hp, (uint32_t)C, 2u);
-        bar(cb);
-        dGemm(cb, famIdx, A(oPOOL), A(poff[tname("block%d.layer0.weight0", idx)]), A(outOff),
-              outS.TOK, (uint32_t)Cn, (uint32_t)C, 1, 0, 0, 0, gflags(EPI_E4M3, true),
-              (uint32_t)C, (uint32_t)Cn, (uint32_t)Cn);
-        bar(cb);
-        hazZone = hzSave;
-    };
-
-    // upsample transition: gemm w0 -> nearest-x2 crop merge with skip*sin -> e4m3
-    auto recordUp = [&](VkCommandBuffer &cb, int famIdx, int idx, int Ci, int Co,
-                        Cur &cur, VkDeviceSize skipOff, VkDeviceSize out16Off,
-                        const Stage &lowS, const Stage &tgtS) {
-        const bool hzSave = hazZone;
-        hazZone = true;
-        dGemm(cb, famIdx, A(cur.off), A(poff[tname("block%d.layer0.weight0", idx)]), A(oG3),
-              lowS.TOK, (uint32_t)Co, (uint32_t)Ci, 1, 0, 0, 0, gflags(EPI_NONE, false),
-              (uint32_t)Ci, (uint32_t)Co, (uint32_t)Co);
-        bar(cb);
-        dUpMerge(cb, A(oG3), A(skipOff), A(oG4), A(vecOff[tname("block%d.layer0.sin", idx)]), 0,
-                 A(out16Off), tgtS, lowS, (uint32_t)Co, 0);
-        bar(cb);
-        cur = {out16Off, true, (uint32_t)Co};
-        hazZone = hzSave;
-    };
-
-    // global block (L6 grid, input f16, padded to T6P rows)
-    auto recordGlobal = [&](VkCommandBuffer &cb, int famIdx, int idx, Cur &cur,
-                            VkDeviceSize rawOff, VkDeviceSize pubOff) {
-        const bool hzSave = hazZone;
-        hazZone = true;   // global blocks died co-executed (TDR at ~762)
-        uint32_t TOKG = T6P;
-        dGemm(cb, famIdx, A(cur.off), A(poff[tname("block%d.layer0.weight", idx)]), A(oHG),
-              TOKG, 4096, 1024, 1, 0, 0, 0, gflags(EPI_GATE_E4M3, true), 1024, 4096, 4096);
-        bar(cb);
-        dGemm(cb, famIdx, A(oHG), A(poff[tname("block%d.layer1.weight", idx)]), A(oG3),
-              TOKG, 1024, 4096, 1, 0, 0, 0, gflags(EPI_NONE, false), 4096, 1024, 1024);
-        bar(cb);
-        dEw(cb, A(oG3), A(cur.off), A(oG3), A(vecOff[tname("block%d.layer1.ffn_cos_skip", idx)]),
-            0, TOKG * 1024, 4, 1024);
-        bar(cb);
-        dEw(cb, A(oG3), 0, 0, 0, A(oG2), TOKG * 1024, 2, 0);
-        bar(cb);
-        dGemm(cb, famIdx, A(oG2), A(poff[tname("block%d.layer2.qkv_weight", idx)]), A(oPROJG),
-              TOKG, 3072, 1024, 1, 0, 0, 0, gflags(EPI_NONE, false), 1024, 3072, 3072);
-        bar(cb);
-        // Q/K/V read the same oPROJG and write disjoint slots; under
-        // hazZone each bar() is a chained submission boundary.
-        dCosG(cb, A(oPROJG), A(oQG), A(vecOff[tname("block%d.layer2.attn_scale.q32", idx)]), 0);
-        bar(cb);
-        dCosG(cb, A(oPROJG), A(oKG), A(vecOff[tname("block%d.layer2.attn_scale.q32", idx)]), 1);
-        bar(cb);
-        dCosG(cb, A(oPROJG), A(oVG), A(vecOff[tname("block%d.layer2.attn_scale.q32", idx)]), 2);
-        bar(cb);
-        dGemm(cb, famIdx, A(oQG), A(oKG), A(oSCG), TOKG, TOKG, 32, 32,
-              32, 32, TOKG * TOKG, gflags(EPI_NONE, false) | F_TRANSPOSE, 1024, 1024, TOKG);
-        bar(cb);
-        dSmaxG(cb, A(oSCG), A(oPRG));
-        bar(cb);
-        dGemm(cb, famIdx, A(oPRG), A(oVG), A(oMGG), TOKG, 32, TOKG, 32,
-              TOKG * TOKG, 32, 32, gflags(EPI_NONE, false), TOKG, 1024, 1024);
-        bar(cb);
-        dEw(cb, A(oMGG), 0, 0, 0, A(oATG), TOKG * 1024, 3, 0);
-        bar(cb);
-        dGemm(cb, famIdx, A(oATG), A(poff[tname("block%d.layer4.projection_weight", idx)]), A(oABG),
-              TOKG, 1024, 1024, 1, 0, 0, 0, gflags(EPI_NONE, false), 1024, 1024, 1024);
-        bar(cb);
-        dEw(cb, A(oABG), A(oG3), A(oBRG), A(vecOff[tname("block%d.layer4.attn_cos_skip", idx)]),
-            A(pubOff), TOKG * 1024, 0, 1024);
-        bar(cb);
-        hazZone = hzSave;
-    };
-
-    auto originOf = [](int blockIndex) -> std::pair<int, int> {
-        int phase;
-        if (blockIndex == 0) phase = 0;
-        else if (blockIndex >= 1 && blockIndex <= 4) phase = blockIndex - 1;
-        else if (blockIndex >= 5 && blockIndex <= 8) phase = blockIndex - 5;
-        else if (blockIndex >= 9 && blockIndex <= 14) phase = blockIndex - 9;
-        else if (blockIndex >= 15 && blockIndex <= 22) phase = blockIndex - 15;
-        else if (blockIndex >= 23 && blockIndex <= 30) phase = blockIndex - 23;
-        else if (blockIndex >= 40 && blockIndex <= 55) phase = blockIndex - (blockIndex < 48 ? 40 : 48);
-        else if (blockIndex >= 56 && blockIndex <= 61) phase = blockIndex - 54;
-        else if (blockIndex >= 62 && blockIndex <= 69) phase = blockIndex - (blockIndex < 66 ? 62 : 66);
-        else if (blockIndex == 70) phase = 1;
-        else return {0, 0};
-        const int dy[4] = {0, -4, 0, -4};
-        const int dx[4] = {0, -4, -4, 0};
-        return {dy[phase % 4], dx[phase % 4]};
-    };
-
-    // ---- the 71-block chain (M9 U-Net walk: per-scale extents, pool/up
-    //      transitions, padded global stage; validated vs torch reference) ----
-    auto recordChain = [&](VkCommandBuffer &cb) {
-        Cur cur{oADA, false, 32};
-
-        // adapter GEMM at L0: x16 @ input_adapter_weight -> fp32
-        dGemm(cb, 0, A(oX16), A(poff["block0.layer0.input_adapter_weight"]), A(oADA),
-              st[0].TOK, 32, 16, 1, 0, 0, 0, gflags(EPI_NONE, false), 16, 32, 32);
-        bar(cb);
-        // b0 (plain, publish=false) at L0; frs = e4m3(raw); pool -> L1 e4m3
-        {
-            Cur c0 = cur;
-            recordWindowBlock(cb, 0, 0, st[0], 32, 1, 0, 0, 0, false, c0, oB0RAW, 0);
-            cur = {oB0RAW, false, 32};
-            dEw(cb, A(oB0RAW), 0, 0, 0, A(oFRS), st[0].TOK * 32, 3, 0);
-            bar(cb);
-            dPool(cb, A(oB0RAW), A(oPOOL), st[0].H, st[0].W, st[0].W, st[0].H, 32, 2u);
-            bar(cb);
-            cur = {oPOOL, true, 32};
-        }
-        for (int i = 1; i <= 3; ++i) {
-            VkDeviceSize out = (i == 3) ? oSKIP0 : oG1;
-            auto o = originOf(i);
-            recordWindowBlock(cb, 0, i, st[1], 32, 1, 0, o.first, o.second, true, cur, oRAW, out);
-            cur = {out, true, 32};
-        }
-        {   // b4 window at L1 (publish=false) + ds to L2 C=64
-            Cur c4 = cur;
-            recordWindowBlock(cb, 0, 4, st[1], 32, 1, 0, -4, 0, false, c4, oRAW, 0);
-            recordDs(cb, 0, 4, 32, 64, oRAW, oB4DS, st[1], st[2], false);
-            cur = {oB4DS, true, 64};
-        }
-
-        // enc L2: b5-7, b8 ds -> L3 C=128
-        for (int i = 5; i <= 7; ++i) {
-            VkDeviceSize out = (i == 7) ? oSKIP1 : oG1;
-            auto o = originOf(i);
-            recordWindowBlock(cb, 1, i, st[2], 64, 2, 1, o.first, o.second, true, cur, oRAW, out);
-            cur = {out, true, 64};
-        }
-        {
-            Cur ci = cur;
-            auto o = originOf(8);
-            recordWindowBlock(cb, 1, 8, st[2], 64, 2, 1, o.first, o.second, false, ci, oRAW, 0);
-            recordDs(cb, 1, 8, 64, 128, oRAW, oG1, st[2], st[3], false);
-            cur = {oG1, true, 128};
-        }
-        // enc L3: b9-13, b14 ds -> L4 C=256
-        for (int i = 9; i <= 13; ++i) {
-            VkDeviceSize out = (i == 13) ? oSKIP2 : oG1;
-            auto o = originOf(i);
-            recordWindowBlock(cb, 1, i, st[3], 128, 4, 1, o.first, o.second, true, cur, oRAW, out);
-            cur = {out, true, 128};
-        }
-        {
-            Cur ci = cur;
-            auto o = originOf(14);
-            recordWindowBlock(cb, 1, 14, st[3], 128, 4, 1, o.first, o.second, false, ci, oRAW, 0);
-            recordDs(cb, 1, 14, 128, 256, oRAW, oG1, st[3], st[4], false);
-            cur = {oG1, true, 256};
-        }
-        // enc L4: b15-21, b22 ds (pad8) -> L5 C=512
-        for (int i = 15; i <= 21; ++i) {
-            VkDeviceSize out = (i == 21) ? oSKIP3 : oG1;
-            auto o = originOf(i);
-            recordWindowBlock(cb, 1, i, st[4], 256, 8, 1, o.first, o.second, true, cur, oRAW, out);
-            cur = {out, true, 256};
-        }
-        {
-            Cur ci = cur;
-            auto o = originOf(22);
-            recordWindowBlock(cb, 1, 22, st[4], 256, 8, 1, o.first, o.second, false, ci, oRAW, 0);
-            recordDs(cb, 1, 22, 256, 512, oRAW, oB22DS, st[4], st[5], true);
-            cur = {oB22DS, true, 512};
-        }
-
-        // bottleneck L5: b23-30 split window
-        for (int i = 23; i <= 30; ++i) {
-            VkDeviceSize out = (i == 30) ? oSS : oG1;
-            auto o = originOf(i);
-            recordWindowBlock(cb, 2, i, st[5], 512, 16, 2, o.first, o.second, true, cur, oRAW, out);
-            cur = {out, true, 512};
-        }
-        {   // b30 bridge: pad8 + pool(f16) -> half -> gemm layer4.weight -> e4m3 at L6
-            uint32_t Hp = pad8u(st[5].H), Wp = pad8u(st[5].W);
-            dPool(cb, A(oSS), A(oPOOL), st[5].H, st[5].W, Wp, Hp, 512, 1u);
-            bar(cb);
-            dGemm(cb, 2, A(oPOOL), A(poff["block30.layer4.weight"]), A(oBRIDGE),
-                  st[6].TOK, 1024, 512, 1, 0, 0, 0, gflags(EPI_E4M3, true), 512, 1024, 1024);
-            bar(cb);
-            if (T6P > st[6].TOK) {   // zero the padded global rows (fill + transfer barrier)
-                vkCmdFillBuffer(cb, bufOf(oBRIDGE), localOff(oBRIDGE) + (uint64_t)st[6].TOK * 1024 * 2,
-                                (uint64_t)(T6P - st[6].TOK) * 1024 * 2, 0);
-                VkBufferMemoryBarrier fb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
-                fb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-                fb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-                fb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                fb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                fb.buffer = bufOf(oBRIDGE);
-                fb.offset = 0;
-                fb.size = VK_WHOLE_SIZE;
-                vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 1, &fb, 0, nullptr);
-            }
-            cur = {oBRIDGE, true, 1024};
-        }
-
-        for (int i = 31; i <= 38; ++i) {
-            VkDeviceSize out = (i == 38) ? oB38 : oG1;
-            recordGlobal(cb, 3, i, cur, oBRG, out);
-            cur = {out, true, 1024};
-        }
-
-        {   // b39: gemm conv_weight -> nearest-x2 crop merge with split_skip*sin -> e4m3
-            dGemm(cb, 4, A(cur.off), A(poff["block39.layer0.conv_weight"]), A(oG3),
-                  st[6].TOK, 512, 1024, 1, 0, 0, 0, gflags(EPI_NONE, false), 1024, 512, 512);
-            bar(cb);
-            dUpMerge(cb, A(oG3), A(oSS), A(oMRG39), A(vecOff["block39.layer0.inp_upsample_sin"]), 0,
-                     A(oB39), st[5], st[6], 512, 0);
-            bar(cb);
-            cur = {oB39, true, 512};
-        }
-        for (int i = 40; i <= 47; ++i) {
-            auto o = originOf(i);
-            recordWindowBlock(cb, 4, i, st[5], 512, 16, 2, o.first, o.second, true, cur, oRAW, oG1);
-            cur = {oG1, true, 512};
-        }
-        {   // b48 up-transition L5->L4 + window branched C=256 H=8
-            recordUp(cb, 4, 48, 512, 256, cur, oSKIP3, oG2, st[5], st[4]);
-            recordWindowBlock(cb, 4, 48, st[4], 256, 8, 1, 0, 0, true, cur, oRAW, oB48);
-            cur = {oB48, true, 256};
-        }
-        for (int i = 49; i <= 55; ++i) {
-            auto o = originOf(i);
-            recordWindowBlock(cb, 4, i, st[4], 256, 8, 1, o.first, o.second, true, cur, oRAW, oG1);
-            cur = {oG1, true, 256};
-        }
-        {   // b56 up L4->L3 + window C=128 H=4
-            recordUp(cb, 4, 56, 256, 128, cur, oSKIP2, oG2, st[4], st[3]);
-            recordWindowBlock(cb, 4, 56, st[3], 128, 4, 1, 0, -4, true, cur, oRAW, oG1); // originOf(56)=(0,-4)
-            cur = {oG1, true, 128};
-        }
-        for (int i = 57; i <= 61; ++i) {
-            auto o = originOf(i);
-            recordWindowBlock(cb, 4, i, st[3], 128, 4, 1, o.first, o.second, true, cur, oRAW, oG1);
-            cur = {oG1, true, 128};
-        }
-        {   // b62 up L3->L2 + window C=64 H=2
-            recordUp(cb, 4, 62, 128, 64, cur, oSKIP1, oG2, st[3], st[2]);
-            recordWindowBlock(cb, 4, 62, st[2], 64, 2, 1, 0, 0, true, cur, oRAW, oG1);
-            cur = {oG1, true, 64};
-        }
-        for (int i = 63; i <= 65; ++i) {
-            auto o = originOf(i);
-            recordWindowBlock(cb, 4, i, st[2], 64, 2, 1, o.first, o.second, true, cur, oRAW, oG1);
-            cur = {oG1, true, 64};
-        }
-        {   // b66 up L2->L1 + window plain C=32 H=1
-            recordUp(cb, 4, 66, 64, 32, cur, oSKIP0, oG2, st[2], st[1]);
-            recordWindowBlock(cb, 4, 66, st[1], 32, 1, 0, 0, 0, true, cur, oRAW, oG1);
-            cur = {oG1, true, 32};
-        }
-        for (int i = 67; i <= 69; ++i) {
-            auto o = originOf(i);
-            VkDeviceSize out = (i == 69) ? oB69 : oG1;
-            recordWindowBlock(cb, 4, i, st[1], 32, 1, 0, o.first, o.second, true, cur, oRAW, out);
-            cur = {out, true, 32};
-        }
-
-        {   // b70: upsample L1->L0, merge up*sin + frs*cos (fp32) -> window plain -> head
-            dUpMerge(cb, A(cur.off), A(oFRS), A(oMRG70), A(vecOff["block70.layer0.inp_merge_sin"]),
-                     A(vecOff["block70.layer0.inp_merge_cos"]), 0, st[0], st[1], 32, 1);
-            bar(cb);
-            Cur c70{oMRG70, false, 32};
-            recordWindowBlock(cb, 5, 70, st[0], 32, 1, 0, -4, -4, false, c70, oRAW, 0);
-            dEw(cb, A(oRAW), 0, 0, 0, A(oG2), st[0].TOK * 32, 2, 0);
-            bar(cb);
-            vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pGemm1.pipe);
-            GemmPush p{A(oG2), A(oHeadW), A(oHEAD), st[0].TOK, 16, 32, 1, 0, 0, 0,
-                       gflags(EPI_NONE, false), 32, 16, 16};
-            vkCmdPushConstants(cb, pGemm1.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
-            spanTag("gemm1", {{A(oG2), (uint64_t)st[0].TOK * 32 * 4}, {A(oHeadW), 1024},
-                              {A(oHEAD), (uint64_t)st[0].TOK * 16 * 4}});
-            vkCmdDispatch(cb, 1, st[0].TOK / 16, 1);
-            bar(cb);
-        }
-    };
+#define vkCmdDispatch rec.m8bDispatch
 
     // ===================================================================
     // 12. LIVE LOOP (m4 verbatim, standin block -> real chain).
@@ -2904,16 +2181,16 @@ int main(int argc, char** argv) {
         }
         {   // ==== REAL DLSS 5 CHAIN (M9 U-Net, 7 scales, full extent) ====
             // featpack: features fp32 [TOK0,16] -> chain input f16 (oX16)
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pFeatpack.pipe);
-            PackPush fp{A(oFeatV), A(oX16), st[0].TOK * 16};
-            vkCmdPushConstants(cmd, pFeatpack.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(fp), &fp);
-            spanTag("featpack", {{A(oFeatV), (uint64_t)st[0].TOK * 16 * 4},
-                                 {A(oX16), (uint64_t)st[0].TOK * 16 * 2}});
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, rec.pFeatpack.pipe);
+            PackPush fp{rec.A(rec.oFeatV), rec.A(rec.oX16), st[0].TOK * 16};
+            vkCmdPushConstants(cmd, rec.pFeatpack.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(fp), &fp);
+            rec.spanTag("featpack", {{rec.A(rec.oFeatV), (uint64_t)st[0].TOK * 16 * 4},
+                                     {rec.A(rec.oX16), (uint64_t)st[0].TOK * 16 * 2}});
             vkCmdDispatch(cmd, (st[0].TOK * 16 + 255) / 256, 1, 1);
             barrierAll();
             vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool, 2);
             // full 71-block DLSSNR U-Net chain (~1400 dispatches)
-            recordChain(cmd);
+            rec.recordChain(cmd);
             vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool, 3);
             vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, tsPool, 4);
         }
@@ -2977,25 +2254,25 @@ int main(int argc, char** argv) {
             // (every slot sits whole inside its chunk by construction).
             struct DbgCp { VkDeviceSize srcOff, dstOff, size; };
             DbgCp dcps[15] = {
-                {oFeatV, dbgOffFeat, (uint64_t)st[0].TOK * 16 * 4},
-                {oHEAD, dbgOffHead, (uint64_t)st[0].TOK * 16 * 4},
-                {oX16, dbgOffX16, (uint64_t)st[0].TOK * 16 * 2},
-                {oADA, dbgOffADA, (uint64_t)st[0].TOK * 32 * 4},
-                {oMRG70, dbgOffMRG, (uint64_t)st[0].TOK * 32 * 4},
-                {oG2, dbgOffG2, (uint64_t)st[0].TOK * 32 * 4},
-                {oHeadW, dbgOffHW, 1024},
-                {oB4DS, dbgOffB4, (uint64_t)st[2].TOK * 64 * 2},
-                {oB22DS, dbgOffB22, (uint64_t)st[5].TOK * 512 * 2},
-                {oB38, dbgOffB38, (uint64_t)T6P * 1024 * 2},
-                {oB48, dbgOffB48, (uint64_t)st[4].TOK * 256 * 2},
-                {oB69, dbgOffB69, (uint64_t)st[1].TOK * 32 * 2},
+                {rec.oFeatV, dbgOffFeat, (uint64_t)st[0].TOK * 16 * 4},
+                {rec.oHEAD, dbgOffHead, (uint64_t)st[0].TOK * 16 * 4},
+                {rec.oX16, dbgOffX16, (uint64_t)st[0].TOK * 16 * 2},
+                {rec.oADA, dbgOffADA, (uint64_t)st[0].TOK * 32 * 4},
+                {rec.oMRG70, dbgOffMRG, (uint64_t)st[0].TOK * 32 * 4},
+                {rec.oG2, dbgOffG2, (uint64_t)st[0].TOK * 32 * 4},
+                {rec.oHeadW, dbgOffHW, 1024},
+                {rec.oB4DS, dbgOffB4, (uint64_t)st[2].TOK * 64 * 2},
+                {rec.oB22DS, dbgOffB22, (uint64_t)st[5].TOK * 512 * 2},
+                {rec.oB38, dbgOffB38, (uint64_t)T6P * 1024 * 2},
+                {rec.oB48, dbgOffB48, (uint64_t)st[4].TOK * 256 * 2},
+                {rec.oB69, dbgOffB69, (uint64_t)st[1].TOK * 32 * 2},
                 {vecOff["block70.layer0.inp_merge_sin"], dbgOffSin, 32 * 4},
                 {vecOff["block70.layer0.inp_merge_cos"], dbgOffCos, 32 * 4},
-                {oFRS, dbgOffFRS, (uint64_t)st[0].TOK * 32 * 2},
+                {rec.oFRS, dbgOffFRS, (uint64_t)st[0].TOK * 32 * 2},
             };
             for (auto &e : dcps) {
-                VkBufferCopy c1{localOff(e.srcOff), e.dstOff, e.size};
-                vkCmdCopyBuffer(cmd, bufOf(e.srcOff), bufDbg, 1, &c1);
+                VkBufferCopy c1{rec.localOff(e.srcOff), e.dstOff, e.size};
+                vkCmdCopyBuffer(cmd, rec.bufOf(e.srcOff), bufDbg, 1, &c1);
             }
             VkMemoryBarrier db{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
             db.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; db.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
@@ -3386,8 +2663,9 @@ int main(int argc, char** argv) {
                          pipeEncode, pipeBlit, pipeFbcancel, pipeHpfilter})
         vkDestroyPipeline(c.dev, p, nullptr);
     vkDestroyPipelineLayout(c.dev, pipeLayout, nullptr);
-    for (ChainPipe* cp : {&pGemm, &pGemm1, &pCos, &pCosW, &pSmax, &pEw, &pPart, &pTrans,
-                          &pGather, &pMerge, &pFeatpack, &pHeadpack, &pPool, &pUpM}) {
+    for (ChainPipe* cp : {&rec.pGemm, &rec.pGemm1, &rec.pCos, &rec.pCosW, &rec.pSmax,
+                          &rec.pEw, &rec.pPart, &rec.pTrans, &rec.pGather, &rec.pMerge,
+                          &rec.pFeatpack, &rec.pHeadpack, &rec.pPool, &rec.pUpM}) {
         vkDestroyPipeline(c.dev, cp->pipe, nullptr);
         vkDestroyPipelineLayout(c.dev, cp->layout, nullptr);
         vkDestroyDescriptorSetLayout(c.dev, cp->dsl, nullptr);
