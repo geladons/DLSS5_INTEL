@@ -66,6 +66,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <io.h>
 #include <string>
 #include <vector>
 
@@ -101,6 +102,7 @@ int main(int argc, char** argv) {
     }
     core.fgModeConfigured = core.fgMode;
     std::string selftest;
+    std::string logPath;
     int benchN = 0;
     uint32_t benchW = 0, benchH = 0;
     // Shader dir: exe-relative by default so the daemon is CWD-independent
@@ -176,10 +178,11 @@ int main(int argc, char** argv) {
             }
         }
         else if (a == "--prof" && i + 1 < argc) core.benchProf = argv[++i];
+        else if (a == "--log" && i + 1 < argc) logPath = argv[++i];
         else {
             std::fprintf(stderr, "usage: m11d [--port N] [--gain F] [--blend F] [--scale F] [--framegen <0|1|2>] [--weights PATH] [--dump] "
                                  "[--intensity F] [--local-tone F] [--local-structure F] [--skin-structure F] [--auto-mask <0|1>] "
-                                 "[--style-index <0|1|2>] [--color-strength F] [--selftest file.bmp] [--bench N WxH [--prof out.csv]]\n");
+                                 "[--style-index <0|1|2>] [--color-strength F] [--log PATH] [--selftest file.bmp] [--bench N WxH [--prof out.csv]]\n");
             return 1;
         }
     }
@@ -337,6 +340,38 @@ int main(int argc, char** argv) {
     }
 
     // ------------------------------------------------------------ daemon ---
+    // Never run silent: an explicit --log PATH (or M11D_LOG env) captures
+    // stdout+stderr directly; with no target and stdout not a console
+    // (detached spawn / DEVNULL / a stale pipe that would otherwise lose
+    // every byte), fall back to %TEMP%\m11d_last.log so ANY serving
+    // daemon leaves a trace. A console run keeps its live output.
+    {
+        if (logPath.empty()) {
+            if (const char* le = std::getenv("M11D_LOG")) logPath = le;
+        }
+        // GetConsoleMode only succeeds on a real console - NUL, pipes,
+        // files and missing handles all mean "no one can see this
+        // output" (isatty cannot tell NUL from a console).
+        HANDLE so = GetStdHandle(STD_OUTPUT_HANDLE);
+        DWORD cmode = 0;
+        const bool console = so && so != INVALID_HANDLE_VALUE
+                             && GetConsoleMode(so, &cmode);
+        if (logPath.empty() && !console) {
+            char tb[MAX_PATH]{};
+            DWORD n = GetEnvironmentVariableA("TEMP", tb, MAX_PATH);
+            if (n && n < MAX_PATH)
+                logPath = std::string(tb) + "\\m11d_last.log";
+        }
+        if (!logPath.empty()) {
+            if (std::freopen(logPath.c_str(), "a", stdout))
+                std::freopen(logPath.c_str(), "a", stderr);
+            // freopen reverts to full buffering on a file - restore
+            // unbuffered writes or a killed daemon loses its last lines.
+            setvbuf(stdout, nullptr, _IONBF, 0);
+            setvbuf(stderr, nullptr, _IONBF, 0);
+            std::printf("[m11d] logging to %s\n", logPath.c_str());
+        }
+    }
     WSADATA wsa{};
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
         std::fprintf(stderr, "[FAIL] WSAStartup\n");

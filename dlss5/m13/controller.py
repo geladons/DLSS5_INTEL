@@ -428,6 +428,7 @@ class M13Controller:
                 "--color-strength", "%.3f" % p30["color_strength"],
                 "--scale", "%.2f" % float(self.cfg.get("scale") or 0.50),
                 "--framegen", "2" if self.cfg.get("frame_gen") else "0",
+                "--log", M11D_LOG,
                 "--weights", self.cfg.get("weights_path")]
         ok, msg = self.daemon.start(args)
         if notes:
