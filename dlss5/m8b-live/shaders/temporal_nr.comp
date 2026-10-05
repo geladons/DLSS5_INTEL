@@ -26,7 +26,8 @@
 // 288-token miniature; at full extent rows carry real content) -> fully
 // deterministic per pixel.
 //
-// push a.x = pixel count (st[0].TOK = netW*netH). Remaining fields unused.
+// push a.x = pixel count (st[0].TOK = netW*netH), c.x = gain-anchor EMA
+// alpha, d.x = histValid (0 on a history-reset frame -> no blend).
 // ============================================================================
 #extension GL_GOOGLE_include_directive : require
 #include "publish.glsl"
@@ -179,6 +180,16 @@ void main() {
                  + LW.y * (h01[1] - col01[1])
                  + LW.z * (h01[2] - col01[2]));
     alpha *= 1.0 - smoothstep(0.02, 0.10, lm);
+
+    // History-reset frame (pc.d.x = histValid = 0: first frame after a
+    // scene cut, stream start, or resetHistory): features substitutes
+    // h01=col01, so the blend would emit pred + alpha*(col01-pred) - the
+    // residual attenuated by up to ~74% for exactly one frame between
+    // full-strength neighbours (the field's menu "flash" / false-positive
+    // cut mid-pan). Skip the blend entirely: outp=pred at full strength
+    // and next frame's history is written from pred, not an attenuated
+    // value.
+    if (pc.d.x == 0) alpha = 0.0;
 
     for (uint c = 0u; c < 3u; ++c) {
         float pred  = clamp(col01[c] + halfr(head[hP + c]) * 0.25, 0.0, 1.0);

@@ -69,6 +69,10 @@ void main() {
                      + W.y * (h01[1] - col01[1])
                      + W.z * (h01[2] - col01[2]));
         alpha *= 1.0 - smoothstep(0.02, 0.10, lm);
+        // History-reset frame (pc.d.x = histValid = 0): temporal_nr skips
+        // the blend outright, so stats[1] must accumulate the unblended
+        // prediction - mirror the same alpha collapse here.
+        if (pc.d.x == 0) alpha = 0.0;
         for (uint c = 0u; c < 3u; ++c) {
             float pred  = clamp(col01[c] + head[p * 4u + c] * 0.25, 0.0, 1.0);
             luma += W[c] * (pred + alpha * (h01[c] - pred));
