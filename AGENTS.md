@@ -162,6 +162,17 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
     first-frame layout by the same distance (fv keeps the clamped copy
     for the blend). temporal_stats.comp mirrors the same gate so
     stats[1] matches the emitted output.
+    temporal_nr then runs a HOLD/RELEASE latch on the emitted value
+    (5d238f6, flicker fix): if the pre-anchor blend candidate is within
+    DB_HOLD=32/255 of current history (same chroma-aware metric), emit =
+    history verbatim - the net's response to its own output fed back as
+    history has gain>1 (period-2 limit cycle, +-4-5 LSB), so ANY
+    proportional deadband/trickle rides the chase forever; only a hard
+    hold pins the loop. Do not soften it into a smoothstep/k_min form -
+    that reopens the chase (measured: ~24-42% movers on identical
+    frames). The emitted value is byte-snapped and stored; the identical
+    kd must stay mirrored in temporal_stats.comp or the gain anchor
+    chases a ghost.
   - Input contract = 16 feature channels exactly (input_adapter_weight
     [16,32]): ch 0-2 noise, 3 const, 4-6 scaled colour, 7-9 history,
     10-14 Phase30 controls, 15 zero. NO motion-vector/depth slots - the
