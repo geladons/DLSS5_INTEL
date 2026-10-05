@@ -5,8 +5,12 @@
 #include "engine.h"
 #include "fp16.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <direct.h>
 #include <new>
 
@@ -30,6 +34,25 @@ bool ChainEngine::init(const EngineConfig& cfg) {
     InitFp16();
     InitSwizzle();
     _mkdir(cfg.dumpDir.c_str());
+
+    // Scene-cut gate (detectSceneCut): threshold on the mean abs luma diff
+    // of the decimated input thumb, normalized to 1.0 (0.15 ~= 38/255 -
+    // the reference content-reset level). D5C_CUT_LIMIT / DLSS5_CUT_LIMIT
+    // override, 0 disables entirely; D5C_DEBUG_CUT=1 logs each detected
+    // cut to stderr. Env is launch-frozen so re-reading per init is just
+    // the baseline snapshot; a re-init (extent/config change) also drops
+    // the stale thumb baseline via cutThumbValid_.
+    cutLimit_ = 0.15f;
+    if (const char* e = std::getenv("D5C_CUT_LIMIT"))
+        cutLimit_ = (float)std::atof(e);
+    else if (const char* e2 = std::getenv("DLSS5_CUT_LIMIT"))
+        cutLimit_ = (float)std::atof(e2);
+    if (cutLimit_ < 0.0f) cutLimit_ = 0.0f;
+    if (const char* d = std::getenv("D5C_DEBUG_CUT"))
+        cutDebug_ = (std::atoi(d) != 0);
+    else
+        cutDebug_ = false;
+    cutThumbValid_ = false;
 
     if (!vkc_.create(cfg.vkCfg)) return false;
     const VkCtx& c = vkc_.vk;
@@ -192,11 +215,58 @@ void ChainEngine::recordChainCached() {
     }
     vkCmdExecuteCommands(cmd_, 1, &chainCmd_);
 }
+// ------------------------------------------------------ scene-cut gate ----
+// Content-based temporal reset (field report: "phantom" ghost trails and
+// colour drift on scene cuts / camera switches - the temporal blend kept
+// dragging stale history across unrelated content; the reference
+// implementation drops history when mean|frame-diff| > ~0.15). Compares a
+// strided 64x36 luma thumb of the CURRENT host input against the previous
+// frame's; mean abs diff above cutLimit_ flags a cut. Pure CPU work on the
+// already-resident input pointer (~2.3K samples), no GPU buffers. Runs
+// regardless of cfg_.temporal so a live re-enable never compares against a
+// stale baseline. The caller resets ONLY framesDone_ (histValid + the
+// stats-slot clear in recordFrame) - FG anchors keep their own staleness
+// logic, and extent changes re-init the engine (fresh thumb baseline).
+bool ChainEngine::detectSceneCut(const uint8_t* bgraIn) {
+    if (cutLimit_ <= 0.0f || !W_ || !H_ || !bgraIn) return false;
+    const uint32_t ax = std::max(1u, W_ / (uint32_t)kCutThumbW);   // grid stride
+    const uint32_t ay = std::max(1u, H_ / (uint32_t)kCutThumbH);
+    uint8_t cur[kCutThumbW * kCutThumbH];
+    uint64_t acc = 0;
+    for (int ty = 0; ty < kCutThumbH; ++ty) {
+        const uint32_t y = std::min(H_ - 1, (uint32_t)ty * ay);
+        const uint8_t* row = bgraIn + (size_t)y * W_ * 4;
+        for (int tx = 0; tx < kCutThumbW; ++tx) {
+            const uint32_t x = std::min(W_ - 1, (uint32_t)tx * ax);
+            const uint8_t* px = row + (size_t)x * 4;                        // BGRA
+            const int l = (px[2] * 77 + px[1] * 150 + px[0] * 29) >> 8;     // BT.601 luma
+            cur[ty * kCutThumbW + tx] = (uint8_t)l;
+            if (cutThumbValid_)
+                acc += (uint64_t)std::abs(l - (int)cutThumb_[ty * kCutThumbW + tx]);
+        }
+    }
+    bool cut = false;
+    if (cutThumbValid_) {
+        const float mean = (float)((double)acc / (double)(kCutThumbW * kCutThumbH) / 255.0);
+        cut = mean > cutLimit_;
+        if (cut && cutDebug_)
+            std::fprintf(stderr, "[chain] scene cut (meandiff=%.3f) - history reset\n",
+                         (double)mean);
+    }
+    std::memcpy(cutThumb_, cur, sizeof(cur));
+    cutThumbValid_ = true;
+    return cut;
+}
+
 // ------------------------------------------------------------ process -----
 bool ChainEngine::processFrame(const uint8_t* bgraIn, uint8_t* bgraOut, long frameIndex,
                                FrameStats* stats) {
     const VkCtx& c = vkc_.vk;
     auto t0 = std::chrono::steady_clock::now();
+    // Scene-cut gate: on a cut bufHist_ holds unrelated output, so drop
+    // framesDone_ BEFORE recording - this frame runs the first-frame path
+    // (histValid=0, stats slots cleared) instead of blending stale history.
+    if (detectSceneCut(bgraIn)) framesDone_ = 0;
     std::memcpy(uploadPtr_, bgraIn, (size_t)W_ * H_ * 4);
 
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};

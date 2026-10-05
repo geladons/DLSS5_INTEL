@@ -48,8 +48,10 @@ d5c::EngineConfig DaemonCore::makeEngineConfig(uint32_t w, uint32_t h,
     // any extent/scale re-init). Same env-leash fix as chain_c_api's
     // temporal_ member.
     cfg.temporal = temporal;
-    // Gain anchor: EMA smoothing of the global output/input gain
-    // (default 0.08). DLSS5_GAIN_LOCK / NR_LAYER_GAIN_LOCK / D5C_GAIN_LOCK.
+    // Gain anchor: EMA smoothing of the global output/input gain.
+    // DEFAULT OFF (EngineConfig.gainLock = 0.0): even the bounded
+    // multiplier is a field-visible modulation - opt-in only via
+    // DLSS5_GAIN_LOCK / NR_LAYER_GAIN_LOCK / D5C_GAIN_LOCK.
     if (const char* genv = std::getenv("DLSS5_GAIN_LOCK")) cfg.gainLock = (float)std::atof(genv);
     else if ((genv = std::getenv("NR_LAYER_GAIN_LOCK")))    cfg.gainLock = (float)std::atof(genv);
     else if ((genv = std::getenv("D5C_GAIN_LOCK")))         cfg.gainLock = (float)std::atof(genv);

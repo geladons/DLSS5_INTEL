@@ -45,8 +45,12 @@ struct EngineConfig {
     // the smoothed value, so network exposure "breathing" and per-frame
     // gain jitter are low-passed away while real lighting changes track
     // within ~1/alpha frames (>40% jumps snap instantly - scene cuts).
-    // 0 disables. Requires temporal_stats.spv alongside temporal_nr.spv.
-    float gainLock = 0.08f;
+    // Requires temporal_stats.spv alongside temporal_nr.spv.
+    // DEFAULT OFF (0.0): even the deadzoned + clamped (0.80..1.25)
+    // residual multiplier is a field-visible per-frame modulation -
+    // opt-in only via DLSS5_GAIN_LOCK / NR_LAYER_GAIN_LOCK /
+    // D5C_GAIN_LOCK (e.g. 0.08 = ~12-frame EMA window).
+    float gainLock = 0.0f;
     VkContextConfig vkCfg{};                           // device selection (headless default)
     bool debugDumps = false;                           // dump live_*.bin on frame index 1
     std::string dumpDir = "out";                       // dump destination
@@ -122,8 +126,10 @@ public:
     // Drop temporal history: the NEXT frame runs the first-frame path
     // (histValid=0, plain compose). Use on stream switches (new game window,
     // a different photo in a batch) so stale history cannot bleed across
-    // unrelated content.
-    void resetHistory() { framesDone_ = 0; resetAnchors(); }
+    // unrelated content. Also re-baselines the scene-cut thumb: the caller
+    // already handled the transition, so the new content must not
+    // double-fire the gate.
+    void resetHistory() { framesDone_ = 0; resetAnchors(); cutThumbValid_ = false; }
 
     uint32_t netW() const { return netW_; }
     uint32_t netH() const { return netH_; }
@@ -151,6 +157,11 @@ private:
     // interpolateAnchors copies the newest processed anchor until a second
     // pair exists.
     void resetAnchors() { anchorCount_ = 0; havePrevProcessed_ = false; }
+    // Scene-cut gate (engine.cpp): compares a strided 64x36 luma thumb of
+    // bgraIn against the previous frame's. True = unrelated content; the
+    // caller drops framesDone_ so the frame runs the first-frame path
+    // (histValid=0) instead of blending stale history.
+    bool detectSceneCut(const uint8_t* bgraIn);
     void recordDebugCopies();     // frame==1 chain-path readback into bufDbg
     void writeDebugDumps();       // map bufDbg, write live_*.{bin,f16}
     void barrierAll();
@@ -216,6 +227,18 @@ private:
                                        // mirrors havePrevProcessed_ (0/1)
     uint64_t framesDone_ = 0;          // frames completed on THIS instance;
                                        // 0 -> first-frame path (no history)
+
+    // Scene-cut gate state (detectSceneCut): a strided 64x36 luma thumb of
+    // the previous host input (~2.3 KB, plain member array - no GPU
+    // buffers). A mean abs diff above cutLimit_ (normalized 0..1, default
+    // 0.15 ~= 38/255 - the reference content-reset level) flags a cut.
+    // Env overrides read in init(): D5C_CUT_LIMIT / DLSS5_CUT_LIMIT
+    // (0 disables), D5C_DEBUG_CUT=1 logs each cut to stderr.
+    static constexpr int kCutThumbW = 64, kCutThumbH = 36;
+    uint8_t cutThumb_[kCutThumbW * kCutThumbH]{};
+    bool cutThumbValid_ = false;       // first frame / after init or reset
+    float cutLimit_ = 0.15f;
+    bool cutDebug_ = false;
     void* uploadPtr_ = nullptr;
     void* rbFinalPtr_ = nullptr;             // persistently mapped readback
 

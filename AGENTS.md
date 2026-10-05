@@ -159,7 +159,8 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
     the input luma sum, temporal_stats the pre-anchor output sum, and
     temporal_nr rescales the per-pixel residual so the frame's mean
     residual follows an EMA (`DLSS5_GAIN_LOCK`/`NR_LAYER_GAIN_LOCK`/
-    `D5C_GAIN_LOCK`, default 0.08, 0=off). Kills DC breathing on pans;
+    `D5C_GAIN_LOCK`, default 0 = OFF - opt-in only; e.g. 0.08).
+    Kills DC breathing on pans;
     >50% residual jumps snap through (scene changes). Per-frame
     correction k is DEADZONED (|dCur-ema| < 6% -> k=1) and clamped to
     0.80..1.25 - never widen the clamp, a wider range re-introduces
