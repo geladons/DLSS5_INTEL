@@ -132,7 +132,7 @@ Stdlib-only Python/Tk application (`m13.pyw` + modules):
 | `gamescan.py` | all-drive scan + Steam `libraryfolders.vdf` + Epic manifests + GOG registry; PE parsing (imports, delay-load directory, wide D3D strings) → real renderer exe + bitness + API; launcher wrappers resolved (`Launcher.exe` → real binary) |
 | `deploy.py` | per-mode DLL deployment with backup/restore; `DeployNeedsElevation` → one UAC prompt runs an elevated copy for Program Files games |
 | `gamelaunch.py` | launches through wrappers with `ENABLE_NR_LAYER=1` |
-| `overlay.py` | frameless in-game panel (hotkey `CTRL+ALT+G`): pause/resume, gain + blend sliders, live status; focus-steal + cursor release against games that re-clip the cursor every frame |
+| `overlay.py` + `overlay_inlayer.py` + `overlay_shm.py` | in-game panel (hotkey `CTRL+ALT+G`): pause/resume, gain + blend sliders, live status. `overlay_mode="inlayer"` (default): a hidden Tk panel is PrintWindow'd into `Local\DLSS5_UI_<pid>` and the Vulkan layer alpha-blends it into the presented frame + captures input via the wndproc subclass (see TECHNICAL.md §6b for the ABI); `"external"` = classic topmost toplevel fallback |
 | `screenmode.py` | start/stop `m8blive`, screen knobs via knob file |
 | `daemonctl.py` | m11d lifecycle, autosetup (weights find, layer registration, daemon start) |
 | `i18n.py` | all UI strings, EN + RU |

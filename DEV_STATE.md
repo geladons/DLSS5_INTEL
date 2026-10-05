@@ -1,5 +1,47 @@
 # DEV_STATE.md - where we are (updated 2026-10-05 by Devin)
 
+## Stage 38: in-layer UI overlay implemented + validated on GTA IV (2026-10-05)
+
+- **Layer side** (`e47d5f8`): `nr_ui.c/.h` - the layer lazily opens
+  `Local\DLSS5_UI_<pid>` once per present and alpha-blends the
+  producer's BGRA panel into `data->mapped` at the single `transfer(1)`
+  choke point, so processed/held/generated/frozen frames all carry the
+  UI without a GPU pipeline (swapchains may lack STORAGE usage). 8-bit
+  BGRA/RGBA formats blend; A2*10 formats skip. Header contract: magic
+  `NUI0`, seqlock, sanity caps, heartbeat freshness (2 s - a dead
+  producer auto-hides the panel and releases input capture). The
+  GDI-guard wndproc doubles as the capture point: visible+fresh UI eats
+  mouse/keyboard messages into a 256-entry ring (move coalescing,
+  buttons, wheel, keys, chars); raw-input deltas track the logical
+  cursor inside the ClipCursor rect and the 32x32 cursor sprite is
+  composited at that position.
+- **m13 side** (`c78c831`): `overlay_shm.py` publishes the same ABI;
+  `overlay_inlayer.py` keeps the Tk panel mapped ON-SCREEN but invisible
+  (`-alpha 0` + `WS_EX_TRANSPARENT` - off-screen toplevels render as
+  all-zero PrintWindow bitmaps), with two Tk-thread `after()` pumps
+  (~15 Hz publish, ~10 ms event drain; PrintWindow is thread-affine so
+  no worker thread). `overlay.py` split: 1669 -> 908 lines plus
+  `overlay_inlayer/hotkey/widgets` modules. `overlay_mode="inlayer"`
+  default, "external" fallback when the shm open fails.
+- **Validated E2E on GTA IV** (x86 daemon path, synthetic ctypes
+  producer): layer logged `shared UI section mapped`, the 260x140
+  magenta panel landed inside the game's real frame at the published
+  client offset - 2275/2275 DDA-sampled pixels magenta; publisher exit
+  -> panel gone inside the 2 s heartbeat window (0/2275). x64+x86 layer
+  builds clean; 27-assert ABI selftest, test_phase30_cache (12) and
+  test_stage5 all green.
+- **NOT yet validated**: the full m13-driven overlay in a live session
+  (Tk bitmap -> layer -> real input clickthrough to the widget tree,
+  cursor sprite, combo remap). The ring/events contract is covered by
+  the agent's 50-check selftest, not by a field run. Next live check:
+  CTRL+ALT+G over GTA IV with the owner watching.
+- **Host quirk, unrelated to this work**: vkcube on this machine never
+  reaches `nr_QueuePresentKHR` (swapchain hook logs, zero per-frame
+  lines, verified with a top-of-function probe on BOTH pre-overlay and
+  current dlls - predates the overlay). GTA IV/DXVK presents through
+  the same hooks fine, so it is a vkcube/DXVK-path difference, not a
+  layer regression. Field validation uses real games.
+
 ## Stage 37: async m11d re-init + never-silent daemon + overlay spec (2026-10-05)
 
 - **Async engine rebuild** (`7463f4e`): engine init (3-14 s of device +
@@ -30,7 +72,10 @@
 
 ### In-layer UI overlay - architecture spec (Steam/Xbox-class)
 
-Current state: the overlay is an external Tk window (`overlay_win32.py`,
+> IMPLEMENTED + field-validated on GTA IV - see Stage 38 above. The
+> spec below is kept as the design record.
+
+The overlay WAS an external Tk window (`overlay_win32.py`,
 `WS_EX_NOACTIVATE`). Documented dead ends: raw-input games expose no OS
 cursor to click it; confined/hidden cursors can't reach its rect;
 exclusive fullscreen buries topmost windows; the m13 mainloop starves

@@ -4,6 +4,23 @@ All notable changes to this project. The day-by-day engineering log with
 measured numbers lives in [DEV_STATE.md](DEV_STATE.md); this file tracks
 user-visible milestones.
 
+## Unreleased — in-layer game overlay (2026-10-05)
+
+### Added
+- **Steam-class in-game overlay (P1)**: the manager's control panel is
+  now composited INSIDE the game frame by the Vulkan layer instead of
+  being an external topmost window. m13 publishes a BGRA bitmap +
+  heartbeat into `Local\DLSS5_UI_<pid>`; the layer alpha-blends it into
+  the staging buffer at the single write-back point, so the panel works
+  identically on x64 in-process and x86 daemon paths and survives
+  processed/held/generated/frozen frames. Mouse/keyboard input is
+  captured by the existing window subclass into a shared event ring,
+  and a synthetic cursor sprite tracks inside the clipped panel rect.
+  Fail-safe: a stalled producer hides the UI inside 2 s and releases
+  input. `overlay_mode="inlayer"` default; "external" fallback.
+- Validated end-to-end on GTA IV: panel pixels verified inside the
+  presented frame via DDA (2275/2275), auto-hide on producer death.
+
 ## Unreleased — universal gain contract + daemon resilience (2026-10-05)
 
 ### Fixed (E2E verified)

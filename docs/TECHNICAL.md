@@ -241,6 +241,41 @@ Phase30 tuning (intensity, local tone, local structure, skin structure,
 auto-mask, style index, color strength) maps 1:1 to NRCT commands 1-11 and
 to `dlss5_set_phase30` / the individual setters in the C ABI.
 
+## 6b. In-layer UI shared-memory ABI (`Local\DLSS5_UI_<pid>`)
+
+The in-game overlay is rendered into the frame by the layer itself -
+no sockets, no pipes. m13 creates a pagefile section named
+`Local\DLSS5_UI_<game pid>`; the layer opens it lazily (one attempt per
+present, `OpenFileMappingA` read/write) and blends the published bitmap
+into `data->mapped` at the single `transfer(1)` write-back point, so
+processed/held/generated/frozen frames all carry the UI. Absent mapping,
+bad magic, hidden flag or stale heartbeat = zero behaviour.
+
+Layout (all little-endian, `nr_ui.h` / `overlay_shm.py`):
+
+| Offset | Field | Size / meaning |
+|---|---|---|
+| 0 | header | 64 B, `u32[16]`: `[0]` magic `0x3049554E` (`NUI0`), `[1]` seq (odd = mid-write), `[2]` bmp w, `[3]` bmp h, `[4]` dst x, `[5]` dst y, `[6]` flags (`1` visible, `2` show cursor), `[7]` cursor x, `[8]` cursor y, `[9]` heartbeat, `[10]` evt head, `[11]` evt tail, `[12]` dropped events |
+| 64 | event ring | 256 x 16 B `{u32 type; i32 a; i32 b; u32 c}`; types 1 move, 2 btn down, 3 btn up, 4 wheel, 5 key down, 6 key up, 7 char |
+| 4160 | cursor sprite | 32 x 32 RGBA straight-alpha |
+| 8256 | bitmap | BGRA straight-alpha, max 1024 x 1200 |
+
+Total size 4,923,456 B. The producer holds `seq` odd while it writes the
+bitmap then bumps it to even; the reader snapshots header fields under a
+bounded seqlock. `heartbeat` must change at least every 2 s
+(`NR_UI_HB_STALE_MS`) - a stalled writer hides the panel and releases
+the input capture rather than leaving a ghost UI that still eats input.
+
+Input capture lives in the existing GDI-guard wndproc
+(`gdi_guard.c`): while `flags&1` and the heartbeat is fresh the panel
+eats mouse/keyboard messages (incl. `WM_INPUT` raw deltas for the
+logical cursor) and pushes them to the ring; the game window is
+ClipCursor'd to the panel rect and the cursor sprite is composited at
+the tracked position. Focus/capture messages always pass through - the
+overlay never manufactures focus transitions for the game. Teardown
+(`nr_unguard_all` on instance destroy/detach) releases ClipCursor and
+unmaps the view.
+
 ## 7. Weights
 
 - Required file: `dlssnr-logical.safetensors` - Safetensors, layout tag
