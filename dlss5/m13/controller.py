@@ -158,6 +158,19 @@ class StateMonitor(threading.Thread):
                     print(msg, flush=True)
                     ok, m2 = ctl.daemon_start()
                     print("[controller] daemon restart: %s %s" % (ok, m2), flush=True)
+                    if ok:
+                        # daemon_start's --framegen only carries the GLOBAL
+                        # flag; the per-game set_fg_mode push from
+                        # launcher.do_daemon died with the old daemon.
+                        # Re-push the mode resolved for the game that is
+                        # actually running (same tri-state logic).
+                        try:
+                            ctl.client.set_fg_mode(
+                                2 if ctl._framegen_resolved(
+                                    exe=active_game
+                                    or ctl._active_game_exe) else 0)
+                        except Exception:
+                            pass
         elif ctl.daemon.running:
             self._x86_empty_ticks = getattr(self, "_x86_empty_ticks", 0) + 1
         else:
@@ -438,6 +451,22 @@ class M13Controller:
     def daemon_stop(self):
         return self.daemon.stop()
 
+    def _framegen_resolved(self, exe=None):
+        """Effective frame-gen flag for the LIVE channels (knob file,
+        daemon re-push): the ACTIVE game's meta["framegen"|"fg"] tri-state
+        wins when its meta carries an explicit override, else the global
+        cfg["frame_gen"]. The knob file is live authority on the x64
+        layer, m12 and the x86 daemon path - writing the raw global there
+        reverted a per-game override on every unrelated knob touch (M1)."""
+        if exe is None:
+            exe = self.snapshot().get("active_game") \
+                or self._active_game_exe
+        if exe:
+            meta = (self.cfg.get("games") or {}).get(exe) or {}
+            if "framegen" in meta or "fg" in meta:
+                return bool(meta.get("framegen", meta.get("fg")))
+        return bool(self.cfg.get("frame_gen"))
+
     def _knob_blob(self, p30):
         """Phase30 dict plus the live engine knobs. The knob file is the
         only channel a RUNNING in-process game can see (its env froze at
@@ -448,7 +477,7 @@ class M13Controller:
         blob["blend"] = float(self.cfg.get("blend") or 1.0)
         blob["scale"] = float(self.cfg.get("scale") or 0.50)
         blob["sharpness"] = float(self.cfg.get("sharpness") or 0.8)
-        blob["frame_gen"] = 1 if self.cfg.get("frame_gen") else 0
+        blob["frame_gen"] = 1 if self._framegen_resolved() else 0
         return blob
 
     # --------------------------------------------------------------- gain --
@@ -570,6 +599,8 @@ class M13Controller:
         enable = bool(enable)
         self.cfg.set("frame_gen", enable)
         os.environ["DLSS5_FRAMEGEN"] = "1" if enable else "0"
+        os.environ["NR_LAYER_FRAMEGEN"] = "1" if enable else "0"
+        os.environ["DLSS5_FG_MODE"] = "2" if enable else "1"
         # Knob file BEFORE any reproc bump (see set_blend).
         write_phase30_knobs(self._knob_blob(self.cfg.get_phase30()))
         if self.daemon.running:

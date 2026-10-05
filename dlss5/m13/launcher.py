@@ -264,11 +264,15 @@ class GameLauncher:
                     # per-game resolution (meta.framegen -> cfg.frame_gen)
                     # selects the actual FG algorithm over NRCT so an x86 game
                     # with framegen:true gets mode 2 even with the global off.
+                    # cmd14 semantics (daemon_core handleCtrlLocked): 0 =
+                    # off - a "1" here left FG dormant-but-enabled (mode 1
+                    # still answers NRN2 requests with generated frames);
+                    # cmd5 restores fgModeConfigured so 0 toggles back up.
                     fg_meta = meta.get("framegen", meta.get("fg"))
                     fg_res = bool(fg_meta) if fg_meta is not None else bool(
                         ctl.cfg.get("frame_gen"))
                     try:
-                        ctl.client.set_fg_mode(2 if fg_res else 1)
+                        ctl.client.set_fg_mode(2 if fg_res else 0)
                     except Exception:
                         pass
                     # Same per-game channel for the temporal feed: the daemon

@@ -429,6 +429,23 @@ static void poll_knob_file(int force)
      * phase30 params the chain polls itself (the layer never sees those
      * pushes). Invalidate the earlier->result mapping either way. */
     g_knobs_changed++;
+    /* frame_gen is the exception to the engine gate below: on the x86
+     * daemon path g_engine stays NULL for the whole session but
+     * g_cur_framegen is still the layer-side FG authority
+     * (is_framegen_enabled drives the cadence and the NRN2/NRN3 choice),
+     * so a mid-session knob write must reach it engine-less or a global
+     * toggle can never flip this path's FG flag. */
+    if (knob_json_value(buf, "frame_gen", tok, sizeof(tok))) {
+        int val = (tok[0] == '1' || !strcmp(tok, "true")) ? 1 : 0;
+        if (val != g_cur_framegen) {
+            g_cur_framegen = val;
+            if (g_engine && pfn_dlss5_set_framegen) {
+                pfn_dlss5_set_framegen(g_engine, val);
+                nr_log("[nr_layer] live framegen updated: %d (knob file)",
+                       val);
+            }
+        }
+    }
     /* The value pushes below need the in-process engine; on the daemon
      * path the watch above alone carries the knob-change signal. */
     if (!g_engine) return;
@@ -478,17 +495,6 @@ static void poll_knob_file(int force)
             if (pfn_dlss5_set_sharpness) {
                 pfn_dlss5_set_sharpness(g_engine, val);
                 nr_log("[nr_layer] live sharpness updated: %.2f (knob file)",
-                       val);
-            }
-        }
-    }
-    if (knob_json_value(buf, "frame_gen", tok, sizeof(tok))) {
-        int val = (tok[0] == '1' || !strcmp(tok, "true")) ? 1 : 0;
-        if (val != g_cur_framegen) {
-            g_cur_framegen = val;
-            if (pfn_dlss5_set_framegen) {
-                pfn_dlss5_set_framegen(g_engine, val);
-                nr_log("[nr_layer] live framegen updated: %d (knob file)",
                        val);
             }
         }

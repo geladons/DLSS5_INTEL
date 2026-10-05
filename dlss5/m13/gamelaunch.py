@@ -49,6 +49,34 @@ def _cfg_value(cfg, key, default):
     return default
 
 
+def _registered_key(games, exe_path):
+    """Registered games-dict key owning this spawn target.
+
+    The spawn target can be a launch_exe wrapper (LaunchGTAIV.exe) whose
+    path is NOT a games key - the per-game meta (framegen/temporal/
+    phase30/arch) lives under the real exe the launcher registered.
+    Lookup by exe_path alone misses and silently falls back to globals.
+    Direct hit wins; else find the entry whose launch_exe IS the target."""
+    if not isinstance(games, dict) or exe_path in games:
+        return exe_path
+    try:
+        want = os.path.normcase(os.path.normpath(exe_path))
+    except (TypeError, ValueError):
+        return exe_path
+    for key, meta in games.items():
+        if not isinstance(meta, dict):
+            continue
+        wrap = meta.get("launch_exe")
+        if not wrap or not isinstance(wrap, str):
+            continue
+        try:
+            if os.path.normcase(os.path.normpath(wrap)) == want:
+                return key
+        except (TypeError, ValueError):
+            continue
+    return exe_path
+
+
 def _flag_exists(path):
     return os.path.exists(path)
 
@@ -311,10 +339,18 @@ def launch_game(exe_path, mode, scale=None, gain=None, blend=None, cfg=None, sha
 
     fg_val = False
     meta = {}
+    # Per-game overrides live under the REGISTERED key; exe_path is the
+    # spawn target, which may be a launch_exe wrapper (M2 fix - the same
+    # key launcher used at register, not the spawn target).
+    game_key = exe_path
     if cfg is not None and hasattr(cfg, "get"):
-        meta = (cfg.get("games") or {}).get(exe_path) or {}
+        games = cfg.get("games") or {}
+        game_key = _registered_key(games, exe_path)
+        meta = games.get(game_key) or {}
     elif isinstance(cfg, dict):
-        meta = (cfg.get("games") or {}).get(exe_path) or {}
+        games = cfg.get("games") or {}
+        game_key = _registered_key(games, exe_path)
+        meta = games.get(game_key) or {}
     # Per-game "framegen"/"fg" flag overrides the global switch. Measured on
     # the x86 daemon path (GTA IV, DDA-verified): residual-transfer FG only
     # transfers detail for motion <= ~4 px/frame; real gameplay motion emits
@@ -360,11 +396,9 @@ def launch_game(exe_path, mode, scale=None, gain=None, blend=None, cfg=None, sha
     # FG runs in-process inside the x64 engine; on the x86 TCP/daemon path
     # the daemon's resident engine answers NRN2 transfer requests instead
     # (degrades to a full process until a prev pair exists).
-    if fg_val and cfg is not None and hasattr(cfg, "get"):
-        meta = (cfg.get("games") or {}).get(exe_path) or {}
-        if isinstance(meta, dict) and meta.get("arch") == "x86":
-            print("[launch] framegen on x86: daemon residual-transfer path",
-                  flush=True)
+    if fg_val and isinstance(meta, dict) and meta.get("arch") == "x86":
+        print("[launch] framegen on x86: daemon residual-transfer path",
+              flush=True)
 
     if scale is not None:
         s_val = str(scale)
@@ -386,7 +420,7 @@ def launch_game(exe_path, mode, scale=None, gain=None, blend=None, cfg=None, sha
 
     p30 = None
     if cfg is not None and hasattr(cfg, "get_phase30"):
-        p30 = cfg.get_phase30(exe_path)
+        p30 = cfg.get_phase30(game_key)
     elif cfg is not None and hasattr(cfg, "get"):
         p30 = {
             # intensity is the Phase30 compose mix - never seeded from
@@ -418,10 +452,8 @@ def launch_game(exe_path, mode, scale=None, gain=None, blend=None, cfg=None, sha
     # Weights + shader locations for the in-process d5c_chain (see the
     # engine_env block above) - every injection mode, unconditionally.
     arch = "x64"
-    if cfg is not None and hasattr(cfg, "get"):
-        gmeta = (cfg.get("games") or {}).get(exe_path) or {}
-        if isinstance(gmeta, dict) and gmeta.get("arch"):
-            arch = gmeta["arch"]
+    if isinstance(meta, dict) and meta.get("arch"):
+        arch = meta["arch"]
     ee = engine_env(cfg, mode, arch)
     env.update(ee)
     print("[launch] game=%s env_weights=%s env_shaders=%s"

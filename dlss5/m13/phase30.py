@@ -49,7 +49,8 @@ PHASE30_DEFAULTS = {
     "blend": 1.0,
     "scale": 1.0,
     "sharpness": 0.8,
-    "frame_gen": 1,
+    "frame_gen": 0,         # match config default False: a writer omitting
+                            # the key must not silently turn FG ON
 }
 
 # The 7 compose-side vendor knobs (the Phase30Panel set). Everything else in
