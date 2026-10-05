@@ -151,12 +151,17 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
     kills cursor trails, stale-region drag, and the bright-patch
     relaxation oscillator a scalar reject gate produced (field report
     2026-10-03). Do NOT reintroduce a scalar alpha gate - it oscillates.
-    temporal_nr additionally gates alpha PER PIXEL by the luma distance
-    |luma(hist01) - luma(col01)| (hold_floor port): alpha *=
-    1-smoothstep(0.02,0.10,lm) - still pixels keep the pull, moved pixels
-    reconstruct from the net alone (no trails at edges the AABB can't
-    tighten). temporal_stats.comp mirrors the same gate so stats[1]
-    matches the emitted output.
+    temporal_nr additionally gates alpha PER PIXEL (hold_floor port):
+    alpha *= fv[15] - a factor features.comp computes on the UNCLAMPED
+    history vs the current colour, max(BT601 luma dist, 2.5 * max channel
+    dist) through the same soft 1-smoothstep(0.02,0.10) band - still
+    pixels keep the pull, moved pixels and isoluminant chroma drifts
+    reconstruct from the net alone. fv[15] is 0 on history-reset frames
+    (features' histValid), collapsing the blend to the full-strength
+    prediction there. x16 ch7-9 are additionally mixed toward the
+    first-frame layout by the same distance (fv keeps the clamped copy
+    for the blend). temporal_stats.comp mirrors the same gate so
+    stats[1] matches the emitted output.
   - Input contract = 16 feature channels exactly (input_adapter_weight
     [16,32]): ch 0-2 noise, 3 const, 4-6 scaled colour, 7-9 history,
     10-14 Phase30 controls, 15 zero. NO motion-vector/depth slots - the
