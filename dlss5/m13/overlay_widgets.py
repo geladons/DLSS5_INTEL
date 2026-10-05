@@ -161,9 +161,11 @@ def build_panel(ov):
         compact=True)
     ov.p30_panel.pack(fill="x", padx=8, pady=6)
 
-    # Legacy variables for compatibility
+    # Legacy variables for compatibility. ov.var is the GAIN knob's var
+    # (_debounced_push -> ctl.set_gain, synced from daemon_gain): it must
+    # seed from "gain" (residual multiplier), never "intensity".
     ov.var = tk.DoubleVar(
-        value=float(ov.ctl.cfg.get("intensity") if ov.ctl.cfg.get("intensity") is not None else 1.0))
+        value=float(ov.ctl.cfg.get("gain") if ov.ctl.cfg.get("gain") is not None else 1.0))
     ov._suppress_scale = None
     ov._scale_dragging = False
 

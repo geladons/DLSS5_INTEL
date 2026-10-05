@@ -389,7 +389,9 @@ def launch_game(exe_path, mode, scale=None, gain=None, blend=None, cfg=None, sha
         p30 = cfg.get_phase30(exe_path)
     elif cfg is not None and hasattr(cfg, "get"):
         p30 = {
-            "intensity": cfg.get("intensity", cfg.get("gain", 1.0)),
+            # intensity is the Phase30 compose mix - never seeded from
+            # "gain" (the residual multiplier); separate knobs.
+            "intensity": cfg.get("intensity", 1.0),
             "local_tone": cfg.get("local_tone", 1.0),
             "local_structure": cfg.get("local_structure", 1.0),
             "skin_structure": cfg.get("skin_structure", -1.0),
