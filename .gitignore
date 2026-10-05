@@ -41,3 +41,4 @@ nul
 
 # Agent knowledge vault (Obsidian, local-only)
 notes/
+.obsidian/

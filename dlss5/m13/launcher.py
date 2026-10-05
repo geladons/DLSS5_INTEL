@@ -28,6 +28,17 @@ from .processes import find_pid
 STALE_GUARD_S = 180.0
 
 
+def _screen_extent():
+    """Primary display resolution: the extent a fullscreen game will
+    present at when launch_args carry no explicit -width/-height."""
+    try:
+        import ctypes
+        return (int(ctypes.windll.user32.GetSystemMetrics(0)),
+                int(ctypes.windll.user32.GetSystemMetrics(1)))
+    except Exception:
+        return 1920, 1080
+
+
 class GameLauncher:
     """Single responsibility: run one launch as explicit steps."""
 
@@ -246,10 +257,9 @@ class GameLauncher:
                     ah = re.search(r"-height\s+(\d+)", raw_args)
                     if am and ah:
                         ww, wh = int(am.group(1)), int(ah.group(1))
-                    if ww > 0 and wh > 0:
-                        okw = ctl.client.warmup(ww, wh)
-                    else:
-                        okw = ctl.client.warmup()
+                    if not (ww > 0 and wh > 0):
+                        ww, wh = _screen_extent()
+                    okw = ctl.client.warmup(ww, wh)
                     # The daemon's --framegen arg only knows the GLOBAL flag;
                     # per-game resolution (meta.framegen -> cfg.frame_gen)
                     # selects the actual FG algorithm over NRCT so an x86 game

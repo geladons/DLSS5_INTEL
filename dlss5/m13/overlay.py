@@ -336,7 +336,9 @@ class ControlOverlay:
         inside OUR overlay holds focus."""
         try:
             w = self.win.focus_get()
-        except tk.TclError:
+        except (tk.TclError, KeyError):
+            # KeyError: focus sits on a Tk-untracked window (ttk
+            # 'popdown', foreign widget) - nametowidget can't resolve it.
             w = None
         if w is not None:
             try:

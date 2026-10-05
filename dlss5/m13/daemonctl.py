@@ -15,6 +15,7 @@
 import os
 import socket
 import struct
+import time
 
 MAGIC_CTRL = 0x5443524E          # "NRCT", little-endian uint32
 MAGIC_PLAIN = 0x304E524E         # "NRN0" frame-request magic (see m11d)
@@ -152,28 +153,45 @@ class M11dClient:
             return False
 
     def warmup(self, w=1920, h=1080, timeout=120.0):
-        """Drive one NRN0 frame through the daemon so its lazy engine init
-        (seconds of weight load + pipeline build) happens NOW, not inside
-        the game's first presents where it reads as a raw-frame burst.
-        The engine binds the request extent, so callers should pass the
-        extent the game will actually present at (launch-args -width/
-        -height, else the desktop default); a mismatch just means the
-        daemon re-inits once on the first real frame - no worse than
-        today. Returns True on a full reply; False on any transport
-        failure - callers treat it as a soft hint, never a blocker."""
+        """Drive NRN0 frames through the daemon until one is actually
+        processed, so the lazy engine init (seconds of weight load +
+        pipeline build) happens NOW, not inside the game's first
+        presents where it reads as a raw-frame burst. Mid-build the
+        daemon kicks the async build and closes the connection WITHOUT
+        draining the payload, so a single attempt always reports short
+        - the first attempt still kicks the build, then we retry until
+        a full frame reply proves the engine is hot (the definitive
+        warm signal, unlike STATUS which also reports ok=1 while a
+        build is pending). The engine binds the request extent, so
+        callers should pass the extent the game will actually present
+        at (launch-args -width/-height, else the desktop default); a
+        mismatch just means the daemon re-inits once on the first real
+        frame - no worse than today. Returns True on a full reply;
+        False on timeout or persistent transport failure - callers
+        treat it as a soft hint, never a blocker."""
         frame_len = w * h * 4
-        try:
-            with socket.create_connection((self.host, self.port),
-                                          timeout=15.0) as s:
-                s.settimeout(timeout)
-                s.sendall(struct.pack("<4I", MAGIC_PLAIN, w, h, 44))
-                s.sendall(b"\x80" * frame_len)
-                got = 0
-                while got < frame_len:
-                    chunk = s.recv(min(65536, frame_len - got))
-                    if not chunk:
-                        break
-                    got += len(chunk)
-            return got == frame_len
-        except OSError:
-            return False
+        deadline = time.time() + timeout
+        payload = b"\x80" * frame_len
+        hdr = struct.pack("<4I", MAGIC_PLAIN, w, h, 44)
+        while time.time() < deadline:
+            try:
+                with socket.create_connection((self.host, self.port),
+                                              timeout=15.0) as s:
+                    s.settimeout(min(15.0, max(1.0,
+                                               deadline - time.time())))
+                    s.sendall(hdr)
+                    s.sendall(payload)
+                    got = 0
+                    while got < frame_len:
+                        chunk = s.recv(min(65536, frame_len - got))
+                        if not chunk:
+                            break
+                        got += len(chunk)
+                if got == frame_len:
+                    return True
+            except OSError:
+                pass
+            # Engine build pending (or transport hiccup): the request
+            # already re-armed the pending extent, retry shortly.
+            time.sleep(0.5)
+        return False
