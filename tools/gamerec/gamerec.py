@@ -108,16 +108,34 @@ def cmd_record(a):
     region = f"{x},{y},{w},{h}"
     print(f"[gamerec] effective crop={region}")
 
-    rec_cmd = [DDAREC, str(a.sec), str(a.fps), region, "-"]
+    # Pipe mode glitches at high fps (ddarec fwrite splits across the pipe
+    # and ffmpeg rawvideo sees a torn packet - observed at 120 fps: a short
+    # packet poisons every frame after it). Default to a two-pass raw file
+    # when fps > 60; --pipe forces the old path, --keep-raw keeps the .raw.
+    via_file = (a.fps > 60 and not a.pipe) or a.via_raw
+    raw_path = a.out + ".raw" if via_file else None
+
+    rec_cmd = [DDAREC, str(a.sec), str(a.fps), region,
+               raw_path if via_file else "-"]
     ff_cmd = [
         ff, "-y", "-hide_banner", "-loglevel", "warning",
         "-f", "rawvideo", "-pix_fmt", "bgra", "-s", f"{w}x{h}", "-r", str(a.fps),
-        "-i", "-",
+        "-i", raw_path if via_file else "-",
         "-c:v", a.codec, "-b:v", a.bitrate, "-pix_fmt", "nv12",
         a.out,
     ]
     print("[gamerec] rec :", " ".join(rec_cmd))
     print("[gamerec] enc :", " ".join(ff_cmd))
+
+    if via_file:
+        with open(os.devnull, "wb") as dn:
+            rec = subprocess.run(rec_cmd, stdout=dn, stderr=subprocess.PIPE)
+        print(rec.stderr.decode("utf-8", "replace").strip())
+        enc = subprocess.run(ff_cmd)
+        if not a.keep_raw and os.path.exists(raw_path):
+            os.remove(raw_path)
+        print(f"[gamerec] wrote {a.out} rc_rec={rec.returncode} rc_enc={enc.returncode}")
+        return
 
     rec = subprocess.Popen(rec_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     enc = subprocess.Popen(ff_cmd, stdin=rec.stdout, stderr=subprocess.STDOUT)
@@ -208,6 +226,11 @@ def main():
     r.add_argument("--window", default=None, help="exe name -> capture its window rect")
     r.add_argument("--codec", default="h264_qsv")
     r.add_argument("--bitrate", default="20M")
+    r.add_argument("--via-raw", action="store_true",
+                   help="two-pass record via .raw file (auto-on above 60 fps)")
+    r.add_argument("--keep-raw", action="store_true")
+    r.add_argument("--pipe", action="store_true",
+                   help="force the stdout-pipe path even above 60 fps")
     r.set_defaults(fn=cmd_record)
 
     az = sub.add_parser("analyze")
