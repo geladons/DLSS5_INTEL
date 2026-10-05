@@ -10,9 +10,12 @@
 # layer's wndproc filter EATS the game's window input and posts it to the
 # shared event ring; a ~10 ms Tk-side drain pump turns those events back
 # into Tk events on the panel widgets - hit-testing comes for free from
-# the widget tree. All foreground/cursor machinery is external-only:
-# in-layer never moves the OS cursor and never shows a visible window on
-# the desktop. ControlOverlay (overlay.py) owns the lifecycle via the
+# the widget tree. The OS cursor never draws over the game (the layer
+# composites the sprite and eats the game's WM_SETCURSOR); the m13-side
+# input guard (overlay_input.py) still runs in-layer to keep the game's
+# ClipCursor/SetCapture released - a confining game would otherwise
+# starve the wndproc of the very input this module injects.
+# ControlOverlay (overlay.py) owns the lifecycle via the
 # `self._il` back-reference - InLayerUI(overlay) reaches back into the
 # overlay object for win/ctl/cfg/dst, matching the dispatch contract.
 # ============================================================================
@@ -208,12 +211,15 @@ class InLayerUI:
         return True
 
     def set_frame_flags(self, covers_screen):
-        """Framed-mode flags for the armed session: the sprite cursor only
-        where the OS cursor is hidden (a game covering its monitor),
-        and ClipCursor only for that same case - the band covers the
-        client rect, so clipping a WINDOWED game would jail the pointer
-        inside it while the hole still passes input through."""
-        self.shm.set_cursor_visible(bool(covers_screen))
+        """Framed-mode flags for the armed session. The cursor sprite is
+        ALWAYS on while the overlay is visible: the layer eats the game's
+        WM_SETCURSOR (nr_ui.c) so no OS cursor draws over the frame, and a
+        game that hides/confines it anyway (GTA IV-class) would otherwise
+        leave the owner cursor-blind on a windowed run - the field report.
+        ClipCursor only when the game covers its monitor: the band covers
+        the client rect, so clipping a WINDOWED game would jail the
+        pointer inside it while the hole still passes input through."""
+        self.shm.set_cursor_visible(True)
         self.shm.set_no_clip(not covers_screen)
 
     def disarm(self):

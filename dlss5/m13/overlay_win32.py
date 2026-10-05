@@ -100,6 +100,10 @@ _u32.ReleaseCapture.argtypes = []
 _u32.ReleaseCapture.restype = wintypes.BOOL
 _u32.ClipCursor.argtypes = [wintypes.LPRECT]
 _u32.ClipCursor.restype = wintypes.BOOL
+_u32.GetClipCursor.argtypes = [wintypes.LPRECT]
+_u32.GetClipCursor.restype = wintypes.BOOL
+_u32.GetSystemMetrics.argtypes = [ctypes.c_int]
+_u32.GetSystemMetrics.restype = ctypes.c_int
 _u32.ShowCursor.argtypes = [wintypes.BOOL]
 _u32.ShowCursor.restype = ctypes.c_int
 _u32.SetCursor.argtypes = [ctypes.c_void_p]
@@ -264,8 +268,13 @@ def fix_popdown(combo):
 # real focus; overlay_focus handles that separately).
 GWLP_WNDPROC = -4
 WM_MOUSEACTIVATE = 0x0021
+WM_SETCURSOR = 0x0020
 MA_NOACTIVATE = 3
 SPI_GETWORKAREA = 0x0030
+SM_XVIRTUALSCREEN = 76
+SM_YVIRTUALSCREEN = 77
+SM_CXVIRTUALSCREEN = 78
+SM_CYVIRTUALSCREEN = 79
 _WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, wintypes.HWND,
                               wintypes.UINT, wintypes.WPARAM,
                               wintypes.LPARAM)
@@ -290,6 +299,23 @@ def subclass_noactivate(hwnd):
         def _proc(h, m, w, l):
             if m == WM_MOUSEACTIVATE:
                 return MA_NOACTIVATE
+            if m == WM_SETCURSOR:
+                # Let Tk (or DefWindowProc's class-cursor answer) reply
+                # first so per-widget cursors (hand2 on buttons, xterm
+                # on entries) survive; when the chain declines, answer
+                # with a real arrow ourselves - a game that hid/confined
+                # the cursor otherwise leaves nothing visible over the
+                # band. TRUE return = handled, no further default answer.
+                try:
+                    r = _u32.CallWindowProcW(prev, h, m, w, l)
+                except Exception:
+                    r = 0
+                if r:
+                    return r
+                arrow = _u32.LoadCursorW(None, IDC_ARROW)
+                if arrow:
+                    _u32.SetCursor(arrow)
+                return 1
             try:
                 return _u32.CallWindowProcW(prev, h, m, w, l)
             except Exception:
@@ -359,20 +385,47 @@ def _show_noactivate(hwnd):
         pass
 
 
-def _free_cursor(target_hwnd=None):
+def cursor_clip():
+    """Current ClipCursor rect (l, t, r, b) or None when the pointer is
+    NOT confined. GetClipCursor always succeeds - an unconfined pointer
+    reports the virtual-desktop rect - so 'confined' = a returned rect
+    that does not cover the whole virtual desktop. Read-only probe used
+    by the input guard for its sparse release log."""
+    rc = wintypes.RECT()
+    try:
+        if not _u32.GetClipCursor(ctypes.byref(rc)):
+            return None
+        l = _u32.GetSystemMetrics(SM_XVIRTUALSCREEN)
+        t = _u32.GetSystemMetrics(SM_YVIRTUALSCREEN)
+        w = _u32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
+        h = _u32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
+        if (rc.left <= l and rc.top <= t
+                and rc.right >= l + w and rc.bottom >= t + h):
+            return None                        # desktop-sized = unconfined
+        return (rc.left, rc.top, rc.right, rc.bottom)
+    except (ValueError, OSError):
+        return None
+
+
+def _free_cursor(target_hwnd=None, show=True):
     """Force the OS cursor out of the game's grip: release the clip
     rectangle, release capture, raise the show counter, set a normal arrow.
     target_hwnd: the game window whose thread state needs freeing -
-    defaults to the foreground window when the caller does not know it."""
+    defaults to the foreground window when the caller does not know it.
+    show=False skips the ShowCursor/SetCursor half: the in-layer session
+    only needs the confinement released (the composited sprite is the
+    cursor; the game's own cursor state stays the game's)."""
     try:
         _u32.ReleaseCapture()
         _u32.ClipCursor(None)
-        for _ in range(10):
-            if _u32.ShowCursor(True) >= 0:
-                break
-        arrow = _u32.LoadCursorW(None, IDC_ARROW)
-        if arrow:
-            _u32.SetCursor(arrow)
+        arrow = None
+        if show:
+            for _ in range(10):
+                if _u32.ShowCursor(True) >= 0:
+                    break
+            arrow = _u32.LoadCursorW(None, IDC_ARROW)
+            if arrow:
+                _u32.SetCursor(arrow)
 
         # Also release clipping, capture, and unhide cursor on the game's
         # thread (foreground is only a guess when target_hwnd is unknown).
@@ -385,11 +438,12 @@ def _free_cursor(target_hwnd=None):
                     try:
                         _u32.ReleaseCapture()
                         _u32.ClipCursor(None)
-                        for _ in range(10):
-                            if _u32.ShowCursor(True) >= 0:
-                                break
-                        if arrow:
-                            _u32.SetCursor(arrow)
+                        if show:
+                            for _ in range(10):
+                                if _u32.ShowCursor(True) >= 0:
+                                    break
+                            if arrow:
+                                _u32.SetCursor(arrow)
                     finally:
                         _u32.AttachThreadInput(cur_tid, fg_tid, False)
     except (ValueError, OSError):

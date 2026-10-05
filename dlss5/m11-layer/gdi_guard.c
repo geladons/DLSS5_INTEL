@@ -31,10 +31,12 @@ static LRESULT CALLBACK nr_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     /* Overlay routing: flags&1 in the shared header arms the per-region
      * filter. nr_ui_message returns nonzero for band-hit messages it
      * turned into ring events (eaten); hole hits, ungated keys, focus/
-     * capture/setcursor bookkeeping and unlisted messages fall through
-     * to the game unchanged. */
+     * capture bookkeeping and unlisted messages fall through to the game
+     * unchanged. WM_SETCURSOR is the exception that proves the rule: the
+     * eaten value must be TRUE there, or the FALSE answer walks on to the
+     * game's class cursor and double-draws over the sprite. */
     if (nr_ui_capture_active(hwnd) && nr_ui_message(hwnd, msg, wp, lp))
-        return 0;
+        return (msg == WM_SETCURSOR) ? TRUE : 0;
     WNDPROC prev = (WNDPROC)GetPropW(hwnd, NR_GUARD_PROP);
     /* Self-chain defense: if a stale prop ever points back at us, fall to
      * DefWindowProcW instead of recursing into ourselves forever. */

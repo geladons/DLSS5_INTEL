@@ -61,6 +61,12 @@
  *   - while any overlay-captured button is held (implicit grab) every
  *     mouse message is still eaten, so a drag that wanders into the hole
  *     keeps tracking until the release;
+ *   - raw-input titles (RIDEV_NOLEGACY) never see WM_*BUTTON* or
+ *     WM_MOUSEWHEEL at all: WM_INPUT usButtonFlags/usButtonData are
+ *     decoded with the same region gates so clicks/wheel still reach
+ *     the ring;
+ *   - WM_SETCURSOR is eaten (SetCursor NULL) while the overlay is up -
+ *     the composited sprite is the only cursor over the game window;
  *   - key/char messages are eaten only while bit2 (kbd_capture) is set.
  * The hole rect is the coarse occupancy mask the producer publishes -
  * band pixels are uniformly opaque, so region-test == alpha-test without
@@ -145,9 +151,15 @@ typedef struct NrUiState {
     int      hb_seen;
     /* input capture (wndproc thread) */
     HWND     ui_hwnd;               /* window owning the client coords */
+    int      raw_reg;               /* RIDEV_INPUTSINK mouse on ui_hwnd */
     int      clipped;               /* ClipCursor currently ours */
     int32_t  cur_x, cur_y;          /* logical cursor, client coords */
     int      cur_set;               /* a real position arrived */
+    int      real_out;              /* real cursor last seen OUTSIDE the
+                                     * client rect - the next WM_INPUT
+                                     * that finds it back inside re-syncs
+                                     * the virtual cursor to the real
+                                     * one (see WM_INPUT). */
     uint32_t ui_btns;               /* overlay-captured buttons held (bit
                                      * per btn idx 0..4): while nonzero
                                      * all mouse messages are eaten -
@@ -438,6 +450,7 @@ static void ui_note_pos(int32_t x, int32_t y)
     g_ui.cur_x = x;
     g_ui.cur_y = y;
     g_ui.cur_set = 1;
+    g_ui.real_out = 0;              /* an authoritative inside pos */
     ui_clamp_cursor();
     ui_publish_cursor();
 }
@@ -509,6 +522,68 @@ static void ui_evt_push(uint32_t type, int32_t a, int32_t b, uint32_t c)
     unlock();
 }
 
+/* Raw-input sink on the guarded window. WM_INPUT only reaches our
+ * wndproc when the game registered raw devices targeting THIS window
+ * (or takes foreground delivery); a title whose registration points at
+ * a different hwndTarget - or one that never registers at all - leaves
+ * the band blind to the ONLY mouse channel a RIDEV_NOLEGACY path emits.
+ * RIDEV_INPUTSINK with hwndTarget = the guarded window makes delivery
+ * deterministic: WM_INPUT lands here for every mouse event while the
+ * overlay is up. It is additive (the game's own registrations are
+ * untouched), window-lifetime scoped, and unregistered on every
+ * disassociate/detach so a hidden overlay carries zero delivery. */
+/* Foreign-confinement probe for the WM_INPUT path: returns nonzero while
+ * a ClipCursor rect smaller than the client is armed AND releases it, so
+ * a game that re-clips every frame loses the pin within one raw event
+ * instead of the next Python watchdog pass. The layer's own fullscreen
+ * clip covers the whole client and counts as 'free' - never released
+ * here. An unconfined cursor reports the virtual screen, which always
+ * covers the client. */
+static int ui_foreign_clip(HWND hwnd)
+{
+    RECT clip, cr;
+    POINT a, b;
+    if (!GetClipCursor(&clip)) return 0;
+    if (!GetClientRect(hwnd, &cr)) return 0;
+    a.x = cr.left;  a.y = cr.top;
+    b.x = cr.right; b.y = cr.bottom;
+    if (!ClientToScreen(hwnd, &a) || !ClientToScreen(hwnd, &b)) return 0;
+    if (clip.left <= a.x && clip.top <= a.y
+        && clip.right >= b.x && clip.bottom >= b.y)
+        return 0;                              /* covers client = free */
+    ClipCursor(NULL);                          /* foreign pin: drop it */
+    return 1;
+}
+
+static void ui_raw_reg(HWND hwnd, int on)
+{
+    RAWINPUTDEVICE rid;
+    if (on) {
+        if (g_ui.raw_reg) return;
+        memset(&rid, 0, sizeof(rid));
+        rid.usUsagePage = 0x01;             /* generic desktop page */
+        rid.usUsage     = 0x02;             /* mouse */
+        rid.dwFlags     = RIDEV_INPUTSINK;
+        rid.hwndTarget  = hwnd;
+        g_ui.raw_reg = RegisterRawInputDevices(&rid, 1, sizeof(rid))
+            ? 1 : 0;
+        if (g_ui.raw_reg)
+            nr_log("[nr_ui] raw-input sink on hwnd=0x%p", (void *)hwnd);
+        else
+            nr_log("[nr_ui] raw-input sink FAILED hwnd=0x%p err=%lu",
+                   (void *)hwnd, (unsigned long)GetLastError());
+    } else if (g_ui.raw_reg) {
+        memset(&rid, 0, sizeof(rid));
+        rid.usUsagePage = 0x01;
+        rid.usUsage     = 0x02;
+        rid.dwFlags     = RIDEV_REMOVE;
+        rid.hwndTarget  = NULL;
+        RegisterRawInputDevices(&rid, 1, sizeof(rid));
+        g_ui.raw_reg = 0;
+        nr_log("[nr_ui] raw-input sink removed");
+    }
+}
+
 /* ClipCursor edge tracking, driven per message from the wndproc path.
  * Rising edge: clip to the panel rect (client -> screen on the associated
  * window). Falling edge: release. Only transitions touch the OS. */
@@ -540,10 +615,16 @@ int nr_ui_capture_active(HWND hwnd)
     int on = 0;
     if (h && (flags & NR_UI_F_VISIBLE) && ui_hb_fresh()) {
         /* First guarded window to observe the flag owns the client-
-         * coordinate space (ClientToScreen anchor for the clip rect). */
-        if (!g_ui.ui_hwnd) g_ui.ui_hwnd = hwnd;
+         * coordinate space (ClientToScreen anchor for the clip rect) AND
+         * becomes the raw-input sink target - WM_INPUT must reach this
+         * wndproc for NOLEGACY titles to have any band input at all. */
+        if (!g_ui.ui_hwnd) {
+            g_ui.ui_hwnd = hwnd;
+            ui_raw_reg(hwnd, 1);
+        }
         on = 1;
     } else {
+        ui_raw_reg(g_ui.ui_hwnd, 0);
         g_ui.ui_hwnd = NULL;
         g_ui.ui_btns = 0;       /* release any stuck implicit grab */
     }
@@ -580,6 +661,36 @@ static int ui_kbd_cap(void)
     return h && (h->flags & NR_UI_F_KBDCAP);
 }
 
+/* Button-region gate shared by the WM_*BUTTON* messages and the WM_INPUT
+ * raw-button decode (idx: 0=L 1=R 2=M 3=X1 4=X2). A press is overlay
+ * input only when the logical cursor sits on the band or that button's
+ * grab bit is already set (the grab bit is checked OUTSIDE sane: a torn
+ * snapshot must never leak a down to the game while the grab is live); a
+ * release is overlay input when it was grabbed or lands on the band -
+ * either way the ring's down/up pairs stay consistent and the game never
+ * sees half a click. Returns 1 = consumed into the ring (eat), 0 = the
+ * originating message must flow to the game. */
+static int ui_btn_gate(int idx, int down)
+{
+    NrUiSnap s;
+    int sane = ui_snapshot(&s) && ui_panel_sane(&s);
+    uint32_t bit = 1u << idx;
+    if (down) {
+        if (!((sane && ui_hit(&s, g_ui.cur_x, g_ui.cur_y))
+              || (g_ui.ui_btns & bit)))
+            return 0;
+        g_ui.ui_btns |= bit;
+        ui_evt_push(NR_UI_EVT_BTNDN, idx, 0, 0);
+        return 1;
+    }
+    if (!(g_ui.ui_btns & bit)
+        && !(sane && ui_hit(&s, g_ui.cur_x, g_ui.cur_y)))
+        return 0;
+    g_ui.ui_btns &= ~bit;
+    ui_evt_push(NR_UI_EVT_BTNUP, idx, 0, 0);
+    return 1;
+}
+
 /* The message filter (ABI level 1): input routes by REGION - a message
  * whose pointer position lands on the band becomes a ring event and is
  * eaten; anything over the hole (or outside the bitmap) flows to the
@@ -605,10 +716,14 @@ int nr_ui_message(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         return 0;
     case WM_INPUT:
-        /* Raw mouse deltas: the OS cursor may be pinned at the clip edge,
-         * so the logical position integrates deltas on top. Eaten only
-         * when the logical position sits on the band (or a drag is live);
-         * hole deltas keep driving the game's own raw-input path. */
+        /* Raw mouse input: the OS cursor may be pinned at the clip edge,
+         * so the logical position integrates deltas on top. RIDEV_NOLEGACY
+         * titles never see WM_xBUTTON / WM_MOUSEWHEEL at all - WM_INPUT is
+         * their ONLY mouse channel - so usButtonFlags and usButtonData are
+         * decoded with the same region gates as the legacy path, or clicks
+         * die in a blind spot (field report: overlay visible, clicks dead).
+         * Eaten only when the logical position sits on the band (or a drag
+         * is live); hole input keeps driving the game's own raw path. */
         {
             unsigned char buf[64];
             RAWINPUT *ri = (RAWINPUT *)buf;
@@ -618,6 +733,7 @@ int nr_ui_message(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (got != (UINT)-1 && got >= sizeof(RAWINPUTHEADER)
                 && ri->header.dwType == RIM_TYPEMOUSE) {
                 int32_t dx, dy;
+                USHORT bf;
                 if (ri->data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE) {
                     /* Absolute raw input (rare - tablets/virtual HID):
                      * normalize 0..65535 onto the panel rect. */
@@ -630,13 +746,59 @@ int nr_ui_message(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                         ui_evt_push(NR_UI_EVT_MOVE, dx, dy, 0);
                     }
                 } else {
-                    dx = ri->data.mouse.lLastX;
-                    dy = ri->data.mouse.lLastY;
-                    if (dx || dy) {
-                        ui_note_delta(dx, dy);
-                        ui_evt_push(NR_UI_EVT_MOVE,
-                                    g_ui.cur_x, g_ui.cur_y, 0);
+                    /* The logical cursor is a VIRTUAL pointer: it seeds
+                     * from and re-syncs to the real cursor only when the
+                     * real one crosses back INTO the client rect
+                     * (real_out edge). A clip-pinned cursor never left,
+                     * so a game's point-clip cannot snap the sprite back
+                     * mid-gesture - the deltas integrate on top, and the
+                     * foreign pin itself is dropped within one event
+                     * instead of the next Python watchdog pass. */
+                    {
+                        POINT p;
+                        RECT cr;
+                        int inside;
+                        dx = ri->data.mouse.lLastX;
+                        dy = ri->data.mouse.lLastY;
+                        ui_foreign_clip(hwnd);
+                        inside = GetCursorPos(&p)
+                            && ScreenToClient(hwnd, &p)
+                            && GetClientRect(hwnd, &cr)
+                            && p.x >= 0 && p.y >= 0
+                            && p.x < cr.right && p.y < cr.bottom;
+                        if (inside && (g_ui.real_out || !g_ui.cur_set)) {
+                            ui_note_pos(p.x, p.y);
+                            ui_evt_push(NR_UI_EVT_MOVE, p.x, p.y, 0);
+                        } else if (dx || dy) {
+                            ui_note_delta(dx, dy);
+                            ui_evt_push(NR_UI_EVT_MOVE,
+                                        g_ui.cur_x, g_ui.cur_y, 0);
+                        }
+                        g_ui.real_out = !inside;
                     }
+                }
+                bf = ri->data.mouse.usButtonFlags;
+                if (bf & RI_MOUSE_LEFT_BUTTON_DOWN)   ui_btn_gate(0, 1);
+                if (bf & RI_MOUSE_LEFT_BUTTON_UP)     ui_btn_gate(0, 0);
+                if (bf & RI_MOUSE_RIGHT_BUTTON_DOWN)  ui_btn_gate(1, 1);
+                if (bf & RI_MOUSE_RIGHT_BUTTON_UP)    ui_btn_gate(1, 0);
+                if (bf & RI_MOUSE_MIDDLE_BUTTON_DOWN) ui_btn_gate(2, 1);
+                if (bf & RI_MOUSE_MIDDLE_BUTTON_UP)   ui_btn_gate(2, 0);
+                if (bf & RI_MOUSE_BUTTON_4_DOWN)      ui_btn_gate(3, 1);
+                if (bf & RI_MOUSE_BUTTON_4_UP)        ui_btn_gate(3, 0);
+                if (bf & RI_MOUSE_BUTTON_5_DOWN)      ui_btn_gate(4, 1);
+                if (bf & RI_MOUSE_BUTTON_5_UP)        ui_btn_gate(4, 0);
+                if (bf & (RI_MOUSE_WHEEL | RI_MOUSE_HWHEEL)) {
+                    /* usButtonData is the signed wheel delta; the wheel
+                     * is overlay input only on a band hit or a live drag
+                     * (same gate as WM_MOUSEWHEEL below). */
+                    if (g_ui.ui_btns
+                        || (sane && ui_hit(&s, g_ui.cur_x, g_ui.cur_y)))
+                        ui_evt_push(NR_UI_EVT_WHEEL,
+                                    (int32_t)((int16_t)ri->data.mouse
+                                              .usButtonData / WHEEL_DELTA),
+                                    0,
+                                    (bf & RI_MOUSE_HWHEEL) ? 1u : 0u);
                 }
             }
         }
@@ -644,86 +806,54 @@ int nr_ui_message(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return 1;
         return 0;
     /* Buttons: btn index 0=L 1=R 2=M 3=X1 4=X2 (lp = client coords). A
-     * double-click message is just another press. Downs are eaten on a
-     * band hit; ups are eaten whenever that button was captured OR the
-     * release lands on the band - either way the ring's down/up pairs
-     * stay consistent and the game never sees half a click. */
+     * double-click message is just another press. ui_btn_gate() owns the
+     * hit/grab rule: downs are eaten on a band hit, ups are eaten when
+     * that button was captured or lands on the band - the ring's down/up
+     * pairs stay consistent and the game never sees half a click. */
     case WM_LBUTTONDOWN:
     case WM_LBUTTONDBLCLK:
         ui_note_pos((int32_t)(int16_t)LOWORD(lp),
                     (int32_t)(int16_t)HIWORD(lp));
-        /* The held-grab bit is checked OUTSIDE sane: a torn snapshot must
-         * never leak a down to the game while the grab is live. */
-        if (!((sane && ui_hit(&s, g_ui.cur_x, g_ui.cur_y))
-              || (g_ui.ui_btns & 0x1u))) return 0;
-        g_ui.ui_btns |= 0x1u;
-        ui_evt_push(NR_UI_EVT_BTNDN, 0, 0, 0); return 1;
+        return ui_btn_gate(0, 1);
     case WM_LBUTTONUP:
         ui_note_pos((int32_t)(int16_t)LOWORD(lp),
                     (int32_t)(int16_t)HIWORD(lp));
-        if (!(g_ui.ui_btns & 0x1u)
-            && !(sane && ui_hit(&s, g_ui.cur_x, g_ui.cur_y))) return 0;
-        g_ui.ui_btns &= ~0x1u;
-        ui_evt_push(NR_UI_EVT_BTNUP, 0, 0, 0); return 1;
+        return ui_btn_gate(0, 0);
     case WM_RBUTTONDOWN:
     case WM_RBUTTONDBLCLK:
         ui_note_pos((int32_t)(int16_t)LOWORD(lp),
                     (int32_t)(int16_t)HIWORD(lp));
-        if (!((sane && ui_hit(&s, g_ui.cur_x, g_ui.cur_y))
-              || (g_ui.ui_btns & 0x2u))) return 0;
-        g_ui.ui_btns |= 0x2u;
-        ui_evt_push(NR_UI_EVT_BTNDN, 1, 0, 0); return 1;
+        return ui_btn_gate(1, 1);
     case WM_RBUTTONUP:
         ui_note_pos((int32_t)(int16_t)LOWORD(lp),
                     (int32_t)(int16_t)HIWORD(lp));
-        if (!(g_ui.ui_btns & 0x2u)
-            && !(sane && ui_hit(&s, g_ui.cur_x, g_ui.cur_y))) return 0;
-        g_ui.ui_btns &= ~0x2u;
-        ui_evt_push(NR_UI_EVT_BTNUP, 1, 0, 0); return 1;
+        return ui_btn_gate(1, 0);
     case WM_MBUTTONDOWN:
     case WM_MBUTTONDBLCLK:
         ui_note_pos((int32_t)(int16_t)LOWORD(lp),
                     (int32_t)(int16_t)HIWORD(lp));
-        if (!((sane && ui_hit(&s, g_ui.cur_x, g_ui.cur_y))
-              || (g_ui.ui_btns & 0x4u))) return 0;
-        g_ui.ui_btns |= 0x4u;
-        ui_evt_push(NR_UI_EVT_BTNDN, 2, 0, 0); return 1;
+        return ui_btn_gate(2, 1);
     case WM_MBUTTONUP:
         ui_note_pos((int32_t)(int16_t)LOWORD(lp),
                     (int32_t)(int16_t)HIWORD(lp));
-        if (!(g_ui.ui_btns & 0x4u)
-            && !(sane && ui_hit(&s, g_ui.cur_x, g_ui.cur_y))) return 0;
-        g_ui.ui_btns &= ~0x4u;
-        ui_evt_push(NR_UI_EVT_BTNUP, 2, 0, 0); return 1;
+        return ui_btn_gate(2, 0);
     case WM_XBUTTONDOWN:
     case WM_XBUTTONDBLCLK:
         ui_note_pos((int32_t)(int16_t)LOWORD(lp),
                     (int32_t)(int16_t)HIWORD(lp));
         {
             int xi = (int)HIWORD(wp);                /* 1=X1, 2=X2 */
-            uint32_t bit;
             if (xi < 1 || xi > 2) xi = 1;
-            bit = 0x8u << (xi - 1);                  /* X1->0x8 X2->0x10 */
-            if (!((sane && ui_hit(&s, g_ui.cur_x, g_ui.cur_y))
-                  || (g_ui.ui_btns & bit))) return 0;
-            g_ui.ui_btns |= bit;
-            ui_evt_push(NR_UI_EVT_BTNDN, 2 + xi, 0, 0);
+            return ui_btn_gate(2 + xi, 1);
         }
-        return 1;
     case WM_XBUTTONUP:
         ui_note_pos((int32_t)(int16_t)LOWORD(lp),
                     (int32_t)(int16_t)HIWORD(lp));
         {
             int xi = (int)HIWORD(wp);
-            uint32_t bit;
             if (xi < 1 || xi > 2) xi = 1;
-            bit = 0x8u << (xi - 1);
-            if (!(g_ui.ui_btns & bit)
-                && !(sane && ui_hit(&s, g_ui.cur_x, g_ui.cur_y))) return 0;
-            g_ui.ui_btns &= ~bit;
-            ui_evt_push(NR_UI_EVT_BTNUP, 2 + xi, 0, 0);
+            return ui_btn_gate(2 + xi, 0);
         }
-        return 1;
     case WM_MOUSEWHEEL:
     case WM_MOUSEHWHEEL:
         /* Wheel lp is SCREEN coords - convert on the guarded window; fall
@@ -758,12 +888,20 @@ int nr_ui_message(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (!ui_kbd_cap()) return 0;
         ui_evt_push(NR_UI_EVT_CHAR, (int32_t)wp, 0, 0);
         return 1;
+    case WM_SETCURSOR:
+        /* The composited sprite is the ONLY cursor while the overlay is
+         * up - the producer publishes it unconditionally now, so a
+         * game-drawn or class-cursor arrow over the window would
+         * double-draw. Eating the message (SetCursor NULL) keeps the OS
+         * cursor hidden over the game window for the whole session; the
+         * game's own cursor logic resumes untouched on overlay close. */
+        SetCursor(NULL);
+        return 1;
     default:
         /* Forwarded on purpose: WM_SETFOCUS/WM_KILLFOCUS (focus bookkeeping
-         * the game needs), WM_CAPTURECHANGED (release tracking), and
-         * WM_SETCURSOR - forwarding keeps the game's own cursor state
-         * intact; our sprite is composited on top and the OS cursor is
-         * confined by ClipCursor only while the producer wants it. */
+         * the game needs) and WM_CAPTURECHANGED (release tracking) keep
+         * the game's input bookkeeping intact; WM_SETCURSOR is handled
+         * above because the sprite replaces the OS cursor while visible. */
         return 0;
     }
 }
@@ -776,9 +914,11 @@ void nr_ui_detach(void)
         ClipCursor(NULL);
         g_ui.clipped = 0;
     }
+    ui_raw_reg(g_ui.ui_hwnd, 0);
     g_ui.ui_hwnd = NULL;
     g_ui.ui_btns = 0;
     g_ui.cur_set = 0;
+    g_ui.real_out = 0;
     g_ui.lhb_cnt = 0;
     if (g_ui.view) {
         UnmapViewOfFile((LPCVOID)g_ui.view);

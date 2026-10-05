@@ -64,9 +64,12 @@
 #     layer's wndproc filter EATS the game's window input and posts it to
 #     the shared event ring; a ~10 ms Tk-side pump turns those events back
 #     into Tk events on the panel widgets - hit-testing comes for free
-#     from the widget tree. All foreground/cursor machinery is
-#     external-only: in-layer never moves the OS cursor and never shows a
-#     visible window on the desktop.
+#     from the widget tree. In-layer draws the cursor sprite itself (and
+#     eats the game's WM_SETCURSOR) instead of showing an OS cursor; the
+#     input guard (overlay_input.py) still runs in BOTH modes - a game
+#     that ClipCursor-pins the pointer would starve the wndproc of the
+#     very input it is supposed to route. Only the OS-cursor shaping
+#     (ShowCursor/SetCursor over our own window) is external-only.
 #
 # Threading: the overlay never does I/O itself. It renders ctl.snapshot()
 # (monitor thread) and routes every action through ctl.submit() (worker).
@@ -86,6 +89,7 @@ from .i18n import (tr, scale_preset_labels, scale_to_preset_label,
 from .overlay_hotkey import (VK, POLL_MS, parse_hotkey,  # noqa: F401
                              hotkey_label, HotkeyPoller)
 from .overlay_inlayer import InLayerUI
+from .overlay_input import OverlayInputGuard
 from .overlay_widgets import (build_panel, BG, PANEL, PANEL2, FG, MUTED,
                               ACCENT, GREEN, RED, AMBER,
                               CHROMA, SIDEBAR_W, STRIP_H)
@@ -106,8 +110,7 @@ VK_LBUTTON = 0x01
 DEBOUNCE_MS = 250
 STATUS_MS = 500
 FIT_MS = 500           # game-rect poll cadence while shown (resize/move)
-CURSOR_KEEP_MS = 32
-CURSOR_FREE_MS = 500   # low cadence: full ReleaseCapture/SetCursor pass
+CURSOR_KEEP_MS = 32    # jail poll cadence (fullscreen click-escape guard)
 TOPMOST_REASSERT_S = 1.0
 
 
@@ -145,7 +148,6 @@ class ControlOverlay:
         self._jail_cursor = True     # recompute per show(): fullscreen only
         self._tf_saved = None        # original takefocus per widget
         self._dragging = False       # a mouse button is held over the panel
-        self._last_cursor_free = 0.0  # last full _free_cursor() timestamp
         self._last_topmost = 0.0     # last HWND_TOPMOST re-assert timestamp
         self._hwnd = None            # cached top-level HWND (per show())
         self._inlayer = False        # this session composites via the layer
@@ -155,6 +157,12 @@ class ControlOverlay:
                                      # for this pid -> external for the
                                      # rest of that session
         self._combo_tags_saved = None  # combobox bindtags while in-layer
+        # Input lane (overlay_input.py): while the overlay is VISIBLE the
+        # guard re-releases the game's ClipCursor/SetCapture grip (~180 ms
+        # watchdog - games re-arm per frame, a show() one-shot loses) and
+        # raises the cursor for external mode; in-layer mode releases the
+        # confinement only, the layer-drawn sprite is the cursor there.
+        self._input_guard = OverlayInputGuard(self)
         self._extent = (self.WIDTH, self.HEIGHT)  # current panel extent
         self._rect = None            # last applied (x,y,w,h) screen rect
         self._hole = (0, 0, 0, 0)    # transparent center, bitmap coords
@@ -607,10 +615,7 @@ class ControlOverlay:
             self.win.focus_set()
             self._focus_mode = True
         self._warp_cursor()
-        gh = self._game_hwnd
-        self.win.after(100, lambda: _free_cursor(gh))
-        self.win.after(350, lambda: _free_cursor(gh))
-        self.win.after(700, lambda: _free_cursor(gh))
+        self._input_guard.arm(self._game_hwnd, show_cursor=True)
         self._cursor_keeper()
 
     def _walk_widgets(self):
@@ -685,21 +690,17 @@ class ControlOverlay:
             pass
 
     def _cursor_keeper(self):
-        """While the panel is open, keep the cursor free: games re-apply
-        ClipCursor/ShowCursor(false) on every frame, so the one-shot at
-        show() is not enough. The full ReleaseCapture/SetCursor/ClipCursor
-        pass is NOT run at this 32 ms poll rate - it killed Tk slider
-        drags (ReleaseCapture) and fought widget cursors (SetCursor).
-        It runs once at show() and then at CURSOR_FREE_MS cadence, and the
-        whole keeper skips while a mouse button is held over the panel
-        (_dragging: slider drags, title-strip moves, popdown picks). The
-        hard jail (teleport back into the panel) only runs for a
-        fullscreen game and is also skipped mid-drag."""
+        """Fullscreen-only jail: while a screen-covering game is up, the
+        pointer must not escape the panel (an escaped click reaches the
+        desktop/taskbar). ClipCursor/ReleaseCapture/ShowCursor
+        housekeeping moved to OverlayInputGuard (overlay_input.py), which
+        runs its own ~180 ms watchdog for BOTH modes - this 32 ms poll
+        now only runs the jail, and is skipped mid-drag (_dragging /
+        p30_panel.is_dragging: a drag that wanders off the edge is not a
+        jailbreak)."""
         if self._inlayer:
-            # In-layer never touches the OS cursor: the layer draws the
-            # sprite and clips the pointer itself. The invisible mapped
-            # toplevel is always viewable, so the check below alone
-            # cannot stop the chain - kill it explicitly on mode entry.
+            # In-layer has no visible window to jail over - the input
+            # guard still runs (it only releases the game's confinement).
             return
         if not self.win.winfo_viewable():
             return
@@ -718,13 +719,8 @@ class ControlOverlay:
                 dragging = True
         except tk.TclError:
             pass
-        if not dragging:
-            now = time.time()
-            if now - self._last_cursor_free >= CURSOR_FREE_MS / 1000.0:
-                _free_cursor(self._game_hwnd)
-                self._last_cursor_free = now
-            if not self._focus_mode and self._jail_cursor:
-                self._keep_cursor_over_panel()
+        if not dragging and not self._focus_mode and self._jail_cursor:
+            self._keep_cursor_over_panel()
         self.win.after(CURSOR_KEEP_MS, self._cursor_keeper)
 
     def _keep_cursor_over_panel(self):
@@ -895,6 +891,11 @@ class ControlOverlay:
         il.set_frame_flags(self._game_covers_screen())
         self._combo_bindtags_off()
         il.armed()                # first frame + ui_visible + drain pump
+        # Same confinement-release watchdog as external mode, minus the
+        # ShowCursor/SetCursor half: the layer composites the sprite
+        # cursor itself, but a game that pins the pointer (ClipCursor)
+        # would otherwise starve the wndproc of the input it routes.
+        self._input_guard.arm(self._game_hwnd, show_cursor=False)
         self._start_fit()         # ~500 ms client-rect tracking
         self._log("[overlay] in-layer shown pid=%s hwnd=0x%x extent=%s"
                     % (pid or 0, hwnd or 0, self._extent))
@@ -1077,11 +1078,10 @@ class ControlOverlay:
             self._freeze_flags = False
             self.freeze_lbl.config(text="")
 
-        # Free the cursor, release capture on both threads, set arrow cursor
-        _u32.ReleaseCapture()
-        _u32.ClipCursor(None)
-        _free_cursor(self._game_hwnd)
-        self._last_cursor_free = time.time()
+        # Cursor freedom/visibility is owned by the input guard now: an
+        # immediate pass frees the pointer at once, then a ~180 ms
+        # watchdog re-releases while visible (games re-arm per frame).
+        self._input_guard.arm(self._game_hwnd, show_cursor=True)
         self._dragging = False
 
         # Display the panel topmost WITHOUT taking the foreground. Tk's
@@ -1116,10 +1116,6 @@ class ControlOverlay:
         self.win.after(50, _log_shown)
 
         self._warp_cursor()
-        gh = self._game_hwnd
-        self.win.after(100, lambda: _free_cursor(gh))
-        self.win.after(350, lambda: _free_cursor(gh))
-        self.win.after(700, lambda: _free_cursor(gh))
         self._cursor_keeper()
         self._start_fit()        # ~500 ms client-rect tracking
 
@@ -1138,6 +1134,7 @@ class ControlOverlay:
 
     def hide(self):
         self._cancel_fit()
+        self._input_guard.disarm()   # stop re-releasing the game's clip
         self._log("[overlay] hidden (inlayer=%d)" % self._inlayer)
         self.unfreeze()
         self.freeze_lbl.config(text="")
