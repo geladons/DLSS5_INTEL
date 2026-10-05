@@ -135,12 +135,10 @@ public:
         cfg.temporal = temporal_;
         cfg.gainLock = gainLock_;
         cfg.phase30 = p30Ctl_.params();
-        const char* s_env = std::getenv("DLSS5_SHARPNESS");
-        if (!s_env) s_env = std::getenv("NR_LAYER_SHARPNESS");
-        if (s_env) {
-            float val = static_cast<float>(std::atof(s_env));
-            if (val >= 0.0f) sharpness_ = val;
-        }
+        // sharpness_ already holds the ctor env baseline or a live knob
+        // push (dlss5_set_sharpness). No env re-read here: re-applying the
+        // launch baseline on a re-init would silently revert a pushed
+        // value (same env-leash class as the per-frame read below).
         cfg.sharpness = sharpness_;
         cfg.debugDumps = false;
         cfg.dumpDir = "out";
@@ -186,21 +184,13 @@ public:
             return -1;
         }
 
-        const char* s_env = std::getenv("DLSS5_SHARPNESS");
-        if (!s_env) s_env = std::getenv("NR_LAYER_SHARPNESS");
-        if (s_env) {
-            float val = static_cast<float>(std::atof(s_env));
-            if (val >= 0.0f && std::abs(val - sharpness_) > 1e-4f) {
-                setSharpness(val);
-            }
-        }
-
-        const char* fg_env = std::getenv("DLSS5_FRAMEGEN");
-        if (!fg_env) fg_env = std::getenv("NR_LAYER_FRAMEGEN");
-        if (fg_env) {
-            frameGenEnabled_ = (std::strcmp(fg_env, "0") != 0);
-        }
-
+        // DLSS5_SHARPNESS / NR_LAYER_SHARPNESS / DLSS5_FRAMEGEN /
+        // NR_LAYER_FRAMEGEN envs were captured ONCE in the ctor - the
+        // process env is frozen at launch, so re-reading them per frame
+        // only reverted live knob pushes (dlss5_set_sharpness /
+        // dlss5_set_framegen via the layer's knob poll) back to the
+        // baseline within one frame. Same pattern as the phase30 env fix:
+        // knob file / ABI pushes are the live channel, env is baseline.
         if (w != prevW_ || h != prevH_) {
             havePrev_ = false;
         }
@@ -340,8 +330,15 @@ public:
     void setBlend(float b) {
         if (b < 0.0f || b > 1.0f) return;
         blend_ = b;
+        // The blend knob drives the compose-mix slot (pc.c.w = Phase30
+        // intensity): the old setHeadBlend dual-write is gone, so the live
+        // push goes through the intensity channel explicitly - same
+        // routing as the daemon's NRCT SETBLEND. p30Ctl_ tracks it so an
+        // engine re-init (cfg.phase30 = params) does not revert the push.
+        p30Ctl_.setIntensity(b);
         if (initialized_) {
-            engine_.setHeadBlend(b);
+            engine_.setHeadBlend(b);   // bookkeeping slot only now
+            engine_.setIntensity(b);
         }
     }
 

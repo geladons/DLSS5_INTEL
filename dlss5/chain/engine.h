@@ -30,7 +30,10 @@ struct EngineConfig {
     std::string weightsPath;                           // dlssnr-logical.safetensors
     std::string shaderDir;                             // dir with *.spv (trailing slash)
     float headGain = 1.0f;                             // vendor residual scale (--gain)
-    float headBlend = 1.0f;                            // vendor mix factor / intensity (public baseline 1.0)
+    float headBlend = 1.0f;                            // vendor mix factor / blend knob home
+                                                       // (public baseline 1.0). The LIVE compose
+                                                       // mix slot (pc.c.w) is phase30.intensity -
+                                                       // kept strictly separate from headBlend.
     float renderScale = 1.0f;
     float sharpness = 0.8f;
     bool temporal = true;                              // vendor history conditioning (features 7-9
@@ -93,14 +96,21 @@ public:
     // applies to the NEXT processFrame - no engine re-init, no game
     // re-capture. Daemon-side only (single-threaded accept loop).
     void setHeadGain(float g) { cfg_.headGain = g; }
-    void setHeadBlend(float b) { cfg_.headBlend = b; cfg_.phase30.intensity = b; }
+    // Blend and intensity are SEPARATE channels: headBlend is the blend
+    // knob's slot, phase30.intensity feeds the compose pc.c.w mix. The
+    // old dual-write let a blend push silently overwrite the intensity
+    // knob (and vice versa) - callers that want the mix slot use
+    // setIntensity/setPhase30 explicitly.
+    void setHeadBlend(float b) { cfg_.headBlend = b; }
     void setSharpness(float s) { cfg_.sharpness = s; }
     float sharpness() const { return cfg_.sharpness; }
 
-    // Phase 30 vendor parameter controls
-    void setPhase30(const Phase30Params& p) { cfg_.phase30 = p; cfg_.headBlend = p.intensity; }
+    // Phase 30 vendor parameter controls. setPhase30/setIntensity write
+    // ONLY cfg_.phase30 - neither touches headBlend, so the sequence
+    // setHeadBlend(b); setPhase30(p) cannot fight over a shared slot.
+    void setPhase30(const Phase30Params& p) { cfg_.phase30 = p; }
     const Phase30Params& phase30() const { return cfg_.phase30; }
-    void setIntensity(float v) { cfg_.phase30.intensity = v; cfg_.headBlend = v; }
+    void setIntensity(float v) { cfg_.phase30.intensity = v; }
     void setLocalTone(float v) { cfg_.phase30.localTone = v; }
     void setLocalStructure(float v) { cfg_.phase30.localStructure = v; }
     void setSkinStructure(float v) { cfg_.phase30.skinStructure = v; }

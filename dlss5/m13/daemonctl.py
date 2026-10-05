@@ -86,7 +86,7 @@ class M11dClient:
         return self._roundtrip(CMD_SETGAIN, payload)
 
     def set_intensity(self, intensity):
-        """Live Phase30 compose-mix update (headBlend slot); next frame."""
+        """Live Phase30 compose-mix update (pc.c.w slot); next frame."""
         if not 0.0 <= intensity <= 2.0:
             raise DaemonError("intensity %.3f out of range 0..2" % intensity)
         payload = struct.unpack("<I", struct.pack("<f", intensity))[0]

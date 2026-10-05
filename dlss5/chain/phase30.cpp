@@ -352,8 +352,9 @@ bool Phase30Controller::pollKnobsFile(const std::string& customPath) {
     }
 
     // Engine knobs riding the same file (gain = residual headGain,
-    // blend = compose mix/headBlend). They are not Phase30Params - the
-    // consumer (daemon) applies them via engineGain()/engineBlend().
+    // blend = compose mix, applied via the intensity channel pc.c.w).
+    // They are not Phase30Params - the consumer (daemon) applies them
+    // via engineGain()/engineBlend().
     if (extractJsonField(json, "gain", val)) {
         float v = static_cast<float>(std::atof(val.c_str()));
         if (v >= 0.0f && v <= 16.0f && std::abs(v - engineGain_) > 1e-4f) {

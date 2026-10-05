@@ -68,8 +68,9 @@ public:
     // Engine knobs carried by the same knob file (the x64 layer and
     // m12-dxgi read them themselves; the daemon applies them via these
     // accessors). "gain" = residual multiplier (engine headGain, neutral
-    // 1.0) - NOT the compose intensity slot; "blend" = compose mix
-    // (engine headBlend, same slot as intensity - last write wins).
+    // 1.0) - NOT the compose intensity slot; "blend" = compose mix knob,
+    // applied through the intensity channel (engine.setIntensity ->
+    // compose pc.c.w; the "intensity" key wins when both are present).
     float engineGain() const { return engineGain_; }
     float engineBlend() const { return engineBlend_; }
 

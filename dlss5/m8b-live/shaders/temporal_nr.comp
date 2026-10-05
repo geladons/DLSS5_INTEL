@@ -121,7 +121,16 @@ void main() {
             float snap = abs(ema) * 0.5 + npx * 2.0;  // +2/256 mean floor
             if (ema == 0.0 || abs(dCur - ema) > snap) ema = dCur;
             else ema += (dCur - ema) * pc.c.x;
-            k = clamp(ema / dCur, 0.25, 4.0);
+            // Deadzone + tight clamp (field-validated whipsaw fix): when
+            // dCur sits inside the noise band around the EMA the delta is
+            // content noise, not a real tone change - per-frame noise must
+            // never modulate strength, so k = 1.0 there. Outside the band
+            // the correction is still bounded to -20%/+25% per frame: the
+            // old 0.25..4.0 range let k jitter with noise and rail at the
+            // flat-gate boundary (a visible processing-strength flicker).
+            float dz = 0.06 * max(abs(ema), npx * 0.5);
+            k = (abs(dCur - ema) <= dz) ? 1.0
+                                      : clamp(ema / dCur, 0.80, 1.25);
         } else if (ema == 0.0) {
             // first contact on a flat frame - seed the EMA at 0, no scale
         }

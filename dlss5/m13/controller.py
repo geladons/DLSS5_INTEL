@@ -604,7 +604,7 @@ class M13Controller:
     # ------------------------------------------------------------- phase30 --
     def set_intensity(self, intensity, exe=None):
         """Phase 30 compose mix (0.0..2.0, public baseline 1.0). Owns the
-        headBlend compose slot - independent from the residual gain knob.
+        pc.c.w compose slot - independent from the residual gain knob.
         Same routing as set_gain: config+env+knob file always, NRCT cmd 15
         when a daemon is up, frozen-frame reprocess afterwards."""
         intensity = max(0.0, min(2.0, float(intensity)))
