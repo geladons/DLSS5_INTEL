@@ -384,6 +384,15 @@ void DaemonCore::handleFrame(SOCKET s, const uint32_t hdr[4], ULONGLONG deadline
             eng->setIntensity(p30Ctl.engineBlend());
             eng->setHeadGain(p30Ctl.engineGain());
             eng->setPhase30(p30Ctl.params());
+            // Encode CAS sharpness rides the same file now (x64/m12
+            // paths parsed it all along; the daemon never did - the
+            // slider was dead on GTA-IV-class x86 titles). -1 sentinel
+            // means the file never carried the key: keep the env
+            // baseline member in that case.
+            if (p30Ctl.hasEngineSharpness()) {
+                eng->setSharpness(p30Ctl.engineSharpness());
+                sharpness = p30Ctl.engineSharpness();
+            }
             // Mirror the pushed knobs into the members makeEngineConfig
             // reads: without the sync a knob-file gain/blend push rode
             // the live engine only and silently reverted to the stale

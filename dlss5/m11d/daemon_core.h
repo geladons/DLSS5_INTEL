@@ -44,9 +44,10 @@ public:
     // engine instance only (SETTEMPORAL did) silently reverted to the env
     // default on every extent/scale rebuild.
     bool temporal = true;       // SETTEMPORAL / *_TEMPORAL env baseline
-    float sharpness = 0.8f;     // encode CAS; *_SHARPNESS env baseline
-                                // (no NRCT command - the knob file's
-                                // "sharpness" key feeds in-process paths)
+    float sharpness = 0.8f;     // encode CAS; *_SHARPNESS env baseline,
+                                // knob-file "sharpness" key live override
+                                // (no NRCT command - member-synced like
+                                // gain/blend so rebuilds keep the push)
     bool dump = false;
     float gain = 1.0f, blend = 1.0f;
     d5c::Phase30Controller p30Ctl;

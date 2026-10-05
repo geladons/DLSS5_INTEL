@@ -73,6 +73,13 @@ public:
     // compose pc.c.w; the "intensity" key wins when both are present).
     float engineGain() const { return engineGain_; }
     float engineBlend() const { return engineBlend_; }
+    // Encode CAS sharpness riding the same knob file (x64 layer and
+    // m12-dxgi parse the key themselves; the daemon applies it via
+    // these). Sentinel -1 = the file never carried the key - callers
+    // keep their env baseline then instead of stomping it with a
+    // default that was never pushed.
+    bool hasEngineSharpness() const { return engineSharpness_ >= 0.0f; }
+    float engineSharpness() const { return engineSharpness_; }
 
     // Default file path for Phase30 live knobs (%TEMP%\m13_phase30_knobs.json)
     static std::string defaultKnobFilePath();
@@ -81,6 +88,7 @@ private:
     Phase30Params params_{};
     float engineGain_ = 1.0f;
     float engineBlend_ = 1.0f;
+    float engineSharpness_ = -1.0f;   // -1: knob file has not pushed it
     std::string knobFilePath_;
     uint64_t lastFileWriteTime_ = 0;
 };

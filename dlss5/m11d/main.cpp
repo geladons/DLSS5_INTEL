@@ -110,14 +110,18 @@ int main(int argc, char** argv) {
     if (!t_env) t_env = std::getenv("D5C_TEMPORAL");
     core.temporal = !(t_env && std::strcmp(t_env, "0") == 0);
     // Encode-side CAS sharpness baseline (same env names as the x64
-    // in-process context). No NRCT command exists for it; the knob file's
-    // "sharpness" key is consumed by the in-process paths, not the daemon.
+    // in-process context). No NRCT command exists for it; the knob
+    // file's "sharpness" key now reaches the daemon too - it was
+    // polled above and owns the knob once supplied (same precedence as
+    // gain/blend: env is the launch baseline, the file is live state).
     const char* sh_env = std::getenv("DLSS5_SHARPNESS");
     if (!sh_env) sh_env = std::getenv("NR_LAYER_SHARPNESS");
     if (sh_env) {
         float v = (float)std::atof(sh_env);
         if (v >= 0.0f) core.sharpness = v;
     }
+    if (core.p30Ctl.hasEngineSharpness())
+        core.sharpness = core.p30Ctl.engineSharpness();
     std::string selftest;
     std::string logPath;
     int benchN = 0;

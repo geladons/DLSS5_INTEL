@@ -369,6 +369,19 @@ bool Phase30Controller::pollKnobsFile(const std::string& customPath) {
             changed = true;
         }
     }
+    // Encode CAS sharpness (engine.setSharpness). Was the only live knob
+    // the daemon could not see: the x64 layer/m12 parse the same key
+    // themselves, so GTA-IV-class x86 titles ran the env baseline all
+    // session - the slider was dead mid-game (open-issues).
+    if (extractJsonField(json, "sharpness", val)) {
+        float v = static_cast<float>(std::atof(val.c_str()));
+        if (v >= 0.0f && v <= 2.0f
+            && (!hasEngineSharpness()
+                || std::abs(v - engineSharpness_) > 1e-4f)) {
+            engineSharpness_ = v;
+            changed = true;
+        }
+    }
 
     return changed;
 }
