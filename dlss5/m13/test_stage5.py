@@ -326,6 +326,11 @@ tk_root.withdraw()
 try:
     with tempfile.TemporaryDirectory() as td:
         c = Config(os.path.join(td, "ov_cfg.json"))
+        # The default overlay_mode is "inlayer" (shm compositing); these
+        # tests encode the EXTERNAL window contract (noactivate ordering,
+        # focus steal) so pin the classic path - F4 also injects a fake
+        # game pid, which would otherwise arm the in-layer path.
+        c.set("overlay_mode", "external")
         c_ctl = M13Controller(c)
         try:
             ov = overlay.ControlOverlay(tk_root, c_ctl, on_log=lambda m: None)

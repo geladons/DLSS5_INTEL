@@ -18,9 +18,15 @@
 #   cleaner.py    "Remove all traces": TraceScanner inventory + Cleaner
 #                 removal (game dlls, HKCU layers, daemon, flags/logs, config)
 #   logtail.py    threaded log file tails into the UI
-#   overlay.py    frameless in-game control overlay (hotkey, pause, gain)
+#   overlay.py    frameless in-game control overlay (hotkey, pause, gain);
+#                 in-layer mode composites the hidden panel through the
+#                 Vulkan layer via shared memory, external mode is the
+#                 classic on-screen toplevel
+#   overlay_shm.py  Local\DLSS5_UI_<pid> shared-memory producer (ShmUI):
+#                 seqlocked bitmap publish + heartbeat, input ring drain
 #   overlay_win32.py  Win32 plumbing for the overlay (no-activate, cursor,
-#                 foreground steal when overlay_focus is on)
+#                 foreground steal when overlay_focus is on; PrintWindow
+#                 -> BGRA DIB capture for the in-layer publisher)
 #   ui.py         main window (dark theme; zero I/O on the Tk thread -
 #                 StateMonitor probes, ActionWorker mutates)
 #   media.py      Media tab backend: EngineSession ctypes wrapper on

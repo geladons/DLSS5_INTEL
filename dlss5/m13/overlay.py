@@ -37,98 +37,60 @@
 # picture updates with live results.
 # Close -> the freeze flag drops, the game continues with the new settings.
 #
+# OVERLAY MODES (cfg overlay_mode):
+#   "external" - the classic real toplevel mapped on top of the game
+#     (everything in the paragraphs above; today's behaviour, kept as the
+#     fallback for hosts without the shm-aware layer).
+#   "inlayer"  - DEFAULT. Steam-style: the toplevel stays MAPPED, on-screen
+#     but invisible (-alpha 0 + WS_EX_TRANSPARENT click-through - an
+#     off-screen window has an empty GDI visible region and Tk's paint is
+#     clipped away), so Tk keeps laying out/painting and every binding
+#     keeps working; a publish pump PrintWindow's it into
+#     "Local\DLSS5_UI_<pid>" (~15 Hz + heartbeat) and the in-process Vulkan
+#     layer alpha-blends it into the frame. While ui_visible is set the
+#     layer's wndproc filter EATS the game's window input and posts it to
+#     the shared event ring; a ~10 ms Tk-side pump turns those events back
+#     into Tk events on the panel widgets - hit-testing comes for free
+#     from the widget tree. All foreground/cursor machinery is
+#     external-only: in-layer never moves the OS cursor and never shows a
+#     visible window on the desktop.
+#
 # Threading: the overlay never does I/O itself. It renders ctl.snapshot()
 # (monitor thread) and routes every action through ctl.submit() (worker).
+# The in-layer shm pumps are plain after() timers on the Tk thread -
+# PrintWindow is a synchronous cross-thread WM_PRINT send, so it cannot
+# live on a worker thread anyway (see InLayerUI).
 # ============================================================================
 import ctypes
 import time
 import tkinter as tk
 from ctypes import wintypes
-from tkinter import ttk
 
 from .processes import hwnd_for_pid
 from . import gamelaunch
 from .i18n import (tr, scale_preset_labels, scale_to_preset_label,
                    preset_label_to_scale)
-from .phase30 import Phase30Panel
+from .overlay_hotkey import (VK, POLL_MS, parse_hotkey,  # noqa: F401
+                             hotkey_label, HotkeyPoller)
+from .overlay_inlayer import InLayerUI
+from .overlay_widgets import (build_panel, BG, PANEL, PANEL2, FG, MUTED,
+                              ACCENT, GREEN, RED, AMBER)
 from .overlay_win32 import (_u32, GWL_EXSTYLE, WS_EX_TOPMOST,  # noqa: F401
                             WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
                             HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE,
                             SWP_NOACTIVATE,
                             _set_noactivate, _free_cursor, _input_jiggle,
                             _force_foreground, _toplevel_hwnd, _exstyle,
-                            _show_noactivate, fix_popdown,
+                            _show_noactivate,
+                            set_clickthrough,
                             monitor_work_area_for_hwnd)
 
-VK = {"control": 0x11, "ctrl": 0x11, "alt": 0x12, "shift": 0x10}
 VK_LBUTTON = 0x01
-POLL_MS = 120
 DEBOUNCE_MS = 250
 STATUS_MS = 500
 CURSOR_KEEP_MS = 32
 CURSOR_FREE_MS = 500   # low cadence: full ReleaseCapture/SetCursor pass
 TOPMOST_REASSERT_S = 1.0
-
-# dark theme (shared palette with ui.py)
-BG = "#0d1017"
-PANEL = "#161a23"
-PANEL2 = "#1f2430"
-FG = "#e6e9f0"
-MUTED = "#8a91a5"
-ACCENT = "#5b8cff"
-GREEN = "#3fb950"
-RED = "#f85149"
-AMBER = "#d29922"
-
-
-def parse_hotkey(spec):
-    """'control+alt+g' -> (mods_mask, vk). Defaults to ctrl+alt+g."""
-    mods = 0
-    key = "g"
-    parts = [p.strip().lower() for p in (spec or "").split("+") if p.strip()]
-    if parts:
-        key = parts[-1]
-        for p in parts[:-1]:
-            if p in VK:
-                mods |= {0x11: 0x0002, 0x12: 0x0001, 0x10: 0x0004}[VK[p]]
-    vk = ord(key[0].upper()) if key else ord("G")
-    return mods, vk
-
-
-def hotkey_label(spec):
-    return (spec or "control+alt+g").upper().replace("CONTROL", "CTRL")
-
-
-class HotkeyPoller:
-    """Edge-triggered global combo polling."""
-
-    def __init__(self, spec, on_fire, poll_ms=POLL_MS):
-        self.mods, self.vk = parse_hotkey(spec)
-        self.on_fire = on_fire
-        self.poll_ms = poll_ms
-        self._armed = True
-        self._tk = None
-
-    def _down(self, vk):
-        return bool(_u32.GetAsyncKeyState(vk) & 0x8000)
-
-    def poll(self):
-        combo = self._down(self.vk)
-        if combo and self.mods:
-            combo = all(self._down(vk) for bit, vk in
-                        ((0x0002, VK["control"]), (0x0001, VK["alt"]),
-                         (0x0004, VK["shift"])) if self.mods & bit)
-        if combo and self._armed:
-            self._armed = False
-            self.on_fire()
-        elif not combo:
-            self._armed = True
-        if self._tk is not None:
-            self._tk.after(self.poll_ms, self.poll)
-
-    def attach(self, tk_widget):
-        self._tk = tk_widget
-        tk_widget.after(self.poll_ms, self.poll)
 
 
 class ControlOverlay:
@@ -169,6 +131,12 @@ class ControlOverlay:
         self._last_cursor_free = 0.0  # last full _free_cursor() timestamp
         self._last_topmost = 0.0     # last HWND_TOPMOST re-assert timestamp
         self._hwnd = None            # cached top-level HWND (per show())
+        self._inlayer = False        # this session composites via the layer
+        self._ui_visible = False     # logical panel visibility (in-layer)
+        self._il = None              # InLayerUI bridge, built on first arm
+        self._shm_failed_pid = None  # shm open failed for this pid ->
+                                     # external for the rest of that session
+        self._combo_tags_saved = None  # scale_cb bindtags while in-layer
         # Drag tracking feeds _cursor_keeper: while a button is held over
         # the panel the keeper must not ReleaseCapture mid-gesture. The
         # toplevel bindtag sees presses/releases from every descendant.
@@ -180,171 +148,9 @@ class ControlOverlay:
 
     # ------------------------------------------------------------- build ---
     def _build(self):
-        w = self.win
-        # title strip (drag handle)
-        strip = tk.Frame(w, bg=PANEL, height=34)
-        strip.pack(fill="x")
-        strip.pack_propagate(False)
-        self.title_lbl = tk.Label(strip, text="◆ DLSS 5", bg=PANEL, fg=ACCENT,
-                                  font=("Segoe UI", 10, "bold"))
-        self.title_lbl.pack(side="left", padx=10)
-        close = tk.Label(strip, text="✕", bg=PANEL, fg=MUTED,
-                         font=("Segoe UI", 10, "bold"), padx=10, cursor="hand2")
-        close.pack(side="right")
-        close.bind("<Button-1>", lambda _e: self.hide())
-        close.bind("<Enter>", lambda _e: close.config(fg=RED))
-        close.bind("<Leave>", lambda _e: close.config(fg=MUTED))
-        for widget in (strip, self.title_lbl):
-            widget.bind("<ButtonPress-1>", self._drag_start)
-            widget.bind("<B1-Motion>", self._drag_move)
-
-        body_shell = tk.Frame(w, bg=BG)
-        body_shell.pack(fill="both", expand=True)
-        self.body_canvas = tk.Canvas(
-            body_shell, bg=BG, highlightthickness=0, borderwidth=0)
-        body_scroll = ttk.Scrollbar(
-            body_shell, orient="vertical", command=self.body_canvas.yview)
-        self.body_canvas.configure(yscrollcommand=body_scroll.set)
-        body_scroll.pack(side="right", fill="y")
-        self.body_canvas.pack(side="left", fill="both", expand=True)
-        body = tk.Frame(self.body_canvas, bg=BG, padx=14, pady=10)
-        self._body_window = self.body_canvas.create_window(
-            (0, 0), window=body, anchor="nw")
-        body.bind("<Configure>", lambda _e: self.body_canvas.configure(
-            scrollregion=self.body_canvas.bbox("all")))
-        self.body_canvas.bind(
-            "<Configure>", lambda e: self.body_canvas.itemconfigure(
-                self._body_window, width=e.width))
-
-        self.freeze_lbl = tk.Label(
-            body, text="", bg=BG, fg=AMBER, font=("Segoe UI", 8),
-            justify="left", anchor="w", wraplength=self.WIDTH - 32)
-        self.freeze_lbl.pack(fill="x", pady=(0, 6))
-
-        # processing toggle (the big one)
-        self.toggle_btn = tk.Button(
-            body, text=tr("ov_pause"), font=("Segoe UI", 10, "bold"),
-            bg=ACCENT, fg="#ffffff", activebackground="#3a70d6",
-            activeforeground="#ffffff", relief="flat", bd=0, pady=7,
-            cursor="hand2", command=self._toggle_processing)
-        self.toggle_btn.pack(fill="x")
-
-        self.mode_lbl = tk.Label(body, text="", bg=BG, fg=MUTED,
-                                 font=("Segoe UI", 8))
-        self.mode_lbl.pack(anchor="w", pady=(3, 8))
-
-        # Scale & FrameGen row
-        top_row = tk.Frame(body, bg=BG)
-        top_row.pack(fill="x", pady=(2, 4))
-        tk.Label(top_row, text=tr("scale"), bg=BG, fg=FG,
-                 font=("Segoe UI", 8, "bold")).pack(side="left")
-        self.scale_var = tk.StringVar(
-            value=scale_to_preset_label(self.ctl.cfg.get("scale")))
-        self.scale_cb = ttk.Combobox(
-            top_row, textvariable=self.scale_var, state="readonly",
-            values=scale_preset_labels(), width=18)
-        self.scale_cb.pack(side="left", padx=(6, 12))
-        self.scale_cb.bind("<<ComboboxSelected>>", self._scale_selected)
-        # The combobox popdown is a fresh Tk toplevel that does NOT
-        # inherit our WS_EX_NOACTIVATE - showing it plain would be an
-        # activation vector against exclusive-fullscreen games.
-        self.scale_cb.bind("<Button-1>", fix_popdown(self.scale_cb),
-                           add="+")
-
-        self.fg_var = tk.BooleanVar(value=bool(self.ctl.cfg.get("frame_gen")))
-        self.fg_chk = tk.Checkbutton(
-            top_row, text=tr("framegen"), variable=self.fg_var,
-            command=self._save_framegen, bg=BG, fg=FG, selectcolor=PANEL,
-            activebackground=BG, activeforeground=FG,
-            font=("Segoe UI", 8, "bold"), cursor="hand2")
-        self.fg_chk.pack(side="right")
-
-        # Blend & Sharpness row
-        bs_row = tk.Frame(body, bg=BG)
-        bs_row.pack(fill="x", pady=(2, 4))
-
-        # Blend
-        b_box = tk.Frame(bs_row, bg=BG)
-        b_box.pack(side="left", fill="x", expand=True, padx=(0, 6))
-        b_hdr = tk.Frame(b_box, bg=BG)
-        b_hdr.pack(fill="x")
-        tk.Label(b_hdr, text=tr("ov_blend"), bg=BG, fg=FG,
-                 font=("Segoe UI", 8, "bold")).pack(side="left")
-        self.blend_val = tk.Label(b_hdr, text="%.2f" % float(self.ctl.cfg.get("blend") or 1.0),
-                                  bg=BG, fg=ACCENT, font=("Consolas", 8, "bold"))
-        self.blend_val.pack(side="right")
-        self.blend_var = tk.DoubleVar(value=float(self.ctl.cfg.get("blend") or 1.0))
-        self.blend_scale = tk.Scale(
-            b_box, from_=0.0, to=1.0, resolution=0.05, orient="horizontal",
-            variable=self.blend_var, command=self._debounced_blend,
-            bg=BG, fg=FG, troughcolor=PANEL2, highlightthickness=0, bd=0,
-            activebackground=ACCENT, showvalue=False, sliderrelief="flat")
-        self.blend_scale.pack(fill="x")
-
-        # Sharpness
-        s_box = tk.Frame(bs_row, bg=BG)
-        s_box.pack(side="right", fill="x", expand=True, padx=(6, 0))
-        s_hdr = tk.Frame(s_box, bg=BG)
-        s_hdr.pack(fill="x")
-        tk.Label(s_hdr, text=tr("sharpness"), bg=BG, fg=FG,
-                 font=("Segoe UI", 8, "bold")).pack(side="left")
-        self.sharpness_val = tk.Label(
-            s_hdr, text="%.2f" % float(self.ctl.cfg.get("sharpness") or 0.8),
-            bg=BG, fg=ACCENT, font=("Consolas", 8, "bold"))
-        self.sharpness_val.pack(side="right")
-        self.sharpness_var = tk.DoubleVar(
-            value=float(self.ctl.cfg.get("sharpness") or 0.8))
-        self.sharpness_scale = tk.Scale(
-            s_box, from_=0.0, to=1.0, resolution=0.05, orient="horizontal",
-            variable=self.sharpness_var, command=self._debounced_sharpness,
-            bg=BG, fg=FG, troughcolor=PANEL2, highlightthickness=0, bd=0,
-            activebackground=ACCENT, showvalue=False, sliderrelief="flat")
-        self.sharpness_scale.pack(fill="x")
-
-        # Phase 30 Vendor Panel
-        p30_wrap = tk.Frame(body, bg=PANEL, highlightthickness=1,
-                            highlightbackground=PANEL2)
-        p30_wrap.pack(fill="x", pady=(4, 6))
-        self.p30_panel = Phase30Panel(
-            p30_wrap, initial_values=self.ctl.cfg.get_phase30(),
-            on_change=self._on_phase30_change,
-            on_reset=self._on_phase30_reset,
-            bg=PANEL, fg=FG, accent=ACCENT, panel2=PANEL2, muted=MUTED,
-            compact=True)
-        self.p30_panel.pack(fill="x", padx=8, pady=6)
-
-        # Legacy variables for compatibility
-        self.var = tk.DoubleVar(
-            value=float(self.ctl.cfg.get("intensity") if self.ctl.cfg.get("intensity") is not None else 1.0))
-        self._suppress_scale = None
-        self._scale_dragging = False
-
-        # Options: freeze and autopause
-        opts_row = tk.Frame(body, bg=BG)
-        opts_row.pack(fill="x", pady=(2, 4))
-        self.fr_var = tk.BooleanVar(
-            value=bool(self.ctl.cfg.get("overlay_freeze")))
-        tk.Checkbutton(opts_row, text=tr("ov_freeze_opt"),
-                       variable=self.fr_var, command=self._save_freeze,
-                       bg=BG, fg=MUTED, selectcolor=PANEL,
-                       activebackground=BG, activeforeground=FG,
-                       font=("Segoe UI", 8), cursor="hand2").pack(side="left")
-
-        self.ap_var = tk.BooleanVar(
-            value=bool(self.ctl.cfg.get("overlay_autopause")))
-        tk.Checkbutton(opts_row, text=tr("ov_autopause"), variable=self.ap_var,
-                       command=self._save_autopause, bg=BG, fg=MUTED,
-                       selectcolor=PANEL, activebackground=BG,
-                       activeforeground=FG, font=("Segoe UI", 8),
-                       cursor="hand2").pack(side="right")
-
-        self.status = tk.Label(body, text="", bg=BG, fg=MUTED,
-                               font=("Consolas", 8), justify="left")
-        self.status.pack(anchor="w")
-
-        tk.Label(body, text=tr("ov_hide_hint", hotkey_label(
-            self.ctl.cfg.get("overlay_hotkey"))), bg=BG, fg="#565b66",
-            font=("Segoe UI", 8)).pack(side="bottom", pady=(8, 0))
+        # Widget-tree construction lives in overlay_widgets.build_panel -
+        # it assigns every widget/var straight onto this instance.
+        build_panel(self)
 
     # -------------------------------------------------------------- drag ---
     def _button_press(self, _e):
@@ -372,11 +178,25 @@ class ControlOverlay:
                 self.win.winfo_screenheight())
 
     def _drag_start(self, e):
+        if self._inlayer:
+            # Synthetic ring events carry GAME-CLIENT coords in
+            # x_root/y_root (InLayerUI._inject); the parked window's own
+            # position is the meaningless park spot. Dragging moves the
+            # dst rect the layer composites at - not the hidden window.
+            self._drag = (e.x_root - self._il.dst[0],
+                          e.y_root - self._il.dst[1])
+            self._dragging = True
+            return
         self._drag = (e.x_root - self.win.winfo_x(),
                       e.y_root - self.win.winfo_y())
         self._dragging = True
 
     def _drag_move(self, e):
+        if self._inlayer:
+            if self._drag:
+                self._il.set_dst(e.x_root - self._drag[0],
+                                 e.y_root - self._drag[1])
+            return
         if self._drag:
             # Clamp to the virtual desktop so the panel can never be
             # parked offscreen (negative/secondary-monitor coords are real).
@@ -507,7 +327,7 @@ class ControlOverlay:
 
     def _refresh(self):
         """Render the monitor snapshot; runs only while visible."""
-        if not self.win.winfo_viewable():
+        if not self._is_shown():
             return
         snap = self.ctl.snapshot()
         mode = snap.get("active_mode")
@@ -563,7 +383,10 @@ class ControlOverlay:
         if p30 and hasattr(self, "p30_panel") and self.p30_panel and not self.p30_panel.is_dragging():
             self.p30_panel.set_values(p30)
 
-        self._reassert_topmost()
+        if not self._inlayer:
+            # external-mode z-order insurance only; an off-screen parked
+            # toplevel has nothing to re-assert.
+            self._reassert_topmost()
         self.win.after(STATUS_MS, self._refresh)
 
     def _reassert_topmost(self):
@@ -681,6 +504,12 @@ class ControlOverlay:
         (_dragging: slider drags, title-strip moves, popdown picks). The
         hard jail (teleport back into the panel) only runs for a
         fullscreen game and is also skipped mid-drag."""
+        if self._inlayer:
+            # In-layer never touches the OS cursor: the layer draws the
+            # sprite and clips the pointer itself. The invisible mapped
+            # toplevel is always viewable, so the check below alone
+            # cannot stop the chain - kill it explicitly on mode entry.
+            return
         if not self.win.winfo_viewable():
             return
         held = False
@@ -734,13 +563,191 @@ class ControlOverlay:
         self._game_hwnd = None
 
     # ------------------------------------------------------------ show/hide
+    def _is_shown(self):
+        """Logical visibility. In in-layer mode the toplevel is ALWAYS
+        viewable (mapped, invisible on-screen) so winfo_viewable() is not
+        the truth - _ui_visible is."""
+        if self._inlayer:
+            return self._ui_visible
+        return self.win.winfo_viewable()
+
     def toggle(self):
-        if self.win.winfo_viewable():
+        if self._is_shown():
             self.hide()
         else:
             self.show()
 
+    def _overlay_mode(self):
+        """cfg overlay_mode: 'inlayer' (default - composited into the
+        game frame by the Vulkan layer via shared memory) or 'external'
+        (the classic real toplevel, kept as the fallback)."""
+        m = str(self.ctl.cfg.get("overlay_mode") or "inlayer").lower()
+        return "external" if m == "external" else "inlayer"
+
+    def _inlayer_ready(self):
+        """Arm the shm channel for the active game pid. False -> fall
+        back to the external path; an open failure is logged ONCE per pid
+        and that pid then stays external for the rest of the session."""
+        try:
+            pid = self.ctl.active_game_pid()
+        except Exception:
+            pid = None
+        if not pid:
+            return False          # no game -> nothing to composite into
+        if self._il is None:
+            self._il = InLayerUI(self)
+        il = self._il
+        if il.is_armed() and il.pid != pid:
+            il.disarm()           # game restarted / different game now
+        if not il.is_armed():
+            if pid == self._shm_failed_pid:
+                return False
+            if not il.arm(pid):
+                self._shm_failed_pid = pid
+                self.on_log("[overlay] in-layer shm unavailable for pid "
+                            "%s - falling back to external mode" % pid)
+                return False
+        return True
+
     def show(self):
+        if self._overlay_mode() == "inlayer" and self._inlayer_ready():
+            self._show_inlayer()
+            return
+        self._show_external()
+
+    def _show_inlayer(self):
+        """In-layer show: pixels go to the layer via the shm section,
+        input comes back through the event ring. The toplevel stays
+        MAPPED, on-screen but invisible (alpha=0 + click-through) - Tk
+        keeps painting for PrintWindow, every binding keeps working,
+        nothing ever lands on the desktop. All focus/cursor machinery is
+        skipped on purpose."""
+        freeze_enabled = bool(self.ctl.cfg.get("overlay_freeze"))
+        il = self._il
+        pid = il.pid
+        # The game hwnd anchors CLIENT-coord placement (and the foreground
+        # restore path is never taken in-layer, but _game_hwnd also feeds
+        # _save_freeze's mode check helpers elsewhere).
+        self._game_hwnd = hwnd_for_pid(pid) if pid else None
+        if not self._game_hwnd:
+            try:
+                fg = _u32.GetForegroundWindow()
+                if fg and fg != self._hwnd:
+                    self._game_hwnd = fg
+            except Exception:
+                pass
+        self._jail_cursor = False     # never touch the OS cursor in-layer
+
+        self.scale_var.set(scale_to_preset_label(self.ctl.cfg.get("scale")))
+        self.fg_var.set(bool(self.ctl.cfg.get("frame_gen")))
+        sh = float(self.ctl.cfg.get("sharpness") or 0.8)
+        self.sharpness_var.set(sh)
+        self.sharpness_val.config(text="%.2f" % sh)
+        snap = self.ctl.snapshot()
+        mode = snap.get("active_mode")
+        game_mode = mode in ("dx9", "dx11", "dx12", "vulkan")
+
+        if freeze_enabled:
+            gamelaunch.freeze_set(True)
+            self._freeze_flags = True
+            self.freeze_lbl.config(text=tr("ov_freeze_on"), fg=AMBER)
+        else:
+            self._freeze_flags = False
+            self.freeze_lbl.config(text="")
+        self._dragging = False
+
+        # Same centre-over-the-game convention as _center(), expressed in
+        # the game's CLIENT coords for the layer.
+        il.place(self._game_hwnd)
+
+        # Map BEFORE arming: the window must be viewable for Tk to paint
+        # it (and for the first synchronous publish to see pixels). The
+        # park is ON-SCREEN but invisible - -alpha 0 keeps Tk's paint
+        # flowing (off-screen windows get clipped to an empty visible
+        # region) and WS_EX_TRANSPARENT lets clicks fall through to the
+        # game, where the layer captures them for the event ring.
+        hwnd = _toplevel_hwnd(self.win)
+        self._hwnd = hwnd
+        il._hwnd = hwnd
+        if hwnd is not None:
+            set_clickthrough(hwnd, True)
+        px, py = il.park_pos()
+        self.win.geometry("%dx%d+%d+%d" % (self.WIDTH, self.HEIGHT, px, py))
+        self.win.attributes("-alpha", 0.0)
+        self.win.deiconify()
+        self._inlayer = True
+        self._ui_visible = True
+        self._combo_bindtags_off()
+        il.armed()                # first frame + ui_visible + drain pump
+        self.on_log("[overlay] in-layer shown pid=%s hwnd=0x%x dst=%d,%d"
+                    % (pid or 0, hwnd or 0, il.dst[0], il.dst[1]))
+
+        if self.ap_var.get() and game_mode and not gamelaunch.mode_paused(mode):
+            self.ctl.submit(self.ctl.processing_toggle)
+            self.on_log("[overlay] auto-paused (%s)" % mode)
+
+        self.win.after(STATUS_MS, self._refresh)
+
+    def _inlayer_lost(self):
+        """The armed game pid is gone or the section died (the in-process
+        layer died with it). Drop the session so the next toggle
+        re-evaluates from scratch. Tk thread only - called from the
+        publish pump's pid check / open check."""
+        if self._il:
+            self._il.disarm()
+        self._inlayer = False
+        self._ui_visible = False
+        self._combo_bindtags_restore()
+        self.hide()         # external branch now: withdraw + unfreeze
+
+    def _combo_bindtags_off(self):
+        """In-layer only: drop the TCombobox class binding so <Button-1>
+        cannot post the dropdown popdown (a separate real toplevel that
+        would open at the parked position - invisible AND holding Tk's
+        event grab, which would wedge the panel). Click cycles presets
+        instead via _scale_cycle."""
+        if self._combo_tags_saved is not None:
+            return
+        try:
+            self._combo_tags_saved = self.scale_cb.bindtags()
+            self.scale_cb.bindtags((self.scale_cb, self.win, "all"))
+            self.scale_cb.bind("<ButtonPress-1>", self._scale_cycle,
+                               add="+")
+        except tk.TclError:
+            self._combo_tags_saved = None
+
+    def _combo_bindtags_restore(self):
+        if self._combo_tags_saved is not None:
+            try:
+                self.scale_cb.bindtags(self._combo_tags_saved)
+            except tk.TclError:
+                pass
+            self._combo_tags_saved = None
+
+    def _scale_cycle(self, _e=None):
+        """In-layer scale combo click: cycle presets (the real popdown
+        cannot be composited into the game frame - see _combo_bindtags_off)."""
+        if not self._inlayer:
+            return None           # external mode keeps the real popdown
+        labels = scale_preset_labels()
+        cur = self.scale_var.get()
+        nxt = labels[(labels.index(cur) + 1) % len(labels)] \
+            if cur in labels else labels[0]
+        self.scale_var.set(nxt)
+        self._scale_selected()
+        return "break"
+
+    def _show_external(self):
+        """Classic on-screen panel (overlay_mode 'external' or the
+        in-layer fallback). The original show() body."""
+        if self._inlayer:
+            # Left in-layer mode (config flip or dead game): drop the shm
+            # session before mapping a real on-screen window.
+            self._inlayer = False
+            self._ui_visible = False
+            self._combo_bindtags_restore()
+            if self._il:
+                self._il.disarm()
         focus_enabled = bool(self.ctl.cfg.get("overlay_focus"))
         freeze_enabled = bool(self.ctl.cfg.get("overlay_freeze"))
         try:
@@ -756,6 +763,9 @@ class ControlOverlay:
         self._hwnd = hwnd        # cached for _reassert_topmost
         if hwnd is not None:
             _set_noactivate(hwnd, not focus_enabled)
+            set_clickthrough(hwnd, False)   # in-layer's fall-through undo:
+            # the external panel is a real window - clicks must land on it
+        self.win.attributes("-alpha", self._alpha)   # undo in-layer's 0
 
         # Remember the game window so hide() can hand the foreground back
         # (only used when focus mode was enabled for this session) - and so
@@ -882,6 +892,15 @@ class ControlOverlay:
         self.unfreeze()
         self.freeze_lbl.config(text="")
         self._return_focus()
+        if self._inlayer:
+            # In-layer: the toplevel stays MAPPED at its invisible
+            # on-screen park spot (Tk keeps painting for the next
+            # publish); only the layer-side ui_visible flag drops -
+            # compositing AND input capture stop together.
+            self._ui_visible = False
+            if self._il:
+                self._il.hidden()
+            return
         self.win.withdraw()
 
 

@@ -46,6 +46,11 @@ DEFAULTS = {
     "overlay_freeze": False,     # FREEZE the frame while the overlay is open (False = live game keeps running)
     "overlay_focus": False,      # overlay uses WS_EX_NOACTIVATE without stealing focus;
                                  # game never minimizes on overlay open
+    "overlay_mode": "inlayer",   # "inlayer" = composited into the game frame by
+                                 # the Vulkan layer via Local\DLSS5_UI_<pid>
+                                 # shared memory (hidden Tk panel + shm);
+                                 # "external" = classic on-screen toplevel
+                                 # (fallback when the shm cannot be opened)
     # ---- media tab ---------------------------------------------------------
     "media_out_dir": None,       # fixed output dir for mode "always"; None =
                                  # alongside the source (subdir "dlss5")

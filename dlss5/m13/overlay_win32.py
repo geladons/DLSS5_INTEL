@@ -18,6 +18,7 @@ GWL_EXSTYLE = -20
 WS_EX_TOPMOST = 0x00000008
 WS_EX_NOACTIVATE = 0x08000000
 WS_EX_TOOLWINDOW = 0x00000080
+WS_EX_TRANSPARENT = 0x00000020
 
 # SetWindowPos / show flags for a guaranteed non-activating map+restack.
 GA_ROOT = 2
@@ -182,6 +183,29 @@ def set_noactivate_for_hwnd(hwnd):
         pass
 
 
+def set_clickthrough(hwnd, on=True):
+    """Add/remove WS_EX_TRANSPARENT on the top-level HWND.
+
+    The in-layer bridge keeps the Tk window on-screen but invisible
+    (-alpha 0) so Tk keeps painting a real surface for PrintWindow.
+    WS_EX_TRANSPARENT makes pointer hit-testing fall through to the game
+    below, where the layer captures real input and turns it into ring
+    events. A fully-transparent layered window already skips hit-testing;
+    this is belt on top of it."""
+    try:
+        style = _u32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
+        if on:
+            style |= WS_EX_TRANSPARENT
+        else:
+            style &= ~WS_EX_TRANSPARENT
+        _u32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style)
+        _u32.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
+                          SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER
+                          | SWP_NOACTIVATE | SWP_FRAMECHANGED)
+    except (ValueError, OSError):
+        pass
+
+
 def fix_popdown(combo):
     """Return a <Button-1> bind handler (call combo.bind with the result)
     that hardens a ttk.Combobox popdown: the popdown is a fresh Tk toplevel
@@ -332,3 +356,160 @@ def _force_foreground(hwnd):
                 _u32.AttachThreadInput(cur_tid, fg_tid, False)
     except (ValueError, OSError):
         pass
+
+
+# --------------------------------------------------------------- printing --
+# In-layer overlay pixel source: PrintWindow(hwnd, memdc,
+# PW_RENDERFULLCONTENT) renders the panel HWND into a 32-bpp top-down DIB.
+# The window stays MAPPED and ON-SCREEN but invisible (-alpha 0 +
+# WS_EX_TRANSPARENT - see overlay.py): a fully off-screen window has an
+# empty GDI visible region, so Tk's paint gets clipped away and the DIB
+# comes back all-zero (probed on this host 2026-10-06).
+# Same ctypes style as icons.py; the _g32/_u32 signatures below also fix
+# the default-c_int truncation for icons.py's own calls (both modules
+# share the same WinDLL objects).
+_g32 = ctypes.windll.gdi32
+
+PW_RENDERFULLCONTENT = 0x00000002
+BI_RGB = 0
+DIB_RGB_COLORS = 0
+
+_u32.PrintWindow.argtypes = [wintypes.HWND, ctypes.c_void_p, wintypes.UINT]
+_u32.PrintWindow.restype = wintypes.BOOL
+_u32.GetDC.argtypes = [wintypes.HWND]
+_u32.GetDC.restype = ctypes.c_void_p                      # HDC
+_u32.ReleaseDC.argtypes = [wintypes.HWND, ctypes.c_void_p]
+_u32.ReleaseDC.restype = ctypes.c_int
+_u32.GetClientRect.argtypes = [wintypes.HWND, wintypes.LPRECT]
+_u32.GetClientRect.restype = wintypes.BOOL
+_u32.ClientToScreen.argtypes = [wintypes.HWND,
+                                ctypes.POINTER(wintypes.POINT)]
+_u32.ClientToScreen.restype = wintypes.BOOL
+_g32.CreateCompatibleDC.argtypes = [ctypes.c_void_p]
+_g32.CreateCompatibleDC.restype = ctypes.c_void_p         # HDC
+_g32.CreateDIBSection.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                  wintypes.UINT, ctypes.c_void_p,
+                                  wintypes.HANDLE, wintypes.DWORD]
+_g32.CreateDIBSection.restype = ctypes.c_void_p           # HBITMAP
+_g32.SelectObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+_g32.SelectObject.restype = ctypes.c_void_p               # HGDIOBJ
+_g32.DeleteObject.argtypes = [ctypes.c_void_p]
+_g32.DeleteObject.restype = wintypes.BOOL
+_g32.DeleteDC.argtypes = [ctypes.c_void_p]
+_g32.DeleteDC.restype = wintypes.BOOL
+
+
+class _BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [("biSize", wintypes.DWORD), ("biWidth", ctypes.c_long),
+                ("biHeight", ctypes.c_long), ("biPlanes", wintypes.WORD),
+                ("biBitCount", wintypes.WORD),
+                ("biCompression", wintypes.DWORD),
+                ("biSizeImage", wintypes.DWORD),
+                ("biXPelsPerMeter", ctypes.c_long),
+                ("biYPelsPerMeter", ctypes.c_long),
+                ("biClrUsed", wintypes.DWORD),
+                ("biClrImportant", wintypes.DWORD)]
+
+
+class _BITMAPINFO(ctypes.Structure):
+    _fields_ = [("bmiHeader", _BITMAPINFOHEADER),
+                ("bmiColors", wintypes.DWORD)]
+
+
+def window_size(hwnd):
+    """(w, h) of a window's outer rect. Pure win32 - callable off the Tk
+    thread (the publish worker uses it instead of winfo_*)."""
+    rect = wintypes.RECT()
+    if _u32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        return (rect.right - rect.left, rect.bottom - rect.top)
+    return None
+
+
+def client_size(hwnd):
+    """(w, h) of a window's CLIENT area - the pixel surface the layer
+    composites into (frame coords == client coords)."""
+    rect = wintypes.RECT()
+    if _u32.GetClientRect(hwnd, ctypes.byref(rect)):
+        return (rect.right - rect.left, rect.bottom - rect.top)
+    return None
+
+
+def client_origin(hwnd):
+    """Screen (x, y) of a window's client-area origin. Subtracting it from
+    a screen-space panel position yields the game's CLIENT coords."""
+    pt = wintypes.POINT(0, 0)
+    if _u32.ClientToScreen(hwnd, ctypes.byref(pt)):
+        return (pt.x, pt.y)
+    return None
+
+
+class DibCapture:
+    """Reusable PrintWindow -> BGRA pipeline for one window size at a
+    time. Owns a memory DC + 32bpp top-down DIBSection; grab() returns
+    straight bytes with the alpha lane forced to `alpha` (GDI renders
+    leave A=0 in a 32bpp DIB - the layer composites straight-alpha and the
+    panel is a solid rect, so a uniform 0xE0 reproduces the external
+    window's -alpha 0.88 look)."""
+
+    def __init__(self):
+        self._hdc = self._hbmp = self._old = self._bits = None
+        self._wh = (0, 0)
+
+    def _teardown(self):
+        if self._hdc and self._old:
+            _g32.SelectObject(self._hdc, self._old)
+        if self._hbmp:
+            _g32.DeleteObject(self._hbmp)
+        if self._hdc:
+            _g32.DeleteDC(self._hdc)
+        self._hdc = self._hbmp = self._old = self._bits = None
+        self._wh = (0, 0)
+
+    def _ensure(self, w, h):
+        """(Re)create the DC+DIB when the size changed; True when ready."""
+        if (w, h) == self._wh and self._hdc:
+            return True
+        self._teardown()
+        screen = _u32.GetDC(None)
+        if not screen:
+            return False
+        try:
+            self._hdc = _g32.CreateCompatibleDC(screen)
+            if not self._hdc:
+                return False
+            bmi = _BITMAPINFO()
+            hdr = bmi.bmiHeader
+            hdr.biSize = ctypes.sizeof(_BITMAPINFOHEADER)
+            hdr.biWidth = w
+            hdr.biHeight = -h           # negative = top-down rows
+            hdr.biPlanes = 1
+            hdr.biBitCount = 32
+            hdr.biCompression = BI_RGB
+            bits = ctypes.c_void_p()
+            self._hbmp = _g32.CreateDIBSection(
+                self._hdc, ctypes.byref(bmi), DIB_RGB_COLORS,
+                ctypes.byref(bits), None, 0)
+            if not self._hbmp or not bits.value:
+                self._teardown()
+                return False
+            self._bits = bits.value
+            self._old = _g32.SelectObject(self._hdc, self._hbmp)
+            self._wh = (w, h)
+            return True
+        finally:
+            _u32.ReleaseDC(None, screen)
+
+    def grab(self, hwnd, w, h, alpha=0xE0):
+        """-> BGRA bytes (w*h*4) of the window's current content, or None.
+        The whole rect gets `alpha` - the panel needs no per-pixel
+        transparency."""
+        if w <= 0 or h <= 0 or not self._ensure(w, h):
+            return None
+        if not _u32.PrintWindow(hwnd, self._hdc, PW_RENDERFULLCONTENT):
+            return None
+        buf = bytearray(ctypes.string_at(self._bits, w * h * 4))
+        buf[3::4] = bytes((alpha,)) * (w * h)
+        return bytes(buf)
+
+    def close(self):
+        self._teardown()
