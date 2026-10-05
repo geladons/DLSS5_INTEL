@@ -35,6 +35,9 @@
  *   NR_LAYER_SYNC     "semaphore" = present-semaphore ring; default = idle
  *   NR_LAYER_UI_MASK  0 = disable exact-repeat reuse of the last processed
  *                     result (default on; legacy name)
+ *   NR_LAYER_NEAR_REUSE 1 = also reuse on near-identical input (sampled eps,
+ *                     capped replays). OPT-IN, default OFF: stale-result
+ *                     replay judders on slow pans / animated grain.
  *
  * Live knobs: %TEMP%\m13_phase30_knobs.json is rewritten by the m13 manager
  * on every knob change. A running game's env is frozen at launch, so the
@@ -208,6 +211,13 @@ static int no_patch;            /* NR_LAYER_NOPATCH=1: leave swapchains alone */
 static volatile LONG g_paused;  /* CTRL+ALT+X: passthrough, full fps */
 static volatile LONG g_off;     /* CTRL+ALT+Q: layer off for good */
 static volatile LONG g_hotkeys_started;
+/* A pushed knob value changes what the SAME input produces: the cached
+ * earlier->result mapping is stale the moment a knob lands. Bumped wherever
+ * update_live_knobs/poll_knob_file pushes a changed value; consumed once per
+ * present in nr_QueuePresentKHR by dropping the earlier compare snapshot, so
+ * a byte-identical frame reprocesses at the new strength instead of
+ * replaying the old one (the "dead knob on a static screen" bug). */
+static unsigned long g_knobs_changed;
 
 static void init_freeze_paths(void)
 {
@@ -388,7 +398,10 @@ static void poll_knob_file(int force)
     size_t n;
     ULONGLONG now;
     char tok[64];
-    if (!g_engine) return;
+    /* No g_engine gate on the WATCH half: on the x86 daemon path the
+     * resident engine inside m11d polls this file itself, while the
+     * layer's earlier->result cache must still see the rewrite as a knob
+     * change - else a static screen replays the old-strength frame. */
     now = GetTickCount64();
     if (!force && now < g_knob_next_poll) return;
     g_knob_next_poll = now + 250;
@@ -411,6 +424,14 @@ static void poll_knob_file(int force)
     if (!g_knob_seen)
         nr_log("[nr_layer] live knob file: %s", knob_file_path());
     g_knob_seen = 1;
+    /* A rewrite of the knob file IS a knob change - the manager rewrites it
+     * only when a knob moved, and the file also carries the 7 vendor
+     * phase30 params the chain polls itself (the layer never sees those
+     * pushes). Invalidate the earlier->result mapping either way. */
+    g_knobs_changed++;
+    /* The value pushes below need the in-process engine; on the daemon
+     * path the watch above alone carries the knob-change signal. */
+    if (!g_engine) return;
 
     if (knob_json_value(buf, "scale", tok, sizeof(tok))) {
         float val = (float)atof(tok);
@@ -476,11 +497,13 @@ static void poll_knob_file(int force)
 
 static void update_live_knobs(int force_file)
 {
-    if (!g_engine) return;
-
     /* Live channel first: once the knob file has been read it owns the
-     * engine knobs; the env reads below stay the launch baseline. */
+     * engine knobs; the env reads below stay the launch baseline. The
+     * poll itself runs engine-less - on the daemon path the file rewrite
+     * is still the knob-change signal that invalidates the reuse cache. */
     poll_knob_file(force_file);
+
+    if (!g_engine) return;
 
     if (!g_knob_seen) {
         const char *scale_s = getenv("NR_LAYER_SCALE");
@@ -491,6 +514,7 @@ static void update_live_knobs(int force_file)
             if (diff < 0.0f) diff = -diff;
             if (val > 0.0f && diff > 1e-4f) {
                 g_cur_scale = val;
+                g_knobs_changed++;
                 if (pfn_dlss5_set_scale) {
                     pfn_dlss5_set_scale(g_engine, val);
                     nr_log("[nr_layer] live scale updated: %.2f", val);
@@ -506,6 +530,7 @@ static void update_live_knobs(int force_file)
             if (diff < 0.0f) diff = -diff;
             if (val >= 0.0f && diff > 1e-4f) {
                 g_cur_gain = val;
+                g_knobs_changed++;
                 if (pfn_dlss5_set_gain) {
                     pfn_dlss5_set_gain(g_engine, val);
                     nr_log("[nr_layer] live gain updated: %.2f", val);
@@ -521,6 +546,7 @@ static void update_live_knobs(int force_file)
             if (diff < 0.0f) diff = -diff;
             if (val >= 0.0f && val <= 1.0f && diff > 1e-4f) {
                 g_cur_blend = val;
+                g_knobs_changed++;
                 if (pfn_dlss5_set_blend) {
                     pfn_dlss5_set_blend(g_engine, val);
                     nr_log("[nr_layer] live blend updated: %.2f", val);
@@ -536,6 +562,7 @@ static void update_live_knobs(int force_file)
             if (diff < 0.0f) diff = -diff;
             if (val >= 0.0f && diff > 1e-4f) {
                 g_cur_sharpness = val;
+                g_knobs_changed++;
                 if (pfn_dlss5_set_sharpness) {
                     pfn_dlss5_set_sharpness(g_engine, val);
                     nr_log("[nr_layer] live sharpness updated: %.2f", val);
@@ -559,6 +586,7 @@ static void update_live_knobs(int force_file)
         if (diff < 0.0f) diff = -diff;
         if (diff > 1e-4f) {
             g_cur_intensity = val;
+            g_knobs_changed++;
             pfn_dlss5_set_intensity(g_engine, val);
             nr_log("[nr_layer] live intensity updated: %.2f", val);
         }
@@ -572,6 +600,7 @@ static void update_live_knobs(int force_file)
         if (diff < 0.0f) diff = -diff;
         if (diff > 1e-4f) {
             g_cur_local_tone = val;
+            g_knobs_changed++;
             pfn_dlss5_set_local_tone(g_engine, val);
             nr_log("[nr_layer] live local_tone updated: %.2f", val);
         }
@@ -585,6 +614,7 @@ static void update_live_knobs(int force_file)
         if (diff < 0.0f) diff = -diff;
         if (diff > 1e-4f) {
             g_cur_local_structure = val;
+            g_knobs_changed++;
             pfn_dlss5_set_local_structure(g_engine, val);
             nr_log("[nr_layer] live local_structure updated: %.2f", val);
         }
@@ -598,6 +628,7 @@ static void update_live_knobs(int force_file)
         if (diff < 0.0f) diff = -diff;
         if (diff > 1e-4f) {
             g_cur_skin_structure = val;
+            g_knobs_changed++;
             pfn_dlss5_set_skin_structure(g_engine, val);
             nr_log("[nr_layer] live skin_structure updated: %.2f", val);
         }
@@ -609,6 +640,7 @@ static void update_live_knobs(int force_file)
         int val = (am_s[0] == '1' || !strcmp(am_s, "true") || !strcmp(am_s, "on")) ? 1 : 0;
         if (val != g_cur_auto_mask) {
             g_cur_auto_mask = val;
+            g_knobs_changed++;
             pfn_dlss5_set_auto_mask(g_engine, val);
             nr_log("[nr_layer] live auto_mask updated: %d", val);
         }
@@ -620,6 +652,7 @@ static void update_live_knobs(int force_file)
         int val = atoi(si_s);
         if (val != g_cur_style_index) {
             g_cur_style_index = val;
+            g_knobs_changed++;
             pfn_dlss5_set_style_index(g_engine, val);
             nr_log("[nr_layer] live style_index updated: %d", val);
         }
@@ -633,6 +666,7 @@ static void update_live_knobs(int force_file)
         if (diff < 0.0f) diff = -diff;
         if (diff > 1e-4f) {
             g_cur_color_strength = val;
+            g_knobs_changed++;
             pfn_dlss5_set_color_strength(g_engine, val);
             nr_log("[nr_layer] live color_strength updated: %.2f", val);
         }
@@ -1609,8 +1643,17 @@ static void eps_init(void)
 {
     const char *e;
     if (eps_state >= 0) return;
+    /* The sampled-eps path is OPT-IN: it replays a STALE processed result
+     * for content that merely looks similar, which on slow pans / animated
+     * grain sticks the displayed image then jumps it (stick-slip judder),
+     * and the forced reprocess after reuse_cap lands on drifted temporal
+     * state. NR_LAYER_NEAR_REUSE=1 re-enables it; absent or any other
+     * value keeps it OFF - bit-exact memcmp repeats still reuse.
+     * NR_LAYER_EPS=0 remains a hard kill switch. */
+    e = getenv("NR_LAYER_NEAR_REUSE");
+    eps_state = (e && !strcmp(e, "1")) ? 1 : 0;
     e = getenv("NR_LAYER_EPS");
-    eps_state = !(e && !strcmp(e, "0"));
+    if (e && !strcmp(e, "0")) eps_state = 0;
     e = getenv("NR_LAYER_EPS_MEAN"); if (e) eps_mean_x100 = atol(e);
     e = getenv("NR_LAYER_EPS_PIX");  if (e) eps_pix = atoi(e);
     e = getenv("NR_LAYER_EPS_BIG");  if (e) eps_big_pm = atoi(e);
@@ -1618,7 +1661,8 @@ static void eps_init(void)
 
 /* Max consecutive near-identical replays before a forced reprocess. Bounds
  * the staleness any missed-motion pattern can accumulate; 0 disables the
- * near-identical path entirely (bit-identical repeats still reuse free). */
+ * near-identical path entirely (bit-identical repeats still reuse free).
+ * Moot unless NR_LAYER_NEAR_REUSE=1 armed eps_state in eps_init. */
 static unsigned reuse_cap(void)
 {
     static int cap = -1;
@@ -1991,6 +2035,10 @@ static int resend_raw(device_data *data, swapchain_data *chain)
             data->result_h = data->raw_h;
             data->result_valid = 1;
             data->holding_chain = chain->swapchain;
+            /* result now holds P(raw_frozen), not P(earlier): the
+             * earlier->result mapping is broken, so a post-unfreeze frame
+             * byte-identical to the stale earlier must not replay this. */
+            data->have_earlier = 0;
             nr_log("[nr_layer] in-process reprocessed held raw frame (live knob turn)");
             return 0;
         }
@@ -2023,6 +2071,7 @@ static int resend_raw(device_data *data, swapchain_data *chain)
     data->result_h = data->raw_h;
     data->result_valid = 1;
     data->holding_chain = chain->swapchain;
+    data->have_earlier = 0;  /* result is P(raw), not P(earlier) - see above */
     nr_log("[nr_layer] reprocessed the held frame (live knob turn)");
     return 0;
 }
@@ -2060,6 +2109,7 @@ static int freeze_capture(device_data *data, swapchain_data *chain,
             data->result_h = chain->extent.height;
             data->result_valid = 1;
             data->holding_chain = chain->swapchain;
+            data->have_earlier = 0;  /* result is raw, not P(earlier) */
         }
         nr_log("[nr_layer] daemon unavailable; freezing the original frame unprocessed");
     }
@@ -2145,6 +2195,20 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
     hotkeys_ensure();
     ensure_inprocess();
     update_live_knobs(0);
+    /* Knob invalidation: a pushed value changes what the SAME input would
+     * produce, so the cached earlier->result mapping is stale. Drop the
+     * compare snapshot (same idiom ensure_resources uses on extent grow):
+     * the next present reprocesses at the new values instead of replaying
+     * the old-strength result onto a byte-identical frame - which read as
+     * "the knob is dead until content moves" on static screens. The held
+     * result stays valid; it is still the emergency fallback frame. */
+    if (g_knobs_changed) {
+        g_knobs_changed = 0;
+        for (int i = 0; i < 8; i++) {
+            devices[i].have_earlier = 0;
+            devices[i].reuse_run = 0;
+        }
+    }
     init_freeze_paths();
 
     int frozen = freeze_path && _access(freeze_path, 0) == 0;
