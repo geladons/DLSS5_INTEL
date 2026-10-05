@@ -242,9 +242,10 @@ void main() {
 
     // Confidence: warped-sample disagreement OR hopeless block match.
     // Disagreement catches disocclusion/misses; matchErr catches
-    // scene-wide motion beyond the search range. conf now gates only the
-    // transferred residual - the base is always real content, so a
-    // failed match degrades to an unprocessed frame, never a content mix.
+    // scene-wide motion beyond the search range. conf selects between the
+    // motion-compensated residual and the same residual un-warped - the
+    // base is always real content, so a failed match degrades to an
+    // un-warped-residual frame, never a content mix and never a raw one.
     vec3 diff = abs(sample0.rgb - sample1.rgb);
     float maxDiff = max(diff.r, max(diff.g, diff.b));
     float occl = smoothstep(occlThreshold * 0.75, occlThreshold * 1.5, maxDiff);
@@ -252,9 +253,11 @@ void main() {
     float conf = max(occl, badMatch);
 
     // Base: the real captured middle frame is always temporally honest
-    // (scene cut -> every match fails -> conf ~ 1 -> out ~= midRaw, which
-    // IS the correct midpoint content). No midRaw -> unwarped RAW anchor
-    // blend, so the residual still lands on content of the right colour.
+    // (scene cut -> every match fails -> out ~= midRaw + local residual:
+    // still the correct midpoint content, now carrying the same
+    // processing footprint as its neighbours). No midRaw -> unwarped RAW
+    // anchor blend, so the residual still lands on content of the right
+    // colour.
     vec4 directA = getPixel(pos.x, pos.y, 0);
     vec4 directB = getPixel(pos.x, pos.y, 3);
     vec3 base = (pc.b.x != 0)
@@ -262,7 +265,25 @@ void main() {
               : mix(getPixel(pos.x, pos.y, 2).rgb,
                     getPixel(pos.x, pos.y, 1).rgb, factor);
 
-    vec3 outRgb = base + warpedRes * (1.0 - conf);
+    // Residual continuity: scaling the transferred residual by (1-conf)
+    // dropped it to zero wherever the anchor match failed - fast HUD
+    // motion, rotating chroma, disocclusion - while the held anchors on
+    // either side always carry full strength. The generated slot then
+    // alternated residual strength with its neighbours every other
+    // present (field: radar/HUD oscillation; harness: ~37% residual loss
+    // inside rotating chroma, isolated raw-frame splats when conf ~ 1
+    // globally). A failed match only invalidates the residual's
+    // POSITION, not its existence: fall back to the UNWARPED anchor
+    // residual at this pixel - the same residual state as the current
+    // anchor generation, just not motion-compensated. The residual is
+    // the enhancement field (detail/gain/temporal pull), not content:
+    // even on a scene cut it adds a bounded +-residual pattern onto
+    // still-correct base pixels, instead of splicing an unprocessed raw
+    // frame between two processed ones.
+    vec3 resLocalA = directA.rgb - getPixel(pos.x, pos.y, 2).rgb;
+    vec3 resLocalB = directB.rgb - getPixel(pos.x, pos.y, 1).rgb;
+    vec3 resLocal = mix(resLocalA, resLocalB, factor);
+    vec3 outRgb = base + mix(warpedRes, resLocal, conf);
     float outA = (abs(directA.a - directB.a) < 0.05)
                ? directB.a : mix(directA.a, directB.a, factor);
 
