@@ -1,10 +1,14 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* =====================================================================
  * gdi_guard - GDI repaint guard (see gdi_guard.h). Verbatim move from
- * nr_layer_win.c; uses nr_log + lock/unlock from nr_util.
+ * nr_layer_win.c; uses nr_log + lock/unlock from nr_util. The wndproc is
+ * also the input-capture point for the m13 in-game overlay (nr_ui.c):
+ * while the shared UI section flags capture, input messages become ring
+ * events for the producer instead of reaching the game.
  * ===================================================================== */
 #include "gdi_guard.h"
 #include "nr_util.h"
+#include "nr_ui.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +27,12 @@ static LRESULT CALLBACK nr_wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         EndPaint(hwnd, &ps);
         return 0;
     }
+    /* Overlay capture: flags&1 in the shared header means the panel owns
+     * mouse + keyboard. nr_ui_message returns nonzero for messages it
+     * turned into ring events (eaten); bookkeeping messages (focus,
+     * capture, setcursor, unlisted) fall through to the game unchanged. */
+    if (nr_ui_capture_active(hwnd) && nr_ui_message(hwnd, msg, wp, lp))
+        return 0;
     WNDPROC prev = (WNDPROC)GetPropW(hwnd, NR_GUARD_PROP);
     /* Self-chain defense: if a stale prop ever points back at us, fall to
      * DefWindowProcW instead of recursing into ourselves forever. */
@@ -77,6 +87,10 @@ void nr_guard_window(HWND hwnd)
 void nr_unguard_all(void)
 {
     lock();
+    /* Release the overlay first: ClipCursor must go back to normal before
+     * the wndprocs below stop gating, and the shared view is unmapped
+     * under the same lock that serializes ring pushes. Idempotent. */
+    nr_ui_detach();
     for (int i = 0; i < g_guard_count; i++) {
         HWND hwnd = g_guard_hwnds[i];
         WNDPROC prev = (WNDPROC)GetPropW(hwnd, NR_GUARD_PROP);

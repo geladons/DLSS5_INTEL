@@ -73,6 +73,7 @@
 #include "nr_util.h"
 #include "daemon_client.h"
 #include "gdi_guard.h"
+#include "nr_ui.h"
 
 #define MAX_SWAPCHAINS 8
 #define MAX_IMAGES 8
@@ -912,6 +913,26 @@ static int format_is_four_bytes(VkFormat format)
     }
 }
 
+/* Channel byte order of the staging pixels for the UI compositor. The
+ * layer never swizzles - data->mapped is a bit-exact copy of the swapchain
+ * image - so the memory order IS the format's component order. Only the
+ * 8-bit RGBA-class formats are blendable; the packed A2* formats are
+ * skipped entirely. Returns 0 for B,G,R,A order, 1 for R,G,B,A, -1 when
+ * not blendable. */
+static int frame_byte_order(VkFormat format)
+{
+    switch (format) {
+    case VK_FORMAT_B8G8R8A8_UNORM:
+    case VK_FORMAT_B8G8R8A8_SRGB:
+        return 0;
+    case VK_FORMAT_R8G8B8A8_UNORM:
+    case VK_FORMAT_R8G8B8A8_SRGB:
+        return 1;
+    default:
+        return -1;
+    }
+}
+
 static swapchain_data *find_swapchain(VkSwapchainKHR swapchain)
 {
     for (int i = 0; i < MAX_SWAPCHAINS; i++)
@@ -1412,6 +1433,24 @@ static int transfer(device_data *data, swapchain_data *chain, VkQueue queue,
         mk[4] = (unsigned char)(frame_counter & 0xFF);
         mk[5] = (unsigned char)((frame_counter >> 8) & 0xFF);
         mk[6] = 0; mk[7] = 0;
+    }
+    /* In-game UI overlay (nr_ui.c): blend the shared-memory panel into the
+     * frame while it still sits in the host-visible staging buffer, before
+     * the copy command is recorded. Every write-back path out - processed,
+     * held, generated, frozen - funnels through this one point. Absent
+     * mapping / bad magic / hidden UI = zero behaviour. */
+    if (to_image) {
+        int order = frame_byte_order(chain->format);
+        if (order >= 0 && data->mapped
+            && data->staging_size >= (VkDeviceSize)chain->extent.width
+                                     * chain->extent.height * 4) {
+            NrUiFrame ui_frame;
+            ui_frame.mapped = (unsigned char *)data->mapped;
+            ui_frame.width = chain->extent.width;
+            ui_frame.height = chain->extent.height;
+            ui_frame.rgba_order = order;
+            nr_ui_composite(&ui_frame);
+        }
     }
     PFN_vkAllocateCommandBuffers allocate_commands = (PFN_vkAllocateCommandBuffers)
         data->get_device_proc(data->device, "vkAllocateCommandBuffers");

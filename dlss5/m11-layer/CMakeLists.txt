@@ -17,7 +17,7 @@ else()
 endif()
 
 add_library(nr_layer_win SHARED nr_layer_win.c nr_framegen.c nr_degrade.c
-            nr_util.c daemon_client.c gdi_guard.c nr_layer_win.def)
+            nr_util.c daemon_client.c gdi_guard.c nr_ui.c nr_layer_win.def)
 target_include_directories(nr_layer_win PRIVATE "${VULKAN_SDK}/Include" "${CMAKE_CURRENT_SOURCE_DIR}/../chain")
 target_link_libraries(nr_layer_win PRIVATE ws2_32)
 # No libvulkan link: the layer resolves everything through the loader's
