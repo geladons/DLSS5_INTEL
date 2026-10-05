@@ -195,12 +195,6 @@ static long capture_every;
 static long live_every;
 static NrFrameGen g_fg;
 static NrDegrade g_dg;
-/* Daemon-path framegen state: 0 = unprobed, 1 = a NRN2 transfer request was
- * answered, -1 = refused/failed - latched for the session so an old daemon
- * is never spammed with a doomed multi-MB payload every 2nd present. The
- * request is self-probing: a new daemon always answers (a process fallback
- * when it cannot transfer yet), an old daemon drops the unknown magic. */
-static int g_daemon_fg;
 static const char *trigger_path;
 static const char *freeze_path;
 static const char *reproc_path;
@@ -1938,12 +1932,12 @@ static int process_frame(device_data *data, swapchain_data *chain,
     if (nr_degrade_note_success(&g_dg, nr_now_ms())
             == NR_DEGRADE_LOG_RECOVERY) {
         nr_log("[nr_layer] daemon answered again; processed output resumed");
-        /* The daemon demonstrably went down and came back: allow the FG
-         * path one fresh NRN2 attempt. A daemon that never went down keeps
-         * its latch (an old daemon gets at most one doomed request, ever;
-         * a respawned/new daemon regains FG). */
-        if (g_daemon_fg < 0) {
-            g_daemon_fg = 0;
+        /* The daemon demonstrably went down and came back (restart or a
+         * drained flap): a fresh peer gets a fresh framegen probe - the
+         * next generated present re-tries NRN2/NRN3 immediately instead
+         * of sitting out the remaining backoff. */
+        if (g_dg.fg_fail) {
+            nr_degrade_fg_note_success(&g_dg);
             nr_log("[nr_layer] daemon recovered; framegen re-probed on "
                    "next generated present");
         }
@@ -2331,13 +2325,16 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
          * Daemon requests only flow once the daemon has proven itself on the
          * socket (daemon_known_up) - a daemon that is down keeps FG silent
          * instead of paying a refused connect every 2nd present; a failed
-         * NRN2/NRN3 latches g_daemon_fg=-1 for the session. */
+         * NRN2/NRN3 backs the probe off exponentially (nr_degrade fg_skip)
+         * instead of latching off - on the wire a refusal is a bare
+         * connection drop, indistinguishable from a busy daemon, so nothing
+         * justifies giving up for the session. */
         int fg_inprocess = g_inprocess_active && g_engine
                            && (fg_mode == 2
                                ? (pfn_dlss5_framegen_interpolate != NULL)
                                : (pfn_dlss5_framegen_transfer != NULL));
         int fg_daemon = !fg_inprocess && nr_port
-                        && g_daemon_fg >= 0 && g_dg.daemon_known_up;
+                        && g_dg.daemon_known_up;
         int fg_avail = fg_inprocess || fg_daemon;
         int should_process = nr_fg_should_process(&g_fg, frame_counter,
                                                   fg_enabled, fg_avail);
@@ -2401,13 +2398,15 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                                     gen_ok = 1;
                                 }
                             }
-                        } else {
+                        } else if (nr_degrade_fg_probe_now(&g_dg)) {
                             /* x86 daemon NRN3: the mid frame payload -> the
                              * resident engine replies the interpolated frame
                              * (or a full process fallback - either way a
                              * presentable frame). Reply lands in interp so a
                              * dead daemon cannot tear the P frame still
-                             * sitting in mapped as the fallback. */
+                             * sitting in mapped as the fallback. A probe
+                             * skipped by the backoff leaves P in mapped the
+                             * same way - the anchor goes out on time. */
                             if (data->interp_size < want) {
                                 unsigned char *grown = (unsigned char *)realloc(data->interp, (size_t)want);
                                 if (grown) { data->interp = grown; data->interp_size = want; }
@@ -2420,16 +2419,23 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                                                    data->mid, (size_t)want,
                                                    data->interp, (size_t)want);
                                 if (erc == 0) {
-                                    g_daemon_fg = 1;
+                                    nr_degrade_fg_note_success(&g_dg);
                                     nr_degrade_note_success(&g_dg, nr_now_ms());
                                     memcpy(data->mapped, data->interp,
                                            (size_t)want);
                                     gen_ok = 1;
                                 } else {
-                                    g_daemon_fg = -1;
-                                    nr_log("[nr_layer] daemon NRN3 refused/failed "
-                                           "(rc %d); daemon FG off for this session",
-                                           erc);
+                                    /* Transient by definition (busy daemon,
+                                     * engine rebuild, torn socket - a real
+                                     * refusal is just a connection drop):
+                                     * back the probe off and keep the held
+                                     * anchor; the next FG slot re-tries. */
+                                    nr_degrade_fg_note_fail(&g_dg);
+                                    nr_log("[nr_layer] daemon NRN3 failed "
+                                           "(rc %d); held anchor out, FG "
+                                           "probe streak %u, next in %u "
+                                           "slots", erc, g_dg.fg_fail,
+                                           g_dg.fg_skip);
                                 }
                             }
                         }
@@ -2547,7 +2553,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                             nr_log("[nr_layer] dlss5_framegen_transfer failed (%d); presenting native frame", r);
                         }
                     }
-                } else {
+                } else if (nr_degrade_fg_probe_now(&g_dg)) {
                     /* Daemon path (x86): the reply lands in data->mapped -
                      * the payload is fully sent before the first reply byte
                      * arrives, so the aliasing is safe (same trick
@@ -2560,7 +2566,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                                        (size_t)want, data->mapped, (size_t)want);
                     if (erc == 0) {
                         static unsigned long fg_tcp_count = 0;
-                        g_daemon_fg = 1;
+                        nr_degrade_fg_note_success(&g_dg);
                         fg_tcp_count++;
                         if (fg_tcp_count <= 5 || fg_tcp_count % 60 == 0) {
                             nr_log("[nr_layer] daemon framegen %ux%u "
@@ -2573,16 +2579,21 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                         if (diag_tr == 0)
                             generated = 1;
                     } else {
-                        /* Old daemon without NRN2 support / wedged / dead
-                         * engine: latch FG off for the session rather than
-                         * piling a doomed multi-MB payload onto the socket
-                         * every 2nd present. The frame goes out native
+                        /* Transient (busy daemon, engine rebuild, torn
+                         * socket - a real refusal is a bare connection
+                         * drop, same on the wire): back the probe off
+                         * instead of latching. The frame goes out native
                          * (staging is never written back on failure). */
-                        g_daemon_fg = -1;
-                        nr_log("[nr_layer] daemon framegen refused/failed "
-                               "(rc %d); daemon FG off for this session", erc);
+                        nr_degrade_fg_note_fail(&g_dg);
+                        nr_log("[nr_layer] daemon framegen failed "
+                               "(rc %d); native out, FG probe streak %u, "
+                               "next in %u slots", erc, g_dg.fg_fail,
+                               g_dg.fg_skip);
                     }
                 }
+                /* Probe backoff window: this slot passes native without
+                 * paying the doomed socket round-trip (same picture as a
+                 * refused request). */
             }
             nr_fg_note(&g_fg, generated ? NR_FG_GENERATED : NR_FG_NATIVE);
             diag_path = generated ? "fgd" : "fgn";
@@ -2605,8 +2616,8 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
             diag_path = held ? "eheld" : "enat";
             if (fg_enabled && !fg_avail && !g_fg.unavailable_logged) {
                 nr_log("[nr_layer] framegen requested but unavailable "
-                       "(no in-process engine; daemon not up or NRN2 "
-                       "unsupported); presenting native");
+                       "(no in-process engine; daemon not up); presenting "
+                       "native");
                 g_fg.unavailable_logged = 1;
             }
         }

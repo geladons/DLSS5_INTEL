@@ -68,6 +68,17 @@ typedef struct NrDegrade {
     uint32_t deg_w, deg_h;       /* last logged degenerate extent */
     unsigned long held;          /* presents served from the last result */
     unsigned long degenerate;    /* presents passed through as degenerate */
+    /* Daemon-framegen probe backoff (NRN2/NRN3 requests). The wire has no
+     * "unsupported" reply code - a refusal is the daemon closing the
+     * connection, indistinguishable from a busy/engine-rebuild drop - so
+     * a failed framegen request is transient by definition, never a
+     * session latch. Each consecutive failure lets a growing number of FG
+     * request slots pass unprobed (0, 1, 2, 4 ... capped at 64): a one-off
+     * hiccup is retried at the very next FG slot, while a wedged or
+     * pre-NRN3 daemon pays at most one doomed payload per ~65 slots -
+     * bounded, never a per-present spam. */
+    unsigned fg_fail;            /* consecutive daemon-FG failures */
+    unsigned fg_skip;            /* FG request slots to let pass unprobed */
 } NrDegrade;
 
 void nr_degrade_init(NrDegrade *d);
@@ -95,6 +106,18 @@ int nr_degrade_note_fail(NrDegrade *d, int fail_kind, uint64_t now_ms,
 
 /* The caller re-blitted the last processed result for this present. */
 void nr_degrade_note_held(NrDegrade *d);
+
+/* Daemon-FG probe pacing. Call at every slot where a NRN2/NRN3 request
+ * would be sent: non-zero means go ahead, zero means the backoff window
+ * let this slot pass (serves the held-anchor/native fallback instead). */
+int nr_degrade_fg_probe_now(NrDegrade *d);
+
+/* A daemon-FG request was answered: the backoff streak is over. */
+void nr_degrade_fg_note_success(NrDegrade *d);
+
+/* A daemon-FG request failed: count it and arm the skip window
+ * (0, 1, 2, 4 ... 64 slots by streak length). */
+void nr_degrade_fg_note_fail(NrDegrade *d);
 
 #ifdef __cplusplus
 }

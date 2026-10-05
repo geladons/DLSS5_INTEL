@@ -40,15 +40,24 @@ int nr_degrade_probe_now(NrDegrade *d)
 int nr_degrade_note_success(NrDegrade *d, uint64_t now_ms)
 {
     unsigned streak;
+    int was_down;
     if (!d) return NR_DEGRADE_LOG_NONE;
     streak = d->consecutive_fail;
+    /* A connect-refused outage clears the streak outright (it marks the
+     * daemon down rather than flapping), so a down->up edge must be read
+     * off the flag: a daemon that answered before, went absent, and now
+     * answers again is a recovery exactly like a transport flap ending.
+     * last_success_ms non-zero keeps the very first answer of the session
+     * from posing as a recovery. */
+    was_down = !d->daemon_known_up && d->last_success_ms != 0;
     d->consecutive_fail = 0;
     d->cooldown = 0;
     d->daemon_known_up = 1;
     d->last_success_ms = now_ms;
     d->hiccup_logged = 0;
     d->down_logged = 0;
-    return streak ? NR_DEGRADE_LOG_RECOVERY : NR_DEGRADE_LOG_NONE;
+    return (streak || was_down)
+           ? NR_DEGRADE_LOG_RECOVERY : NR_DEGRADE_LOG_NONE;
 }
 
 int nr_degrade_note_fail(NrDegrade *d, int fail_kind, uint64_t now_ms,
@@ -112,4 +121,33 @@ int nr_degrade_note_fail(NrDegrade *d, int fail_kind, uint64_t now_ms,
 void nr_degrade_note_held(NrDegrade *d)
 {
     if (d) d->held++;
+}
+
+int nr_degrade_fg_probe_now(NrDegrade *d)
+{
+    if (!d) return 1;
+    if (d->fg_skip) {
+        d->fg_skip--;
+        return 0;
+    }
+    return 1;
+}
+
+void nr_degrade_fg_note_success(NrDegrade *d)
+{
+    if (!d) return;
+    d->fg_fail = 0;
+    d->fg_skip = 0;
+}
+
+void nr_degrade_fg_note_fail(NrDegrade *d)
+{
+    if (!d) return;
+    if (d->fg_fail < 8)
+        d->fg_fail++;
+    /* The first failure re-probes at the very next FG slot - the common
+     * case is a one-off hiccup; a streak backs off exponentially and
+     * saturates at 64 skipped slots (fg_fail is clamped at 8, so the
+     * shift below never exceeds 1 << 6). */
+    d->fg_skip = (d->fg_fail <= 1) ? 0u : (1u << (d->fg_fail - 2));
 }
