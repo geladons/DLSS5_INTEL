@@ -12,24 +12,59 @@
  *   offset    0  header, 64 B (16 u32):
  *     [0]  u32 magic        = 0x3049554E ('NUI0')
  *     [1]  u32 seq          seqlock: odd while the producer writes
- *     [2]  u32 w            bitmap extent (cap 1024x1200)
+ *     [2]  u32 w            bitmap extent (cap 3840x2160)
  *     [3]  u32 h
  *     [4]  i32 dst_x        target rect, game CLIENT coords
  *     [5]  i32 dst_y
- *     [6]  u32 flags        bit0 ui_visible (also the capture flag)
- *                         bit1 cursor_visible
+ *     [6]  u32 flags        bit0 ui_visible (compositing gate AND the
+ *                          input-routing master switch - see below)
+ *                         bit1 cursor_visible (sprite slot valid)
+ *                         bit2 kbd_capture (producer: a text widget owns
+ *                          Tk focus - key/char messages go to the ring
+ *                          instead of the game)
+ *                         bit3 no_clip (producer: skip ClipCursor - the
+ *                          framed overlay on a windowed game must not
+ *                          jail the pointer inside the client rect)
  *     [7]  i32 cursor_x     logical cursor position, written by the LAYER
  *     [8]  i32 cursor_y
  *     [9]  u32 heartbeat    producer increments on each publish
  *     [10] u32 evt_head     ring write index (layer produces)
  *     [11] u32 evt_tail     ring read index (m13 consumes)
  *     [12] u32 evt_dropped  overflow counter
- *     [13..15] u32 reserved
+ *     [13] u32 hole_lt      packed u16 pair: hole_l | hole_t<<16
+ *     [14] u32 hole_rb      packed u16 pair: hole_r | hole_b<<16
+ *                         The framed layout publishes a client-sized
+ *                         bitmap with a transparent CENTER hole (the live
+ *                         game view); (l,t)-(r,b) is that hole in BITMAP
+ *                         pixel coords, seqlock-covered with w/h/dst.
+ *                         Degenerate (l>=r or t>=b) = no hole: the whole
+ *                         bitmap is UI (pre-framing semantics).
+ *                         The layer hit-tests input on bitmap-minus-hole
+ *                         and skips the hole while blending.
+ *     [15] u32 layer_hb     LAYER-WRITTEN stamp: top 4 bits = ABI level
+ *                         (>=1 = hole/hit-test aware), low 28 bits =
+ *                         present counter bumped per composite. m13 reads
+ *                         it to tell "armed but no consumer" apart from
+ *                         a healthy session.
  *   offset   64  event ring: 256 x 16 B { u32 type; i32 a; i32 b; u32 c }
  *     types: 1=move(x,y) 2=btn_down 3=btn_up 4=wheel(delta; c:0 vert,1 horiz)
  *            5=key_down(vk) 6=key_up(vk) 7=char(utf32)
  *   offset 4160  cursor sprite slot: 32x32 RGBA straight-alpha
  *   offset 8256  BGRA bitmap payload, w*h*4 straight-alpha
+ *
+ * INPUT CONTRACT (ABI level 1): ui_visible no longer means "eat all game
+ * input". While the overlay is up the wndproc filter routes by REGION:
+ *   - pointer inside the bitmap rect AND outside the hole  -> ring event,
+ *     message eaten (a click on the band operates the controls);
+ *   - pointer in the hole or outside the bitmap            -> the original
+ *     message flows to the game unchanged (center stays live game);
+ *   - while any overlay-captured button is held (implicit grab) every
+ *     mouse message is still eaten, so a drag that wanders into the hole
+ *     keeps tracking until the release;
+ *   - key/char messages are eaten only while bit2 (kbd_capture) is set.
+ * The hole rect is the coarse occupancy mask the producer publishes -
+ * band pixels are uniformly opaque, so region-test == alpha-test without
+ * reading payload bytes under the seqlock.
  * ===================================================================== */
 #include "nr_ui.h"
 #include "nr_util.h"
@@ -46,12 +81,16 @@
 #define NR_UI_CURSOR_W     32u
 #define NR_UI_CURSOR_H     32u
 #define NR_UI_BITMAP_OFF   8256u        /* 4160 + 32*32*4 */
-#define NR_UI_MAX_W        1024u
-#define NR_UI_MAX_H        1200u
+#define NR_UI_MAX_W        3840u    /* framed band spans the game client */
+#define NR_UI_MAX_H        2160u    /* (4K UHD covers every real client) */
 
 #define NR_UI_F_VISIBLE    0x1u
 #define NR_UI_F_CURSOR     0x2u
+#define NR_UI_F_KBDCAP     0x4u     /* producer: text focus owns keys */
+#define NR_UI_F_NOCLIP     0x8u     /* producer: do not ClipCursor */
 #define NR_UI_HB_STALE_MS  2000u
+#define NR_UI_ABI_LEVEL    1u       /* layer_hb top nibble: this build is
+                                     * hole/hit-test aware */
 
 #define NR_UI_EVT_MOVE   1u
 #define NR_UI_EVT_BTNDN  2u
@@ -74,7 +113,9 @@ typedef struct NrUiHdr {
     volatile uint32_t evt_head;
     volatile uint32_t evt_tail;
     volatile uint32_t evt_dropped;
-    volatile uint32_t reserved[3];
+    volatile uint32_t hole_lt;      /* hole_l | hole_t<<16, u16 pair */
+    volatile uint32_t hole_rb;      /* hole_r | hole_b<<16, u16 pair */
+    volatile uint32_t layer_hb;     /* layer stamp: ABI lvl + counter */
 } NrUiHdr;
 
 typedef struct NrUiEvt {
@@ -84,11 +125,12 @@ typedef struct NrUiEvt {
     volatile uint32_t c;
 } NrUiEvt;
 
-/* Seqlock snapshot of the header fields the compositor needs. */
+/* Seqlock snapshot of the header fields the compositor + hit-test need. */
 typedef struct NrUiSnap {
     uint32_t w, h;
     int32_t  dst_x, dst_y;
     uint32_t flags;
+    int32_t  hole_l, hole_t, hole_r, hole_b;    /* bitmap coords, unpacked */
 } NrUiSnap;
 
 /* Module state: one per process (the section is per-process). GUI-thread
@@ -106,6 +148,12 @@ typedef struct NrUiState {
     int      clipped;               /* ClipCursor currently ours */
     int32_t  cur_x, cur_y;          /* logical cursor, client coords */
     int      cur_set;               /* a real position arrived */
+    uint32_t ui_btns;               /* overlay-captured buttons held (bit
+                                     * per btn idx 0..4): while nonzero
+                                     * all mouse messages are eaten -
+                                     * the Tk-side implicit grab needs
+                                     * the release even in the hole. */
+    uint32_t lhb_cnt;               /* own layer_hb counter (28-bit) */
 } NrUiState;
 
 static NrUiState g_ui;
@@ -188,18 +236,26 @@ static int ui_snapshot(NrUiSnap *s)
     if (!h) return 0;
     for (i = 0; i < 8; i++) {
         uint32_t s0 = h->seq;
-        uint32_t w, hh, fl;
+        uint32_t w, hh, fl, hlt, hrb;
         int32_t dx, dy;
         if (s0 & 1u) continue;          /* producer mid-write */
         MemoryBarrier();
         w  = h->w;    hh = h->h;
         dx = h->dst_x; dy = h->dst_y;
         fl = h->flags;
+        hlt = h->hole_lt; hrb = h->hole_rb;
         MemoryBarrier();
         if (h->seq == s0) {
             s->w = w; s->h = hh;
             s->dst_x = dx; s->dst_y = dy;
             s->flags = fl;
+            s->hole_l = (int32_t)(hlt & 0xFFFFu);
+            s->hole_t = (int32_t)(hlt >> 16);
+            s->hole_r = (int32_t)(hrb & 0xFFFFu);
+            s->hole_b = (int32_t)(hrb >> 16);
+            if (s->hole_l >= s->hole_r || s->hole_t >= s->hole_b) {
+                s->hole_l = s->hole_t = s->hole_r = s->hole_b = 0;
+            }
             return 1;
         }
     }
@@ -217,45 +273,85 @@ static int ui_panel_sane(const NrUiSnap *s)
 
 /* ---- composite ------------------------------------------------------ */
 
-/* Straight-alpha src-over on a clipped rect, byte channels. swap selects
- * the R/B byte order relation between source and destination so a BGRA
- * payload lands correctly on an RGBA-ordered frame (and vice versa). */
+/* One row of straight-alpha src-over, byte channels. swap selects the R/B
+ * byte order relation between source and destination so a BGRA payload
+ * lands correctly on an RGBA-ordered frame (and vice versa). sp/dp are
+ * already stepped to the segment start. */
+static void ui_blend_row(unsigned char *dp, const volatile unsigned char *sp,
+                         int32_t xa, int32_t xb, int swap)
+{
+    int32_t x;
+    for (x = xa; x < xb; x++, sp += 4, dp += 4) {
+        unsigned a = sp[3];
+        unsigned inv, s0, s1, s2;
+        if (!a) continue;
+        s0 = sp[swap ? 2 : 0];
+        s1 = sp[1];
+        s2 = sp[swap ? 0 : 2];
+        if (a >= 255) {
+            dp[0] = (unsigned char)s0;
+            dp[1] = (unsigned char)s1;
+            dp[2] = (unsigned char)s2;
+            dp[3] = 255;
+            continue;
+        }
+        inv = 255 - a;
+        dp[0] = (unsigned char)((s0 * a + dp[0] * inv + 127u) / 255u);
+        dp[1] = (unsigned char)((s1 * a + dp[1] * inv + 127u) / 255u);
+        dp[2] = (unsigned char)((s2 * a + dp[2] * inv + 127u) / 255u);
+        /* src-over alpha: a_src + a_dst*(1-a_src) */
+        dp[3] = (unsigned char)(a + (dp[3] * inv + 127u) / 255u);
+    }
+}
+
+/* Straight-alpha src-over on a clipped rect. hx0/hy0/hx1/hy1 = the
+ * transparent hole in SOURCE (bitmap) coords: rows crossing it are split
+ * into left/right segments so the hole never touches the frame even if
+ * the payload alpha there were nonzero. Degenerate hole = full rows. */
 static void ui_blend(unsigned char *dst, uint32_t dw, uint32_t dh,
                      const volatile unsigned char *src, uint32_t sw, uint32_t sh,
-                     int32_t ox, int32_t oy, int swap)
+                     int32_t ox, int32_t oy, int swap,
+                     int32_t hx0, int32_t hy0, int32_t hx1, int32_t hy1)
 {
     int32_t x0 = ox < 0 ? 0 : ox;
     int32_t y0 = oy < 0 ? 0 : oy;
     int32_t x1 = ox + (int32_t)sw;
     int32_t y1 = oy + (int32_t)sh;
-    int32_t x, y;
+    int32_t y;
     if (x1 > (int32_t)dw) x1 = (int32_t)dw;
     if (y1 > (int32_t)dh) y1 = (int32_t)dh;
+    /* Hole sanity in bitmap coords; degenerate disables the split. */
+    if (hx0 < 0) hx0 = 0;
+    if (hy0 < 0) hy0 = 0;
+    if (hx1 > (int32_t)sw) hx1 = (int32_t)sw;
+    if (hy1 > (int32_t)sh) hy1 = (int32_t)sh;
+    if (hx0 >= hx1 || hy0 >= hy1) hx0 = hx1 = hy0 = hy1 = 0;
     for (y = y0; y < y1; y++) {
-        const volatile unsigned char *sp =
-            src + ((uint32_t)(y - oy) * sw + (uint32_t)(x0 - ox)) * 4u;
-        unsigned char *dp =
-            dst + ((uint32_t)y * dw + (uint32_t)x0) * 4u;
-        for (x = x0; x < x1; x++, sp += 4, dp += 4) {
-            unsigned a = sp[3];
-            unsigned inv, s0, s1, s2;
-            if (!a) continue;
-            s0 = sp[swap ? 2 : 0];
-            s1 = sp[1];
-            s2 = sp[swap ? 0 : 2];
-            if (a >= 255) {
-                dp[0] = (unsigned char)s0;
-                dp[1] = (unsigned char)s1;
-                dp[2] = (unsigned char)s2;
-                dp[3] = 255;
-                continue;
-            }
-            inv = 255 - a;
-            dp[0] = (unsigned char)((s0 * a + dp[0] * inv + 127u) / 255u);
-            dp[1] = (unsigned char)((s1 * a + dp[1] * inv + 127u) / 255u);
-            dp[2] = (unsigned char)((s2 * a + dp[2] * inv + 127u) / 255u);
-            /* src-over alpha: a_src + a_dst*(1-a_src) */
-            dp[3] = (unsigned char)(a + (dp[3] * inv + 127u) / 255u);
+        int32_t by = y - oy;
+        int32_t e0 = x1, s1 = x1;
+        if (by >= hy0 && by < hy1) {        /* row crosses the hole */
+            e0 = ox + hx0;
+            s1 = ox + hx1;
+            if (e0 > x1) e0 = x1;
+            if (e0 < x0) e0 = x0;
+            if (s1 < x0) s1 = x0;
+            if (s1 > x1) s1 = x1;
+        }
+        /* left (or whole) segment */
+        if (e0 > x0) {
+            const volatile unsigned char *sp =
+                src + ((uint32_t)by * sw + (uint32_t)(x0 - ox)) * 4u;
+            unsigned char *dp =
+                dst + ((uint32_t)y * dw + (uint32_t)x0) * 4u;
+            ui_blend_row(dp, sp, x0, e0, swap);
+        }
+        /* right segment - only on holed rows */
+        if (s1 < x1) {
+            const volatile unsigned char *sp =
+                src + ((uint32_t)by * sw + (uint32_t)(s1 - ox)) * 4u;
+            unsigned char *dp =
+                dst + ((uint32_t)y * dw + (uint32_t)s1) * 4u;
+            ui_blend_row(dp, sp, s1, x1, swap);
         }
     }
 }
@@ -277,6 +373,12 @@ void nr_ui_composite(const NrUiFrame *frame)
     if (!ui_open()) return;             /* lazy retry, once per present */
     h = ui_hdr();
     if (!h) return;
+    /* layer_hb: ABI level in the top nibble + a present counter below.
+     * Bumped on EVERY present while the section is live - m13 uses it to
+     * tell "armed but nobody is consuming" (stuck at 0) from a healthy
+     * composite, and whether the consumer understands the hole fields. */
+    g_ui.lhb_cnt = (g_ui.lhb_cnt + 1u) & 0x0FFFFFFFu;
+    h->layer_hb = (NR_UI_ABI_LEVEL << 28) | g_ui.lhb_cnt;
     /* The logical cursor position is the layer's slot to publish: once per
      * present so a producer reading it always sees fresh coordinates. */
     if (g_ui.cur_set) {
@@ -286,11 +388,13 @@ void nr_ui_composite(const NrUiFrame *frame)
     if (!nr_ui_active()) return;
     if (!ui_snapshot(&s)) return;
     /* Bitmap payload: BGRA (src order 0) blended at (dst_x,dst_y), clipped
-     * to the frame. */
+     * to the frame; the hole rect splits rows so the center stays the
+     * untouched game frame. */
     if (ui_panel_sane(&s)) {
         ui_blend(frame->mapped, frame->width, frame->height,
                  g_ui.view + NR_UI_BITMAP_OFF, s.w, s.h,
-                 s.dst_x, s.dst_y, frame->rgba_order != 0);
+                 s.dst_x, s.dst_y, frame->rgba_order != 0,
+                 s.hole_l, s.hole_t, s.hole_r, s.hole_b);
     }
     /* Cursor sprite: RGBA (src order 1) at the logical position; moves at
      * present rate even when the panel bitmap itself is static. */
@@ -298,7 +402,8 @@ void nr_ui_composite(const NrUiFrame *frame)
         ui_blend(frame->mapped, frame->width, frame->height,
                  g_ui.view + NR_UI_CURSOR_OFF,
                  NR_UI_CURSOR_W, NR_UI_CURSOR_H,
-                 g_ui.cur_x, g_ui.cur_y, frame->rgba_order == 0);
+                 g_ui.cur_x, g_ui.cur_y, frame->rgba_order == 0,
+                 0, 0, 0, 0);
     }
 }
 
@@ -431,23 +536,62 @@ static void ui_clip_edge(int on)
 int nr_ui_capture_active(HWND hwnd)
 {
     volatile NrUiHdr *h = ui_hdr();
+    uint32_t flags = h ? h->flags : 0;
     int on = 0;
-    if (h && (h->flags & NR_UI_F_VISIBLE) && ui_hb_fresh()) {
+    if (h && (flags & NR_UI_F_VISIBLE) && ui_hb_fresh()) {
         /* First guarded window to observe the flag owns the client-
          * coordinate space (ClientToScreen anchor for the clip rect). */
         if (!g_ui.ui_hwnd) g_ui.ui_hwnd = hwnd;
         on = 1;
     } else {
         g_ui.ui_hwnd = NULL;
+        g_ui.ui_btns = 0;       /* release any stuck implicit grab */
     }
-    ui_clip_edge(on);
+    /* ClipCursor only while the producer wants it: the framed overlay
+     * sets NOCLIP for windowed games (the band covers only the client
+     * rect - jailing the cursor inside it would trap the pointer against
+     * the desktop side). Fullscreen keeps the confinement, which is a
+     * no-op there anyway (the client rect IS the screen). */
+    ui_clip_edge(on && !(flags & NR_UI_F_NOCLIP));
     return on;
 }
 
-/* The message filter: eaten input becomes a ring event; focus/capture/
- * cursor bookkeeping and anything unlisted flows to the previous wndproc. */
+/* Region hit test: the point (game CLIENT coords) is owned by the overlay
+ * when it lands inside the published bitmap rect AND outside the hole.
+ * The hole is the producer-published coarse occupancy mask - in the
+ * framed layout band pixels are uniformly opaque, so region == alpha
+ * without touching payload bytes under the seqlock. */
+static int ui_hit(const NrUiSnap *s, int32_t x, int32_t y)
+{
+    if (x < s->dst_x || x >= s->dst_x + (int32_t)s->w
+        || y < s->dst_y || y >= s->dst_y + (int32_t)s->h)
+        return 0;
+    if (x >= s->hole_l && x < s->hole_r
+        && y >= s->hole_t && y < s->hole_b)
+        return 0;
+    return 1;
+}
+
+/* Producer-controlled keyboard gate (flags bit2): a text Entry holds Tk
+ * focus, so key/char messages route to the ring instead of the game. */
+static int ui_kbd_cap(void)
+{
+    volatile NrUiHdr *h = ui_hdr();
+    return h && (h->flags & NR_UI_F_KBDCAP);
+}
+
+/* The message filter (ABI level 1): input routes by REGION - a message
+ * whose pointer position lands on the band becomes a ring event and is
+ * eaten; anything over the hole (or outside the bitmap) flows to the
+ * previous wndproc untouched. Moves are ALSO pushed while passing through
+ * so the producer's hover/leave tracking stays truthful. While a captured
+ * button is held (g_ui.ui_btns) all mouse messages are eaten - the
+ * Tk-side implicit grab must see the release even in the hole.
+ * Focus/capture/cursor bookkeeping and anything unlisted always flows. */
 int nr_ui_message(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
+    NrUiSnap s;
+    int sane = ui_snapshot(&s) && ui_panel_sane(&s);
     switch (msg) {
     case WM_MOUSEMOVE:
         /* lp = client coords of the cursor position (signed). */
@@ -456,11 +600,15 @@ int nr_ui_message(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             int32_t y = (int32_t)(int16_t)HIWORD(lp);
             ui_note_pos(x, y);
             ui_evt_push(NR_UI_EVT_MOVE, x, y, 0);
+            if (g_ui.ui_btns || (sane && ui_hit(&s, x, y)))
+                return 1;
         }
-        return 1;
+        return 0;
     case WM_INPUT:
         /* Raw mouse deltas: the OS cursor may be pinned at the clip edge,
-         * so the logical position integrates deltas on top. */
+         * so the logical position integrates deltas on top. Eaten only
+         * when the logical position sits on the band (or a drag is live);
+         * hole deltas keep driving the game's own raw-input path. */
         {
             unsigned char buf[64];
             RAWINPUT *ri = (RAWINPUT *)buf;
@@ -473,8 +621,7 @@ int nr_ui_message(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 if (ri->data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE) {
                     /* Absolute raw input (rare - tablets/virtual HID):
                      * normalize 0..65535 onto the panel rect. */
-                    NrUiSnap s;
-                    if (ui_snapshot(&s) && ui_panel_sane(&s)) {
+                    if (sane) {
                         dx = s.dst_x + (int32_t)(
                             (int64_t)ri->data.mouse.lLastX * s.w / 65535);
                         dy = s.dst_y + (int32_t)(
@@ -487,51 +634,120 @@ int nr_ui_message(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     dy = ri->data.mouse.lLastY;
                     if (dx || dy) {
                         ui_note_delta(dx, dy);
-                        ui_evt_push(NR_UI_EVT_MOVE, g_ui.cur_x, g_ui.cur_y, 0);
+                        ui_evt_push(NR_UI_EVT_MOVE,
+                                    g_ui.cur_x, g_ui.cur_y, 0);
                     }
                 }
             }
         }
-        return 1;
-    /* Buttons: btn index 0=L 1=R 2=M 3=X1 4=X2. A double-click message is
-     * just another press for the consumer - the up/down pairs stay
-     * consistent because every press/release is eaten anyway. */
+        if (g_ui.ui_btns || (sane && ui_hit(&s, g_ui.cur_x, g_ui.cur_y)))
+            return 1;
+        return 0;
+    /* Buttons: btn index 0=L 1=R 2=M 3=X1 4=X2 (lp = client coords). A
+     * double-click message is just another press. Downs are eaten on a
+     * band hit; ups are eaten whenever that button was captured OR the
+     * release lands on the band - either way the ring's down/up pairs
+     * stay consistent and the game never sees half a click. */
     case WM_LBUTTONDOWN:
     case WM_LBUTTONDBLCLK:
+        ui_note_pos((int32_t)(int16_t)LOWORD(lp),
+                    (int32_t)(int16_t)HIWORD(lp));
+        /* The held-grab bit is checked OUTSIDE sane: a torn snapshot must
+         * never leak a down to the game while the grab is live. */
+        if (!((sane && ui_hit(&s, g_ui.cur_x, g_ui.cur_y))
+              || (g_ui.ui_btns & 0x1u))) return 0;
+        g_ui.ui_btns |= 0x1u;
         ui_evt_push(NR_UI_EVT_BTNDN, 0, 0, 0); return 1;
     case WM_LBUTTONUP:
+        ui_note_pos((int32_t)(int16_t)LOWORD(lp),
+                    (int32_t)(int16_t)HIWORD(lp));
+        if (!(g_ui.ui_btns & 0x1u)
+            && !(sane && ui_hit(&s, g_ui.cur_x, g_ui.cur_y))) return 0;
+        g_ui.ui_btns &= ~0x1u;
         ui_evt_push(NR_UI_EVT_BTNUP, 0, 0, 0); return 1;
     case WM_RBUTTONDOWN:
     case WM_RBUTTONDBLCLK:
+        ui_note_pos((int32_t)(int16_t)LOWORD(lp),
+                    (int32_t)(int16_t)HIWORD(lp));
+        if (!((sane && ui_hit(&s, g_ui.cur_x, g_ui.cur_y))
+              || (g_ui.ui_btns & 0x2u))) return 0;
+        g_ui.ui_btns |= 0x2u;
         ui_evt_push(NR_UI_EVT_BTNDN, 1, 0, 0); return 1;
     case WM_RBUTTONUP:
+        ui_note_pos((int32_t)(int16_t)LOWORD(lp),
+                    (int32_t)(int16_t)HIWORD(lp));
+        if (!(g_ui.ui_btns & 0x2u)
+            && !(sane && ui_hit(&s, g_ui.cur_x, g_ui.cur_y))) return 0;
+        g_ui.ui_btns &= ~0x2u;
         ui_evt_push(NR_UI_EVT_BTNUP, 1, 0, 0); return 1;
     case WM_MBUTTONDOWN:
     case WM_MBUTTONDBLCLK:
+        ui_note_pos((int32_t)(int16_t)LOWORD(lp),
+                    (int32_t)(int16_t)HIWORD(lp));
+        if (!((sane && ui_hit(&s, g_ui.cur_x, g_ui.cur_y))
+              || (g_ui.ui_btns & 0x4u))) return 0;
+        g_ui.ui_btns |= 0x4u;
         ui_evt_push(NR_UI_EVT_BTNDN, 2, 0, 0); return 1;
     case WM_MBUTTONUP:
+        ui_note_pos((int32_t)(int16_t)LOWORD(lp),
+                    (int32_t)(int16_t)HIWORD(lp));
+        if (!(g_ui.ui_btns & 0x4u)
+            && !(sane && ui_hit(&s, g_ui.cur_x, g_ui.cur_y))) return 0;
+        g_ui.ui_btns &= ~0x4u;
         ui_evt_push(NR_UI_EVT_BTNUP, 2, 0, 0); return 1;
     case WM_XBUTTONDOWN:
     case WM_XBUTTONDBLCLK:
-        ui_evt_push(NR_UI_EVT_BTNDN, 2 + (int32_t)HIWORD(wp), 0, 0);
+        ui_note_pos((int32_t)(int16_t)LOWORD(lp),
+                    (int32_t)(int16_t)HIWORD(lp));
+        {
+            int xi = (int)HIWORD(wp);                /* 1=X1, 2=X2 */
+            uint32_t bit;
+            if (xi < 1 || xi > 2) xi = 1;
+            bit = 0x8u << (xi - 1);                  /* X1->0x8 X2->0x10 */
+            if (!((sane && ui_hit(&s, g_ui.cur_x, g_ui.cur_y))
+                  || (g_ui.ui_btns & bit))) return 0;
+            g_ui.ui_btns |= bit;
+            ui_evt_push(NR_UI_EVT_BTNDN, 2 + xi, 0, 0);
+        }
         return 1;
     case WM_XBUTTONUP:
-        ui_evt_push(NR_UI_EVT_BTNUP, 2 + (int32_t)HIWORD(wp), 0, 0);
+        ui_note_pos((int32_t)(int16_t)LOWORD(lp),
+                    (int32_t)(int16_t)HIWORD(lp));
+        {
+            int xi = (int)HIWORD(wp);
+            uint32_t bit;
+            if (xi < 1 || xi > 2) xi = 1;
+            bit = 0x8u << (xi - 1);
+            if (!(g_ui.ui_btns & bit)
+                && !(sane && ui_hit(&s, g_ui.cur_x, g_ui.cur_y))) return 0;
+            g_ui.ui_btns &= ~bit;
+            ui_evt_push(NR_UI_EVT_BTNUP, 2 + xi, 0, 0);
+        }
         return 1;
     case WM_MOUSEWHEEL:
-        ui_evt_push(NR_UI_EVT_WHEEL,
-                    (int32_t)((int16_t)HIWORD(wp) / WHEEL_DELTA), 0, 0);
-        return 1;
     case WM_MOUSEHWHEEL:
-        ui_evt_push(NR_UI_EVT_WHEEL,
-                    (int32_t)((int16_t)HIWORD(wp) / WHEEL_DELTA), 0, 1);
+        /* Wheel lp is SCREEN coords - convert on the guarded window; fall
+         * back to the tracked logical position when conversion fails. */
+        {
+            POINT pt;
+            int32_t x = g_ui.cur_x, y = g_ui.cur_y;
+            pt.x = (int32_t)(int16_t)LOWORD(lp);
+            pt.y = (int32_t)(int16_t)HIWORD(lp);
+            if (ScreenToClient(hwnd, &pt)) { x = pt.x; y = pt.y; }
+            if (!(g_ui.ui_btns || (sane && ui_hit(&s, x, y)))) return 0;
+            ui_evt_push(NR_UI_EVT_WHEEL,
+                        (int32_t)((int16_t)HIWORD(wp) / WHEEL_DELTA), 0,
+                        msg == WM_MOUSEHWHEEL ? 1u : 0u);
+        }
         return 1;
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN:
+        if (!ui_kbd_cap()) return 0;
         ui_evt_push(NR_UI_EVT_KEYDN, (int32_t)wp, 0, 0);
         return 1;
     case WM_KEYUP:
     case WM_SYSKEYUP:
+        if (!ui_kbd_cap()) return 0;
         ui_evt_push(NR_UI_EVT_KEYUP, (int32_t)wp, 0, 0);
         return 1;
     case WM_CHAR:
@@ -539,6 +755,7 @@ int nr_ui_message(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_DEADCHAR:
     case WM_SYSDEADCHAR:
         /* wParam is the UTF-16 code unit = utf32 for the BMP. */
+        if (!ui_kbd_cap()) return 0;
         ui_evt_push(NR_UI_EVT_CHAR, (int32_t)wp, 0, 0);
         return 1;
     default:
@@ -546,7 +763,7 @@ int nr_ui_message(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
          * the game needs), WM_CAPTURECHANGED (release tracking), and
          * WM_SETCURSOR - forwarding keeps the game's own cursor state
          * intact; our sprite is composited on top and the OS cursor is
-         * already confined to the panel rect. */
+         * confined by ClipCursor only while the producer wants it. */
         return 0;
     }
 }
@@ -560,7 +777,9 @@ void nr_ui_detach(void)
         g_ui.clipped = 0;
     }
     g_ui.ui_hwnd = NULL;
+    g_ui.ui_btns = 0;
     g_ui.cur_set = 0;
+    g_ui.lhb_cnt = 0;
     if (g_ui.view) {
         UnmapViewOfFile((LPCVOID)g_ui.view);
         g_ui.view = NULL;

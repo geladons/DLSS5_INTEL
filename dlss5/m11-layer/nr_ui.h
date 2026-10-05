@@ -5,10 +5,15 @@
  * Two responsibilities behind a small interface:
  *   - composite: straight-alpha blend of the shared-memory UI bitmap (and
  *     the cursor sprite) into the host-visible staging frame before the
- *     write-back copy in transfer(). CPU-side, no GPU pipeline.
- *   - input: while the overlay is up, the guarded wndproc turns window
- *     messages into events on the shared ring, tracks a logical cursor
- *     position and clips the OS cursor to the panel rect.
+ *     write-back copy in transfer(). CPU-side, no GPU pipeline. The
+ *     producer-published hole rect splits blend rows so the center of the
+ *     frame stays the untouched game.
+ *   - input: while the overlay is up, the guarded wndproc routes window
+ *     messages by REGION - pointer on the band (bitmap minus hole) -> ring
+ *     event + eaten; pointer in the hole/outside -> game unchanged; key
+ *     messages eaten only while the producer's kbd_capture flag is set.
+ *     It tracks a logical cursor position and ClipCursors to the panel
+ *     rect unless the producer sets no_clip (windowed framed overlay).
  *
  * The shared-memory section "Local\DLSS5_UI_<pid>" is a frozen contract
  * with the m13 producer; the layout lives in nr_ui.c. The layer OPENS the
@@ -49,15 +54,20 @@ int nr_ui_active(void);
 
 /* Wndproc-path gate: overlay visible with a live producer. Performs the
  * HWND association (the first guarded window that observes the flag owns
- * the client-coordinate space) and the ClipCursor rising/falling edge.
- * Pure memory reads - safe per message. */
+ * the client-coordinate space) and the ClipCursor rising/falling edge
+ * (skipped while the producer's no_clip flag is set). Pure memory reads -
+ * safe per message. */
 int nr_ui_capture_active(HWND hwnd);
 
 /* Input filter for the guarded wndproc; call only when
  * nr_ui_capture_active() is true. Returns nonzero when the message was
  * consumed by the overlay (ring event pushed - do NOT forward to the game),
- * zero when it must flow to the previous wndproc (focus/capture
- * bookkeeping, cursor housekeeping, anything unlisted). */
+ * zero when it must flow to the previous wndproc. Per-region routing:
+ * mouse messages are eaten only when the pointer lands on the band
+ * (inside the bitmap rect, outside the hole) or a captured button is
+ * held; key/char messages only while the producer's kbd_capture flag is
+ * set; focus/capture/cursor bookkeeping and anything unlisted always
+ * flows to the game. */
 int nr_ui_message(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 
 /* Release ClipCursor if we own it, unmap the shared view, reset the

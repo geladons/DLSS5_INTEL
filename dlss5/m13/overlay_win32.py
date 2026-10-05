@@ -124,6 +124,13 @@ _u32.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(_INPUT),
 _u32.SendInput.restype = wintypes.UINT
 _k32.GetCurrentThreadId.argtypes = []
 _k32.GetCurrentThreadId.restype = wintypes.DWORD
+_u32.SystemParametersInfoW.argtypes = [wintypes.UINT, wintypes.UINT,
+                                       ctypes.c_void_p, wintypes.UINT]
+_u32.SystemParametersInfoW.restype = wintypes.BOOL
+_u32.CallWindowProcW.argtypes = [ctypes.c_void_p, wintypes.HWND,
+                                 wintypes.UINT, wintypes.WPARAM,
+                                 wintypes.LPARAM]
+_u32.CallWindowProcW.restype = ctypes.c_ssize_t           # LRESULT
 
 
 def _toplevel_hwnd(win):
@@ -244,6 +251,70 @@ def fix_popdown(combo):
         combo.after_idle(_noactivate_popdown)  # right after the map
         combo.after(60, _noactivate_popdown)   # after Tk's restyle settles
     return _apply
+
+
+# ------------------------------------------------------- mouse-activate ---
+# WM_MOUSEACTIVATE -> MA_NOACTIVATE subclass for the framed external
+# overlay: WS_EX_NOACTIVATE already keeps the toplevel out of the
+# foreground, but the field report showed a click still minimizing the
+# exclusive-fullscreen game on this host (the default wndproc answer is
+# MA_ACTIVATE). The subclass answers "no activate" itself while the click
+# still reaches Tk for widget hit-testing - Tk buttons/scales respond to
+# clicks on a never-active window (only text Entry keyboard input needs
+# real focus; overlay_focus handles that separately).
+GWLP_WNDPROC = -4
+WM_MOUSEACTIVATE = 0x0021
+MA_NOACTIVATE = 3
+SPI_GETWORKAREA = 0x0030
+_WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, wintypes.HWND,
+                              wintypes.UINT, wintypes.WPARAM,
+                              wintypes.LPARAM)
+_subclassed = {}            # hwnd -> (callback, prev_proc) keepalive
+
+
+def subclass_noactivate(hwnd):
+    """Install the WM_MOUSEACTIVATE->MA_NOACTIVATE wndproc filter on a
+    toplevel HWND. Idempotent per HWND; the callback stays referenced in
+    _subclassed so ctypes never frees a live proc."""
+    try:
+        hwnd = int(hwnd)
+    except (TypeError, ValueError):
+        return
+    if not hwnd or hwnd in _subclassed:
+        return
+    try:
+        prev = _u32.GetWindowLongPtrW(hwnd, GWLP_WNDPROC)
+        if not prev:
+            return
+
+        def _proc(h, m, w, l):
+            if m == WM_MOUSEACTIVATE:
+                return MA_NOACTIVATE
+            try:
+                return _u32.CallWindowProcW(prev, h, m, w, l)
+            except Exception:
+                return 0
+        cb = _WNDPROC(_proc)
+        old = _u32.SetWindowLongPtrW(
+            hwnd, GWLP_WNDPROC,
+            ctypes.cast(cb, ctypes.c_void_p).value or 0)
+        if old:
+            _subclassed[hwnd] = (cb, prev)
+    except (ValueError, OSError):
+        pass
+
+
+def primary_work_area():
+    """(l, t, r, b) of the primary monitor WORK area (SPI_GETWORKAREA) -
+    the framed overlay's fallback rect when no game hwnd is known."""
+    rc = wintypes.RECT()
+    try:
+        if _u32.SystemParametersInfoW(SPI_GETWORKAREA, 0,
+                                      ctypes.byref(rc), 0):
+            return (rc.left, rc.top, rc.right, rc.bottom)
+    except (ValueError, OSError):
+        pass
+    return None
 
 
 def monitor_work_area_for_hwnd(hwnd):
@@ -443,6 +514,17 @@ def client_origin(hwnd):
     return None
 
 
+def client_rect_screen(hwnd):
+    """(x, y, w, h) of a window's client area in SCREEN coords - the rect
+    the framed overlay hugs (windowed games: the real play area; exclusive
+    fullscreen: the whole mode). None when either query fails."""
+    cs = client_size(hwnd)
+    org = client_origin(hwnd)
+    if cs and org and cs[0] > 0 and cs[1] > 0:
+        return (org[0], org[1], cs[0], cs[1])
+    return None
+
+
 class DibCapture:
     """Reusable PrintWindow -> BGRA pipeline for one window size at a
     time. Owns a memory DC + 32bpp top-down DIBSection; grab() returns
@@ -499,16 +581,35 @@ class DibCapture:
         finally:
             _u32.ReleaseDC(None, screen)
 
-    def grab(self, hwnd, w, h, alpha=0xE0):
+    def grab(self, hwnd, w, h, alpha=0xE0, hole=None):
         """-> BGRA bytes (w*h*4) of the window's current content, or None.
-        The whole rect gets `alpha` - the panel needs no per-pixel
-        transparency."""
+        The whole rect gets `alpha` - the panel band is a solid fill.
+
+        hole: optional (l, t, r, b) rect in pixel coords whose pixels are
+        zeroed (alpha 0) instead - the framed layout's see-through center.
+        Needed even though the layer skips the hole while blending: it
+        keeps the published payload self-consistent (a hole-unaware
+        reader still shows a clean center). Row-contiguous zero fills -
+        a few ms at 2560x1440 on the 15 Hz publish pump."""
         if w <= 0 or h <= 0 or not self._ensure(w, h):
             return None
         if not _u32.PrintWindow(hwnd, self._hdc, PW_RENDERFULLCONTENT):
             return None
-        buf = bytearray(ctypes.string_at(self._bits, w * h * 4))
-        buf[3::4] = bytes((alpha,)) * (w * h)
+        n = w * h
+        buf = bytearray(ctypes.string_at(self._bits, n * 4))
+        buf[3::4] = bytes((alpha,)) * n
+        if hole:
+            l, t, r, b = (int(v) for v in hole)
+            l = min(max(0, l), w)
+            r = min(max(0, r), w)
+            t = min(max(0, t), h)
+            b = min(max(0, b), h)
+            if l < r and t < b:
+                row = bytes((r - l) * 4)
+                stride = w * 4
+                for y in range(t, b):
+                    o = y * stride + l * 4
+                    buf[o:o + len(row)] = row
         return bytes(buf)
 
     def close(self):

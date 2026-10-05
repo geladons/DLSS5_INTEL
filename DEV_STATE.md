@@ -1,5 +1,67 @@
 # DEV_STATE.md - where we are (updated 2026-10-05 by Devin)
 
+## Stage 39: frame-uniformity fixes + framed overlay redesign (2026-10-05)
+
+Field report after Stage 36-38: per-frame strength whipsaw ("every
+frame a different gain"), ghosts/color drift on scene changes, stick-
+slip judder on slow pans, overlay falling back to a plain external
+window whose clicks could demote the game. Root causes and fixes:
+
+- **Gain anchor whipsaw** (`0ab52ad`): `k = clamp(ema/dCur, 0.25, 4.0)`
+  multiplied the WHOLE residual per frame before headGain - railed on
+  flat/dim scenes and jittered with content noise. Now deadzoned (6%)
+  and clamped to 0.80..1.25; the same commit round later flipped the
+  DEFAULT to OFF (`gainLock = 0.0` in `engine.h` AND `chain_c_api.cpp`
+  - both had defaults) after the bounded version still modulated the
+  field image. Opt-in via `*_GAIN_LOCK` env; never widen the clamp.
+- **Scene-cut history reset** (chain, `test_scene_cut.py`): the chain
+  had no content-based reset - only wall-clock gaps (m11d) and the
+  AABB clamp. `ChainEngine::detectSceneCut` keeps a 64x36 luma thumb
+  of the previous input; mean|thumb diff| > `D5C_CUT_LIMIT`/`DLSS5_CUT_LIMIT`
+  (default 0.15, 0=off, `D5C_DEBUG_CUT=1` logs) resets history BEFORE
+  dispatch - the cut frame runs the first-frame path instead of
+  blending stale history. Universal: covers x64 layer, m12, m11d,
+  media. FG anchors untouched (own staleness logic).
+- **Near-identical reuse -> opt-in** (`nr_layer_win.c`): the sampled-eps
+  reuse (up to cap-8) replayed stale output on slow pans/grain =
+  stick-slip judder; the forced reprocess landed on drifted temporal
+  state. `NR_LAYER_NEAR_REUSE=1` now opts in; default OFF. Exact
+  memcmp reuse stays; `NR_LAYER_UI_MASK=0` still kills everything.
+- **Knob pushes invalidate cached output**: file-scope
+  `g_knobs_changed` bumped on knob-file accept AND every changed env
+  push, consumed per present -> `have_earlier`/`reuse_run` cleared so
+  the next present reprocesses (a knob used to look dead on static
+  screens). IMPORTANT: `poll_knob_file` now runs on the DAEMON path
+  too - it used to early-return on `!g_engine`, so x86 games never
+  invalidated reuse on knob writes.
+- **resend_raw/freeze stale-`earlier` fix**: three sites assigned
+  `result` while leaving `earlier` pointing at a pre-freeze live frame
+  with pending==0 - a post-unfreeze identical present could replay a
+  different frame's processing. `have_earlier=0` added at all three.
+- **m11d knob persistence** (`584abf9`): SETTEMPORAL/sharpness and
+  knob-file gain/blend pushes now survive async rebuilds (members +
+  post-swap re-apply); history reset gap 10s -> 60s (AABB clamp already
+  bounds stale history; GTA IV hitches were emitting undamped frames).
+- **Overlay framed redesign** (this round): the user's spec - controls
+  in a border BAND, center a clean hole for live preview. Both modes:
+  - in-layer: ABI v1 - hole rect in header[13-14], `layer_hb` header[15]
+    handshake (top nibble = ABI level); the layer composites per-row
+    segments around the hole and hit-tests input against it: band
+    pixels -> ring event + eaten, hole -> passed to the game (identical
+    semantics to a chroma-hole window). Implicit button grab while a
+    drag crosses the hole. bit2 = kbd_capture (Entry focus), bit3 =
+    no_clip. Section cap raised 1024x1200 -> 3840x2160 (~33 MB).
+  - external: toplevel now sizes to the game CLIENT rect (500 ms fit
+    poll), `-transparentcolor #ff00ff` center = OS-level click-through,
+    band at ~88% alpha, `WM_MOUSEACTIVATE->MA_NOACTIVATE` subclass so
+    band clicks never activate the window (the minimize vector).
+  - `overlay_log.py`: real file logging (`logs/overlay.log`) - arm
+    result, mode, pid, publish stalls, fallback reasons. The old
+    silent-fallback paths are all loud now.
+  - `layer_hb` watchdog: if no consuming layer stamps it within 4 s,
+    in-layer auto-falls back to external for that pid - no more
+    invisible-overlay dead sessions.
+
 ## Stage 38: in-layer UI overlay implemented + validated on GTA IV (2026-10-05)
 
 - **Layer side** (`e47d5f8`): `nr_ui.c/.h` - the layer lazily opens

@@ -1,9 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # ============================================================================
-# m13.overlay_widgets - dark theme palette + control-panel construction.
-# ControlOverlay._build delegates here (build_panel(self)); every widget
-# and Tk variable lands on the overlay instance, callbacks bind to its
-# methods - identical to an in-place _build, just split for file size.
+# m13.overlay_widgets - dark theme palette + framed control-band
+# construction. ControlOverlay._build delegates here (build_panel(self));
+# every widget and Tk variable lands on the overlay instance, callbacks
+# bind to its methods - identical to an in-place _build, just split for
+# file size.
+#
+# FRAMED LAYOUT (the band): the toplevel covers the GAME CLIENT rect and
+# its own bg is CHROMA, the transparentcolor key. Two packed frames form
+# the perimeter band - a left sidebar carrying every control and a slim
+# bottom status strip - while the remaining center rect stays uncovered:
+#   external mode: -transparentcolor CHROMA punches a real see-through,
+#                  click-through hole (the OS forwards those pixels).
+#   in-layer mode: the same rect is published as the shm bitmap hole
+#                  (alpha 0 + hole rect in the header - see overlay_shm).
+# Pack order matters: the strip goes bottom/full-width FIRST, then the
+# sidebar fills the rest of the left edge - so the hole is always the
+# single rect (sidebar_w, 0, W, H - strip_h).
 # ============================================================================
 import tkinter as tk
 from tkinter import ttk
@@ -24,29 +37,53 @@ GREEN = "#3fb950"
 RED = "#f85149"
 AMBER = "#d29922"
 
+CHROMA = "#ff00ff"   # hole color key: never used by any band widget
+SIDEBAR_W = 240      # control column width (spec: ~200-260 px)
+STRIP_H = 30         # bottom status strip height
+
 
 def build_panel(ov):
-    """Construct the full widget tree of a ControlOverlay instance (the
+    """Construct the framed widget tree of a ControlOverlay instance (the
     former ControlOverlay._build body; ov is the overlay instance)."""
     w = ov.win
-    # title strip (drag handle)
-    strip = tk.Frame(w, bg=PANEL, height=34)
-    strip.pack(fill="x")
-    strip.pack_propagate(False)
-    ov.title_lbl = tk.Label(strip, text="◆ DLSS 5", bg=PANEL, fg=ACCENT,
-                            font=("Segoe UI", 10, "bold"))
+    w.configure(bg=CHROMA)
+
+    # ---- bottom status strip (packed first => full width) -------------
+    ov.strip = tk.Frame(w, bg=PANEL, height=STRIP_H)
+    ov.strip.pack(side="bottom", fill="x")
+    ov.strip.pack_propagate(False)
+    ov.freeze_lbl = tk.Label(
+        ov.strip, text="", bg=PANEL, fg=AMBER, font=("Segoe UI", 8),
+        justify="left", anchor="w")
+    ov.freeze_lbl.pack(side="left", padx=(8, 4))
+    ov.status = tk.Label(ov.strip, text="", bg=PANEL, fg=MUTED,
+                         font=("Consolas", 8), justify="left", anchor="w")
+    ov.status.pack(side="left", padx=4, fill="x", expand=True)
+    tk.Label(ov.strip, text=tr("ov_hide_hint", hotkey_label(
+        ov.ctl.cfg.get("overlay_hotkey"))), bg=PANEL, fg="#565b66",
+        font=("Segoe UI", 8)).pack(side="right", padx=(4, 8))
+
+    # ---- left sidebar (fills the remainder of the left edge) ----------
+    ov.sidebar = tk.Frame(w, bg=BG, width=SIDEBAR_W)
+    ov.sidebar.pack(side="left", fill="y")
+    ov.sidebar.pack_propagate(False)
+
+    # title strip (label + close; the framed band is NOT dragged - the
+    # geometry poll keeps it snapped to the game client rect)
+    title_strip = tk.Frame(ov.sidebar, bg=PANEL, height=34)
+    title_strip.pack(fill="x")
+    title_strip.pack_propagate(False)
+    ov.title_lbl = tk.Label(title_strip, text="◆ DLSS 5", bg=PANEL,
+                            fg=ACCENT, font=("Segoe UI", 10, "bold"))
     ov.title_lbl.pack(side="left", padx=10)
-    close = tk.Label(strip, text="✕", bg=PANEL, fg=MUTED,
+    close = tk.Label(title_strip, text="✕", bg=PANEL, fg=MUTED,
                      font=("Segoe UI", 10, "bold"), padx=10, cursor="hand2")
     close.pack(side="right")
     close.bind("<Button-1>", lambda _e: ov.hide())
     close.bind("<Enter>", lambda _e: close.config(fg=RED))
     close.bind("<Leave>", lambda _e: close.config(fg=MUTED))
-    for widget in (strip, ov.title_lbl):
-        widget.bind("<ButtonPress-1>", ov._drag_start)
-        widget.bind("<B1-Motion>", ov._drag_move)
 
-    body_shell = tk.Frame(w, bg=BG)
+    body_shell = tk.Frame(ov.sidebar, bg=BG)
     body_shell.pack(fill="both", expand=True)
     ov.body_canvas = tk.Canvas(
         body_shell, bg=BG, highlightthickness=0, borderwidth=0)
@@ -55,7 +92,7 @@ def build_panel(ov):
     ov.body_canvas.configure(yscrollcommand=body_scroll.set)
     body_scroll.pack(side="right", fill="y")
     ov.body_canvas.pack(side="left", fill="both", expand=True)
-    body = tk.Frame(ov.body_canvas, bg=BG, padx=14, pady=10)
+    body = tk.Frame(ov.body_canvas, bg=BG, padx=8, pady=10)
     ov._body_window = ov.body_canvas.create_window(
         (0, 0), window=body, anchor="nw")
     body.bind("<Configure>", lambda _e: ov.body_canvas.configure(
@@ -63,11 +100,6 @@ def build_panel(ov):
     ov.body_canvas.bind(
         "<Configure>", lambda e: ov.body_canvas.itemconfigure(
             ov._body_window, width=e.width))
-
-    ov.freeze_lbl = tk.Label(
-        body, text="", bg=BG, fg=AMBER, font=("Segoe UI", 8),
-        justify="left", anchor="w", wraplength=ov.WIDTH - 32)
-    ov.freeze_lbl.pack(fill="x", pady=(0, 6))
 
     # processing toggle (the big one)
     ov.toggle_btn = tk.Button(
@@ -90,8 +122,8 @@ def build_panel(ov):
         value=scale_to_preset_label(ov.ctl.cfg.get("scale")))
     ov.scale_cb = ttk.Combobox(
         top_row, textvariable=ov.scale_var, state="readonly",
-        values=scale_preset_labels(), width=18)
-    ov.scale_cb.pack(side="left", padx=(6, 12))
+        values=scale_preset_labels(), width=10)
+    ov.scale_cb.pack(side="left", padx=(6, 0))
     ov.scale_cb.bind("<<ComboboxSelected>>", ov._scale_selected)
     # The combobox popdown is a fresh Tk toplevel that does NOT
     # inherit our WS_EX_NOACTIVATE - showing it plain would be an
@@ -101,19 +133,15 @@ def build_panel(ov):
 
     ov.fg_var = tk.BooleanVar(value=bool(ov.ctl.cfg.get("frame_gen")))
     ov.fg_chk = tk.Checkbutton(
-        top_row, text=tr("framegen"), variable=ov.fg_var,
+        body, text=tr("framegen"), variable=ov.fg_var,
         command=ov._save_framegen, bg=BG, fg=FG, selectcolor=PANEL,
         activebackground=BG, activeforeground=FG,
         font=("Segoe UI", 8, "bold"), cursor="hand2")
-    ov.fg_chk.pack(side="right")
+    ov.fg_chk.pack(fill="x", pady=(0, 4))
 
-    # Blend & Sharpness row
-    bs_row = tk.Frame(body, bg=BG)
-    bs_row.pack(fill="x", pady=(2, 4))
-
-    # Blend
-    b_box = tk.Frame(bs_row, bg=BG)
-    b_box.pack(side="left", fill="x", expand=True, padx=(0, 6))
+    # Blend (stacked - the sidebar is too narrow for side-by-side)
+    b_box = tk.Frame(body, bg=BG)
+    b_box.pack(fill="x", pady=(2, 4))
     b_hdr = tk.Frame(b_box, bg=BG)
     b_hdr.pack(fill="x")
     tk.Label(b_hdr, text=tr("ov_blend"), bg=BG, fg=FG,
@@ -130,8 +158,8 @@ def build_panel(ov):
     ov.blend_scale.pack(fill="x")
 
     # Sharpness
-    s_box = tk.Frame(bs_row, bg=BG)
-    s_box.pack(side="right", fill="x", expand=True, padx=(6, 0))
+    s_box = tk.Frame(body, bg=BG)
+    s_box.pack(fill="x", pady=(2, 4))
     s_hdr = tk.Frame(s_box, bg=BG)
     s_hdr.pack(fill="x")
     tk.Label(s_hdr, text=tr("sharpness"), bg=BG, fg=FG,
@@ -159,7 +187,7 @@ def build_panel(ov):
         on_reset=ov._on_phase30_reset,
         bg=PANEL, fg=FG, accent=ACCENT, panel2=PANEL2, muted=MUTED,
         compact=True)
-    ov.p30_panel.pack(fill="x", padx=8, pady=6)
+    ov.p30_panel.pack(fill="x", padx=6, pady=6)
 
     # Legacy variables for compatibility. ov.var is the GAIN knob's var
     # (_debounced_push -> ctl.set_gain, synced from daemon_gain): it must
@@ -178,7 +206,7 @@ def build_panel(ov):
                    variable=ov.fr_var, command=ov._save_freeze,
                    bg=BG, fg=MUTED, selectcolor=PANEL,
                    activebackground=BG, activeforeground=FG,
-                   font=("Segoe UI", 8), cursor="hand2").pack(side="left")
+                   font=("Segoe UI", 8), cursor="hand2").pack(anchor="w")
 
     ov.ap_var = tk.BooleanVar(
         value=bool(ov.ctl.cfg.get("overlay_autopause")))
@@ -186,12 +214,4 @@ def build_panel(ov):
                    command=ov._save_autopause, bg=BG, fg=MUTED,
                    selectcolor=PANEL, activebackground=BG,
                    activeforeground=FG, font=("Segoe UI", 8),
-                   cursor="hand2").pack(side="right")
-
-    ov.status = tk.Label(body, text="", bg=BG, fg=MUTED,
-                         font=("Consolas", 8), justify="left")
-    ov.status.pack(anchor="w")
-
-    tk.Label(body, text=tr("ov_hide_hint", hotkey_label(
-        ov.ctl.cfg.get("overlay_hotkey"))), bg=BG, fg="#565b66",
-        font=("Segoe UI", 8)).pack(side="bottom", pady=(8, 0))
+                   cursor="hand2").pack(anchor="w")

@@ -16,17 +16,14 @@
 # `self._il` back-reference - InLayerUI(overlay) reaches back into the
 # overlay object for win/ctl/cfg/dst, matching the dispatch contract.
 # ============================================================================
-import ctypes
 import time
 import tkinter as tk
-from ctypes import wintypes
 
 from .overlay_shm import (ShmUI, MAX_W as SHM_MAX_W, MAX_H as SHM_MAX_H,
                           EVT_MOVE, EVT_BTNDN, EVT_BTNUP, EVT_WHEEL,
                           EVT_KEYDN, EVT_KEYUP, EVT_CHAR)
-from .overlay_win32 import (_u32, _toplevel_hwnd,
-                            client_origin, client_size, window_size,
-                            DibCapture)
+from .overlay_win32 import (_toplevel_hwnd, window_size, DibCapture)
+from . import overlay_log
 
 # ------------------------------------------------------------ in-layer ----
 # The in-layer toplevel cannot be parked off-screen: a window whose GDI
@@ -39,6 +36,12 @@ from .overlay_win32 import (_u32, _toplevel_hwnd,
 # where the layer's wndproc filter captures it into the ring. The park
 # spot is the panel's own composited position (client origin + dst),
 # clamped into the virtual desktop in case the game is minimized.
+#
+# FRAMED MODE: the panel is the game-client-sized band (left sidebar +
+# bottom strip, center hole) - the toplevel exactly covers the client so
+# game-client coords == window-local coords and dst is always (0,0). The
+# hole rect rides along in the shm header so the layer hit-tests input on
+# band pixels only; the center keeps reaching the game.
 
 # Win32 VK -> Tk keysym for ring key events (types 5/6). The overlay has
 # no text fields - this exists for completeness and future bindings.
@@ -138,6 +141,7 @@ class InLayerUI:
     PUBLISH_MS = 66        # ~15 Hz bitmap + heartbeat while armed
     DRAIN_MS = 10          # event ring poll while visible
     PIDCHECK_S = 1.0       # game-pid liveness revalidation cadence
+    LAYER_WAIT_S = 4.0     # armed+visible without a layer stamp -> dead
 
     def __init__(self, overlay):
         self.ov = overlay
@@ -145,7 +149,7 @@ class InLayerUI:
         self.dib = DibCapture()
         self.pid = None
         self.dst = (0, 0)             # panel origin, GAME CLIENT coords
-        self._client = (0, 0)         # game client extent (drag clamp)
+        self._client = (0, 0)         # game client extent (publish clamp)
         self._hwnd = None             # panel HWND (resampled each tick)
         self._size = (0, 0)           # panel pixel extent
         self._pub_id = None
@@ -159,8 +163,15 @@ class InLayerUI:
         self._last_drop = 0
         self._last_pid_check = 0.0
         self._logged_fail = False
+        self._armed_ms = 0.0          # arm() timestamp (consumer grace)
+        self._lhb_last = None         # last observed layer_hb counter
+        self._lhb_ms = 0.0            # ... and when it last moved
+        self._lhb_seen = False        # the layer opened the section once
+        self._lhb_stalled = False     # stall already logged
+        self._last_pub_ms = 0.0       # previous publish tick (stall spot)
 
     def _log(self, msg):
+        overlay_log.log(msg)
         try:
             self.ov.on_log(msg)
         except Exception:
@@ -175,16 +186,35 @@ class InLayerUI:
         the publish pump. False -> caller falls back to external mode."""
         self.disarm()
         if not self.shm.open(pid):
+            self._log("[overlay] shm open FAILED pid=%s (%s) - "
+                      "external fallback" % (pid, self.shm.err or "?"))
             return False
         self.pid = int(pid)
         self.shm.write_cursor_sprite(_CURSOR_RGBA)
-        self.shm.set_cursor_visible(True)
         self._last_pid_check = 0.0
         self._last_drop = 0
         self._logged_fail = False
+        self._armed_ms = time.monotonic()
+        self._lhb_last = None
+        self._lhb_ms = 0.0
+        self._lhb_seen = False
+        self._lhb_stalled = False
+        self._last_pub_ms = 0.0
         self._gen += 1
         self._schedule_publish()
+        self._log("[overlay] shm section open pid=%s (%s, cap %dx%d)"
+                  % (pid, "Local\\DLSS5_UI_%d" % int(pid),
+                     SHM_MAX_W, SHM_MAX_H))
         return True
+
+    def set_frame_flags(self, covers_screen):
+        """Framed-mode flags for the armed session: the sprite cursor only
+        where the OS cursor is hidden (a game covering its monitor),
+        and ClipCursor only for that same case - the band covers the
+        client rect, so clipping a WINDOWED game would jail the pointer
+        inside it while the hole still passes input through."""
+        self.shm.set_cursor_visible(bool(covers_screen))
+        self.shm.set_no_clip(not covers_screen)
 
     def disarm(self):
         """Tk thread: close the section (the publish pump stops, the
@@ -194,6 +224,12 @@ class InLayerUI:
         self._gen += 1
         self._cancel_drain()
         self._cancel_publish()
+        # Drop the routing gate explicitly before the unmap: a layer still
+        # holding the section would otherwise keep compositing/capturing
+        # the last published frame until the heartbeat goes stale (~2 s).
+        self.shm.set_visible(False)
+        self.shm.set_kbd_capture(False)
+        self.shm.set_cursor_visible(False)
         self.shm.close()
         self.pid = None
         self._hover = self._capture = None
@@ -210,7 +246,11 @@ class InLayerUI:
             self._size = (win.winfo_width(), win.winfo_height())
         except tk.TclError:
             pass
-        self._publish_once()
+        ok = self._publish_once()
+        self._log("[overlay] in-layer visible pid=%s extent=%dx%d "
+                  "hole=%s first_publish=%s" % (
+                      self.pid, self._size[0], self._size[1],
+                      self.ov._hole, "ok" if ok else "FAILED"))
         self.shm.set_visible(True)
         self._schedule_drain()
 
@@ -220,70 +260,27 @@ class InLayerUI:
         (heartbeat stays alive) so the next show re-arms instantly."""
         self._cancel_drain()
         self.shm.set_visible(False)
+        self.shm.set_kbd_capture(False)
         self._hover = self._capture = None
         self._held.clear()
 
     # --------------------------------------------------------- placement --
-    def place(self, game_hwnd):
-        """Centre over the game window - the same visual convention as
-        ControlOverlay._center - expressed in GAME CLIENT coords (the
-        layer composites at dst_x/dst_y inside the frame)."""
-        W, H = self.ov.WIDTH, self.ov.HEIGHT
-        rect = wintypes.RECT()
-        if game_hwnd and _u32.GetWindowRect(game_hwnd, ctypes.byref(rect)):
-            gw = rect.right - rect.left
-            gh = rect.bottom - rect.top
-            sx = rect.left + max(0, (gw - W) // 2)
-            sy = rect.top + max(0, (gh - H) // 2)
-            org = client_origin(game_hwnd)
-            cs = client_size(game_hwnd)
-            if org and cs:
-                self._client = cs
-                dx = min(max(0, sx - org[0]), max(0, cs[0] - W))
-                dy = min(max(0, sy - org[1]), max(0, cs[1] - H))
-                self.dst = (dx, dy)
-                return True
-        # No window info: assume the game fills the primary screen (true
-        # for the fullscreen case this mode is built for).
-        try:
-            sw = self.ov.win.winfo_screenwidth()
-            sh = self.ov.win.winfo_screenheight()
-        except tk.TclError:
-            sw = sh = 0
-        self._client = (sw, sh)
-        self.dst = (max(0, (sw - W) // 2), max(0, (sh - H) // 2))
-        return False
+    def fit(self, x, y, w, h):
+        """Framed placement: the toplevel exactly covers the game client,
+        so the published bitmap sits at dst (0,0) and client coords equal
+        window-local coords. w/h are already cap-clamped by the caller.
+        Returns the publish extent actually used."""
+        self._client = (int(w), int(h))
+        self.dst = (0, 0)
+        return self._client
 
     def set_dst(self, nx, ny):
-        """Drag the composited panel to new client coords, clamped into
-        the game client rect so it can never leave the frame."""
-        cw, ch = self._client
-        if cw and ch:
-            nx = min(max(0, nx), max(0, cw - self.ov.WIDTH))
-            ny = min(max(0, ny), max(0, ch - self.ov.HEIGHT))
-        self.dst = (int(nx), int(ny))
+        """Legacy drag hook - the framed band always covers the whole
+        client (dst pinned to 0,0); kept so old callers cannot wedge."""
+        self.dst = (0, 0)
 
     def last_client_xy(self):
         return self._ev_client
-
-    def park_pos(self):
-        """Screen coords for the invisible Tk window: the game client
-        origin + the composited dst, so the (transparent) window sits
-        exactly where the layer draws the panel and real click-through
-        input lines up. Clamped into the virtual desktop - a minimized
-        game reports a -32000 origin and an off-screen window never gets
-        its Tk paint through (see the module header note)."""
-        W, H = self.ov.WIDTH, self.ov.HEIGHT
-        gh = self.ov._game_hwnd
-        org = client_origin(gh) if gh else None
-        if org:
-            sx, sy = org[0] + self.dst[0], org[1] + self.dst[1]
-        else:
-            sx = sy = 0
-        l, t, r, b = self.ov._vroot_bounds()
-        if sx + W <= l or sx >= r or sy + H <= t or sy >= b:
-            sx, sy = l + 8, t + 8       # degenerate origin: primary corner
-        return sx, sy
 
     # ------------------------------------------------------ publish pump --
     def _schedule_publish(self):
@@ -307,10 +304,10 @@ class InLayerUI:
 
     def _publish_tick(self, gen):
         """Tk thread @~15 Hz while armed: flush paint, PrintWindow ->
-        shm, heartbeat, ~1 Hz game-pid liveness. Everything stays on the
-        Tk thread on purpose - PrintWindow on the panel HWND is a
-        synchronous same-thread WM_PRINT send here, while from a worker
-        it blocks until this thread next pumps messages."""
+        shm, heartbeat, ~1 Hz game-pid liveness, layer-consumer tracking.
+        Everything stays on the Tk thread on purpose - PrintWindow on the
+        panel HWND is a synchronous same-thread WM_PRINT send here, while
+        from a worker it blocks until this thread next pumps messages."""
         self._pub_id = None
         if gen != self._gen:
             return                       # stale pump from an old arm
@@ -321,6 +318,14 @@ class InLayerUI:
             if self.ov._inlayer:
                 self.ov._inlayer_lost()
             return
+        now = time.monotonic()
+        if self._last_pub_ms and now - self._last_pub_ms > 1.5:
+            # A stalled pump means a stalled heartbeat - the layer drops
+            # the panel AND releases input after ~2 s. Log it so a wedged
+            # mainloop shows up as "publish pump stalled" in overlay.log.
+            self._log("[overlay] publish pump stalled %.1f s "
+                      "(Tk mainloop busy?)" % (now - self._last_pub_ms))
+        self._last_pub_ms = now
         try:
             win = self.ov.win
             win.update_idletasks()       # apply pending paint now
@@ -329,21 +334,87 @@ class InLayerUI:
                 self._hwnd = _toplevel_hwnd(win)
         except tk.TclError:
             pass
+        # Heartbeat first: liveness must not die with a single bad frame
+        # (a transient TclError mid-resize would otherwise stall the hb
+        # past the layer's ~2 s gate and hide the UI).
         try:
-            if not self._publish_once() and not self._logged_fail:
+            self.shm.bump_heartbeat()
+        except Exception:
+            pass
+        try:
+            ok = self._publish_once()
+            if not ok and not self._logged_fail:
                 self._logged_fail = True
                 self._log("[overlay] shm publish stalled "
-                          "(PrintWindow failed)")
-            self.shm.bump_heartbeat()
+                          "(PrintWindow failed, hwnd=0x%x size=%dx%d)"
+                          % (self._hwnd or 0, *self._size))
+            elif ok and self._logged_fail:
+                self._logged_fail = False
+                self._log("[overlay] shm publish recovered")
         except Exception as e:
             if not self._logged_fail:
                 self._logged_fail = True
                 self._log("[overlay] shm publish error: %s" % e)
-        now = time.monotonic()
+        self._track_consumer(now)
         if now - self._last_pid_check >= self.PIDCHECK_S:
             self._last_pid_check = now
             self._check_pid()
         self._schedule_publish()
+
+    def _track_consumer(self, now):
+        """Layer liveness. Primary signal: the layer-written layer_hb
+        stamp (ABI>=1) - nonzero and moving = the game's Vulkan layer is
+        compositing the bitmap. Secondary signal for an ABI-0 layer that
+        predates the stamp: cursor_x/cursor_y go nonzero once it has a
+        pointer position (written on the same present path). Still-zero
+        on both LAYER_WAIT_S after arm while visible = no consumer exists
+        -> the invisible window can never surface, so the session falls
+        back to external."""
+        try:
+            lhb = self.shm.layer_hb()
+            cpos = self.shm.cursor_pos()
+        except Exception:
+            return
+        if lhb is None:
+            return
+        ver, cnt = lhb
+        # cnt==0 is the never-stamped value (producer reset on open) - it
+        # is NOT a moving counter and must not count as an attach. An
+        # ABI-0 layer instead betrays itself via a nonzero cursor slot -
+        # but only while the published extent still fits the old 1024x1200
+        # cap: a bigger framed bitmap fails its sanity check and never
+        # composites, so a "legacy attach" there would hide the real
+        # dead-consumer situation.
+        legacy_alive = bool(
+            (not cnt) and cpos and (cpos[0] or cpos[1])
+            and self._size[0] <= 1024 and self._size[1] <= 1200)
+        if (cnt and cnt != self._lhb_last) or legacy_alive:
+            if not self._lhb_seen:
+                self._lhb_seen = True
+                self._log("[overlay] layer attached: composite live "
+                          "pid=%s abi=%d" % (self.pid, ver))
+            elif self._lhb_stalled:
+                self._log("[overlay] layer composite resumed pid=%s"
+                          % self.pid)
+            self._lhb_stalled = False
+            self._lhb_last = cnt
+            self._lhb_ms = now
+            return
+        if not self._lhb_seen:
+            if (self.ov._ui_visible and self._armed_ms
+                    and now - self._armed_ms > self.LAYER_WAIT_S):
+                self._lhb_seen = True     # latch: warn once, act once
+                self._log("[overlay] layer NEVER attached after %.0f s "
+                          "pid=%s - the game has no consuming layer" % (
+                              now - self._armed_ms, self.pid))
+                self.ov._inlayer_dead()
+        elif not self._lhb_stalled and now - self._lhb_ms > 2.5:
+            # Attached before, quiet now: game minimized or presents
+            # paused - the UI just stops updating, no fallback needed.
+            self._lhb_stalled = True
+            self._log("[overlay] layer composite stalled %.1f s "
+                      "(game minimized or presenting stopped)" % (
+                          now - self._lhb_ms))
 
     def _publish_once(self):
         hwnd = self._hwnd
@@ -357,10 +428,11 @@ class InLayerUI:
             w, h = size
         if w > SHM_MAX_W or h > SHM_MAX_H:
             return False                 # panel exceeds the ABI cap
-        bgra = self.dib.grab(hwnd, w, h)
+        hole = getattr(self.ov, "_hole", None)
+        bgra = self.dib.grab(hwnd, w, h, hole=hole)
         if bgra is None:
             return False
-        return self.shm.write_bitmap(bgra, w, h, *self.dst)
+        return self.shm.write_bitmap(bgra, w, h, *self.dst, hole=hole)
 
     def _check_pid(self):
         """~1 Hz liveness (Tk thread): the layer lives in-process, so
@@ -435,8 +507,10 @@ class InLayerUI:
         win = self.ov.win
         if t == EVT_MOVE:
             self._ev_client = (a, b)
-            tx = min(max(0, a - self.dst[0]), self.ov.WIDTH - 1)
-            ty = min(max(0, b - self.dst[1]), self.ov.HEIGHT - 1)
+            # Framed mode: window covers the client at dst (0,0), so
+            # client coords == toplevel coords; clamp to the live extent.
+            tx = min(max(0, a - self.dst[0]), max(0, self._size[0] - 1))
+            ty = min(max(0, b - self.dst[1]), max(0, self._size[1] - 1))
             self._ev_xy = (tx, ty)
             target = self._capture or self._widget_at(tx, ty) or win
             if self._capture is None:

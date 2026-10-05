@@ -10,13 +10,19 @@
 #   offset    0  header, 64 B (16 x u32):
 #     [0]  u32 magic        = 0x3049554E ('NUI0')
 #     [1]  u32 seq          seqlock: ODD while the producer writes, EVEN
-#                          once (w,h,dst,bitmap) is a coherent set again
-#     [2]  u32 w            bitmap extent (cap 1024x1200)
+#                          once (w,h,dst,hole,bitmap) is a coherent set again
+#     [2]  u32 w            bitmap extent (cap 3840x2160)
 #     [3]  u32 h
 #     [4]  i32 dst_x        target rect, game CLIENT coords
 #     [5]  i32 dst_y
-#     [6]  u32 flags        bit0 ui_visible (ALSO the layer's input-capture
-#                          flag), bit1 cursor_visible (sprite slot valid)
+#     [6]  u32 flags        bit0 ui_visible (ALSO the layer's input-routing
+#                          gate), bit1 cursor_visible (sprite slot valid),
+#                          bit2 kbd_capture (producer sets it while a text
+#                          widget owns Tk focus: key/char messages go to the
+#                          ring instead of the game),
+#                          bit3 no_clip (producer sets it when the band must
+#                          NOT ClipCursor - windowed games where the framed
+#                          overlay only covers the client rect)
 #     [7]  i32 cursor_x     logical cursor position, written BY THE LAYER
 #     [8]  i32 cursor_y     (readable for diagnostics via cursor_pos())
 #     [9]  u32 heartbeat    producer increments EVERY publish tick; the
@@ -24,7 +30,21 @@
 #     [10] u32 evt_head     ring write index (layer produces)
 #     [11] u32 evt_tail     ring read index (m13 consumes)
 #     [12] u32 evt_dropped  producer-side overflow counter
-#     [13..15] u32 reserved
+#     [13] u32 hole_lt      packed u16 pair: hole_l | hole_t<<16
+#     [14] u32 hole_rb      packed u16 pair: hole_r | hole_b<<16
+#                          The framed layout publishes the client-sized
+#                          bitmap with a transparent CENTER hole (the live
+#                          game view); (l,t)-(r,b) is that hole in BITMAP
+#                          pixel coords, seqlock-covered with w/h/dst.
+#                          Degenerate (l>=r or t>=b) = no hole: the whole
+#                          bitmap is UI (the pre-framing semantics).
+#                          The layer hit-tests input on bitmap-minus-hole
+#                          and skips the hole while blending.
+#     [15] u32 layer_hb     LAYER-WRITTEN stamp: top 4 bits = ABI level
+#                          (>=1 = hole/hit-test aware), low 28 bits =
+#                          present counter bumped per composite. m13 reads
+#                          it to tell "armed but no layer consumes" apart
+#                          from a healthy session (see layer_hb()).
 #   offset   64  event ring: 256 x 16 B { u32 type; i32 a; i32 b; u32 c }
 #     types: 1=move(a=x, b=y client coords)
 #            2=btn_down / 3=btn_up (a: 0=L, 1=R, 2=M, 3=X1, 4=X2)
@@ -33,7 +53,7 @@
 #            7=char (a=UTF-16 code unit / BMP codepoint)
 #   offset 4160  cursor sprite slot: 32x32 RGBA straight-alpha
 #   offset 8256  BGRA bitmap payload, w*h*4 straight-alpha
-# Total = 8256 + 1024*1200*4 = 4923456 bytes.
+# Total = 8256 + 3840*2160*4 = 33185856 bytes.
 #
 # Threading: every public method takes the instance lock - the publish
 # worker thread writes bitmaps while the Tk drain pump consumes events
@@ -61,11 +81,20 @@ CURSOR_OFF = EVT_OFF + EVT_COUNT * EVT_SIZE       # 4160
 CURSOR_W = CURSOR_H = 32
 CURSOR_SIZE = CURSOR_W * CURSOR_H * 4             # 4096
 BITMAP_OFF = CURSOR_OFF + CURSOR_SIZE             # 8256
-MAX_W, MAX_H = 1024, 1200
-TOTAL_SIZE = BITMAP_OFF + MAX_W * MAX_H * 4       # 4923456
+# Cap raised 1024x1200 -> 3840x2160 for the framed layout: the published
+# bitmap now spans the whole game client so the perimeter band can hug
+# every edge (hole = the clean center). 4K UHD covers every realistic
+# game client; a wider client clamps the band to the top-left cap rect
+# (logged at publish time). ~33 MB pagefile-backed section.
+MAX_W, MAX_H = 3840, 2160
+TOTAL_SIZE = BITMAP_OFF + MAX_W * MAX_H * 4       # 33185856
 
 FLAG_VISIBLE = 0x1
 FLAG_CURSOR = 0x2
+FLAG_KBDCAP = 0x4         # producer: a text widget owns Tk focus
+FLAG_NOCLIP = 0x8         # producer: do not ClipCursor (windowed framed)
+
+LAYER_ABI_SHIFT = 28      # layer_hb top 4 bits = ABI level, rest = counter
 
 EVT_MOVE = 1            # a=x, b=y (game client coords)
 EVT_BTNDN = 2           # a=button: 0=L, 1=R, 2=M, 3=X1, 4=X2
@@ -93,7 +122,9 @@ class _Header(ctypes.Structure):
                 ("evt_head", wintypes.DWORD),
                 ("evt_tail", wintypes.DWORD),
                 ("evt_dropped", wintypes.DWORD),
-                ("reserved", wintypes.DWORD * 3)]
+                ("hole_lt", wintypes.DWORD),
+                ("hole_rb", wintypes.DWORD),
+                ("layer_hb", wintypes.DWORD)]
 
 
 assert ctypes.sizeof(_Header) == HDR_SIZE
@@ -134,19 +165,26 @@ class ShmUI:
         self._seq = 0           # private seqlock counter (even = stable)
         self.pid = None         # game pid this section belongs to
         self.evt_dropped = 0    # last observed producer overflow count
+        self.err = None         # open() failure detail for the log
 
     # ------------------------------------------------------------ mapping --
     def open(self, pid):
         """Create-or-open the game session's section. True on success.
-        Any previous mapping is closed first (one session per ShmUI)."""
+        Any previous mapping is closed first (one session per ShmUI).
+        Failure detail lands in self.err for the overlay log."""
         self.close()
+        self.err = None
         name = SECTION_PREFIX + str(int(pid))
         h = _k32.CreateFileMappingW(_INVALID_HANDLE, None,
                                     PAGE_READWRITE, 0, TOTAL_SIZE, name)
         if not h:
+            self.err = "CreateFileMappingW %s err=%d" % (
+                name, _k32.GetLastError())
             return False
         base = _k32.MapViewOfFile(h, FILE_MAP_ALL_ACCESS, 0, 0, TOTAL_SIZE)
         if not base:
+            self.err = "MapViewOfFile %s err=%d" % (name,
+                                                    _k32.GetLastError())
             _k32.CloseHandle(h)
             return False
         with self._lock:
@@ -164,6 +202,12 @@ class ShmUI:
                 # or the fully reset header - never a torn one.
                 ctypes.memset(base, 0, HDR_SIZE)
                 hdr.magic = MAGIC
+            # Producer-owned fields reset on every attach: a reused
+            # section must not carry a stale hole rect or a stale layer
+            # stamp into the new session (m13 restart mid-game).
+            hdr.hole_lt = 0
+            hdr.hole_rb = 0
+            hdr.layer_hb = 0
             # Drop any ring backlog produced before we attached - stale
             # input events must never replay into a fresh UI session.
             hdr.evt_tail = hdr.evt_head
@@ -189,8 +233,15 @@ class ShmUI:
         return self._hdr is not None
 
     # ------------------------------------------------------------- writes --
-    def write_bitmap(self, bgra, w, h, dst_x, dst_y):
+    def write_bitmap(self, bgra, w, h, dst_x, dst_y, hole=None):
         """Publish one BGRA frame + its target rect (client coords).
+
+        hole: optional (l, t, r, b) of the transparent center rect in
+        BITMAP pixel coords - the framed layout's clean game view. The
+        layer hit-tests input on bitmap-minus-hole and skips the hole
+        while blending; hole pixels are also alpha=0 in the payload so a
+        hole-unaware reader keeps the center transparent. Degenerate or
+        None = no hole (whole bitmap is UI).
 
         Seqlock: seq is bumped to ODD, header fields and the bitmap are
         written, then seq is bumped back EVEN. Single producer + in-order
@@ -202,6 +253,15 @@ class ShmUI:
         n = w * h * 4
         if len(bgra) < n:
             return False
+        hl = ht = hr = hb = 0
+        if hole:
+            hl, ht, hr, hb = (int(v) for v in hole)
+            hl = min(max(0, hl), w)
+            hr = min(max(0, hr), w)
+            ht = min(max(0, ht), h)
+            hb = min(max(0, hb), h)
+            if hl >= hr or ht >= hb:
+                hl = ht = hr = hb = 0        # degenerate -> no hole
         with self._lock:
             hdr = self._hdr
             if hdr is None:
@@ -212,6 +272,8 @@ class ShmUI:
             hdr.h = h
             hdr.dst_x = int(dst_x)
             hdr.dst_y = int(dst_y)
+            hdr.hole_lt = (hl & 0xFFFF) | ((ht & 0xFFFF) << 16)
+            hdr.hole_rb = (hr & 0xFFFF) | ((hb & 0xFFFF) << 16)
             ctypes.memmove(self._base + BITMAP_OFF, bgra, n)
             self._seq = (self._seq + 1) & 0xFFFFFFFF     # even: coherent
             hdr.seq = self._seq
@@ -233,6 +295,31 @@ class ShmUI:
     def set_cursor_visible(self, on):
         """flags bit1 - the cursor sprite slot holds a valid image."""
         self._flag(FLAG_CURSOR, bool(on))
+
+    def set_kbd_capture(self, on):
+        """flags bit2 - a text widget owns Tk focus: the layer routes
+        key/char messages to the ring instead of the game. Momentary by
+        design - cleared the instant no entry holds focus."""
+        self._flag(FLAG_KBDCAP, bool(on))
+
+    def set_no_clip(self, on):
+        """flags bit3 - the layer skips its ClipCursor edge tracking.
+        The framed overlay sets it for windowed games: the band only
+        covers the client rect, so jailing the cursor inside it would
+        trap the pointer on the desktop side too."""
+        self._flag(FLAG_NOCLIP, bool(on))
+
+    def layer_hb(self):
+        """-> (abi_level, counter) from the layer-written stamp, or None
+        while unmapped. abi_level >= 1 = hole/hit-test aware consumer;
+        counter moving = the layer is presenting (a live consumer). A
+        persistent (0, 0) while armed means NO layer ever opened the
+        section - the game has no in-process consumer at all."""
+        with self._lock:
+            if self._hdr is None:
+                return None
+            v = self._hdr.layer_hb
+            return (v >> LAYER_ABI_SHIFT, v & 0x0FFFFFFF)
 
     def bump_heartbeat(self):
         """Producer liveness tick. The layer drops the panel (and input
