@@ -56,11 +56,22 @@ void main() {
         float alpha = clamp(1.0 / (1.0 + exp(-logit)) * 0.73974609375, 0.0, 1.0);
         float luma = 0.0;
         const vec3 W = vec3(0.299, 0.587, 0.114);
+        float col01[3], h01[3];
         for (uint c = 0u; c < 3u; ++c) {
-            float col01 = fv[p * 16u + 4u + c] * 8.0 + 0.5;
-            float h01   = fv[p * 16u + 7u + c] * 8.0 + 0.5;
-            float pred  = clamp(col01 + head[p * 4u + c] * 0.25, 0.0, 1.0);
-            luma += W[c] * (pred + alpha * (h01 - pred));
+            col01[c] = fv[p * 16u + 4u + c] * 8.0 + 0.5;
+            h01[c]   = fv[p * 16u + 7u + c] * 8.0 + 0.5;
+        }
+        // Same per-pixel motion gate as temporal_nr (see its comment):
+        // stats[1] must equal what temporal_nr actually emits pre-anchor,
+        // else the anchor would chase a history pull that was never
+        // applied. First frame (h01==col01) leaves alpha untouched.
+        float lm = abs(W.x * (h01[0] - col01[0])
+                     + W.y * (h01[1] - col01[1])
+                     + W.z * (h01[2] - col01[2]));
+        alpha *= 1.0 - smoothstep(0.02, 0.10, lm);
+        for (uint c = 0u; c < 3u; ++c) {
+            float pred  = clamp(col01[c] + head[p * 4u + c] * 0.25, 0.0, 1.0);
+            luma += W[c] * (pred + alpha * (h01[c] - pred));
         }
         atomicAdd(sLum, uint(luma * 256.0 + 0.5));
     }

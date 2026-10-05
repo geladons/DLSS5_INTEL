@@ -155,14 +155,37 @@ void main() {
     // channels 7-9 into the current 3x3 colour range before the network
     // and this blend see them (the scalar soft-reject that used to live
     // here oscillated at its boundary -> shimmer + sustained bright patch).
+    float col01[3], h01[3];
     for (uint c = 0u; c < 3u; ++c) {
-        float col01 = fv[p * 16u + 4u + c] * 8.0 + 0.5;
-        float h01   = fv[p * 16u + 7u + c] * 8.0 + 0.5;
-        float pred  = clamp(col01 + halfr(head[hP + c]) * 0.25, 0.0, 1.0);
-        float outp  = pred + alpha * (h01 - pred);
-        outp = col01 + (outp - col01) * k;              // gain anchor
-        head[hP + c] = halfr((outp - col01) * 4.0);
-        float s = halfr(clamp(outp, 0.0, 1.0));          // scaled_color(outp)
+        col01[c] = fv[p * 16u + 4u + c] * 8.0 + 0.5;
+        h01[c]   = fv[p * 16u + 7u + c] * 8.0 + 0.5;
+    }
+
+    // Per-pixel motion gate (port of the reference daemon's hold_floor on
+    // the blend factor): the history is identity-reprojected, so on a
+    // pixel that MOVED h01 is stale and the alpha blend would drag it
+    // into the output (ghost trails, colour drag). lm is the luma
+    // distance between the reprojected previous output and the current
+    // input; the temporal alpha collapses across a ~5..25/255 band:
+    // still pixels keep the full pull, clearly-moved pixels reconstruct
+    // from the network alone. Complements the upstream AABB clamp - the
+    // clamp bounds how FAR history may pull, the gate decides WHETHER it
+    // pulls at all (at a just-crossed edge the 3x3 neighbourhood still
+    // spans both sides, the clamp stays loose there and only the gate
+    // releases the stale pull). First frame (histValid=0 -> h01==col01)
+    // yields lm=0, so the first-frame path is untouched.
+    const vec3 LW = vec3(0.299, 0.587, 0.114);   // BT.601, as features/stats
+    float lm = abs(LW.x * (h01[0] - col01[0])
+                 + LW.y * (h01[1] - col01[1])
+                 + LW.z * (h01[2] - col01[2]));
+    alpha *= 1.0 - smoothstep(0.02, 0.10, lm);
+
+    for (uint c = 0u; c < 3u; ++c) {
+        float pred  = clamp(col01[c] + halfr(head[hP + c]) * 0.25, 0.0, 1.0);
+        float outp  = pred + alpha * (h01[c] - pred);
+        outp = col01[c] + (outp - col01[c]) * k;          // gain anchor
+        head[hP + c] = halfr((outp - col01[c]) * 4.0);
+        float s = halfr(clamp(outp, 0.0, 1.0));           // scaled_color(outp)
         s = halfr(s - 0.5);
         s = halfr(s * 0.125);
         hs[p * 3u + c] = s;

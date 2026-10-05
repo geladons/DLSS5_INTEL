@@ -85,10 +85,12 @@ public:
         if (!t_env) t_env = std::getenv("NR_LAYER_TEMPORAL");
         temporal_ = !(t_env && std::strcmp(t_env, "0") == 0);
         // Gain anchor: EMA smoothing alpha for the global mean gain.
-        // Default OFF (0.0) - opt-in only via env (e.g. 0.08 = ~12-frame
-        // window). Needs temporal_stats.spv.
+        // Default ON (0.08 = ~12-frame window, bounded: deadzone +
+        // 0.80..1.25 clamp) - the shipping configuration. Any of the
+        // three env names set to 0 disables. Needs temporal_stats.spv.
         const char* g_env = std::getenv("DLSS5_GAIN_LOCK");
         if (!g_env) g_env = std::getenv("NR_LAYER_GAIN_LOCK");
+        if (!g_env) g_env = std::getenv("D5C_GAIN_LOCK");
         if (g_env) {
             float v = static_cast<float>(std::atof(g_env));
             if (v >= 0.0f) gainLock_ = v;
@@ -512,8 +514,8 @@ private:
     bool frameGenEnabled_ = false;
     int fgMode_ = 1;               // 1 = transfer (+0), 2 = anchor interp (+1)
     bool temporal_ = true;
-    float gainLock_ = 0.0f;           // DLSS5_GAIN_LOCK: gain EMA alpha
-                                      // (default OFF - opt-in via env)
+    float gainLock_ = 0.08f;          // DLSS5_GAIN_LOCK: gain EMA alpha
+                                      // (default ON, bounded; env 0 = off)
     std::vector<uint8_t> prevProcessed_;
     bool havePrev_ = false;
     uint32_t prevW_ = 0, prevH_ = 0;

@@ -38,3 +38,6 @@ nul
 
 # MSVC intermediates (x86 layer builds create *.obj in-tree)
 *.obj
+
+# Agent knowledge vault (Obsidian, local-only)
+notes/

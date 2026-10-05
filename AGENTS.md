@@ -151,6 +151,12 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
     kills cursor trails, stale-region drag, and the bright-patch
     relaxation oscillator a scalar reject gate produced (field report
     2026-10-03). Do NOT reintroduce a scalar alpha gate - it oscillates.
+    temporal_nr additionally gates alpha PER PIXEL by the luma distance
+    |luma(hist01) - luma(col01)| (hold_floor port): alpha *=
+    1-smoothstep(0.02,0.10,lm) - still pixels keep the pull, moved pixels
+    reconstruct from the net alone (no trails at edges the AABB can't
+    tighten). temporal_stats.comp mirrors the same gate so stats[1]
+    matches the emitted output.
   - Input contract = 16 feature channels exactly (input_adapter_weight
     [16,32]): ch 0-2 noise, 3 const, 4-6 scaled colour, 7-9 history,
     10-14 Phase30 controls, 15 zero. NO motion-vector/depth slots - the
@@ -159,8 +165,8 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
     the input luma sum, temporal_stats the pre-anchor output sum, and
     temporal_nr rescales the per-pixel residual so the frame's mean
     residual follows an EMA (`DLSS5_GAIN_LOCK`/`NR_LAYER_GAIN_LOCK`/
-    `D5C_GAIN_LOCK`, default 0 = OFF - opt-in only; e.g. 0.08).
-    Kills DC breathing on pans;
+    `D5C_GAIN_LOCK`, default 0.08 = ON - bounded anchor; env =0
+    disables). Kills DC breathing on pans;
     >50% residual jumps snap through (scene changes). Per-frame
     correction k is DEADZONED (|dCur-ema| < 6% -> k=1) and clamped to
     0.80..1.25 - never widen the clamp, a wider range re-introduces

@@ -46,11 +46,12 @@ struct EngineConfig {
     // gain jitter are low-passed away while real lighting changes track
     // within ~1/alpha frames (>40% jumps snap instantly - scene cuts).
     // Requires temporal_stats.spv alongside temporal_nr.spv.
-    // DEFAULT OFF (0.0): even the deadzoned + clamped (0.80..1.25)
-    // residual multiplier is a field-visible per-frame modulation -
-    // opt-in only via DLSS5_GAIN_LOCK / NR_LAYER_GAIN_LOCK /
-    // D5C_GAIN_LOCK (e.g. 0.08 = ~12-frame EMA window).
-    float gainLock = 0.0f;
+    // DEFAULT ON (0.08 = ~12-frame EMA window): the BOUNDED anchor
+    // (6% deadzone + 0.80..1.25 clamp in temporal_nr.comp) is the
+    // shipping configuration - the field-verified DC-breathing fix
+    // (frame luma delta 5.39 -> 0.09). Opt out via
+    // DLSS5_GAIN_LOCK / NR_LAYER_GAIN_LOCK / D5C_GAIN_LOCK = 0.
+    float gainLock = 0.08f;
     VkContextConfig vkCfg{};                           // device selection (headless default)
     bool debugDumps = false;                           // dump live_*.bin on frame index 1
     std::string dumpDir = "out";                       // dump destination

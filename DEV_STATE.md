@@ -14,6 +14,9 @@ window whose clicks could demote the game. Root causes and fixes:
   DEFAULT to OFF (`gainLock = 0.0` in `engine.h` AND `chain_c_api.cpp`
   - both had defaults) after the bounded version still modulated the
   field image. Opt-in via `*_GAIN_LOCK` env; never widen the clamp.
+  UPDATE (2026-10-05, later round): the OFF default brought the field's
+  DC-breathing BACK (brightness/colour pumping) - default restored to
+  0.08 in both files, env =0 still opts out.
 - **Scene-cut history reset** (chain, `test_scene_cut.py`): the chain
   had no content-based reset - only wall-clock gaps (m11d) and the
   AABB clamp. `ChainEngine::detectSceneCut` keeps a 64x36 luma thumb
