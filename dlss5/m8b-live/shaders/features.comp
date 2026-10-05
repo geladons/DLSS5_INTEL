@@ -199,6 +199,7 @@ void main() {
     vec3 n3 = deterministicNoise(x, y, uint(pc.b.x));
 
     float o[16];
+    float histC[3];
     // fv[15] side channel: the per-pixel temporal blend gate (0 = history
     // rejected). x16 ch15 keeps the vendor zero contract - the gate only
     // exists in the fp32 volume temporal_nr/temporal_stats read.
@@ -234,9 +235,9 @@ void main() {
             }
         }
         const float M = 0.004;   // ~8/255 slack in scaled space (grain wiggle)
-        o[7] = clamp(hist[p * 3u + 0u], lo[0] - M, hi[0] + M);
-        o[8] = clamp(hist[p * 3u + 1u], lo[1] - M, hi[1] + M);
-        o[9] = clamp(hist[p * 3u + 2u], lo[2] - M, hi[2] + M);
+        histC[0] = clamp(hist[p * 3u + 0u], lo[0] - M, hi[0] + M);
+        histC[1] = clamp(hist[p * 3u + 1u], lo[1] - M, hi[1] + M);
+        histC[2] = clamp(hist[p * 3u + 2u], lo[2] - M, hi[2] + M);
         // Blend gate measured on the UNCLAMPED history (raw bufHist vs the
         // current colour). The clamped value stays the blend target, but a
         // distance taken on it under-fires exactly where needed: the clamp
@@ -255,7 +256,23 @@ void main() {
                        2.5 * max(abs(hu[0] - raw[0]),
                                  max(abs(hu[1] - raw[1]),
                                      abs(hu[2] - raw[2]))));
-        hGate = 1.0 - smoothstep(0.02, 0.10, dm);
+        float hg = smoothstep(0.02, 0.10, dm);   // 1 = moved: reject history
+        hGate = 1.0 - hg;
+        // Motion-gated history for the NETWORK input (x16 only): the AABB
+        // clamp keeps the blend-side copy bounded, but at a just-vacated
+        // edge the 3x3 neighbourhood still spans both sides, the clamp
+        // stays loose, and the net reads a stale history it enhances as if
+        // the moved object were still here - a residual lift the
+        // temporal_nr blend gate cannot remove because it lives inside
+        // pred (measured: vac_edge +12.5 LSB). Where the unclamped dm says
+        // this pixel's reprojection is not honest, the net gets a mix
+        // toward the first-frame layout (hist==col01, its own "no history"
+        // state) - a benign mis-fire on strongly enhanced still pixels:
+        // the fallback is in-distribution and the blend-side history still
+        // anchors the output.
+        o[7] = mix(histC[0], scaled[0], hg);
+        o[8] = mix(histC[1], scaled[1], hg);
+        o[9] = mix(histC[2], scaled[2], hg);
     } else {
         o[7]  = scaled[0];   // first-frame history layout (nr_image.c:99-101)
         o[8]  = scaled[1];
@@ -268,7 +285,11 @@ void main() {
     o[14] = ctrl4;       // Phase 30 auto-mask structure
     o[15] = 0.0;
     for (uint c = 0u; c < 16u; ++c) {
-        f[p * 16u + c] = (c == 15u) ? hGate : o[c];
+        // fv[7..9] keep the AABB-clamped history for the BLEND side
+        // (temporal_nr/temporal_stats read fv; the net reads x16's gated
+        // copy - the two volumes intentionally differ only there).
+        f[p * 16u + c] = (c >= 7u && c <= 9u && pc.d.x != 0) ? histC[c - 7u]
+                       : (c == 15u) ? hGate : o[c];
         x16[p * 16u + c] = float16_t(o[c]);   // == featpack's f[i] -> float16_t
     }
     }
