@@ -14,6 +14,38 @@ _u32 = ctypes.windll.user32
 _g32 = ctypes.windll.gdi32
 _s32 = ctypes.windll.shell32
 
+# Shared WinDLL objects: overlay_win32 (and any other module) sets
+# argtypes/restype on the SAME cached function objects - e.g. GetDC and
+# CreateCompatibleDC came back as c_void_p there, so our handles arrive
+# as full-size ints and every call below with a default c_int argument
+# overflowed (DrawIconEx/DestroyIcon -> ctypes.ArgumentError, uncaught,
+# manager dead at startup). Declare OUR signatures explicitly: pointer-
+# correct types are compatible with both worlds.
+_u32.GetDC.argtypes = [wintypes.HWND]
+_u32.GetDC.restype = ctypes.c_void_p                       # HDC
+_u32.ReleaseDC.argtypes = [wintypes.HWND, ctypes.c_void_p]
+_u32.ReleaseDC.restype = ctypes.c_int
+_u32.DrawIconEx.argtypes = [ctypes.c_void_p, ctypes.c_int,
+                            ctypes.c_int, ctypes.c_void_p,
+                            ctypes.c_int, ctypes.c_int,
+                            wintypes.UINT, ctypes.c_void_p,
+                            wintypes.UINT]
+_u32.DrawIconEx.restype = wintypes.BOOL
+_u32.DestroyIcon.argtypes = [wintypes.HANDLE]
+_u32.DestroyIcon.restype = wintypes.BOOL
+_g32.CreateCompatibleDC.argtypes = [ctypes.c_void_p]
+_g32.CreateCompatibleDC.restype = ctypes.c_void_p          # HDC
+_g32.CreateDIBSection.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                  wintypes.UINT, ctypes.c_void_p,
+                                  wintypes.HANDLE, wintypes.DWORD]
+_g32.CreateDIBSection.restype = ctypes.c_void_p            # HBITMAP
+_g32.SelectObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+_g32.SelectObject.restype = ctypes.c_void_p                # HGDIOBJ
+_g32.DeleteObject.argtypes = [ctypes.c_void_p]
+_g32.DeleteObject.restype = wintypes.BOOL
+_g32.DeleteDC.argtypes = [ctypes.c_void_p]
+_g32.DeleteDC.restype = wintypes.BOOL
+
 SHGFI_ICON = 0x000000100
 SHGFI_LARGEICON = 0x000000000
 SHGFI_SMALLICON = 0x000000001
@@ -96,8 +128,10 @@ def exe_icon_png(path, size=32):
             alpha = b"\xff" * (size * size)     # no alpha written -> opaque
         rgba[3::4] = alpha
         return _png(size, size, bytes(rgba))
-    except (OSError, ValueError):
-        return None
+    except Exception:
+        return None           # icon extraction is best-effort: bad win32
+                              # plumbing must never take the manager down
+                              # (ctypes.ArgumentError leaked through here)
     finally:
         if old and hdc_mem:
             _g32.SelectObject(hdc_mem, old)
