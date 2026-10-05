@@ -8,17 +8,22 @@
 // generated frame sits BETWEEN two real anchors, so motion error is
 // bounded on both sides:
 //
-//   out = mix( warp(procA, +2(1-t)*h), warp(procB, -2t*h), t )
+//   out = base + (1-conf) * mix( warp(procA - rawA, +2(1-t)*h),
+//                                warp(procB - rawB, -2t*h), t )
 //
 // where h is a symmetric half-motion estimated on the RAW anchors
-// (rawA -> rawB) and procA/procB are the PROCESSED versions of those
-// anchors, so the synthesized frame carries full reconstruction detail.
+// (rawA -> rawB) and base is the REAL captured middle frame (midRaw,
+// binding 10; without it, the unwarped rawA/rawB blend). The processed
+// anchors contribute only their RESIDUAL (proc - raw): the generated
+// frame is real midpoint content carrying the same neural + Phase30
+// processing footprint as the anchors - the earlier colour-warped mix
+// produced a smoothed, weaker frame that alternated character with the
+// held anchors every other present (cadence flicker).
 //
 // Confidence gate: warped-sample disagreement + block-match error ->
-// fall back to the real captured middle frame (midRaw, binding 10) -
+// scale the transferred residual down (conf ~ 1 -> out ~= base) -
 // always temporally honest, and the correct answer on scene cuts
-// (every match fails -> output ~= midRaw). Without midRaw the fallback
-// is the unwarped anchor blend (same mechanism as framegen.comp mode 0).
+// (every match fails -> output ~= midRaw).
 //
 // Push constants:
 //   a = (canvasW, canvasH, searchRadius, searchStep)
@@ -214,33 +219,50 @@ void main() {
     float matchErr;
     vec2 halfMotion = findAnchorMotion(pos, matchErr);
 
-    // Warp the PROCESSED anchors: detail rides along the motion for free
+    // Warp the PROCESSED anchors minus their own RAW anchors: the neural +
+    // Phase30 residual rides the motion onto the REAL middle frame. The
+    // old form warped the processed colours directly - the generated
+    // frame came out a two-anchor bilinear blur of already-processed
+    // pixels: measurably smoother/weaker than the held processed anchor
+    // it alternates with at 1:2 cadence (harness Temp/field_repro.py:
+    // ~30% less residual magnitude, ~half the static residual grain, HF
+    // split +0.44 LSB, chroma averaged between two anchors). That
+    // periodic character alternation IS the cadence flicker the field
+    // reported. Residual transfer sits the generated frame on real
+    // midpoint content with the same processing footprint as the
+    // anchors - the displayed G/P slots carry matching texture.
     vec2 pos0 = vec2(pos) + 2.0 * (1.0 - factor) * halfMotion;
     vec2 pos1 = vec2(pos) - 2.0 * factor * halfMotion;
 
     vec4 sample0 = sampleBilinear(pos0, 0);   // warped procA
     vec4 sample1 = sampleBilinear(pos1, 3);   // warped procB
-    vec3 warpedBlend = mix(sample0.rgb, sample1.rgb, factor);
+    vec3 resA = sample0.rgb - sampleBilinear(pos0, 2).rgb;  // procA - rawA
+    vec3 resB = sample1.rgb - sampleBilinear(pos1, 1).rgb;  // procB - rawB
+    vec3 warpedRes = mix(resA, resB, factor);
 
     // Confidence: warped-sample disagreement OR hopeless block match.
     // Disagreement catches disocclusion/misses; matchErr catches
-    // scene-wide motion beyond the search range.
+    // scene-wide motion beyond the search range. conf now gates only the
+    // transferred residual - the base is always real content, so a
+    // failed match degrades to an unprocessed frame, never a content mix.
     vec3 diff = abs(sample0.rgb - sample1.rgb);
     float maxDiff = max(diff.r, max(diff.g, diff.b));
     float occl = smoothstep(occlThreshold * 0.75, occlThreshold * 1.5, maxDiff);
     float badMatch = smoothstep(0.05, 0.30, matchErr);
     float conf = max(occl, badMatch);
 
-    // Fallback: the real captured middle frame is always temporally
-    // honest (scene cut -> every match fails -> out ~= midRaw, which IS
-    // the correct midpoint content). No midRaw -> unwarped anchor blend.
+    // Base: the real captured middle frame is always temporally honest
+    // (scene cut -> every match fails -> conf ~ 1 -> out ~= midRaw, which
+    // IS the correct midpoint content). No midRaw -> unwarped RAW anchor
+    // blend, so the residual still lands on content of the right colour.
     vec4 directA = getPixel(pos.x, pos.y, 0);
     vec4 directB = getPixel(pos.x, pos.y, 3);
-    vec3 fallback = (pc.b.x != 0)
-                  ? getPixel(pos.x, pos.y, 4).rgb
-                  : mix(directA.rgb, directB.rgb, factor);
+    vec3 base = (pc.b.x != 0)
+              ? getPixel(pos.x, pos.y, 4).rgb
+              : mix(getPixel(pos.x, pos.y, 2).rgb,
+                    getPixel(pos.x, pos.y, 1).rgb, factor);
 
-    vec3 outRgb = mix(warpedBlend, fallback, conf);
+    vec3 outRgb = base + warpedRes * (1.0 - conf);
     float outA = (abs(directA.a - directB.a) < 0.05)
                ? directB.a : mix(directA.a, directB.a, factor);
 
