@@ -89,6 +89,28 @@ float hr_widen(uint h) {
 }
 float halfr(float x) { return hr_widen(hr_bits(floatBitsToUint(x))); }
 
+// Temporal hold latch (constants in the 0..1 colour domain col01/h01/
+// outp live in; 1 LSB = 1/255). The pred=f(hist) -> emit -> fp16 store ->
+// hist feedback never converged: on byte-identical input the emit
+// wandered in a sustained period-2 limit cycle (~55% of bytes changing
+// per frame, +-4-5 LSB amplitude, ~76% sign flips) - at intensity>1 that
+// is the owner-visible flicker. Root cause (isolation test 2026-10):
+// the network's response to its own output fed back as history has
+// gain > 1 - it overshoots the correction, so ANY proportional trickle
+// (soft deadband, kd>0 below threshold) just rides the chase forever:
+// measured 42% movers with a 2/8/255 smoothstep at k_min=0.06, ~24%
+// with a hard freeze even at 16/255. What pins the loop is a
+// HOLD/RELEASE latch on the emitted value: while the blended candidate
+// stays within DB_HOLD of the current history, emit = history verbatim
+// - the fp16 store lands back on itself, the fv/x16 inputs freeze, and
+// the field locks (harness: 0.00% nonzero from ~frame 25). A candidate
+// further than DB_HOLD is a real content change and releases at full
+// strength. The distance uses the pre-anchor blend candidate so
+// temporal_stats mirrors it exactly (stats[1] honest -> anchor's
+// deadzone latches k=1 once the field pins, instead of chasing a wander
+// the emission no longer has).
+const float DB_HOLD = 32.0 / 255.0;  // >=~13/255 chan or 32/255 luma = real change
+
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 layout(std430, set = 0, binding = 3) readonly buffer FeatV { float fv[]; };
 layout(std430, set = 0, binding = 13) writeonly buffer Hist { float hs[]; };
@@ -183,14 +205,59 @@ void main() {
     // the pushed pc.d.x would silently disable the blend under a stale
     // engine (m12 deploys spv copies only). The flag is still pushed for
     // parity/diagnostics.
-    alpha *= fv[p * 16u + 15u];
+    float gate = fv[p * 16u + 15u];
+    alpha *= gate;
 
+    // Pass 1: the pre-anchor blend candidate (exactly what
+    // temporal_stats.comp sums into stats[1]).
+    float cand[3];
     for (uint c = 0u; c < 3u; ++c) {
-        float pred  = clamp(col01[c] + halfr(head[hP + c]) * 0.25, 0.0, 1.0);
-        float outp  = pred + alpha * (h01[c] - pred);
-        outp = col01[c] + (outp - col01[c]) * k;          // gain anchor
+        float pred = clamp(col01[c] + halfr(head[hP + c]) * 0.25, 0.0, 1.0);
+        cand[c] = pred + alpha * (h01[c] - pred);
+    }
+
+    // Pass 2a: the gain-anchored candidate = what the emit WOULD be with
+    // no latch. The anchor rescales the whole residual by k; it must be
+    // composed INTO the release target rather than applied after the
+    // latch - an anchor multiply downstream of a hold would drag the
+    // "frozen" emit off history every time k jitters (measured: a
+    // pre-anchor deadband never pinned for exactly that reason).
+    float anchored[3];
+    for (uint c = 0u; c < 3u; ++c)
+        anchored[c] = col01[c] + (cand[c] - col01[c]) * k;
+
+    // Hold/release latch: distance between the blended candidate and the
+    // CURRENT history (the previous emitted output, already AABB-clamped
+    // upstream) through the same chroma-aware metric features.comp uses
+    // for the fv[15] gate - max(BT.601 luma distance, 2.5 * max
+    // per-channel distance) so isoluminant chroma drift cannot sneak
+    // under a luma-only check. Measured on cand (pre-anchor) so
+    // temporal_stats computes the identical kd on identical inputs.
+    // Skipped entirely when gate==0 (history reset / rejected): the
+    // reset frame must emit the unblended prediction so the NEXT frame's
+    // delta is ~0 (fast lock after scene cuts), and a rejected history
+    // has no business holding the output at all.
+    float kd = 1.0;
+    if (gate > 0.0) {
+        float dl = abs(0.299 * (cand[0] - h01[0])
+                     + 0.587 * (cand[1] - h01[1])
+                     + 0.114 * (cand[2] - h01[2]));
+        float dc = max(abs(cand[0] - h01[0]),
+                       max(abs(cand[1] - h01[1]),
+                           abs(cand[2] - h01[2])));
+        kd = (max(dl, 2.5 * dc) >= DB_HOLD) ? 1.0 : 0.0;
+    }
+
+    // Pass 2b: emit = history while inside the latch, else the anchored
+    // candidate - then snapped to the output byte grid so the emitted
+    // value is always an exact display byte. The SAME value feeds the
+    // head residual AND the history store - emitting and storing must
+    // never diverge or the loop wanders again.
+    for (uint c = 0u; c < 3u; ++c) {
+        float outp = h01[c] + kd * (anchored[c] - h01[c]);      // latch
+        outp = floor(clamp(outp, 0.0, 1.0) * 255.0 + 0.5) * (1.0 / 255.0);
         head[hP + c] = halfr((outp - col01[c]) * 4.0);
-        float s = halfr(clamp(outp, 0.0, 1.0));           // scaled_color(outp)
+        float s = halfr(outp);                            // scaled_color(outp)
         s = halfr(s - 0.5);
         s = halfr(s * 0.125);
         hs[p * 3u + c] = s;

@@ -37,6 +37,14 @@ layout(std430, set = 0, binding = 14) readonly buffer HeadRaw { float head[]; };
 layout(std430, set = 0, binding = 16) buffer Stats { uint stats[]; };
 layout(push_constant) uniform Push { ivec4 a; ivec4 b; vec4 c; vec4 d; } pc;
 
+// Same temporal hold-latch threshold as temporal_nr.comp (0..1 domain).
+// stats[1] must mirror the value temporal_nr actually emits pre-anchor -
+// which since the flicker fix is the LATCHED blend (emit = history while
+// the candidate stays inside DB_HOLD) - else the anchor chases a wander
+// the emission no longer has (dCur jitter leaks past the deadzone and k
+// modulates every pixel's residual = global flicker).
+const float DB_HOLD = 32.0 / 255.0;
+
 shared uint sLum;
 void main() {
     uint p = gl_GlobalInvocationID.x;
@@ -66,15 +74,35 @@ void main() {
         // max-channel distance, soft smoothstep band). stats[1] must
         // equal what temporal_nr actually emits pre-anchor, else the
         // anchor would chase a history pull that was never applied.
-        alpha *= fv[p * 16u + 15u];
+        // NOTE: temporal_nr's flicker latch sits BELOW the gain anchor
+        // on the pre-anchor blend - the value this pass must mirror - so
+        // the same kd computation runs here (same metric, same constant,
+        // same fv[15]==0 skip). Keeping stats[1] honest is what lets the
+        // anchor's deadzone latch k=1 once the image pins.
+        float gate = fv[p * 16u + 15u];
+        alpha *= gate;
         // fv[15] is already 0 on a history-reset frame (features' own
         // histValid path), so stats[1] accumulates the unblended
         // prediction there - matching what temporal_nr emits. No pc.d.x
         // check: the reset rides the side channel, keeping a stale-
         // engine/new-spv pairing functional (m12 gets spv copies only).
+        float cand[3];
         for (uint c = 0u; c < 3u; ++c) {
-            float pred  = clamp(col01[c] + head[p * 4u + c] * 0.25, 0.0, 1.0);
-            luma += W[c] * (pred + alpha * (h01[c] - pred));
+            float pred = clamp(col01[c] + head[p * 4u + c] * 0.25, 0.0, 1.0);
+            cand[c] = pred + alpha * (h01[c] - pred);
+        }
+        float kd = 1.0;
+        if (gate > 0.0) {
+            float dl = abs(0.299 * (cand[0] - h01[0])
+                         + 0.587 * (cand[1] - h01[1])
+                         + 0.114 * (cand[2] - h01[2]));
+            float dc = max(abs(cand[0] - h01[0]),
+                           max(abs(cand[1] - h01[1]),
+                               abs(cand[2] - h01[2])));
+            kd = (max(dl, 2.5 * dc) >= DB_HOLD) ? 1.0 : 0.0;
+        }
+        for (uint c = 0u; c < 3u; ++c) {
+            luma += W[c] * (h01[c] + kd * (cand[c] - h01[c]));
         }
         atomicAdd(sLum, uint(luma * 256.0 + 0.5));
     }
