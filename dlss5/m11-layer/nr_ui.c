@@ -532,27 +532,38 @@ static void ui_evt_push(uint32_t type, int32_t a, int32_t b, uint32_t c)
  * overlay is up. It is additive (the game's own registrations are
  * untouched), window-lifetime scoped, and unregistered on every
  * disassociate/detach so a hidden overlay carries zero delivery. */
-/* Foreign-confinement probe for the WM_INPUT path: returns nonzero while
- * a ClipCursor rect smaller than the client is armed AND releases it, so
- * a game that re-clips every frame loses the pin within one raw event
- * instead of the next Python watchdog pass. The layer's own fullscreen
- * clip covers the whole client and counts as 'free' - never released
- * here. An unconfined cursor reports the virtual screen, which always
- * covers the client. */
-static int ui_foreign_clip(HWND hwnd)
+/* Foreign-confinement drop for the WM_INPUT path. A game that re-clips
+ * every frame loses the pin within one raw event instead of the next
+ * Python watchdog pass. Two policies, mirroring the m13 input guard:
+ *   noclip  (windowed session): the layer never clips, so ANY armed
+ *             rect is the game's - an unconfined pointer reports the
+ *             virtual screen, anything smaller is foreign and dropped;
+ *   clipped (fullscreen): the layer's own ClipCursor covers the whole
+ *             client - drop only a foreign pin smaller than the client. */
+static void ui_foreign_clip(HWND hwnd, int noclip)
 {
     RECT clip, cr;
     POINT a, b;
-    if (!GetClipCursor(&clip)) return 0;
-    if (!GetClientRect(hwnd, &cr)) return 0;
+    if (!GetClipCursor(&clip)) return;
+    if (noclip) {
+        int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        if (clip.left <= vx && clip.top <= vy
+            && clip.right >= vx + vw && clip.bottom >= vy + vh)
+            return;                            /* desktop = unconfined */
+        ClipCursor(NULL);
+        return;
+    }
+    if (!GetClientRect(hwnd, &cr)) return;
     a.x = cr.left;  a.y = cr.top;
     b.x = cr.right; b.y = cr.bottom;
-    if (!ClientToScreen(hwnd, &a) || !ClientToScreen(hwnd, &b)) return 0;
+    if (!ClientToScreen(hwnd, &a) || !ClientToScreen(hwnd, &b)) return;
     if (clip.left <= a.x && clip.top <= a.y
         && clip.right >= b.x && clip.bottom >= b.y)
-        return 0;                              /* covers client = free */
+        return;                                /* covers client = ours */
     ClipCursor(NULL);                          /* foreign pin: drop it */
-    return 1;
 }
 
 static void ui_raw_reg(HWND hwnd, int on)
@@ -760,7 +771,8 @@ int nr_ui_message(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                         int inside;
                         dx = ri->data.mouse.lLastX;
                         dy = ri->data.mouse.lLastY;
-                        ui_foreign_clip(hwnd);
+                        ui_foreign_clip(hwnd,
+                            sane && (s.flags & NR_UI_F_NOCLIP));
                         inside = GetCursorPos(&p)
                             && ScreenToClient(hwnd, &p)
                             && GetClientRect(hwnd, &cr)

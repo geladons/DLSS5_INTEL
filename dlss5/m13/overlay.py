@@ -852,7 +852,9 @@ class ControlOverlay:
                 pass
         self._log("[overlay] in-layer game hwnd=%s pid=%s" % (
             "0x%x" % self._game_hwnd if self._game_hwnd else None, pid))
-        self._jail_cursor = False     # never touch the OS cursor in-layer
+        self._jail_cursor = False     # no visible window to jail over;
+                                      # the input guard still frees the
+                                      # game's confinement below
 
         self.scale_var.set(scale_to_preset_label(self.ctl.cfg.get("scale")))
         self.fg_var.set(bool(self.ctl.cfg.get("frame_gen")))
@@ -888,14 +890,20 @@ class ControlOverlay:
         self.win.attributes("-alpha", 0.0)
         self.win.deiconify()
         self._fit_geometry(force=True)   # cover the game client rect
-        il.set_frame_flags(self._game_covers_screen())
+        covers = self._game_covers_screen()
+        il.set_frame_flags(covers)
         self._combo_bindtags_off()
         il.armed()                # first frame + ui_visible + drain pump
         # Same confinement-release watchdog as external mode, minus the
         # ShowCursor/SetCursor half: the layer composites the sprite
         # cursor itself, but a game that pins the pointer (ClipCursor)
         # would otherwise starve the wndproc of the input it routes.
-        self._input_guard.arm(self._game_hwnd, show_cursor=False)
+        # pin_only only when the game covers the screen: there the layer
+        # keeps its own ClipCursor armed (covers the client, edge-tracked
+        # - a blind release would kill it for the session); windowed sets
+        # NOCLIP so every armed clip is foreign and released outright.
+        self._input_guard.arm(self._game_hwnd, show_cursor=False,
+                              pin_only=covers)
         self._start_fit()         # ~500 ms client-rect tracking
         self._log("[overlay] in-layer shown pid=%s hwnd=0x%x extent=%s"
                     % (pid or 0, hwnd or 0, self._extent))

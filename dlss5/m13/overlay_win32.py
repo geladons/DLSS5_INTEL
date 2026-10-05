@@ -407,17 +407,51 @@ def cursor_clip():
         return None
 
 
-def _free_cursor(target_hwnd=None, show=True):
+def clip_covers_client(hwnd):
+    """True while the armed ClipCursor rect covers the game's whole
+    client rect - the pointer can already reach every band pixel, so the
+    clip is not a pin (or is the layer's own deliberate fullscreen
+    confinement, which must survive). False on a foreign point-clip or
+    any rect that walls off part of the client."""
+    clip = cursor_clip()
+    if clip is None:
+        return True                            # unconfined
+    if not hwnd:
+        return False                           # cannot measure: not safe
+    cr = wintypes.RECT()
+    a = wintypes.POINT(0, 0)
+    try:
+        if not _u32.GetClientRect(hwnd, ctypes.byref(cr)):
+            return False
+        b = wintypes.POINT(cr.right, cr.bottom)
+        if not (_u32.ClientToScreen(hwnd, ctypes.byref(a))
+                and _u32.ClientToScreen(hwnd, ctypes.byref(b))):
+            return False
+        return (clip[0] <= a.x and clip[1] <= a.y
+                and clip[2] >= b.x and clip[3] >= b.y)
+    except (ValueError, OSError):
+        return False
+
+
+def _free_cursor(target_hwnd=None, show=True, pin_only=False):
     """Force the OS cursor out of the game's grip: release the clip
     rectangle, release capture, raise the show counter, set a normal arrow.
     target_hwnd: the game window whose thread state needs freeing -
     defaults to the foreground window when the caller does not know it.
     show=False skips the ShowCursor/SetCursor half: the in-layer session
     only needs the confinement released (the composited sprite is the
-    cursor; the game's own cursor state stays the game's)."""
+    cursor; the game's own cursor state stays the game's).
+    pin_only=True releases ONLY foreign pins - a clip that fails to cover
+    the target's client rect; a client-covering clip (the layer's own
+    fullscreen confinement, or a game's normal client clip the band sits
+    inside anyway) is left armed, so the watchdog cannot fight the layer's
+    edge-tracked ClipCursor into a permanent release."""
+    release = (not pin_only
+               or not clip_covers_client(target_hwnd))
     try:
         _u32.ReleaseCapture()
-        _u32.ClipCursor(None)
+        if release:
+            _u32.ClipCursor(None)
         arrow = None
         if show:
             for _ in range(10):
@@ -437,7 +471,8 @@ def _free_cursor(target_hwnd=None, show=True):
                 if _u32.AttachThreadInput(cur_tid, fg_tid, True):
                     try:
                         _u32.ReleaseCapture()
-                        _u32.ClipCursor(None)
+                        if release:
+                            _u32.ClipCursor(None)
                         if show:
                             for _ in range(10):
                                 if _u32.ShowCursor(True) >= 0:
