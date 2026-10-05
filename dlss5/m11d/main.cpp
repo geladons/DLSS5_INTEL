@@ -101,6 +101,23 @@ int main(int argc, char** argv) {
         core.fgMode = (m >= 0 && m <= 2) ? m : core.fgMode;
     }
     core.fgModeConfigured = core.fgMode;
+    // Temporal conditioning default ON (the flicker fix). Env is the
+    // launch BASELINE only - live flips arrive over NRCT SETTEMPORAL into
+    // core.temporal, and makeEngineConfig consumes the member so async
+    // rebuilds keep the pushed value (same env names as chain_c_api).
+    const char* t_env = std::getenv("DLSS5_TEMPORAL");
+    if (!t_env) t_env = std::getenv("NR_LAYER_TEMPORAL");
+    if (!t_env) t_env = std::getenv("D5C_TEMPORAL");
+    core.temporal = !(t_env && std::strcmp(t_env, "0") == 0);
+    // Encode-side CAS sharpness baseline (same env names as the x64
+    // in-process context). No NRCT command exists for it; the knob file's
+    // "sharpness" key is consumed by the in-process paths, not the daemon.
+    const char* sh_env = std::getenv("DLSS5_SHARPNESS");
+    if (!sh_env) sh_env = std::getenv("NR_LAYER_SHARPNESS");
+    if (sh_env) {
+        float v = (float)std::atof(sh_env);
+        if (v >= 0.0f) core.sharpness = v;
+    }
     std::string selftest;
     std::string logPath;
     int benchN = 0;
@@ -127,7 +144,8 @@ int main(int argc, char** argv) {
             core.gain = (float)std::atof(argv[++i]);
         }
         else if (a == "--blend" && i + 1 < argc) {
-            // Compose mix (engine headBlend / Phase30 intensity slot).
+            // Compose mix = Phase30 intensity slot (pc.c.w); headBlend is
+            // a separate dead-weight bookkeeping slot now.
             core.blend = (float)std::atof(argv[++i]);
             core.p30Ctl.setIntensity(core.blend);
         }

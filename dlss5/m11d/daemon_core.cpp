@@ -33,17 +33,21 @@ d5c::EngineConfig DaemonCore::makeEngineConfig(uint32_t w, uint32_t h,
     cfg.weightsPath = weights;
     cfg.shaderDir = shaderDir;        // exe-relative unless overridden
     cfg.headGain = gain;
-    cfg.headBlend = p30Ctl.params().intensity;
+    // headBlend is the blend knob's own slot (no shader consumes it); the
+    // live compose mix rides phase30.intensity via cfg.phase30 below.
+    cfg.headBlend = p30Ctl.engineBlend();
     cfg.renderScale = renderScale;
     cfg.phase30 = p30Ctl.params();
+    cfg.sharpness = sharpness;          // env baseline (member - see header)
     // Temporal conditioning default ON (the flicker fix): history anchors
-    // each reconstruction to the previous output. DLSS5_TEMPORAL=0 /
-    // NR_LAYER_TEMPORAL=0 / D5C_TEMPORAL=0 disables for A/B and
-    // determinism tests (same env names as chain_c_api).
-    const char* tenv = std::getenv("DLSS5_TEMPORAL");
-    if (!tenv) tenv = std::getenv("NR_LAYER_TEMPORAL");
-    if (!tenv) tenv = std::getenv("D5C_TEMPORAL");
-    cfg.temporal = !(tenv && std::strcmp(tenv, "0") == 0);
+    // each reconstruction to the previous output. The member carries the
+    // launch baseline (DLSS5_TEMPORAL / NR_LAYER_TEMPORAL / D5C_TEMPORAL,
+    // parsed once in main) OR a live SETTEMPORAL push - re-reading env
+    // here reverted a pushed "off" to the baseline on every rebuild (a
+    // meta.temporal:false profile silently ran temporal ON again after
+    // any extent/scale re-init). Same env-leash fix as chain_c_api's
+    // temporal_ member.
+    cfg.temporal = temporal;
     // Gain anchor: EMA smoothing of the global output/input gain
     // (default 0.08). DLSS5_GAIN_LOCK / NR_LAYER_GAIN_LOCK / D5C_GAIN_LOCK.
     if (const char* genv = std::getenv("DLSS5_GAIN_LOCK")) cfg.gainLock = (float)std::atof(genv);
@@ -137,11 +141,13 @@ void DaemonCore::builderLoop() {
                 // Knobs pushed mid-build: member state is always current,
                 // the cfg was snapshotted before they landed - re-apply.
                 engine->setHeadGain(gain);
-                engine->setHeadBlend(p30Ctl.engineBlend());
+                engine->setIntensity(p30Ctl.engineBlend());
                 engine->setPhase30(p30Ctl.params());
+                engine->setTemporal(temporal);
+                engine->setSharpness(sharpness);
                 engine->setFrameGenMode(fgMode >= 2 ? 2 : 1);
-                std::printf("[m11d] engine hot-swapped (%ux%u scale %.2f)\n",
-                            pb.w, pb.h, (double)pb.scale);
+                std::printf("[m11d] engine hot-swapped (%ux%u scale %.2f temporal %d)\n",
+                            pb.w, pb.h, (double)pb.scale, temporal ? 1 : 0);
             }
             // A newer request during the build overwrote pending_: only
             // clear it when it still asks for what we just built (or
@@ -197,7 +203,7 @@ void DaemonCore::handleCtrlLocked(const uint32_t hdr[4], uint32_t rep[4]) {
             std::fprintf(stderr, "[m11d] ctrl: gain %.3f out of range\n", (double)g);
         }
     } else if (hdr[1] == 15) {           // SETINTENSITY: hdr[2] = float bits
-        float v = 0.0f;                  // -> Phase30 compose mix (headBlend)
+        float v = 0.0f;                  // -> Phase30 compose mix (pc.c.w)
         std::memcpy(&v, &hdr[2], 4);
         if (v >= 0.0f && v <= 2.0f) {
             blend = v;
@@ -209,7 +215,7 @@ void DaemonCore::handleCtrlLocked(const uint32_t hdr[4], uint32_t rep[4]) {
             std::fprintf(stderr, "[m11d] ctrl: intensity %.3f out of range\n", (double)v);
         }
     } else if (hdr[1] == 3) {            // SETBLEND: hdr[2] = float bits -> same
-        float b = 0.0f;                  // compose mix slot as intensity
+        float b = 0.0f;                  // compose mix slot as intensity (pc.c.w)
         std::memcpy(&b, &hdr[2], 4);
         if (b >= 0.0f && b <= 2.0f) {
             blend = b;
@@ -294,9 +300,15 @@ void DaemonCore::handleCtrlLocked(const uint32_t hdr[4], uint32_t rep[4]) {
         rep[1] = 1;                      //  the stale prev pair must not
         std::printf("[m11d] ctrl: temporal history reset\n");   //  anchor a post-reset transfer either)
     } else if (hdr[1] == 13) {           // SETTEMPORAL: hdr[2] = int (0/1)
-        if (engine) engine->setTemporal(hdr[2] != 0);
+        // Member FIRST, then the live engine: an engine-only write was
+        // lost on the next async rebuild (makeEngineConfig re-read the
+        // env baseline), so a meta.temporal:false profile popped back to
+        // temporal ON mid-session - a visible look change. Now the member
+        // feeds cfg.temporal and the post-swap re-apply.
+        temporal = (hdr[2] != 0);
+        if (engine) engine->setTemporal(temporal);
         rep[1] = 1;
-        std::printf("[m11d] ctrl: temporal -> %d\n", hdr[2] ? 1 : 0);
+        std::printf("[m11d] ctrl: temporal -> %d\n", temporal ? 1 : 0);
     } else if (hdr[1] == 14) {           // SETFGMODE: hdr[2] = 0/1/2
         int m = (int)hdr[2];
         if (m < 0 || m > 2) m = 1;
@@ -363,12 +375,19 @@ void DaemonCore::handleFrame(SOCKET s, const uint32_t hdr[4], ULONGLONG deadline
         if (p30Ctl.pollKnobsFile()) {
             // Engine knobs riding the same file: residual gain + compose
             // blend (same slot family as the x64 layer pushes via the C
-            // ABI). Blend/intensity share headBlend: apply blend first so
-            // the Phase30 "intensity" key wins deterministically when both
-            // are present (same precedence as the x64 path).
-            eng->setHeadBlend(p30Ctl.engineBlend());
+            // ABI). Blend and intensity both write the compose-mix slot
+            // (pc.c.w): apply blend via setIntensity FIRST so the Phase30
+            // "intensity" key wins deterministically when both are
+            // present (same precedence as the x64 path).
+            eng->setIntensity(p30Ctl.engineBlend());
             eng->setHeadGain(p30Ctl.engineGain());
             eng->setPhase30(p30Ctl.params());
+            // Mirror the pushed knobs into the members makeEngineConfig
+            // reads: without the sync a knob-file gain/blend push rode
+            // the live engine only and silently reverted to the stale
+            // member on the next rebuild (same leak class as SETTEMPORAL).
+            gain = p30Ctl.engineGain();
+            blend = p30Ctl.engineBlend();
         }
     }
     inBuf.resize(px * 4);
@@ -385,19 +404,27 @@ void DaemonCore::handleFrame(SOCKET s, const uint32_t hdr[4], ULONGLONG deadline
         prevW = w;
         prevH = h;
     }
-    // Two gap thresholds (GTA IV stalls 2-4 s during world
-    // streaming - treating those as new streams emitted one
-    // un-damped brighter first-frame per hitch, the field report's
-    // "periodic bright pop"):
-    //  >2 s  - drop the FG anchor pair only; a seconds-stale prev
-    //          frame warps garbage in residual transfer, while the
-    //          AABB-clamped temporal history is safe to keep.
-    //  >10 s - a real new stream (restart, alt-tab, other game):
-    //          reset history too.
+    // Frame-gap policy (GTA IV stalls 2-4 s during world streaming - a
+    // history reset per hitch was the field report's "periodic bright
+    // pop": one un-damped brighter first frame + a cold gain EMA):
+    //  >2 s  - drop the FG anchor pair only; a seconds-stale prev frame
+    //          warps garbage in residual transfer/interpolation - the
+    //          motion product is genuinely dead. Temporal history stays:
+    //          features.comp already AABB-clamps the history input into
+    //          the current 3x3 colour neighbourhood EVERY frame, so a
+    //          stale history cannot drag beyond current content, and
+    //          temporal_nr's gain EMA snaps through real scene changes
+    //          (>50% residual jump). A wall-clock reset on top of that
+    //          was redundant protection with a visible cost.
+    //  >60 s - the stream is almost certainly dead (game exited, or a
+    //          different title presenting on the same extent): drop
+    //          history too. Pure backstop - it must NOT fire on hitches,
+    //          load screens or alt-tabs; deliberate content switches use
+    //          RESETHIST (cmd 12).
     {
         const ULONGLONG now = GetTickCount64();
         const ULONGLONG gap = lastFrameTick ? now - lastFrameTick : 0;
-        if (gap > 10000) {
+        if (gap > 60000) {
             eng->resetHistory();
             havePrev = false;
             std::printf("[m11d] stream gap %llu ms - temporal history reset\n",

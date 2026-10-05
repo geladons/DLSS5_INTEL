@@ -38,6 +38,15 @@ public:
     float scale = 1.0f;
     int fgMode = 1;             // 0 = off, 1 = residual transfer, 2 = anchor interp
     int fgModeConfigured = 1;   // the value SETFRAMEGEN on restores to
+    // Persistent knobs the async rebuild must NOT lose. Every member here
+    // is baked into the EngineConfig by makeEngineConfig and re-applied to
+    // the swapped engine in builderLoop; a control command that wrote the
+    // engine instance only (SETTEMPORAL did) silently reverted to the env
+    // default on every extent/scale rebuild.
+    bool temporal = true;       // SETTEMPORAL / *_TEMPORAL env baseline
+    float sharpness = 0.8f;     // encode CAS; *_SHARPNESS env baseline
+                                // (no NRCT command - the knob file's
+                                // "sharpness" key feeds in-process paths)
     bool dump = false;
     float gain = 1.0f, blend = 1.0f;
     d5c::Phase30Controller p30Ctl;
