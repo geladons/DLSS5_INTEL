@@ -2433,6 +2433,12 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                                 }
                             }
                         }
+                        /* Consume the mid: it described THIS anchor interval
+                         * only. If the next mid present fails to capture
+                         * (deg extent, transfer fault), a stale mid must not
+                         * be re-sent as the next interval's midpoint - the
+                         * held anchor P is the safer splice. */
+                        data->mid_valid = 0;
                     }
                     if (gen_ok) {
                         static unsigned long fgi_count = 0;
