@@ -160,7 +160,10 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
     temporal_nr rescales the per-pixel residual so the frame's mean
     residual follows an EMA (`DLSS5_GAIN_LOCK`/`NR_LAYER_GAIN_LOCK`/
     `D5C_GAIN_LOCK`, default 0.08, 0=off). Kills DC breathing on pans;
-    >50% residual jumps snap through (scene changes). m8b-live binds the
+    >50% residual jumps snap through (scene changes). Per-frame
+    correction k is DEADZONED (|dCur-ema| < 6% -> k=1) and clamped to
+    0.80..1.25 - never widen the clamp, a wider range re-introduces
+    the strength whipsaw fixed 2026-10-04. m8b-live binds the
     stats buffer for shared features.comp but never reads it; missing
     temporal_stats.spv = graceful gain-lock off. The EMA is written to
     spare slot [7] and rotated into [6] by temporal_stats next frame -

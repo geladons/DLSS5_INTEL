@@ -273,16 +273,23 @@ pans. Three fixes shipped:
   stable bright patch) and residual ghost trails. Scalar w-gate in
   temporal_nr removed.
 - **Split gap thresholds** (m11d, dc88fde): >2s frame gap drops only
-  the FG anchors (a stale anchor warps garbage); >10s = real stream
-  switch -> history reset. GTA IV's 2-4s world-streaming hitches no
-  longer fire a reset (each used to emit one undamped bright frame).
+  the FG anchors (a stale anchor warps garbage); >60s = dead-session
+  backstop -> history reset (raised from 10s - the AABB history clamp
+  already bounds stale content, and GTA IV's hitching past 10s was
+  still emitting undamped bright frames; deliberate switches use
+  RESETHIST cmd 12).
 - **Gain anchor** (temporal_stats.comp + temporal_nr, 2667132): the
   frame's global residual DC (pred_luma_sum - in_luma_sum) is
   EMA-smoothed (alpha = DLSS5_GAIN_LOCK, default 0.08, 0=off) and the
   per-pixel residual is rescaled to the EMA - the net can no longer
   pump/breathe mean brightness frame to frame, while >50% residual
   jumps (scene changes) snap through instantly and real exposure
-  tracks within ~12 frames. New binding 16 luma-stats buffer;
+  tracks within ~12 frames. Correction is bounded: a 6% noise
+  deadzone holds k=1 (content noise never modulates strength) and
+  k is clamped to 0.80..1.25 - the original 0.25..4.0 range let k
+  jitter with dCur noise and rail at the flat-gate boundary (the
+  2026-10-04 "every frame a different gain" field report). New
+  binding 16 luma-stats buffer;
   features.comp accumulates input luma, temporal_stats rotates
   next->prev slots + accumulates predicted luma, temporal_nr applies.
   m8b-live binds the buffer without a reader (shared features.comp).
