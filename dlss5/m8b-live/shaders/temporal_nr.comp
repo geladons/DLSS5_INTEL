@@ -27,7 +27,8 @@
 // deterministic per pixel.
 //
 // push a.x = pixel count (st[0].TOK = netW*netH), c.x = gain-anchor EMA
-// alpha, d.x = histValid (0 on a history-reset frame -> no blend).
+// alpha, d.x = histValid (pushed for parity/diagnostics; the reset-frame
+// blend collapse rides in fv[15] instead - see the gate comment below).
 // ============================================================================
 #extension GL_GOOGLE_include_directive : require
 #include "publish.glsl"
@@ -162,34 +163,27 @@ void main() {
         h01[c]   = fv[p * 16u + 7u + c] * 8.0 + 0.5;
     }
 
-    // Per-pixel motion gate (port of the reference daemon's hold_floor on
-    // the blend factor): the history is identity-reprojected, so on a
-    // pixel that MOVED h01 is stale and the alpha blend would drag it
-    // into the output (ghost trails, colour drag). lm is the luma
-    // distance between the reprojected previous output and the current
-    // input; the temporal alpha collapses across a ~5..25/255 band:
-    // still pixels keep the full pull, clearly-moved pixels reconstruct
-    // from the network alone. Complements the upstream AABB clamp - the
-    // clamp bounds how FAR history may pull, the gate decides WHETHER it
-    // pulls at all (at a just-crossed edge the 3x3 neighbourhood still
-    // spans both sides, the clamp stays loose there and only the gate
-    // releases the stale pull). First frame (histValid=0 -> h01==col01)
-    // yields lm=0, so the first-frame path is untouched.
-    const vec3 LW = vec3(0.299, 0.587, 0.114);   // BT.601, as features/stats
-    float lm = abs(LW.x * (h01[0] - col01[0])
-                 + LW.y * (h01[1] - col01[1])
-                 + LW.z * (h01[2] - col01[2]));
-    alpha *= 1.0 - smoothstep(0.02, 0.10, lm);
-
-    // History-reset frame (pc.d.x = histValid = 0: first frame after a
-    // scene cut, stream start, or resetHistory): features substitutes
-    // h01=col01, so the blend would emit pred + alpha*(col01-pred) - the
-    // residual attenuated by up to ~74% for exactly one frame between
-    // full-strength neighbours (the field's menu "flash" / false-positive
-    // cut mid-pan). Skip the blend entirely: outp=pred at full strength
-    // and next frame's history is written from pred, not an attenuated
-    // value.
-    if (pc.d.x == 0) alpha = 0.0;
+    // Per-pixel motion gate (hold_floor port): the history is identity-
+    // reprojected, so on a pixel that MOVED h01 is stale and the alpha
+    // blend would drag it into the output (ghost trails, colour drag).
+    // fv[15] carries the gate factor computed UPSTREAM in features.comp
+    // from the UNCLAMPED history vs the current colour - a combined
+    // luma + max-channel distance collapsed across the same soft
+    // ~5..25/255 smoothstep band: still pixels keep the full pull,
+    // clearly-moved pixels reconstruct from the network alone. Measuring
+    // on the raw history is required: the AABB clamp pins stale history
+    // to the 3x3 box edge, deflating any clamp-side metric exactly where
+    // the gate must fire; and a luma-only metric is chroma-blind
+    // (isoluminant white->blue drift passed untouched). The clamped h01
+    // above stays the blend TARGET - the clamp bounds how FAR history
+    // may pull, the gate decides WHETHER it pulls at all.
+    // fv[15] is also 0 on a history-reset frame (features' own histValid
+    // path), collapsing the blend to outp=pred there - the reset-frame
+    // full-strength fix needs no separate flag check here, and keying on
+    // the pushed pc.d.x would silently disable the blend under a stale
+    // engine (m12 deploys spv copies only). The flag is still pushed for
+    // parity/diagnostics.
+    alpha *= fv[p * 16u + 15u];
 
     for (uint c = 0u; c < 3u; ++c) {
         float pred  = clamp(col01[c] + halfr(head[hP + c]) * 0.25, 0.0, 1.0);

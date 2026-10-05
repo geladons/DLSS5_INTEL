@@ -16,7 +16,9 @@
 //         written by temporal.comp last frame); first frame / reseed / temporal
 //         off = scaled colour (first-frame layout, nr_image.c:98-101)
 //   10..14 controls = (half(style), half(tone), half(structure), -1, -1)
-//   15    0.0
+//   15    0.0 on x16 (vendor contract); the fp32 fv[15] instead carries the
+//         temporal blend gate for temporal_nr/temporal_stats (computed on
+//         the unclamped history - see below).
 //
 // NOISE PORT: the vendor deterministic_noise() (work/mlx-dlss/python/mlxdlss/
 // features.py:87) IS portable, the old "cannot be ported" comment was wrong.
@@ -197,6 +199,10 @@ void main() {
     vec3 n3 = deterministicNoise(x, y, uint(pc.b.x));
 
     float o[16];
+    // fv[15] side channel: the per-pixel temporal blend gate (0 = history
+    // rejected). x16 ch15 keeps the vendor zero contract - the gate only
+    // exists in the fp32 volume temporal_nr/temporal_stats read.
+    float hGate = 0.0;
     o[0]  = n3.x;
     o[1]  = n3.y;
     o[2]  = n3.z;
@@ -231,6 +237,25 @@ void main() {
         o[7] = clamp(hist[p * 3u + 0u], lo[0] - M, hi[0] + M);
         o[8] = clamp(hist[p * 3u + 1u], lo[1] - M, hi[1] + M);
         o[9] = clamp(hist[p * 3u + 2u], lo[2] - M, hi[2] + M);
+        // Blend gate measured on the UNCLAMPED history (raw bufHist vs the
+        // current colour). The clamped value stays the blend target, but a
+        // distance taken on it under-fires exactly where needed: the clamp
+        // pins a stale history to the 3x3 box edge, deflating the metric.
+        // Luma alone is also chroma-blind - an isoluminant white->blue
+        // drift passes untouched - so dm takes the max of the BT.601 luma
+        // distance and the max per-channel distance at 2.5x weight: a
+        // ~10/255 single-channel excursion fully releases the pull inside
+        // the same 0.02..0.10 soft smoothstep band (a hard gate oscillates).
+        float hu[3] = { hist[p * 3u + 0u] * 8.0 + 0.5,
+                        hist[p * 3u + 1u] * 8.0 + 0.5,
+                        hist[p * 3u + 2u] * 8.0 + 0.5 };
+        float dm = max(abs(0.299 * (hu[0] - raw[0])
+                         + 0.587 * (hu[1] - raw[1])
+                         + 0.114 * (hu[2] - raw[2])),
+                       2.5 * max(abs(hu[0] - raw[0]),
+                                 max(abs(hu[1] - raw[1]),
+                                     abs(hu[2] - raw[2]))));
+        hGate = 1.0 - smoothstep(0.02, 0.10, dm);
     } else {
         o[7]  = scaled[0];   // first-frame history layout (nr_image.c:99-101)
         o[8]  = scaled[1];
@@ -243,7 +268,7 @@ void main() {
     o[14] = ctrl4;       // Phase 30 auto-mask structure
     o[15] = 0.0;
     for (uint c = 0u; c < 16u; ++c) {
-        f[p * 16u + c] = o[c];
+        f[p * 16u + c] = (c == 15u) ? hGate : o[c];
         x16[p * 16u + c] = float16_t(o[c]);   // == featpack's f[i] -> float16_t
     }
     }

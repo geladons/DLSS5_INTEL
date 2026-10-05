@@ -61,18 +61,17 @@ void main() {
             col01[c] = fv[p * 16u + 4u + c] * 8.0 + 0.5;
             h01[c]   = fv[p * 16u + 7u + c] * 8.0 + 0.5;
         }
-        // Same per-pixel motion gate as temporal_nr (see its comment):
-        // stats[1] must equal what temporal_nr actually emits pre-anchor,
-        // else the anchor would chase a history pull that was never
-        // applied. First frame (h01==col01) leaves alpha untouched.
-        float lm = abs(W.x * (h01[0] - col01[0])
-                     + W.y * (h01[1] - col01[1])
-                     + W.z * (h01[2] - col01[2]));
-        alpha *= 1.0 - smoothstep(0.02, 0.10, lm);
-        // History-reset frame (pc.d.x = histValid = 0): temporal_nr skips
-        // the blend outright, so stats[1] must accumulate the unblended
-        // prediction - mirror the same alpha collapse here.
-        if (pc.d.x == 0) alpha = 0.0;
+        // Same per-pixel blend gate as temporal_nr: fv[15] carries the
+        // factor features.comp measured on the UNCLAMPED history (luma +
+        // max-channel distance, soft smoothstep band). stats[1] must
+        // equal what temporal_nr actually emits pre-anchor, else the
+        // anchor would chase a history pull that was never applied.
+        alpha *= fv[p * 16u + 15u];
+        // fv[15] is already 0 on a history-reset frame (features' own
+        // histValid path), so stats[1] accumulates the unblended
+        // prediction there - matching what temporal_nr emits. No pc.d.x
+        // check: the reset rides the side channel, keeping a stale-
+        // engine/new-spv pairing functional (m12 gets spv copies only).
         for (uint c = 0u; c < 3u; ++c) {
             float pred  = clamp(col01[c] + head[p * 4u + c] * 0.25, 0.0, 1.0);
             luma += W[c] * (pred + alpha * (h01[c] - pred));
