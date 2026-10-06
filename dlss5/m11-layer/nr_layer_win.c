@@ -38,6 +38,26 @@
  *   NR_LAYER_NEAR_REUSE 1 = also reuse on near-identical input (sampled eps,
  *                     capped replays). OPT-IN, default OFF: stale-result
  *                     replay judders on slow pans / animated grain.
+ *   NR_LAYER_ASYNC    0 = synchronous TCP round-trip inside the present
+ *                     (the old behaviour, kept for bisecting). Default ON
+ *                     for the daemon path: the present submits the frame
+ *                     to a worker mailbox (bounded, drop-oldest) and shows
+ *                     the newest completed reply it already holds - the
+ *                     ~60 ms m11d round-trip runs in parallel with the
+ *                     game instead of capping it (GTA IV: ~15 fps ->
+ *                     engine speed, no loading-screen "Not Responding").
+ *                     The processed stream simply lags the raw stream by
+ *                     roughly one daemon frame; on static content the
+ *                     displayed result is identical to the sync path.
+ *   NR_LAYER_ASYNC_STALE_MS  staleness bound for serve-best on NEW content
+ *                     (default 500): while replies keep landing within
+ *                     this window every present shows the freshest
+ *                     processed frame; past it (daemon stalled) the
+ *                     current raw frame wins - a consistent processed
+ *                     stream beats a processed/raw strobe, but only while
+ *                     it is alive. 0 = serve the held result at any age.
+ *                     Identical input never reaches the bound (the reuse
+ *                     gate replays the processed result for statics).
  *
  * Live knobs: %TEMP%\m13_phase30_knobs.json is rewritten by the m13 manager
  * on every knob change. A running game's env is frozen at launch, so the
@@ -74,6 +94,7 @@
 #include "nr_framegen.h"
 #include "nr_degrade.h"
 #include "nr_util.h"
+#include "nr_async.h"
 #include "daemon_client.h"
 #include "gdi_guard.h"
 #include "nr_ui.h"
@@ -153,6 +174,25 @@ typedef struct device_data {
     VkDeviceSize mid_size;
     int mid_valid;               /* mid holds a frame of the current extent */
     uint32_t mid_w, mid_h;       /* extent mid was captured at */
+    /* Async daemon submit (nr_async.h, TCP path only): the present path
+     * enqueues the captured frame and serves the newest completed reply
+     * it already holds - the ~60 ms daemon round-trip moves off the
+     * game's present. result_ms/result_seq track when the newest PROC
+     * reply landed (staleness bound for the serve-best policy). */
+    struct NrAsync *async;
+    int async_failed;            /* create failed once - do not retry+spam */
+    uint64_t result_ms;          /* tick the current result landed at */
+    unsigned long result_seq;    /* submission seq the result answers */
+    /* Latest daemon-FG reply (NRN2/NRN3) awaiting its one-shot display:
+     * generated midpoints are display frames, never anchors - they must
+     * NOT be written into result (it feeds every held/reuse path). */
+    unsigned char *fgi;
+    VkDeviceSize fgi_size;
+    int fgi_pending;             /* fgi holds a reply not yet displayed */
+    unsigned long fgi_seq;       /* request seq that produced it */
+    uint64_t fgi_ms;             /* tick it landed (staleness check) */
+    uint64_t fgi_chain;
+    uint32_t fgi_w, fgi_h;
     PFN_vkGetDeviceProcAddr get_device_proc;
     PFN_vkQueuePresentKHR present;
     PFN_vkCreateSwapchainKHR create_swapchain;
@@ -202,6 +242,19 @@ static char default_freeze_path[MAX_PATH];
 static char default_reproc_path[MAX_PATH];
 static int static_reuse;
 static int no_patch;            /* NR_LAYER_NOPATCH=1: leave swapchains alone */
+/* Async daemon submit (TCP path): present enqueues, the worker waits for
+ * the reply. ON by default on the TCP path; NR_LAYER_ASYNC=0 restores the
+ * synchronous exchange for bisecting. */
+static int g_async = -1;        /* -1 uninited (CreateInstance reads env) */
+/* Staleness bound for the serve-best policy: while a reply has landed
+ * within this window the processed stream is "live" and even NEW content
+ * is shown the freshest completed result (a consistent processed stream
+ * beats a processed/raw strobe). Older than this on changed input the
+ * daemon is effectively stalled -> present the current raw frame.
+ * Identical input never reaches this check (the reuse path replays the
+ * processed result for static content regardless of age). 0 disables
+ * the bound entirely. */
+static long g_async_stale_ms = 500;
 static volatile LONG g_paused;  /* CTRL+ALT+X: passthrough, full fps */
 static volatile LONG g_off;     /* CTRL+ALT+Q: layer off for good */
 static volatile LONG g_hotkeys_started;
@@ -1039,6 +1092,15 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
         no_patch = nopatch && strcmp(nopatch, "0") != 0;
         if (no_patch)
             nr_log("[nr_layer] NOPATCH: swapchains left completely alone");
+        {
+            const char *ae = getenv("NR_LAYER_ASYNC");
+            g_async = !ae || strcmp(ae, "0") != 0;
+            const char *st = getenv("NR_LAYER_ASYNC_STALE_MS");
+            if (st) {
+                g_async_stale_ms = atol(st);
+                if (g_async_stale_ms < 0) g_async_stale_ms = 0;
+            }
+        }
         hotkeys_ensure();
         if (live_every > 0)
             nr_log("[nr_layer] live: every %ld present processed", live_every);
@@ -1047,6 +1109,9 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
         nr_log("[nr_layer] active; port=%ld trigger=%s capture=%s every=%ld",
              nr_port, trigger_path ? trigger_path : "(none)",
              capture_path ? capture_path : "(off)", capture_every);
+        if (nr_port)
+            nr_log("[nr_layer] async daemon submit: %s (stale bound %ld ms)",
+                   g_async ? "on" : "OFF (sync exchange)", g_async_stale_ms);
         if (static_reuse)
             nr_log("[nr_layer] static reuse on: exact-repeat frames reuse "
                  "the last processed result");
@@ -1242,16 +1307,31 @@ static void release_device(device_data *data)
             data->get_device_proc(data->device, "vkDestroyCommandPool");
         if (destroy) destroy(data->device, data->pool, NULL);
     }
+    if (data->async) {
+        /* result/fgi may be POOL buffers (zero-copy publish in
+         * async_drain) - reclaim them first or free() below double-frees
+         * what nr_async_destroy is about to release itself. */
+        if (nr_async_claim(data->async, data->result))
+            data->result = NULL;
+        if (nr_async_claim(data->async, data->fgi))
+            data->fgi = NULL;
+        nr_async_destroy(data->async);
+        data->async = NULL;
+    }
     free(data->result);
     free(data->earlier);
     free(data->raw);
     free(data->interp);
     free(data->mid);
+    free(data->fgi);
     data->interp = NULL;
     data->interp_size = 0;
     data->mid = NULL;
     data->mid_size = 0;
     data->mid_valid = 0;
+    data->fgi = NULL;
+    data->fgi_size = 0;
+    data->fgi_pending = 0;
 }
 
 VKAPI_ATTR void VKAPI_CALL nr_DestroyDevice(VkDevice device,
@@ -1759,6 +1839,173 @@ static uint32_t diag_crc(const void *p, VkDeviceSize n)
     return h;
 }
 
+/* ------------------------------------------------------------------ */
+/* Async daemon submit (NR_LAYER_ASYNC, TCP path).                      */
+/* ------------------------------------------------------------------ */
+/* The present path submits the captured frame to a worker mailbox
+ * (bounded, drop-oldest; nr_async.c) and displays the newest reply it
+ * already holds. The ~60 ms m11d round-trip therefore runs in parallel
+ * with the game instead of inside its present. All state transitions
+ * that feed the hold/reuse paths (result, fgi slot, nr_degrade streaks)
+ * are applied HERE, on the present thread, when the done mailbox is
+ * drained - the worker itself touches only its own buffers + sockets. */
+
+static void async_lazy_start(device_data *data)
+{
+    if (!g_async || !nr_port || data->async || data->async_failed) return;
+    data->async = nr_async_create();
+    if (data->async)
+        nr_log("[nr_layer] async daemon submit started (bounded queue, "
+               "drop-oldest, stale bound %ld ms)", g_async_stale_ms);
+    else {
+        data->async_failed = 1;
+        nr_log("[nr_layer] async worker failed to start; staying sync");
+    }
+}
+
+/* Publish every completed daemon reply (latest-wins mailbox). PROC
+ * replies swap straight into data->result (zero-copy: the reply buffer
+ * becomes the held result, the old result buffer returns to the pool);
+ * FGT/FGI replies land in the single-shot fgi slot - generated frames
+ * are display content, never anchors, so they stay out of result.
+ * Transport reports feed nr_degrade exactly as the inline exchange did;
+ * a failed PROC submission also clears have_earlier so even identical
+ * content resubmits next present (the sync earlier_pending semantics). */
+static int async_drain(device_data *data)
+{
+    NrAsyncDone d;
+    int landed = 0;
+    if (!data->async) return 0;
+    while (nr_async_take_done(data->async, &d)) {
+        if (d.erc) {
+            int hold = 0;
+            int lg = nr_degrade_note_fail(&g_dg,
+                d.erc == -2 ? NR_DEGRADE_FAIL_CONNECT
+                            : NR_DEGRADE_FAIL_TRANSPORT,
+                nr_now_ms(), &hold);
+            if (d.kind != NR_ASYNC_PROC)
+                nr_degrade_fg_note_fail(&g_dg);
+            data->have_earlier = 0;
+            if (lg == NR_DEGRADE_LOG_HICCUP)
+                nr_log("[nr_layer] daemon hiccup; holding last processed "
+                       "frame (fail %u)", g_dg.consecutive_fail);
+            else if (lg == NR_DEGRADE_LOG_DOWN)
+                nr_log("[nr_layer] daemon considered down; native "
+                       "passthrough");
+            continue;
+        }
+        if (nr_degrade_note_success(&g_dg, nr_now_ms())
+                == NR_DEGRADE_LOG_RECOVERY) {
+            nr_log("[nr_layer] daemon answered again; processed output "
+                   "resumed");
+            if (g_dg.fg_fail) {
+                nr_degrade_fg_note_success(&g_dg);
+                nr_log("[nr_layer] daemon recovered; framegen re-probed "
+                       "on next generated present");
+            }
+        }
+        if (d.kind != NR_ASYNC_PROC)
+            nr_degrade_fg_note_success(&g_dg);
+        if (d.kind == NR_ASYNC_PROC) {
+            unsigned char *old = data->result;
+            data->result = d.buf;          /* zero-copy publish */
+            data->result_size = d.buf_bytes;
+            d.buf = old;
+            data->result_w = d.w;
+            data->result_h = d.h;
+            data->result_valid = 1;
+            data->holding_chain = (VkSwapchainKHR)d.chain;
+            data->result_ms = nr_now_ms();
+            data->result_seq = d.seq;
+            landed = 1;
+            /* A newer anchor supersedes an undisplayed midpoint: showing
+             * a midpoint of an interval that already closed backwards
+             * would step the stream in time. */
+            if (data->fgi_pending && d.seq > data->fgi_seq)
+                data->fgi_pending = 0;
+            {
+                uint32_t oh[4] = { 0x304E524Eu, d.w, d.h, d.fmt };
+                dump_capture(capture_out_path, oh, data->result,
+                             d.buf_bytes);
+            }
+        } else {
+            unsigned char *old = data->fgi;
+            data->fgi = d.buf;
+            data->fgi_size = d.buf_bytes;
+            d.buf = old;
+            data->fgi_pending = 1;
+            data->fgi_seq = d.seq;
+            data->fgi_ms = nr_now_ms();
+            data->fgi_chain = d.chain;
+            data->fgi_w = d.w;
+            data->fgi_h = d.h;
+            nr_log("[nr_layer] daemon framegen reply %ux%u seq=%lu "
+                   "awaiting display", d.w, d.h, d.seq);
+        }
+        if (d.buf)
+            nr_async_give_buf(data->async, d.buf);
+    }
+    return landed;
+}
+
+/* Load the pending FG reply into mapped if it belongs to this chain +
+ * extent and is still fresh. A stale midpoint is dropped, not shown. */
+static int async_take_fgi(device_data *data, swapchain_data *chain,
+                          VkDeviceSize want)
+{
+    if (!data->mapped || data->staging_size < want) return 0;
+    if (!data->fgi_pending || !data->fgi || data->fgi_size < want) return 0;
+    if (data->fgi_chain != (uint64_t)chain->swapchain) return 0;
+    if (data->fgi_w != chain->extent.width
+        || data->fgi_h != chain->extent.height) return 0;
+    if (g_async_stale_ms > 0
+        && nr_now_ms() - data->fgi_ms > (uint64_t)g_async_stale_ms) {
+        data->fgi_pending = 0;
+        return 0;
+    }
+    memcpy(data->mapped, data->fgi, (size_t)want);
+    data->fgi_pending = 0;
+    return 1;
+}
+
+/* Unified async output choice for every managed present: a fresh FG
+ * reply first (its single display slot), then the newest PROC result
+ * while the reply stream is live, else -2 = "present the current raw
+ * frame, do NOT re-blit the stale result" (the caller treats -2 as
+ * fail-but-no-hold). The processed-stream staleness bound only applies
+ * to NEW content - identical/near-identical input replays the result at
+ * any age via the reuse gate (static content cannot go stale visually).
+ * mapped holds the raw captured frame on entry; a 0 return means mapped
+ * now holds the frame to blit. */
+static int async_serve_best(device_data *data, swapchain_data *chain,
+                            VkDeviceSize want)
+{
+    if (!data->mapped || data->staging_size < want) {
+        diag_path = "araw";
+        return -2;
+    }
+    if (async_take_fgi(data, chain, want)) {
+        diag_path = "afgi";
+        return 0;
+    }
+    if (data->result_valid && data->result
+        && data->result_size >= want
+        && data->result_w == chain->extent.width
+        && data->result_h == chain->extent.height
+        && data->holding_chain == chain->swapchain) {
+        if (g_async_stale_ms <= 0
+            || nr_now_ms() - data->result_ms <= (uint64_t)g_async_stale_ms) {
+            memcpy(data->mapped, data->result, (size_t)want);
+            diag_path = "aserv";
+            return 0;
+        }
+        diag_path = "astale";
+        return -2;
+    }
+    diag_path = "araw";
+    return -2;
+}
+
 static int process_frame(device_data *data, swapchain_data *chain,
                          VkQueue queue, uint32_t index)
 {
@@ -1895,6 +2142,33 @@ static int process_frame(device_data *data, swapchain_data *chain,
                frame_counter);
         diag_path = "praw";
         return -1;
+    }
+    /* Async submit (default, NR_LAYER_ASYNC=1): enqueue the frame copy and
+     * display the newest reply already held - the ~60 ms daemon round-trip
+     * runs on the worker, never inside the game's present. earlier_pending
+     * is a sync-only notion: the async reuse gate treats `earlier` as the
+     * last SUBMITTED input and result as the newest COMPLETED output, so a
+     * byte-identical present simply serves the freshest processed frame. */
+    if (g_async) {
+        async_lazy_start(data);
+        if (data->async) {
+            uint32_t ahdr[4] = { 0x304E524Eu, chain->extent.width,
+                                 chain->extent.height,
+                                 (uint32_t)chain->format };
+            data->earlier_pending = 0;
+            if (nr_async_submit(data->async, NR_ASYNC_PROC,
+                                (uint64_t)chain->swapchain, ahdr,
+                                (const unsigned char *)data->mapped,
+                                (size_t)needed, NULL) != 0) {
+                /* Mailbox would not take the frame (pool exhaustion is
+                 * nearly impossible): the newest pending submission still
+                 * covers fresher content than the last reply - serve. */
+                nr_log("[nr_layer] async submit dropped (frame %lu)",
+                       frame_counter);
+            }
+            return async_serve_best(data, chain, needed);
+        }
+        /* worker failed to start once: sync exchange fallback below */
     }
     /* The reply lands in data->mapped (the payload is fully sent before the
      * first reply byte arrives, so the alias is safe). Receiving anywhere
@@ -2316,6 +2590,13 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
          * or unavailable the unprocessed presents pass through native.
          */
         {
+        /* Publish any completed daemon replies BEFORE the serve decisions
+         * below - result/fgi slots refresh on every present, including
+         * reuse, mid and cadence-skipped ones (the worker reports through
+         * the done mailbox; nr_degrade streaks apply here on the present
+         * thread, keeping all flap policy single-threaded). */
+        if (data->async)
+            async_drain(data);
         int fg_enabled = is_framegen_enabled();
         int fg_mode = fg_enabled ? framegen_mode() : 1;
         /* Two FG producers: the in-process x64 engine answers
@@ -2341,14 +2622,18 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
         diag_path = "?";
         int diag_tr = -1;
         if (should_process) {
-            int ok = (process_frame(data, chain, queue, index) == 0);
+            int prc = process_frame(data, chain, queue, index);
+            int ok = (prc == 0);
             if (!ok) {
                 /* Splice guard: a frame that failed processing must never go
                  * out raw between processed neighbours - serve the last
                  * processed result of this extent instead (same policy as the
                  * daemon-flap hold). Only a matching-extent result qualifies;
-                 * degenerate/other-extent chains still pass through native. */
-                if (data->result_valid && data->result
+                 * degenerate/other-extent chains still pass through native.
+                 * prc==-2 is the async POLICY raw: the serve-best already
+                 * weighed this exact held result and rejected it (stale on
+                 * moving content) - the guard must not re-serve it. */
+                if (prc != -2 && data->result_valid && data->result
                     && data->result_size >= want
                     && data->result_w == chain->extent.width
                     && data->result_h == chain->extent.height
@@ -2360,9 +2645,13 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                     ok = 1;
                     diag_path = "sheld";
                 } else {
-                    nr_log("[nr_layer] process failed and no held result; "
-                           "raw out (frame %lu)", frame_counter);
-                    diag_path = "raw";
+                    if (prc != -2) {
+                        nr_log("[nr_layer] process failed and no held result; "
+                               "raw out (frame %lu)", frame_counter);
+                        diag_path = "raw";
+                    }
+                    /* prc == -2: async policy chose raw; the araw/astale
+                     * serve tag stays for the diag line. */
                 }
             }
             if (ok) {
@@ -2402,19 +2691,32 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                             /* x86 daemon NRN3: the mid frame payload -> the
                              * resident engine replies the interpolated frame
                              * (or a full process fallback - either way a
-                             * presentable frame). Reply lands in interp so a
-                             * dead daemon cannot tear the P frame still
-                             * sitting in mapped as the fallback. A probe
-                             * skipped by the backoff leaves P in mapped the
-                             * same way - the anchor goes out on time. */
+                             * presentable frame).
+                             * ASYNC: queue the mid behind its anchor PROC
+                             * (same FIFO, ordered); the reply lands in the
+                             * fgi slot and displays one-shot at a later
+                             * present - this one keeps whatever serve-best
+                             * already put in mapped. SYNC: the reply lands
+                             * in interp so a dead daemon cannot tear the P
+                             * frame still sitting in mapped as the fallback.
+                             * A probe skipped by the backoff leaves P in
+                             * mapped the same way - the anchor goes out on
+                             * time. */
+                            uint32_t fgi_hdr[4] = { 0x334E524Eu,
+                                chain->extent.width, chain->extent.height,
+                                (uint32_t)chain->format };
+                            if (data->async) {
+                                if (nr_async_submit(data->async, NR_ASYNC_FGI,
+                                        (uint64_t)chain->swapchain, fgi_hdr,
+                                        data->mid, (size_t)want, NULL))
+                                    nr_log("[nr_layer] async NRN3 dropped "
+                                           "(frame %lu)", frame_counter);
+                            } else {
                             if (data->interp_size < want) {
                                 unsigned char *grown = (unsigned char *)realloc(data->interp, (size_t)want);
                                 if (grown) { data->interp = grown; data->interp_size = want; }
                             }
                             if (data->interp && data->interp_size >= want) {
-                                uint32_t fgi_hdr[4] = { 0x334E524Eu,
-                                    chain->extent.width, chain->extent.height,
-                                    (uint32_t)chain->format };
                                 int erc = exchange(fgi_hdr, sizeof fgi_hdr,
                                                    data->mid, (size_t)want,
                                                    data->interp, (size_t)want);
@@ -2437,6 +2739,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                                            "slots", erc, g_dg.fg_fail,
                                            g_dg.fg_skip);
                                 }
+                            }
                             }
                         }
                         /* Consume the mid: it described THIS anchor interval
@@ -2485,7 +2788,16 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                     data->mid_w = chain->extent.width;
                     data->mid_h = chain->extent.height;
                 }
-                if (data->result_valid && data->result
+                if (data->async) {
+                    /* serve-best: a pending fgi midpoint (the previous
+                     * interval's generated frame, landing right at its
+                     * natural cadence slot), else the freshest processed
+                     * anchor, else the raw mid just captured. */
+                    if (async_serve_best(data, chain, want) == 0) {
+                        diag_tr = transfer(data, chain, queue, index, 1);
+                        held = (diag_tr == 0);
+                    }
+                } else if (data->result_valid && data->result
                     && data->result_size >= want
                     && data->result_w == chain->extent.width
                     && data->result_h == chain->extent.height
@@ -2495,8 +2807,12 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                     held = (diag_tr == 0);
                 }
             }
-            nr_fg_note(&g_fg, held ? NR_FG_PROCESSED : NR_FG_NATIVE);
-            diag_path = held ? "mheld" : "mnat";
+            nr_fg_note(&g_fg, held
+                       ? ((data->async && !strcmp(diag_path, "afgi"))
+                          ? NR_FG_GENERATED : NR_FG_PROCESSED)
+                       : NR_FG_NATIVE);
+            if (!held || !data->async)
+                diag_path = held ? "mheld" : "mnat";
         } else if (fg_enabled && fg_avail) {
             /* Framegen: generate this present from the engine's copy of the
              * last processed frame + its raw input (residual transfer).
@@ -2506,6 +2822,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
              * usable prev pair, so any complete reply is a presentable
              * frame (generated or not). */
             int generated = 0;
+            int fg_out = -1;   /* async: explicit NR_FG_* for shown frame */
             int deg_log = NR_DEGRADE_LOG_NONE;
             /* Same gate as process_frame: a menu/letterbox strip must not
              * bounce the daemon's (or in-process) engine through a
@@ -2558,10 +2875,34 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                      * the payload is fully sent before the first reply byte
                      * arrives, so the aliasing is safe (same trick
                      * process_frame uses). data->raw/interp stay untouched:
-                     * the engine's own buffers hold prev. */
+                     * the engine's own buffers hold prev.
+                     * ASYNC: the NRN2 request is queued; THIS present shows
+                     * serve-best (a pending fgi reply, else the freshest
+                     * processed result, else the raw mid we just captured).
+                     * The generated frame displays when its reply lands. */
                     uint32_t fgheader[4] = { 0x324E524Eu, chain->extent.width,
                                              chain->extent.height,
                                              (uint32_t)chain->format };
+                    if (data->async) {
+                        if (nr_async_submit(data->async, NR_ASYNC_FGT,
+                                (uint64_t)chain->swapchain, fgheader,
+                                (const unsigned char *)data->mapped,
+                                (size_t)want, NULL))
+                            nr_log("[nr_layer] async NRN2 dropped "
+                                   "(frame %lu)", frame_counter);
+                        if (async_serve_best(data, chain, want) == 0) {
+                            diag_tr = transfer(data, chain, queue, index, 1);
+                            if (diag_tr == 0) {
+                                generated = 1;
+                                /* serve tag (afgi/aserv) already in
+                                 * diag_path; fg_out carries the note kind */
+                                fg_out = !strcmp(diag_path, "afgi")
+                                         ? NR_FG_GENERATED : NR_FG_PROCESSED;
+                            }
+                        } else {
+                            fg_out = NR_FG_NATIVE;
+                        }
+                    } else {
                     int erc = exchange(fgheader, sizeof fgheader, data->mapped,
                                        (size_t)want, data->mapped, (size_t)want);
                     if (erc == 0) {
@@ -2590,20 +2931,30 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                                "next in %u slots", erc, g_dg.fg_fail,
                                g_dg.fg_skip);
                     }
+                    }
                 }
                 /* Probe backoff window: this slot passes native without
                  * paying the doomed socket round-trip (same picture as a
                  * refused request). */
             }
-            nr_fg_note(&g_fg, generated ? NR_FG_GENERATED : NR_FG_NATIVE);
-            diag_path = generated ? "fgd" : "fgn";
+            /* fg_out (async only): the serve tag already chose the exact
+             * bucket for the displayed frame; sync keeps generated/native. */
+            nr_fg_note(&g_fg, fg_out >= 0 ? fg_out
+                       : (generated ? NR_FG_GENERATED : NR_FG_NATIVE));
+            if (fg_out < 0)
+                diag_path = generated ? "fgd" : "fgn";
         } else {
             /* Cadence-skipped present (NR_LAYER_LIVE=N>1): re-blit the held
              * processed result of this extent - the documented behaviour -
              * falling back to native only when nothing is held yet. A raw
              * splice between processed frames is a visible quality strobe. */
             int held = 0;
-            if (data->result_valid && data->result && data->mapped
+            if (data->async) {
+                if (async_serve_best(data, chain, want) == 0) {
+                    diag_tr = transfer(data, chain, queue, index, 1);
+                    held = (diag_tr == 0);
+                }
+            } else if (data->result_valid && data->result && data->mapped
                 && data->result_size >= want
                 && data->result_w == chain->extent.width
                 && data->result_h == chain->extent.height
@@ -2612,8 +2963,12 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                 diag_tr = transfer(data, chain, queue, index, 1);
                 held = (diag_tr == 0);
             }
-            nr_fg_note(&g_fg, held ? NR_FG_PROCESSED : NR_FG_NATIVE);
-            diag_path = held ? "eheld" : "enat";
+            nr_fg_note(&g_fg, held
+                       ? ((data->async && !strcmp(diag_path, "afgi"))
+                          ? NR_FG_GENERATED : NR_FG_PROCESSED)
+                       : NR_FG_NATIVE);
+            if (!held || !data->async)
+                diag_path = held ? "eheld" : "enat";
             if (fg_enabled && !fg_avail && !g_fg.unavailable_logged) {
                 nr_log("[nr_layer] framegen requested but unavailable "
                        "(no in-process engine; daemon not up); presenting "
