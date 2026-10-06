@@ -51,7 +51,12 @@ typedef struct NrAsync NrAsync;
 /* Newest completed request (latest-wins mailbox). On erc==0 buf holds the
  * reply pixels and ownership moves to the caller - return it via
  * nr_async_give_buf when done with it. On erc!=0 buf is NULL and the
- * record is a pure transport report (same rc values as exchange()). */
+ * record is a pure transport report (same rc values as exchange()).
+ * For PROC replies that were received into a second pool buffer, src also
+ * holds the exact submitted payload (the raw frame this reply answers) -
+ * caller-owned the same way; NULL for FG replies, failures, and when the
+ * pool had no spare buffer (the reply then landed in the payload buffer
+ * and the source is gone). nr_residual consumes (src, buf) pairs. */
 typedef struct NrAsyncDone {
     int kind;              /* NR_ASYNC_* of the originating request */
     int erc;               /* 0 ok, -1 transport, -2 connect refused */
@@ -60,6 +65,8 @@ typedef struct NrAsyncDone {
     uint32_t w, h, fmt;    /* extent + VkFormat stamped from the header */
     unsigned char *buf;    /* reply pixels (caller-owned until give_buf) */
     size_t buf_bytes;
+    unsigned char *src;    /* submitted source frame (caller-owned, may be NULL) */
+    size_t src_bytes;
     uint64_t done_ms;      /* nr_now_ms-style tick when the reply landed */
 } NrAsyncDone;
 

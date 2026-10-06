@@ -22,10 +22,13 @@
 #include "nr_util.h"
 #include "daemon_client.h"   /* default transport: exchange() */
 
-/* Pool sizing: one buffer in flight in the worker, up to NR_ASYNC_PEND
- * queued, one in the done slot, one held by the caller mid-swap - plus
- * slack so a submit never waits on a buffer. ~2 MB each at 800x600. */
-#define NR_ASYNC_BUFS 8
+/* Pool sizing: one buffer in flight in the worker (TWO for a PROC request
+ * - the reply lands in a second slot so the submitted source survives to
+ * be published as done.src), up to NR_ASYNC_PEND queued, two in the done
+ * slot (reply+source), one held by the caller mid-swap, one fgi slot -
+ * plus slack so a submit never waits on a buffer. ~2 MB each at 800x600,
+ * lazily allocated on first use. */
+#define NR_ASYNC_BUFS 12
 /* Pending queue depth: PROC submissions are the common case; FG requests
  * ride along behind their anchor without letting midpoints starve the
  * stream. Bounded - overflow evicts, never grows. */
@@ -61,6 +64,7 @@ struct NrAsync {
     int done_set;
     NrAsyncDone done;
     int done_buf;               /* pool index owned by done.buf, -1 none */
+    int done_src;               /* pool index owned by done.src, -1 none */
     unsigned long seq_next;
     unsigned long dropped;
     unsigned long submitted;
@@ -119,7 +123,7 @@ static DWORD WINAPI nr_async_worker(LPVOID param)
     NrAsync *a = (NrAsync *)param;
     for (;;) {
         NrAsyncReq r;
-        int erc;
+        int erc, rbuf = -1;
         EnterCriticalSection(&a->cs);
         /* <= 0, not == 0: belt-and-braces so even a corrupt count can
          * never produce a phantom pop (spurious wakes re-evaluate the
@@ -130,24 +134,55 @@ static DWORD WINAPI nr_async_worker(LPVOID param)
         r = a->req[a->head];
         a->head = (a->head + 1) % NR_ASYNC_PEND;
         a->count--;
+        /* A PROC request additionally claims a second pool slot for the
+         * reply: the payload buffer then survives the round-trip intact
+         * and is published as done.src (the residual module needs the
+         * exact frame this reply answers to form proc - src). FG replies
+         * are display content only - no source kept. On pool exhaustion
+         * the exchange falls back to the aliased in-place form and
+         * done.src is NULL. */
+        if (r.kind == NR_ASYNC_PROC)
+            rbuf = pop_free_locked(a);
         LeaveCriticalSection(&a->cs);
 
         /* The payload is fully sent before the first reply byte arrives,
-         * so the reply may land in the same buffer (the aliasing the
-         * sync path already relies on for data->mapped). Sizes come from
-         * the wire header, not the pool buffer's capacity - a slot grown
-         * for a bigger earlier extent must not over-read the reply. */
+         * so the reply may land in the same buffer when no second slot is
+         * available (the aliasing the sync path already relies on for
+         * data->mapped). Sizes come from the wire header, not the pool
+         * buffer's capacity - a slot grown for a bigger earlier extent
+         * must not over-read the reply. */
         {
             const size_t rx = (size_t)r.hdr[1] * r.hdr[2] * 4;
-            erc = a->xchg(a->xctx, r.hdr, sizeof r.hdr,
-                          a->buf[r.buf], r.n, a->buf[r.buf], rx);
+            if (rbuf >= 0 && a->bufsz[rbuf] < rx) {
+                /* Grow while exclusively owned; another thread can pop a
+                 * DIFFERENT slot concurrently without touching this one. */
+                unsigned char *grown =
+                    (unsigned char *)realloc(a->buf[rbuf], rx ? rx : 1);
+                if (grown) {
+                    a->buf[rbuf] = grown;
+                    a->bufsz[rbuf] = rx;
+                } else {
+                    EnterCriticalSection(&a->cs);
+                    push_free_locked(a, rbuf);
+                    LeaveCriticalSection(&a->cs);
+                    rbuf = -1;
+                }
+            }
+            if (rbuf >= 0)
+                erc = a->xchg(a->xctx, r.hdr, sizeof r.hdr,
+                              a->buf[r.buf], r.n, a->buf[rbuf], rx);
+            else
+                erc = a->xchg(a->xctx, r.hdr, sizeof r.hdr,
+                              a->buf[r.buf], r.n, a->buf[r.buf], rx);
         }
 
         EnterCriticalSection(&a->cs);
-        /* Latest-wins: an unconsumed record is superseded - its buffer
-         * recycles with it. */
-        if (a->done_set && a->done_buf >= 0)
-            push_free_locked(a, a->done_buf);
+        /* Latest-wins: an unconsumed record is superseded - its buffers
+         * (reply AND source) recycle with it. */
+        if (a->done_set) {
+            if (a->done_buf >= 0) push_free_locked(a, a->done_buf);
+            if (a->done_src >= 0) push_free_locked(a, a->done_src);
+        }
         a->done.kind = r.kind;
         a->done.erc = erc;
         a->done.seq = r.seq;
@@ -156,15 +191,30 @@ static DWORD WINAPI nr_async_worker(LPVOID param)
         a->done.h = r.hdr[2];
         a->done.fmt = r.hdr[3];
         a->done.done_ms = nr_now_ms();
+        a->done.src = NULL;
+        a->done.src_bytes = 0;
+        a->done_src = -1;
         if (erc == 0) {
-            a->done.buf = a->buf[r.buf];
-            a->done.buf_bytes = (size_t)r.hdr[1] * r.hdr[2] * 4;
-            a->done_buf = r.buf;
+            const size_t rx = (size_t)r.hdr[1] * r.hdr[2] * 4;
+            if (rbuf >= 0) {
+                a->done.buf = a->buf[rbuf];
+                a->done.buf_bytes = rx;
+                a->done_buf = rbuf;
+                a->done.src = a->buf[r.buf];
+                a->done.src_bytes = r.n;
+                a->done_src = r.buf;
+            } else {
+                a->done.buf = a->buf[r.buf];
+                a->done.buf_bytes = rx;
+                a->done_buf = r.buf;
+            }
         } else {
             a->done.buf = NULL;
             a->done.buf_bytes = 0;
             a->done_buf = -1;
             push_free_locked(a, r.buf);
+            if (rbuf >= 0)
+                push_free_locked(a, rbuf);
         }
         a->done_set = 1;
         LeaveCriticalSection(&a->cs);
@@ -184,6 +234,7 @@ NrAsync *nr_async_create_ex(nr_async_exchange_fn fn, void *ctx)
     a->xchg = fn;
     a->xctx = ctx;
     a->done_buf = -1;
+    a->done_src = -1;
     for (i = 0; i < NR_ASYNC_BUFS; i++)
         push_free_locked(a, i);          /* lazily sized on first use */
     a->thread = CreateThread(NULL, 0, nr_async_worker, a, 0, NULL);
@@ -305,7 +356,8 @@ int nr_async_take_done(NrAsync *a, NrAsyncDone *out)
     if (a->done_set) {
         *out = a->done;
         a->done_set = 0;
-        a->done_buf = -1;      /* ownership moved to *out.buf */
+        a->done_buf = -1;      /* ownership moved to *out.buf / *out.src */
+        a->done_src = -1;
         got = 1;
     }
     LeaveCriticalSection(&a->cs);
