@@ -89,27 +89,58 @@ float hr_widen(uint h) {
 }
 float halfr(float x) { return hr_widen(hr_bits(floatBitsToUint(x))); }
 
-// Temporal hold latch (constants in the 0..1 colour domain col01/h01/
-// outp live in; 1 LSB = 1/255). The pred=f(hist) -> emit -> fp16 store ->
-// hist feedback never converged: on byte-identical input the emit
-// wandered in a sustained period-2 limit cycle (~55% of bytes changing
-// per frame, +-4-5 LSB amplitude, ~76% sign flips) - at intensity>1 that
-// is the owner-visible flicker. Root cause (isolation test 2026-10):
-// the network's response to its own output fed back as history has
-// gain > 1 - it overshoots the correction, so ANY proportional trickle
-// (soft deadband, kd>0 below threshold) just rides the chase forever:
-// measured 42% movers with a 2/8/255 smoothstep at k_min=0.06, ~24%
-// with a hard freeze even at 16/255. What pins the loop is a
-// HOLD/RELEASE latch on the emitted value: while the blended candidate
-// stays within DB_HOLD of the current history, emit = history verbatim
-// - the fp16 store lands back on itself, the fv/x16 inputs freeze, and
-// the field locks (harness: 0.00% nonzero from ~frame 25). A candidate
-// further than DB_HOLD is a real content change and releases at full
-// strength. The distance uses the pre-anchor blend candidate so
-// temporal_stats mirrors it exactly (stats[1] honest -> anchor's
-// deadzone latches k=1 once the field pins, instead of chasing a wander
-// the emission no longer has).
-const float DB_HOLD = 32.0 / 255.0;  // >=~13/255 chan or 32/255 luma = real change
+// Temporal hold latch + banded rate-limited release (constants in the
+// 0..1 colour domain col01/h01/outp live in; 1 LSB = 1/255). The
+// pred=f(hist) -> emit -> fp16 store -> hist feedback never converged:
+// on byte-identical input the emit wandered in a sustained period-2
+// limit cycle (~55% of bytes changing per frame, +-4-5 LSB amplitude,
+// ~76% sign flips) - at intensity>1 that is the owner-visible flicker.
+// Root cause (isolation test 2026-10): the network's response to its own
+// output fed back as history has gain > 1 - it overshoots the
+// correction, so ANY proportional trickle (soft deadband, kd>0 below
+// threshold) just rides the chase forever: measured 42% movers with a
+// 2/8/255 smoothstep at k_min=0.06, ~24% with a hard freeze even at
+// 16/255. The first fix (5d238f6) was a HOLD/RELEASE latch: while the
+// blended candidate stays within DB_HOLD of the current history, emit =
+// history verbatim - the fp16 store lands back on itself, the fv/x16
+// inputs freeze, and the field locks (harness: 0.00% nonzero from
+// ~frame 25).
+//
+// Field run on a static loading screen then exposed the remaining
+// failure: for pixels where |cand - hist| sits AT the threshold the
+// latch flipped hold->release->hold every frame, and each release
+// emitted the FULL candidate - ~32+/255 chroma/luma pops clustering in
+// episodes for dozens of frames (chroma_r +-0.7 alternation, luma_pump
+// 3.6%). So the release is now banded and rate-limited: the emitted
+// per-channel delta is clamped to a step cap chosen by the SAME
+// chroma-aware distance d:
+//   d <  DB_HOLD (32/255) : hold     - emit history verbatim (latch)
+//   [DB_HOLD, DB_MID)     : STEP_LO  - 8/255 per-channel cap
+//   [DB_MID,  DB_CUT)     : STEP_HI  - 24/255 per-channel cap
+//   d >= DB_CUT (128/255) : uncapped - real change/scene cut lands in
+//                                      one frame, unchanged semantics
+// Hysteresis WITHOUT per-pixel state: the step IS the Schmitt margin.
+// A release-step moves the STORED history STEP closer to the candidate,
+// so when the prediction flips its attractor (the ping-pong behind the
+// pops) the flipped candidate sits only STEP < DB_HOLD away - the next
+// frame re-HOLDS instead of re-releasing. For a straddler gap below
+// DB_MID the ratchet is monotonic and provably terminates: it can only
+// step while d >= DB_HOLD and each step buys STEP of margin, so the
+// alternation collapses into a hold after a few sub-visible micro-steps
+// (a real boundary change converges into the deadband floor - the same
+// <DB_HOLD residual a held pixel already carries). Only a persistent
+// >DB_MID attractor alternation can shuttle inside the release band,
+// still capped at STEP_HI/frame instead of the full ~64+/255 jump.
+// A persistent real change converges in ~1-4 frames (vs ~30 at a fixed
+// 8/255), and >=DB_CUT stays instant for scene cuts. The distance uses
+// the pre-anchor blend candidate so temporal_stats mirrors it exactly
+// (stats[1] honest -> anchor's deadzone latches k=1 once the field
+// pins, instead of chasing a wander the emission no longer has).
+const float DB_HOLD = 32.0 / 255.0;  // enter-release threshold (unchanged)
+const float DB_MID  = 64.0 / 255.0;  // low/high step-band edge
+const float DB_CUT  = 128.0 / 255.0; // >= this = real change, emit uncapped
+const float STEP_LO =  8.0 / 255.0;  // emit cap in the [DB_HOLD,DB_MID) band
+const float STEP_HI = 24.0 / 255.0;  // emit cap in the [DB_MID,DB_CUT) band
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 layout(std430, set = 0, binding = 3) readonly buffer FeatV { float fv[]; };
@@ -226,18 +257,25 @@ void main() {
     for (uint c = 0u; c < 3u; ++c)
         anchored[c] = col01[c] + (cand[c] - col01[c]) * k;
 
-    // Hold/release latch: distance between the blended candidate and the
-    // CURRENT history (the previous emitted output, already AABB-clamped
-    // upstream) through the same chroma-aware metric features.comp uses
-    // for the fv[15] gate - max(BT.601 luma distance, 2.5 * max
-    // per-channel distance) so isoluminant chroma drift cannot sneak
-    // under a luma-only check. Measured on cand (pre-anchor) so
-    // temporal_stats computes the identical kd on identical inputs.
-    // Skipped entirely when gate==0 (history reset / rejected): the
-    // reset frame must emit the unblended prediction so the NEXT frame's
-    // delta is ~0 (fast lock after scene cuts), and a rejected history
-    // has no business holding the output at all.
-    float kd = 1.0;
+    // Hold/release latch + banded rate limit: distance between the
+    // blended candidate and the CURRENT history (the previous emitted
+    // output, already AABB-clamped upstream) through the same
+    // chroma-aware metric features.comp uses for the fv[15] gate -
+    // max(BT.601 luma distance, 2.5 * max per-channel distance) so
+    // isoluminant chroma drift cannot sneak under a luma-only check.
+    // Measured on cand (pre-anchor) so temporal_stats computes the
+    // identical d on identical inputs. stepCap is the per-channel emit
+    // cap: 0 inside the deadband (emit = history verbatim - the latch
+    // that pins the feedback limit cycle), STEP_LO/STEP_HI in the
+    // release bands (bounded micro-steps instead of a full-candidate
+    // pop - a threshold-straddler can no longer emit a ~32+/255 jump),
+    // and 2.0 (= uncapped, deltas are <=1.0) past DB_CUT where a real
+    // change must land in one frame. The whole check is skipped when
+    // gate==0 (history reset / rejected): the reset frame must emit the
+    // unblended prediction so the NEXT frame's delta is ~0 (fast lock
+    // after scene cuts), and a rejected history has no business holding
+    // the output at all.
+    float stepCap = 2.0;
     if (gate > 0.0) {
         float dl = abs(0.299 * (cand[0] - h01[0])
                      + 0.587 * (cand[1] - h01[1])
@@ -245,16 +283,22 @@ void main() {
         float dc = max(abs(cand[0] - h01[0]),
                        max(abs(cand[1] - h01[1]),
                            abs(cand[2] - h01[2])));
-        kd = (max(dl, 2.5 * dc) >= DB_HOLD) ? 1.0 : 0.0;
+        float dMetric = max(dl, 2.5 * dc);
+        stepCap = (dMetric >= DB_CUT)  ? 2.0
+                : (dMetric >= DB_MID)  ? STEP_HI
+                : (dMetric >= DB_HOLD) ? STEP_LO
+                :                        0.0;
     }
 
-    // Pass 2b: emit = history while inside the latch, else the anchored
-    // candidate - then snapped to the output byte grid so the emitted
-    // value is always an exact display byte. The SAME value feeds the
-    // head residual AND the history store - emitting and storing must
-    // never diverge or the loop wanders again.
+    // Pass 2b: emit = history inside the latch, else history stepped
+    // toward the anchored candidate by at most stepCap per channel -
+    // then snapped to the output byte grid so the emitted value is
+    // always an exact display byte. The SAME value feeds the head
+    // residual AND the history store - emitting and storing must never
+    // diverge or the loop wanders again.
     for (uint c = 0u; c < 3u; ++c) {
-        float outp = h01[c] + kd * (anchored[c] - h01[c]);      // latch
+        float outp = h01[c] + clamp(anchored[c] - h01[c],
+                                    -stepCap, stepCap);       // latch+step
         outp = floor(clamp(outp, 0.0, 1.0) * 255.0 + 0.5) * (1.0 / 255.0);
         head[hP + c] = halfr((outp - col01[c]) * 4.0);
         float s = halfr(outp);                            // scaled_color(outp)

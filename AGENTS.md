@@ -171,8 +171,24 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
     hold pins the loop. Do not soften it into a smoothstep/k_min form -
     that reopens the chase (measured: ~24-42% movers on identical
     frames). The emitted value is byte-snapped and stored; the identical
-    kd must stay mirrored in temporal_stats.comp or the gain anchor
-    chases a ghost.
+    step cap must stay mirrored in temporal_stats.comp or the gain
+    anchor chases a ghost.
+    RELEASES ARE BANDED + RATE-LIMITED (release-pop fix): a candidate AT
+    the threshold used to flip hold->release->hold and emit the full
+    ~32+/255 candidate every flip (fieldfix.mp4: chroma/luma pop
+    clusters on a static loading screen). Now the emit cap is chosen by
+    the distance band: d<32/255 hold, [32,64)->STEP_LO=8/255,
+    [64,128)->STEP_HI=24/255 per channel, >=128/255 uncapped (real
+    change/scene cut lands in one frame). The stored history IS the
+    Schmitt margin: each release-step moves hist STEP closer to cand,
+    so a flipped attractor lands STEP<DB_HOLD away -> re-HOLDS; for
+    gaps <64/255 the ratchet is monotonic and provably terminates
+    (unit-proven: +-35/255 alternation collapses to one 8/255 micro-
+    step then pins). >64/255 persistent alternation can still shuttle,
+    bounded at STEP_HI/frame vs the old full-gap pops. Real per-pixel
+    changes >~25/255 bypass the latch entirely via the fv[15] gate=0
+    path (unblended full emit) - the bands only mediate stable-input
+    boundary straddlers.
   - Input contract = 16 feature channels exactly (input_adapter_weight
     [16,32]): ch 0-2 noise, 3 const, 4-6 scaled colour, 7-9 history,
     10-14 Phase30 controls, 15 zero. NO motion-vector/depth slots - the
