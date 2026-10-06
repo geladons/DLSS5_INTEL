@@ -62,10 +62,16 @@ if errorlevel 1 (
     echo [FAIL] cl x86 nr_async
     exit /b 1
 )
+cl /nologo /std:c11 /O2 /c /I"C:\VulkanSDK\1.4.357.0\Include" /I"%REPO%\dlss5\chain" ^
+   "%SRC%\nr_residual.c" /Fo"%OUT%\nr_residual.obj" 2>&1
+if errorlevel 1 (
+    echo [FAIL] cl x86 nr_residual
+    exit /b 1
+)
 link /nologo /DLL /DEF:"%SRC%\nr_layer_win.def" ws2_32.lib user32.lib ^
    "%OUT%\nr_layer_win32.obj" "%OUT%\nr_framegen.obj" "%OUT%\nr_degrade.obj" ^
    "%OUT%\nr_util.obj" "%OUT%\daemon_client.obj" "%OUT%\gdi_guard.obj" ^
-   "%OUT%\nr_ui.obj" "%OUT%\nr_async.obj" ^
+   "%OUT%\nr_ui.obj" "%OUT%\nr_async.obj" "%OUT%\nr_residual.obj" ^
    /OUT:"%OUT%\nr_layer_win32.dll" /PDB:"%OUT%\nr_layer_win32.pdb" 2>&1
 if errorlevel 1 (
     echo [FAIL] link x86

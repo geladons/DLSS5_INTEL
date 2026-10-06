@@ -58,6 +58,31 @@
  *                     it is alive. 0 = serve the held result at any age.
  *                     Identical input never reaches the bound (the reuse
  *                     gate replays the processed result for statics).
+ *   NR_LAYER_RESIDUAL 0 = disable serve-residual (default ON on the async
+ *                     TCP path; bisect knob). When a present has no fresh
+ *                     reply for its own content, the layer displays the
+ *                     CURRENT raw frame + the newest reply's enhancement
+ *                     delta (proc - its source, stored by nr_residual.c)
+ *                     instead of re-showing the stale processed frame -
+ *                     the display tracks the game's presents on animated
+ *                     content rather than the daemon's reply rate.
+ *   NR_LAYER_RESIDUAL_MS    age bound for the residual pair (default 400);
+ *                     older than this the pair is stale, 0 = no age bound.
+ *   NR_LAYER_RESIDUAL_DIFF  content bound: sampled mean |cur - pair src|
+ *                     per channel in hundredths (default 1000 = 10.00);
+ *                     past it the residual would land displaced - the
+ *                     serve falls back to the serve-best order.
+ *   NR_LAYER_RESIDUAL_BIG   second half of the content bound: allowed
+ *                     share of sampled pixels moved >48/255, per-mille
+ *                     (default 400). A scene cut trips both bounds.
+ *   NR_LAYER_RESIDUAL_FB    what a REJECTED residual serve falls back to
+ *                     when mapped holds the current raw frame:
+ *                     1 (default) = the current raw frame itself - the
+ *                     freshest applicable enhancement for content that
+ *                     moved is none, and the stated goal is CURRENT
+ *                     content over stale pixels;
+ *                     0 = the legacy serve-best order (stale processed
+ *                     frame first) - A/B bisect knob, NOT the goal.
  *
  * Live knobs: %TEMP%\m13_phase30_knobs.json is rewritten by the m13 manager
  * on every knob change. A running game's env is frozen at launch, so the
@@ -95,6 +120,7 @@
 #include "nr_degrade.h"
 #include "nr_util.h"
 #include "nr_async.h"
+#include "nr_residual.h"
 #include "daemon_client.h"
 #include "gdi_guard.h"
 #include "nr_ui.h"
@@ -183,6 +209,11 @@ typedef struct device_data {
     int async_failed;            /* create failed once - do not retry+spam */
     uint64_t result_ms;          /* tick the current result landed at */
     unsigned long result_seq;    /* submission seq the result answers */
+    /* Serve-residual compositor (nr_residual.h): keeps the newest
+     * (source_raw, proc_reply) pair so a present without a fresh reply can
+     * display CURRENT raw + the freshest enhancement delta instead of the
+     * stale processed frame. Async TCP path only. */
+    struct NrResidual *resid;
     /* Latest daemon-FG reply (NRN2/NRN3) awaiting its one-shot display:
      * generated midpoints are display frames, never anchors - they must
      * NOT be written into result (it feeds every held/reuse path). */
@@ -255,6 +286,16 @@ static int g_async = -1;        /* -1 uninited (CreateInstance reads env) */
  * processed result for static content regardless of age). 0 disables
  * the bound entirely. */
 static long g_async_stale_ms = 500;
+/* Serve-residual (NR_LAYER_RESIDUAL, async TCP path only): while the
+ * newest reply pair is fresh AND the current frame still resembles the
+ * pair's source, a present displays cur_raw + residual instead of the
+ * stale processed frame. -1 = env not parsed yet. */
+static int g_residual = -1;
+static long g_resid_ms = 400;      /* pair age bound (NR_LAYER_RESIDUAL_MS) */
+static long g_resid_diff = 1000;   /* sampled mean |d| bound, x100 per ch */
+static long g_resid_big = 400;     /* moved-pixel share bound, per-mille */
+static int g_resid_fb_raw = 1;     /* reject fallback: current raw (1) vs
+                                    legacy stale-processed order (0) */
 static volatile LONG g_paused;  /* CTRL+ALT+X: passthrough, full fps */
 static volatile LONG g_off;     /* CTRL+ALT+Q: layer off for good */
 static volatile LONG g_hotkeys_started;
@@ -1100,6 +1141,25 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
                 g_async_stale_ms = atol(st);
                 if (g_async_stale_ms < 0) g_async_stale_ms = 0;
             }
+            const char *re = getenv("NR_LAYER_RESIDUAL");
+            g_residual = !re || strcmp(re, "0") != 0;
+            const char *rm = getenv("NR_LAYER_RESIDUAL_MS");
+            if (rm) {
+                g_resid_ms = atol(rm);
+                if (g_resid_ms < 0) g_resid_ms = 0;
+            }
+            const char *rd = getenv("NR_LAYER_RESIDUAL_DIFF");
+            if (rd) {
+                g_resid_diff = atol(rd);
+                if (g_resid_diff < 0) g_resid_diff = 0;
+            }
+            const char *rb = getenv("NR_LAYER_RESIDUAL_BIG");
+            if (rb) {
+                g_resid_big = atol(rb);
+                if (g_resid_big < 0) g_resid_big = 0;
+            }
+            const char *fb = getenv("NR_LAYER_RESIDUAL_FB");
+            g_resid_fb_raw = !fb || strcmp(fb, "0") != 0;
         }
         hotkeys_ensure();
         if (live_every > 0)
@@ -1112,6 +1172,13 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
         if (nr_port)
             nr_log("[nr_layer] async daemon submit: %s (stale bound %ld ms)",
                    g_async ? "on" : "OFF (sync exchange)", g_async_stale_ms);
+        if (nr_port && g_async)
+            nr_log("[nr_layer] serve-residual: %s (age bound %ld ms, "
+                   "diff bound %ld.%02ld, moved share %ld pm, "
+                   "reject fb %s)",
+                   g_residual ? "on" : "OFF", g_resid_ms,
+                   g_resid_diff / 100, g_resid_diff % 100, g_resid_big,
+                   g_resid_fb_raw ? "raw" : "stale");
         if (static_reuse)
             nr_log("[nr_layer] static reuse on: exact-repeat frames reuse "
                  "the last processed result");
@@ -1318,6 +1385,12 @@ static void release_device(device_data *data)
         nr_async_destroy(data->async);
         data->async = NULL;
     }
+    /* The residual module owns plain mallocs (its src copy + res delta),
+     * never pool buffers - safe to destroy after the pool is gone. */
+    if (data->resid) {
+        nr_residual_destroy(data->resid);
+        data->resid = NULL;
+    }
     free(data->result);
     free(data->earlier);
     free(data->raw);
@@ -1473,6 +1546,11 @@ static int ensure_resources(device_data *data, VkDeviceSize needed)
             data->mapped = mapped;
             data->staging_size = needed;
             data->have_earlier = 0; /* old-extent bytes must not feed memcmp */
+            /* A live async result is a POOL buffer (zero-copy publish) -
+             * claim() returns it to the pool; freeing it directly would
+             * leave a dangling a->buf[] slot and double-free at destroy. */
+            if (data->async && nr_async_claim(data->async, data->result))
+                data->result = NULL;
             free(data->result);
             data->result = (unsigned char *)malloc((size_t)needed);
             data->result_size = needed;
@@ -1854,10 +1932,19 @@ static void async_lazy_start(device_data *data)
 {
     if (!g_async || !nr_port || data->async || data->async_failed) return;
     data->async = nr_async_create();
-    if (data->async)
+    if (data->async) {
         nr_log("[nr_layer] async daemon submit started (bounded queue, "
                "drop-oldest, stale bound %ld ms)", g_async_stale_ms);
-    else {
+        if (g_residual && !data->resid) {
+            data->resid = nr_residual_create();
+            nr_residual_configure(data->resid, g_resid_ms,
+                                  g_resid_diff, g_resid_big);
+            nr_log("[nr_layer] serve-residual compositor armed (age bound "
+                   "%ld ms, diff bound %ld.%02ld, moved share %ld pm)",
+                   g_resid_ms, g_resid_diff / 100, g_resid_diff % 100,
+                   g_resid_big);
+        }
+    } else {
         data->async_failed = 1;
         nr_log("[nr_layer] async worker failed to start; staying sync");
     }
@@ -1908,6 +1995,24 @@ static int async_drain(device_data *data)
             nr_degrade_fg_note_success(&g_dg);
         if (d.kind == NR_ASYNC_PROC) {
             unsigned char *old = data->result;
+            /* Serve-residual pair update BEFORE the zero-copy publish:
+             * d.src is the exact submitted frame this reply answers and
+             * d.buf is its full-res processed output - res = proc - src
+             * is computed once inside the module (channels_ok fails on
+             * packed 10-bit formats). A NULL src means the pool was dry:
+             * the previous pair simply rides on. */
+            if (data->resid && d.src)
+                nr_residual_update(data->resid, d.src, d.buf, d.w, d.h,
+                                   d.chain, d.seq,
+                                   frame_byte_order((VkFormat)d.fmt) >= 0,
+                                   nr_now_ms());
+            else if (data->resid && !d.src) {
+                static unsigned long src_misses;
+                if ((++src_misses & 63) == 1)
+                    nr_log("[nr_layer] async reply without source copy "
+                           "(pool pressure); residual pair kept (x%lu)",
+                           src_misses);
+            }
             data->result = d.buf;          /* zero-copy publish */
             data->result_size = d.buf_bytes;
             d.buf = old;
@@ -1942,8 +2047,15 @@ static int async_drain(device_data *data)
             nr_log("[nr_layer] daemon framegen reply %ux%u seq=%lu "
                    "awaiting display", d.w, d.h, d.seq);
         }
-        if (d.buf)
-            nr_async_give_buf(data->async, d.buf);
+        /* The swapped-out result/fgi slot is pool-owned once a zero-copy
+         * publish has happened, but it starts life as the staging-path
+         * malloc - claim() sorts the two (non-pool = ours to free, so the
+         * pool never sees a foreign pointer). d.src is pool-owned by
+         * construction (the worker only ever fills it from the pool). */
+        if (d.buf && !nr_async_claim(data->async, d.buf))
+            free(d.buf);
+        if (d.src)
+            nr_async_give_buf(data->async, d.src);
     }
     return landed;
 }
@@ -1968,25 +2080,79 @@ static int async_take_fgi(device_data *data, swapchain_data *chain,
     return 1;
 }
 
+/* Low-rate serve-class diag: one line per policy class TRANSITION
+ * (residual-served vs stale-served vs raw vs generated), capped at ~3/s
+ * with the suppressed flips counted into the next line. */
+static void serve_class_note(const char *cls)
+{
+    static char last[16];
+    static uint64_t last_ms;
+    static unsigned long run, skipped;
+    uint64_t now = nr_now_ms();
+    if (!strcmp(cls, last)) { run++; return; }
+    if (now - last_ms >= 300) {
+        nr_log("[nr_layer] serve class %s -> %s (prev x%lu%s)",
+               last[0] ? last : "none", cls, run,
+               skipped ? ", flips suppressed" : "");
+        last_ms = now;
+        skipped = 0;
+    } else skipped++;
+    run = 0;
+    snprintf(last, sizeof last, "%s", cls);
+}
+
 /* Unified async output choice for every managed present: a fresh FG
- * reply first (its single display slot), then the newest PROC result
- * while the reply stream is live, else -2 = "present the current raw
- * frame, do NOT re-blit the stale result" (the caller treats -2 as
- * fail-but-no-hold). The processed-stream staleness bound only applies
- * to NEW content - identical/near-identical input replays the result at
- * any age via the reuse gate (static content cannot go stale visually).
- * mapped holds the raw captured frame on entry; a 0 return means mapped
- * now holds the frame to blit. */
+ * reply first (its single display slot), then the serve-residual
+ * composite (CURRENT raw + freshest enhancement delta - have_raw must be
+ * set, i.e. mapped holds THIS present's captured frame), then the newest
+ * PROC result while the reply stream is live, else -2 = "present the
+ * current raw frame, do NOT re-blit the stale result" (the caller treats
+ * -2 as fail-but-no-hold). The processed-stream staleness bound only
+ * applies to NEW content - identical/near-identical input replays the
+ * result at any age via the reuse gate (static content cannot go stale
+ * visually). mapped holds the raw captured frame on entry; a 0 return
+ * means mapped now holds the frame to blit. */
 static int async_serve_best(device_data *data, swapchain_data *chain,
-                            VkDeviceSize want)
+                            VkDeviceSize want, int have_raw)
 {
     if (!data->mapped || data->staging_size < want) {
         diag_path = "araw";
+        serve_class_note("araw");
         return -2;
     }
     if (async_take_fgi(data, chain, want)) {
         diag_path = "afgi";
+        serve_class_note("afgi");
         return 0;
+    }
+    /* Serve-residual: mapped holds the CURRENT captured raw frame. A
+     * residual-composited display frame is display content ONLY - it is
+     * never written into result/mid/earlier/fgi, so it can never become
+     * an anchor or a reuse source (the mode-2 mid frame is captured from
+     * mapped BEFORE this call).
+     * Reject fallback ordering (g_resid_fb_raw=1, default): the freshest
+     * enhancement applicable to content that moved or outlived the pair
+     * is NONE - mapped already holds current content, so it goes out as
+     * raw rather than re-showing the stale processed frame (which would
+     * re-freeze the display at the daemon's reply cadence on exactly the
+     * animated content this exists for). Packed 10-bit formats and
+     * have_raw=0 presents cannot produce current content either way and
+     * keep the legacy stale-first order below. */
+    if (have_raw && data->resid) {
+        int v = nr_residual_apply(data->resid,
+                                  (unsigned char *)data->mapped,
+                                  chain->extent.width, chain->extent.height,
+                                  (uint64_t)chain->swapchain, nr_now_ms());
+        if (v == NR_RESIDUAL_APPLIED) {
+            diag_path = "ares";
+            serve_class_note("ares");
+            return 0;
+        }
+        if (g_resid_fb_raw && frame_byte_order(chain->format) >= 0) {
+            diag_path = "arej";
+            serve_class_note("arej");
+            return -2;
+        }
     }
     if (data->result_valid && data->result
         && data->result_size >= want
@@ -1997,12 +2163,15 @@ static int async_serve_best(device_data *data, swapchain_data *chain,
             || nr_now_ms() - data->result_ms <= (uint64_t)g_async_stale_ms) {
             memcpy(data->mapped, data->result, (size_t)want);
             diag_path = "aserv";
+            serve_class_note("aserv");
             return 0;
         }
         diag_path = "astale";
+        serve_class_note("astale");
         return -2;
     }
     diag_path = "araw";
+    serve_class_note("araw");
     return -2;
 }
 
@@ -2166,7 +2335,8 @@ static int process_frame(device_data *data, swapchain_data *chain,
                 nr_log("[nr_layer] async submit dropped (frame %lu)",
                        frame_counter);
             }
-            return async_serve_best(data, chain, needed);
+            /* have_raw=1: mapped holds THIS present's captured frame. */
+            return async_serve_best(data, chain, needed, 1);
         }
         /* worker failed to start once: sync exchange fallback below */
     }
@@ -2288,8 +2458,18 @@ static int resend_raw(device_data *data, swapchain_data *chain)
     VkDeviceSize needed = data->raw_size;
     if (!data->raw || !needed || !data->raw_w || !data->raw_h) return -1;
     if (!data->result || data->result_size < needed) {
+        /* A pool-published result cannot be realloc'd in place - claim()
+         * hands it back to the async pool first; the fresh slot below is
+         * caller-owned again (realloc(NULL) == malloc). */
+        if (data->async && nr_async_claim(data->async, data->result)) {
+            data->result = NULL;
+            data->result_size = 0;
+        }
         unsigned char *grown = (unsigned char *)realloc(data->result, (size_t)needed);
-        if (!grown) return -1;
+        if (!grown) {
+            if (!data->result) data->result_valid = 0;
+            return -1;
+        }
         data->result = grown;
         data->result_size = needed;
     }
@@ -2481,6 +2661,11 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
         for (int i = 0; i < 8; i++) {
             devices[i].have_earlier = 0;
             devices[i].reuse_run = 0;
+            /* A knob turn changes what the SAME input produces - the held
+             * residual pair encodes the old values, drop it (the next
+             * reply re-arms at the new strength in ~one round-trip). */
+            if (devices[i].resid)
+                nr_residual_invalidate(devices[i].resid);
         }
     }
     init_freeze_paths();
@@ -2792,8 +2977,10 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                     /* serve-best: a pending fgi midpoint (the previous
                      * interval's generated frame, landing right at its
                      * natural cadence slot), else the freshest processed
-                     * anchor, else the raw mid just captured. */
-                    if (async_serve_best(data, chain, want) == 0) {
+                     * anchor, else the raw mid just captured. have_raw=1:
+                     * the mid was captured into data->mid above and
+                     * mapped still holds it. */
+                    if (async_serve_best(data, chain, want, 1) == 0) {
                         diag_tr = transfer(data, chain, queue, index, 1);
                         held = (diag_tr == 0);
                     }
@@ -2890,7 +3077,8 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                                 (size_t)want, NULL))
                             nr_log("[nr_layer] async NRN2 dropped "
                                    "(frame %lu)", frame_counter);
-                        if (async_serve_best(data, chain, want) == 0) {
+                        /* have_raw=1: mapped is the just-captured frame. */
+                        if (async_serve_best(data, chain, want, 1) == 0) {
                             diag_tr = transfer(data, chain, queue, index, 1);
                             if (diag_tr == 0) {
                                 generated = 1;
@@ -2950,7 +3138,11 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
              * splice between processed frames is a visible quality strobe. */
             int held = 0;
             if (data->async) {
-                if (async_serve_best(data, chain, want) == 0) {
+                /* have_raw=0: this cadence-skipped present does NOT
+                 * readback - mapped still holds the previous present's
+                 * output, so serve-residual must not composite onto it
+                 * (applying the delta to non-raw content double-adds). */
+                if (async_serve_best(data, chain, want, 0) == 0) {
                     diag_tr = transfer(data, chain, queue, index, 1);
                     held = (diag_tr == 0);
                 }
