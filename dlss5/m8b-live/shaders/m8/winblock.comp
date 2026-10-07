@@ -308,8 +308,8 @@ void main() {
         vec2 pair = unpackHalf2x16(u32[scratch + widx]);
         precise float first = pair.x * scale;
         precise float second = pair.y * scale;
-        u32[scratch + widx] = packHalf2x16(vec2(e4m3(half_round(first)),
-                                                e4m3(half_round(second))));
+        u32[scratch + widx] = packHalf2x16(vec2(e4m3(half_round_hw(first)),
+                                                e4m3(half_round_hw(second))));
     }
     subgroupMemoryBarrierShared();
     subgroupBarrier();

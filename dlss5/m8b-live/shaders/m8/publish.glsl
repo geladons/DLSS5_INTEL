@@ -79,6 +79,11 @@ float f16_widen(uint h) {
 }
 
 float half_round(float x) { return f16_widen(f16_round_bits(floatBitsToUint(x))); }
+/* Hardware f32->f16->f32 round-trip through a real float16_t temporary: the
+ * conversion survives the compiler here (the pack/unpack spelling is the one
+ * that gets folded). RNE, ~2 instructions vs ~35 for half_round(). Only safe
+ * where f16-subnormal-range results cannot reach memory - see publish_hw(). */
+float half_round_hw(float x) { float16_t h = float16_t(x); return float(h); }
 
 float e4m3(float x) {
     float magnitude = min(abs(x), 448.0);
@@ -100,6 +105,40 @@ float gate_activation(float x) {
     linear += 0.89453125;
     linear = half_round(linear);
     return half_round(wide * linear);
+}
+
+/* Hardware-rounding gate variant for EPI_GATE_E4M3 epilogues.
+ * `float16_t(x)` performs a real f32->f16 conversion on this driver (unlike the
+ * packHalf2x16/unpackHalf2x16 pair, which the compiler folds to a no-op). It is
+ * round-to-nearest-even, bit-identical to half_round() over the f16 normal
+ * range and overflow-to-inf - verified bit-exact against the full selftest.
+ * The ONLY possible divergence vs half_round() is on inputs whose f16-rounded
+ * result would be an f16 subnormal (|v| < 2^-14): a driver may flush those to
+ * zero where the software path emits subnormal bits. A value that small is
+ * annihilated downstream: gate_activation's output is <= 6.1e-5 there, which
+ * e4m3() rounds to 0 (its zero boundary is 2^-10) and int8 requantize rounds to
+ * 0 as well. publish_hw() therefore routes only epilogue 3 (GATE_E4M3) through
+ * the hardware gate; epilogues 2 (gate -> direct f16 store) and 4 (plain
+ * half_round store) keep the software path since their subnormal bits reach
+ * memory. publish_hw(e) == publish(e) bit-for-bit for every e. */
+float gate_activation_hw(float x) {
+    precise float wide = half_round_hw(x);
+    precise float clamped = clamp(wide, -4.0, 4.0);
+    precise float linear = abs(clamped) * -0.055908203125;
+    linear += 0.447265625;
+    linear = half_round_hw(linear);
+    linear *= clamped;
+    linear += 0.89453125;
+    linear = half_round_hw(linear);
+    return half_round_hw(wide * linear);
+}
+
+float publish_hw(uint epilogue, float value) {
+    if (epilogue == 3u) value = gate_activation_hw(value);
+    if (epilogue == 2u) value = gate_activation(value);
+    if (epilogue == 1u || epilogue == 3u) value = e4m3(value);
+    if (epilogue == 4u) value = half_round(value);
+    return value;
 }
 
 /* The publish an epilogue applies: bits 8-11 of a pass's `flags` pick the transform. */

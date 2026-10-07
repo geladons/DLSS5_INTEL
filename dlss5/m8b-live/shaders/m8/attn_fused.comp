@@ -211,8 +211,8 @@ void main() {
             vec2 w = unpackHalf2x16(pk[i]);
             precise float p0 = w.x * recip;
             precise float p1 = w.y * recip;
-            sS[base + i * 2u + 0u] = float16_t(e4m3(half_round(p0)));
-            sS[base + i * 2u + 1u] = float16_t(e4m3(half_round(p1)));
+            sS[base + i * 2u + 0u] = float16_t(e4m3(half_round_hw(p0)));
+            sS[base + i * 2u + 1u] = float16_t(e4m3(half_round_hw(p1)));
         }
     }
 

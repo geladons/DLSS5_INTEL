@@ -127,7 +127,7 @@ void main() {
             for (uint i = 0u; i < RM; ++i)
                 for (uint j = 0u; j < RN; ++j) {
                     for (uint e = 0u; e < acc[i][j].length(); ++e)
-                        acc[i][j][e] = float16_t(publish(3u, float(acc[i][j][e])));
+                        acc[i][j][e] = float16_t(publish_hw(3u, float(acc[i][j][e])));
                     coopMatStore(acc[i][j], sHid, (i * TM) * 128u + sg * 32u + j * TN,
                                  128u, gl_CooperativeMatrixLayoutRowMajor);
                 }

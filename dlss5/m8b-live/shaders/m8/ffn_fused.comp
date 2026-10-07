@@ -188,7 +188,7 @@ void main() {
                 uint cc = c_base + k;
                 float scale_b = (cc < 4u * C) ? pc.w1s.v[cc] : 0.0;
                 float val = float(stage[sb + e + k]) * (scaleA * scale_b);
-                val = publish(EPI_GATE_E4M3, val);
+                val = publish_hw(EPI_GATE_E4M3, val);
                 stage[sb + e + k] = floatBitsToInt(val);
                 if (r < pc.m && cc < 4u * C)
                     tileMax = max(tileMax, abs(val));

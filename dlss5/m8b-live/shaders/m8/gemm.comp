@@ -716,7 +716,7 @@ void main() {
     for (uint i = 0u; i < RM; i++)
         for (uint j = 0u; j < RN; j++) {
             for (uint e = 0u; e < acc[i][j].length(); e++)
-                acc[i][j][e] = ACC(publish(epilogue, float(acc[i][j][e])));
+                acc[i][j][e] = ACC(publish_hw(epilogue, float(acc[i][j][e])));
             if (narrow) {
                 coopMatStore(acc[i][j], stage, i * TM * BN + j * TN, BN,
                              gl_CooperativeMatrixLayoutRowMajor);

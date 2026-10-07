@@ -89,8 +89,8 @@ void main() {
         for (uint i = 0u; i < 32u; ++i) {
             precise float p0 = w_cache[i].x * reciprocal;
             precise float p1 = w_cache[i].y * reciprocal;
-            pc.c.v[base + i * 2u]      = float16_t(e4m3(half_round(p0)));
-            pc.c.v[base + i * 2u + 1u] = float16_t(e4m3(half_round(p1)));
+            pc.c.v[base + i * 2u]      = float16_t(e4m3(half_round_hw(p0)));
+            pc.c.v[base + i * 2u + 1u] = float16_t(e4m3(half_round_hw(p1)));
         }
         return;
     }
@@ -107,7 +107,7 @@ void main() {
         weights_at(base, i, biasBase, w0, w1);
         precise float p0 = w0 * reciprocal;
         precise float p1 = w1 * reciprocal;
-        pc.c.v[base + i]      = float16_t(e4m3(half_round(p0)));
-        pc.c.v[base + i + 1u] = float16_t(e4m3(half_round(p1)));
+        pc.c.v[base + i]      = float16_t(e4m3(half_round_hw(p0)));
+        pc.c.v[base + i + 1u] = float16_t(e4m3(half_round_hw(p1)));
     }
 }

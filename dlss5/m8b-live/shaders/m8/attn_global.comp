@@ -244,8 +244,8 @@ void main() {
         for (uint i = 0u; i < T6P; i += 2u) {
             precise float p0 = float(sS[rb + i]) * reciprocal;
             precise float p1 = float(sS[rb + i + 1u]) * reciprocal;
-            sS[rb + i]      = float16_t(e4m3(half_round(p0)));
-            sS[rb + i + 1u] = float16_t(e4m3(half_round(p1)));
+            sS[rb + i]      = float16_t(e4m3(half_round_hw(p0)));
+            sS[rb + i + 1u] = float16_t(e4m3(half_round_hw(p1)));
         }
     }
     barrier();

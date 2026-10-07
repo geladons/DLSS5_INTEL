@@ -383,7 +383,7 @@ void main() {
                 uint c = c_base + k;
                 float scale_b = (c < pc.n) ? pc.b_scale.v[c] : 0.0;
                 float val = float(stage[e + k]) * (act_scale * scale_b);
-                if (epilogue != 0u) val = publish(epilogue, val);
+                if (epilogue != 0u) val = publish_hw(epilogue, val);
                 stage_f[e + k] = val;
                 if (r < pc.m && c < pc.n) {
                     my_max = max(my_max, abs(val));
@@ -531,7 +531,7 @@ void main() {
                 uint c = c_base + k;
                 float scale_b = (c < pc.n) ? pc.b_scale.v[c] : 0.0;
                 float val = float(stage[e + k]) * (act_scale * scale_b);
-                if (epilogue != 0u) val = publish(epilogue, val);
+                if (epilogue != 0u) val = publish_hw(epilogue, val);
                 v_out[k] = val;
             }
             if (narrow) {
