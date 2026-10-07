@@ -58,8 +58,14 @@
  *                     it is alive. 0 = serve the held result at any age.
  *                     Identical input never reaches the bound (the reuse
  *                     gate replays the processed result for statics).
- *   NR_LAYER_RESIDUAL 0 = disable serve-residual (default ON on the async
- *                     TCP path; bisect knob). When a present has no fresh
+ *   NR_LAYER_RESIDUAL 1 = enable serve-residual (default OFF; opt-in).
+ *                     Field report 2026-10-06: even the per-pixel-masked
+ *                     residual reads worse than a coherent stale frame on
+ *                     sustained motion (coverage dithers per-pixel at ~12
+ *                     Hz and rejected frames flash raw). Until the residual
+ *                     is motion-warped the stale-processed serve is the
+ *                     shipped default. When enabled and a present has no
+ *                     fresh
  *                     reply for its own content, the layer displays the
  *                     CURRENT raw frame + the newest reply's enhancement
  *                     delta (proc - its source, stored by nr_residual.c)
@@ -1152,7 +1158,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
                 if (g_async_stale_ms < 0) g_async_stale_ms = 0;
             }
             const char *re = getenv("NR_LAYER_RESIDUAL");
-            g_residual = !re || strcmp(re, "0") != 0;
+            g_residual = re && strcmp(re, "0") != 0;
             const char *rm = getenv("NR_LAYER_RESIDUAL_MS");
             if (rm) {
                 g_resid_ms = atol(rm);
