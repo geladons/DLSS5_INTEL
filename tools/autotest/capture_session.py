@@ -18,14 +18,14 @@
 #   8. manifest.json + capture.log in --out; all spawned processes killed,
 #      commandline.txt restored byte-exact, one-line RESULT printed.
 #
-# KNOWN LIMITATION (documented, do not re-attempt): GTA IV ignores ALL
-# injected input on this host (SendInput/PostMessage/mouse_event/UIA -
-# verified 2026-10-03). There is NO commandline arg to auto-load a
-# savegame or skip the main menu - the complete commandline.txt vocabulary
-# is graphics/memory/audio/input-method flags only (-benchmark is the
-# single auto-run mode, it plays a fixed flythrough then self-exits).
-# Reaching gameplay therefore requires Sunshine's virtual HID (owner
-# session) or physical input; menu and benchmark modes need none.
+# INPUT: GTA IV ignores ALL injected keyboard/mouse input on this host
+# (SendInput/PostMessage/mouse_event/UIA - verified 2026-10-03). The only
+# synthetic input the game accepts is a ViGEmBus virtual X360 pad - see
+# pad.py + --drive (field report 2026-10-05: menus AND gameplay driven
+# end-to-end). There is still NO commandline arg to auto-load a savegame
+# or skip the main menu - the complete commandline.txt vocabulary is
+# graphics/memory/audio/input-method flags only (-benchmark is the single
+# auto-run mode, it plays a fixed flythrough then self-exits).
 #
 # Timeline segmentation is NOT done here: we record continuously from
 # window-stable and let the analyzer bucket phases (loading art ~static,
@@ -37,6 +37,9 @@
 #   python capture_session.py --mode benchmark --native --out out\native1
 #   python capture_session.py --mode benchmark --env NR_LAYER_RESIDUAL=1 \
 #       --env NR_LAYER_RESIDUAL_FB=1 --fg 2 --out out\ab1
+#   python capture_session.py --mode menu --dur 60 --pre-roll 150 \
+#       --drive menu_play --out out\g1   (records REAL gameplay: the
+#       virtual pad navigates menus during pre-roll, then wanders)
 # ============================================================================
 import argparse
 import ctypes
@@ -294,6 +297,15 @@ def parse_args():
                          "occluder minimize) - only the trigger is re-armed; "
                          "isolates whether window management itself breaks "
                          "painting")
+    ap.add_argument("--drive", default="none",
+                    choices=("none", "menu_play", "wander"),
+                    help="scripted X360-pad input during the session "
+                         "(pad.py, needs ViGEmBus+vgamepad). menu_play = "
+                         "legal->select->menu->PLAY->gameplay wander; "
+                         "wander = gameplay motion only; none = no input. "
+                         "Thread starts when the game window appears and "
+                         "stops with the session; attach failure just "
+                         "logs and skips")
     ap.add_argument("--keep-raw", action="store_true",
                     help="keep the raw BGRA capture (huge: w*h*4*fps*dur)")
     ap.add_argument("--no-warm", action="store_true",
@@ -337,6 +349,7 @@ def main():
         "requested_dur_s": a.dur,
         "fg_mode": a.fg,
         "native": bool(a.native),
+        "drive": a.drive,
         "park": None if a.no_park else a.park,
         "paths": {"game": a.game, "m11d": a.m11d, "weights": weights,
                   "ddarec": a.ddarec, "ffmpeg": a.ffmpeg, "outdir": outdir},
@@ -348,6 +361,8 @@ def main():
     daemon_spawned = False
     stop_keeper = threading.Event()
     keeper_thread = [None]
+    stop_drive = threading.Event()
+    drive_thread = [None]
     minimized_hwnds = []          # windows hidden for the run; restored in finally
     layer_log_off = 0
     rec_region = None
@@ -599,6 +614,43 @@ def main():
         keeper_thread[0] = threading.Thread(target=keeper, daemon=True)
         keeper_thread[0].start()
 
+        # ---------- drive thread: scripted X360 pad input (optional) -----
+        # Starts NOW, with the window already appearing/defended: the
+        # sequence clock counts from here (~+21 s post-launch on this
+        # host), so early events land on the legal/intro screens and the
+        # menu-arrival sweep brackets the (~110-200 s varying) main menu.
+        # The keeper owns foreground state - pad presses need it and the
+        # keeper already maintains it; this thread must ONLY call the pad.
+        # All input failures are soft: no vgamepad/ViGEmBus -> logged skip,
+        # never a failed capture.
+        def drive():
+            if a.drive == "none":
+                return
+            try:
+                import pad
+            except Exception as e:
+                log("[drive] pad module unavailable: %r - skipped" % e)
+                return
+            ctl = pad.Pad(log=lambda m: log("[drive] " + m))
+            if not ctl.attach():
+                return
+            events = [e for e in pad.SEQUENCES.get(a.drive, ())]
+            log("[drive] %s: %d events over %.0fs"
+                % (a.drive, len(events),
+                   events[-1][0] if events else 0))
+            try:
+                ctl.play_sequence(events, stop=stop_drive)
+            except Exception as e:
+                log("[drive] sequence aborted: %r" % e)
+            finally:
+                ctl.release()
+
+        if a.drive != "none":
+            drive_thread[0] = threading.Thread(target=drive, daemon=True)
+            drive_thread[0].start()
+            ts["t_drive_start"] = time.time()
+            log("[drive] thread started (t0 = sequence clock)")
+
         # stabilize: identical rect for settle_secs, THEN freeze it as the
         # record rect (--park overrides with a foreign rect, best-effort)
         stable_since = time.time()
@@ -731,6 +783,9 @@ def main():
 
     finally:
         stop_keeper.set()
+        stop_drive.set()
+        if drive_thread[0]:
+            drive_thread[0].join(timeout=5)
         if keeper_thread[0]:
             keeper_thread[0].join(timeout=3)
         # put back every window we minimized for the capture

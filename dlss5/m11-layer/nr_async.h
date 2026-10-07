@@ -114,6 +114,13 @@ int nr_async_claim(NrAsync *a, unsigned char *buf);
 unsigned long nr_async_dropped(const NrAsync *a);     /* evicted requests */
 unsigned long nr_async_submitted(const NrAsync *a);   /* queued requests */
 
+/* Submit-pacing probes (present thread only reads them - the values are
+ * advisory, a same-instant race just falls back to the bounded queue):
+ * pending() = requests waiting in the ring (not yet in flight),
+ * busy()    = pending + the request the worker is exchanging now. */
+int nr_async_pending(NrAsync *a);
+int nr_async_busy(NrAsync *a);
+
 #ifdef __cplusplus
 }
 #endif

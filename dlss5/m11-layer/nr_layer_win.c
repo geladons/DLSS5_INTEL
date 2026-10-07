@@ -58,6 +58,37 @@
  *                     it is alive. 0 = serve the held result at any age.
  *                     Identical input never reaches the bound (the reuse
  *                     gate replays the processed result for statics).
+ *   NR_LAYER_SERVE_STALE  0 = legacy: a held result older than the async
+ *                     stale bound emits the current raw frame (the -2
+ *                     policy raw). Default ON (1): a processed result that
+ *                     exists for this extent+format+chain is ALWAYS
+ *                     preferred over raw, however old - a coherent stale
+ *                     processed frame beats a single-frame raw splice
+ *                     (the measured raw-pop flashes). Freshness then only
+ *                     picks the diag tag: aserv when the result's source
+ *                     is among the last NR_LAYER_STALE_MATCH captured
+ *                     uploads (or it just landed), stale when older.
+ *                     Raw remains possible only at cold start (no result
+ *                     ever) or after an extent/format/chain change.
+ *   NR_LAYER_STALE_MATCH  N (default 4, clamp 1..8): the captured-upload
+ *                     CRC window a held result's source must hit to count
+ *                     as content-fresh. Content match, not the clock, is
+ *                     the freshness test - a reply that lands "late" on a
+ *                     static scene still answers what the user sees.
+ *   NR_LAYER_SUBMIT_IDLE  0 = submit every process-eligible present (the
+ *                     legacy flood: bounded ring, drop-oldest, most frames
+ *                     die in queue before the daemon sees them). Default
+ *                     1: submit only while the worker's pending ring is
+ *                     empty - the daemon always works on the freshest
+ *                     captured frame and replies stay <= ~2 submits old.
+ *                     2 = stricter: also wait for the in-flight exchange
+ *                     to finish (fully serial; freshest requests, a bit
+ *                     less daemon throughput).
+ *   NR_LAYER_SUBMIT_EVERY N (default 1 = every eligible present): an
+ *                     additional hard decimation - only every Nth
+ *                     eligible present may submit. For rapid-change
+ *                     content (loading screens) N=2..3 halves the daemon
+ *                     load; combines with SUBMIT_IDLE (both must allow).
  *   NR_LAYER_RESIDUAL 1 = enable serve-residual (default OFF on the async
  *                     TCP path). Disabled by the owner field report: on
  *                     sustained camera motion the masked compose still
@@ -178,6 +209,7 @@
 #define MAX_IMAGES 8
 #define SYNC_SLOTS 4
 #define NR_MAX_WAITS 16
+#define NR_CAP_RING 8   /* capture-CRC ring depth (STALE_MATCH clamp) */
 
 static int sync_semaphores;
 
@@ -258,6 +290,22 @@ typedef struct device_data {
     int async_failed;            /* create failed once - do not retry+spam */
     uint64_t result_ms;          /* tick the current result landed at */
     unsigned long result_seq;    /* submission seq the result answers */
+    /* Content-freshness bookkeeping for the serve policy: the held
+     * result's source identity + a small ring of the most recent
+     * captured-upload CRCs. A reply whose source still matches a recent
+     * upload answers content the user just saw - it is fresh regardless
+     * of wall-clock age (the slow daemon round-trip is the normal case,
+     * so age alone cannot tell "stale" from "still current"). */
+    uint32_t result_src_crc;     /* crc of the raw frame result answers;
+                                  * 0 when the reply carried no source */
+    uint32_t result_fmt;         /* wire format of the held result */
+    unsigned long result_age;    /* submits issued since the answer frame */
+    uint32_t cap_crc[NR_CAP_RING]; /* last captured-upload CRCs */
+    unsigned cap_fill;             /* ring fill count, <= NR_CAP_RING */
+    unsigned cap_next;             /* next ring write slot */
+    unsigned long submit_seq;      /* newest issued submission seq */
+    unsigned long submit_tick;     /* per-device submit-eligibility clock */
+    unsigned long submit_skipped;  /* pacing-gate skips (stats only) */
     /* Serve-residual compositor (nr_residual.h): keeps the newest
      * (source_raw, proc_reply) pair so a present without a fresh reply can
      * display CURRENT raw + the freshest enhancement delta instead of the
@@ -342,6 +390,15 @@ static int g_async = -1;        /* -1 uninited (CreateInstance reads env) */
  * processed result for static content regardless of age). 0 disables
  * the bound entirely. */
 static long g_async_stale_ms = 500;
+/* Serve-policy knobs (NR_LAYER_SERVE_STALE / _STALE_MATCH /
+ * _SUBMIT_IDLE / _SUBMIT_EVERY - see the header block): prefer a held
+ * processed result over raw at any age, and pace async submits so the
+ * daemon's pending ring stays empty and every request it runs is the
+ * freshest captured frame. */
+static int g_serve_stale = 1;
+static long g_stale_match = 4;
+static int g_submit_idle = 1;
+static long g_submit_every = 1;
 /* Serve-residual (NR_LAYER_RESIDUAL, async TCP path only): while the
  * newest reply pair is fresh AND the current frame still resembles the
  * pair's source, a present displays cur_raw + residual instead of the
@@ -1259,6 +1316,22 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
                       if (g_gpuwarp_radius > 64) g_gpuwarp_radius = 64; }
             const char *gd = getenv("NR_LAYER_GPUWARP_DBG");
             g_gpuwarp_dbg = gd && strcmp(gd, "0") != 0;
+            const char *sv = getenv("NR_LAYER_SERVE_STALE");
+            g_serve_stale = !sv || strcmp(sv, "0") != 0;
+            const char *sm = getenv("NR_LAYER_STALE_MATCH");
+            if (sm) {
+                g_stale_match = atol(sm);
+                if (g_stale_match < 1) g_stale_match = 1;
+                if (g_stale_match > NR_CAP_RING)
+                    g_stale_match = NR_CAP_RING;
+            }
+            const char *si = getenv("NR_LAYER_SUBMIT_IDLE");
+            if (si) g_submit_idle = atoi(si);
+            const char *se = getenv("NR_LAYER_SUBMIT_EVERY");
+            if (se) {
+                g_submit_every = atol(se);
+                if (g_submit_every < 1) g_submit_every = 1;
+            }
         }
         hotkeys_ensure();
         if (live_every > 0)
@@ -1271,6 +1344,11 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
         if (nr_port)
             nr_log("[nr_layer] async daemon submit: %s (stale bound %ld ms)",
                    g_async ? "on" : "OFF (sync exchange)", g_async_stale_ms);
+        if (nr_port && g_async)
+            nr_log("[nr_layer] serve policy: serve-stale %s (match window "
+                   "%ld), submit pacing idle=%d every=%ld",
+                   g_serve_stale ? "on" : "OFF (legacy raw)",
+                   g_stale_match, g_submit_idle, g_submit_every);
         if (nr_port && g_async)
             nr_log("[nr_layer] serve-residual: %s (age bound %ld ms, "
                    "pixel eps %ld, cut bound %ld.%02ld, moved share %ld pm, "
@@ -2191,6 +2269,14 @@ static int async_drain(device_data *data)
             data->holding_chain = (VkSwapchainKHR)d.chain;
             data->result_ms = nr_now_ms();
             data->result_seq = d.seq;
+            /* Content identity of the frame this result answers: the
+             * serve freshness test matches it against the capture-CRC
+             * ring (fix B). src==NULL (pool dry) degrades the test to
+             * the submit-age / wall-clock fallback. */
+            data->result_src_crc = d.src ? diag_crc(d.src, d.src_bytes) : 0;
+            data->result_fmt = d.fmt;
+            data->result_age = (data->submit_seq > d.seq)
+                               ? data->submit_seq - d.seq : 0;
             landed = 1;
             /* A newer anchor supersedes an undisplayed midpoint: showing
              * a midpoint of an interval that already closed backwards
@@ -2431,17 +2517,61 @@ static int async_serve_best(device_data *data, swapchain_data *chain,
         && data->result_size >= want
         && data->result_w == chain->extent.width
         && data->result_h == chain->extent.height
-        && data->holding_chain == chain->swapchain) {
-        if (g_async_stale_ms <= 0
-            || nr_now_ms() - data->result_ms <= (uint64_t)g_async_stale_ms) {
-            memcpy(data->mapped, data->result, (size_t)want);
-            diag_path = "aserv";
-            serve_class_note("aserv", -1);
-            return 0;
+        && data->holding_chain == chain->swapchain
+        && (!data->result_fmt
+            || data->result_fmt == (uint32_t)chain->format)) {
+        /* Freshness = CONTENT match, not the clock: the held result is
+         * fresh when its source frame is still among the last
+         * NR_LAYER_STALE_MATCH captured uploads (a reply that lands
+         * "late" on a static or re-presented scene still answers what
+         * the user sees). Replies that arrived without their source copy
+         * (pool dry) fall back to the submit-age count, then to the
+         * wall-clock bound. With serve-stale on, freshness only picks
+         * the diag tag - a stale coherent frame is always served over
+         * raw. serve_stale=0 reproduces the legacy clock-only policy. */
+        int fresh;
+        if (!g_serve_stale) {
+            fresh = (g_async_stale_ms <= 0
+                     || nr_now_ms() - data->result_ms
+                        <= (uint64_t)g_async_stale_ms);
+            if (fresh) {
+                memcpy(data->mapped, data->result, (size_t)want);
+                diag_path = "aserv";
+                serve_class_note("aserv", -1);
+                return 0;
+            }
+            diag_path = "astale";
+            serve_class_note("astale", -1);
+            return -2;
         }
-        diag_path = "astale";
-        serve_class_note("astale", -1);
-        return -2;
+        if (data->result_src_crc) {
+            /* Two ways to be content-fresh: the reply is only a few
+             * submits behind the newest one (the pacing gate keeps this
+             * <= ~2), or its source still matches one of the last
+             * STALE_MATCH captured uploads (static/re-presented scene,
+             * however the submits were spaced). */
+            unsigned lim = data->cap_fill < (unsigned)g_stale_match
+                           ? data->cap_fill : (unsigned)g_stale_match;
+            unsigned k;
+            fresh = (data->result_age <= (unsigned long)g_stale_match);
+            for (k = 0; !fresh && k < lim; k++) {
+                unsigned at = (data->cap_next + NR_CAP_RING - 1 - k)
+                              % NR_CAP_RING;
+                if (data->cap_crc[at] == data->result_src_crc) {
+                    fresh = 1;
+                    break;
+                }
+            }
+        } else {
+            fresh = (data->result_age <= (unsigned long)g_stale_match)
+                || (g_async_stale_ms <= 0
+                    || nr_now_ms() - data->result_ms
+                       <= (uint64_t)g_async_stale_ms);
+        }
+        memcpy(data->mapped, data->result, (size_t)want);
+        diag_path = fresh ? "aserv" : "stale";
+        serve_class_note(diag_path, -1);
+        return 0;
     }
     diag_path = "araw";
     serve_class_note("araw", -1);
@@ -2476,6 +2606,15 @@ static int process_frame(device_data *data, swapchain_data *chain,
         diag_path = "rbfail";
         return -1;
     }
+
+    /* Capture-CRC ring: every frame that reaches the screen through this
+     * path, submitted or not. The serve freshness test asks "does the
+     * held result answer content the user recently saw" - repeated
+     * bit-identical frames share the same CRC, so a static scene keeps
+     * its replies content-fresh however the submits are paced. */
+    data->cap_crc[data->cap_next] = diag_crc(data->mapped, needed);
+    data->cap_next = (data->cap_next + 1) % NR_CAP_RING;
+    if (data->cap_fill < NR_CAP_RING) data->cap_fill++;
 
     /* Exact-repeat reuse: a frame identical to the previous one reuses the
      * last processed result instead of running the chain again. data->result
@@ -2551,6 +2690,7 @@ static int process_frame(device_data *data, swapchain_data *chain,
                 data->result_h = chain->extent.height;
                 data->result_valid = 1;
                 data->holding_chain = chain->swapchain;
+                data->result_fmt = (uint32_t)chain->format;
                 data->earlier_pending = 0;
             }
             dump_capture(capture_out_path, header, (const unsigned char *)data->mapped, needed);
@@ -2598,15 +2738,45 @@ static int process_frame(device_data *data, swapchain_data *chain,
                                  chain->extent.height,
                                  (uint32_t)chain->format };
             data->earlier_pending = 0;
-            if (nr_async_submit(data->async, NR_ASYNC_PROC,
-                                (uint64_t)chain->swapchain, ahdr,
-                                (const unsigned char *)data->mapped,
-                                (size_t)needed, NULL) != 0) {
-                /* Mailbox would not take the frame (pool exhaustion is
-                 * nearly impossible): the newest pending submission still
-                 * covers fresher content than the last reply - serve. */
-                nr_log("[nr_layer] async submit dropped (frame %lu)",
-                       frame_counter);
+            /* Submit pacing (fix C): the bounded ring used to absorb an
+             * every-present submit flood by evicting the oldest - most
+             * frames died in queue and the daemon processed a stale
+             * backlog. With the gate on, a submit lands only while the
+             * pending ring is empty (SUBMIT_IDLE=1) or the worker is
+             * fully idle (=2): the request the daemon runs is always the
+             * freshest captured frame and its reply stays <= ~2 submits
+             * old. SUBMIT_EVERY=N adds a hard decimation on top for
+             * rapid-change content. Skipped presents still capture,
+             * serve and present normally - only the queue stops growing. */
+            {
+                int may = 1;
+                data->submit_tick++;
+                if (g_submit_every > 1
+                    && (data->submit_tick % (unsigned long)g_submit_every))
+                    may = 0;
+                if (may && g_submit_idle) {
+                    if (nr_async_pending(data->async)) may = 0;
+                    if (may && g_submit_idle > 1
+                        && nr_async_busy(data->async)) may = 0;
+                }
+                if (!may) {
+                    data->submit_skipped++;
+                } else {
+                    unsigned long seq = 0;
+                    if (nr_async_submit(data->async, NR_ASYNC_PROC,
+                                        (uint64_t)chain->swapchain, ahdr,
+                                        (const unsigned char *)data->mapped,
+                                        (size_t)needed, &seq) != 0) {
+                        /* Mailbox would not take the frame (pool
+                         * exhaustion is nearly impossible): the newest
+                         * pending submission still covers fresher
+                         * content than the last reply - serve. */
+                        nr_log("[nr_layer] async submit dropped "
+                               "(frame %lu)", frame_counter);
+                    } else {
+                        data->submit_seq = seq;
+                    }
+                }
             }
             /* have_raw=1: mapped holds THIS present's captured frame.
              * queue+index are passed through for the GPU compose path,
@@ -2666,6 +2836,7 @@ static int process_frame(device_data *data, swapchain_data *chain,
     data->result_h = chain->extent.height;
     data->result_valid = 1;
     data->holding_chain = chain->swapchain;
+    data->result_fmt = (uint32_t)chain->format;
     data->earlier_pending = 0;
     dump_capture(capture_out_path, header, data->result, needed);
     nr_log("[nr_layer] processed %ux%u", chain->extent.width, chain->extent.height);
@@ -2764,6 +2935,7 @@ static int resend_raw(device_data *data, swapchain_data *chain)
             data->result_h = data->raw_h;
             data->result_valid = 1;
             data->holding_chain = chain->swapchain;
+            data->result_fmt = (uint32_t)chain->format;
             /* result now holds P(raw_frozen), not P(earlier): the
              * earlier->result mapping is broken, so a post-unfreeze frame
              * byte-identical to the stale earlier must not replay this. */
@@ -2800,6 +2972,7 @@ static int resend_raw(device_data *data, swapchain_data *chain)
     data->result_h = data->raw_h;
     data->result_valid = 1;
     data->holding_chain = chain->swapchain;
+    data->result_fmt = (uint32_t)chain->format;
     data->have_earlier = 0;  /* result is P(raw), not P(earlier) - see above */
     nr_log("[nr_layer] reprocessed the held frame (live knob turn)");
     return 0;
@@ -2838,6 +3011,7 @@ static int freeze_capture(device_data *data, swapchain_data *chain,
             data->result_h = chain->extent.height;
             data->result_valid = 1;
             data->holding_chain = chain->swapchain;
+            data->result_fmt = (uint32_t)chain->format;
             data->have_earlier = 0;  /* result is raw, not P(earlier) */
         }
         nr_log("[nr_layer] daemon unavailable; freezing the original frame unprocessed");
@@ -3472,6 +3646,12 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
             nr_log("[nr_layer] fg stats: presents=%lu processed=%lu "
                    "generated=%lu native=%lu",
                    g_fg.presents, g_fg.processed, g_fg.generated, g_fg.native);
+            if (data->async)
+                nr_log("[nr_layer] submit pacing: skipped=%lu queued=%lu "
+                       "evicted=%lu reply_age=%lu",
+                       data->submit_skipped,
+                       nr_async_submitted(data->async),
+                       nr_async_dropped(data->async), data->result_age);
         }
         if (diag_active()) {
             /* pres = residual coverage % (last apply); on a gres serve

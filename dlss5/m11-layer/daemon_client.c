@@ -34,6 +34,18 @@ int exchange(const void *header, size_t header_size, const void *payload,
     DWORD tv = 1500;
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)&tv, sizeof tv);
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof tv);
+    /* Frame payloads are ~2 MB per direction: Nagle + the default 64 KB
+     * buffers fragment a request/reply into dozens of small windowed
+     * writes and delayed-ack stalls on loopback, adding ~10-20 ms to a
+     * round-trip that must fit inside a present cadence. NODELAY plus
+     * payload-sized buffers keep the exchange a single burst. */
+    {
+        int nd = 1;
+        int bs = 4 * 1024 * 1024;
+        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (const char *)&nd, sizeof nd);
+        setsockopt(fd, SOL_SOCKET, SO_SNDBUF, (const char *)&bs, sizeof bs);
+        setsockopt(fd, SOL_SOCKET, SO_RCVBUF, (const char *)&bs, sizeof bs);
+    }
     struct sockaddr_in address;
     memset(&address, 0, sizeof address);
     address.sin_family = AF_INET;

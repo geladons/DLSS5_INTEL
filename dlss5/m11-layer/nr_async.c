@@ -65,6 +65,7 @@ struct NrAsync {
     NrAsyncDone done;
     int done_buf;               /* pool index owned by done.buf, -1 none */
     int done_src;               /* pool index owned by done.src, -1 none */
+    int inflight;               /* worker is inside an exchange (pacing) */
     unsigned long seq_next;
     unsigned long dropped;
     unsigned long submitted;
@@ -134,6 +135,7 @@ static DWORD WINAPI nr_async_worker(LPVOID param)
         r = a->req[a->head];
         a->head = (a->head + 1) % NR_ASYNC_PEND;
         a->count--;
+        a->inflight = 1;
         /* A PROC request additionally claims a second pool slot for the
          * reply: the payload buffer then survives the round-trip intact
          * and is published as done.src (the residual module needs the
@@ -217,6 +219,7 @@ static DWORD WINAPI nr_async_worker(LPVOID param)
                 push_free_locked(a, rbuf);
         }
         a->done_set = 1;
+        a->inflight = 0;
         LeaveCriticalSection(&a->cs);
     }
     return 0;
@@ -410,4 +413,24 @@ unsigned long nr_async_dropped(const NrAsync *a)
 unsigned long nr_async_submitted(const NrAsync *a)
 {
     return a ? a->submitted : 0;
+}
+
+int nr_async_pending(NrAsync *a)
+{
+    int n;
+    if (!a) return 0;
+    EnterCriticalSection(&a->cs);
+    n = a->count;
+    LeaveCriticalSection(&a->cs);
+    return n;
+}
+
+int nr_async_busy(NrAsync *a)
+{
+    int n;
+    if (!a) return 0;
+    EnterCriticalSection(&a->cs);
+    n = a->count + a->inflight;
+    LeaveCriticalSection(&a->cs);
+    return n;
 }

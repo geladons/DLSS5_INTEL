@@ -25,6 +25,11 @@ ffmpeg binary.
     # then film the main menu 45 s
     python tools/autotest/capture_session.py --mode menu --dur 45 --pre-roll 150 --out Temp/menu2
 
+    # REAL gameplay: the virtual X360 pad navigates the menus during the
+    # pre-roll, then wanders in-world while recording. --pre-roll 230 puts
+    # the whole 60 s on walking/camera-pan footage:
+    python tools/autotest/capture_session.py --mode menu --dur 60 --pre-roll 230 --drive menu_play --out Temp/game1
+
     # flythrough: benchmark self-runs a camera flight - continuous motion,
     # the hardest temporal-coherence test. The window DIES ~124 s post-launch
     # (flythrough end -> results/exit); film BEFORE it does:
@@ -42,12 +47,67 @@ Important flags:
 - `--no-window-mgmt` - zero window manipulation (isolation test variable).
 - `--fg {0,1,2}` - framegen mode pushed to daemon and layer knobs.
 - `--env KEY=VAL` - extra env for the layer (e.g. `NR_LAYER_RESIDUAL=1`).
+- `--drive NAME` - scripted gamepad input during the session (see below).
 - `--keep-raw` - keep the multi-GB BGRA raw next to the mp4 (else deleted
   after encode). Raw is `W*H*4*fps` per second: 816x638x120 = ~63 MB/s.
 
 The harness writes GTA IV `commandline.txt` for the mode and restores it
 byte-for-byte afterwards; kills only processes it spawned; never touches a
 pre-existing daemon or Sunshine.
+
+### Driving the game (--drive, pad.py)
+
+GTA IV ignores every injected keyboard/mouse path (DInput/raw input), but
+it DOES accept a **ViGEmBus virtual X360 pad** via Python `vgamepad` - the
+only synthetic input that reaches the game (field report 2026-10-05 drove
+menus AND gameplay end-to-end; verified again 2026-10-07 by this rig:
+legal -> game-select -> main menu -> PLAY -> save loaded -> walking in
+Hove Beach, plus a START-opened pause map).
+
+`--drive NAME` starts a daemon thread the moment the game window appears
+(~+21 s post-launch; the keeper keeps the window foreground, the drive
+thread only calls the pad). Every dispatched input is logged with its
+elapsed sequence time into capture.log as `[drive] t=...`. The thread is
+stopped and the pad reset to neutral at session end; a missing
+vgamepad/ViGEmBus just logs and skips - the capture still runs.
+
+Sequences (timed event lists in `tools/autotest/pad.py`, `SEQUENCES`;
+t=0 = game window appears, ~+21 s post-launch):
+
+| name | what it does |
+|---|---|
+| `none` | default, no input (benchmark/loading/menu captures unchanged) |
+| `menu_play` | full menu->gameplay route, then in-world wandering |
+| `wander` | gameplay motion only: walk-forward bursts + camera pans + an A sprint tap every ~35 s - for sessions already expected to be in-world |
+
+`menu_play` phases (menu arrival varies ~110-200 s, so navigation is a
+repeating sweep, not a fixed-time guess):
+
+- **t=8-80** - START every ~12 s dismisses R*/legal/intro screens. These
+  are the ONLY STARTs: START on live gameplay opens the pause map, and a
+  blind sequence cannot reliably close it (B did not resume in testing;
+  a second START just toggles). At t<=80 gameplay cannot exist yet, so
+  the sequence can never pause itself.
+- **t=85-210** - A every 10 s: picks GTA IV on the game-select screen,
+  then PLAY on the main menu (cursor defaults to PLAY). Stray A's are
+  no-ops on loading screens and harmless sprint taps in-world.
+- **t=215-232** - transition: right-stick-only camera pans (ignored by
+  menus) + straggler A presses.
+- **t>=235** - wander loop: walk bursts (left stick up), camera pans,
+  A sprint tap every ~23 s. Left stick is always up = 'forward' in-world,
+  and in the pathological still-on-menu case it pins the cursor on PLAY.
+
+Measured on this host (2026-10-07): menu up at t~125-130, PLAY hit ~t=140,
+in-world ~t=150 (Hove Beach apartment, 'Load Successful'), camera pans and
+character visibly walking through the apartment during the wander phase.
+With `--pre-roll 230 --dur 60` the recorded window is all in-world motion;
+`--pre-roll 150` catches the menu tail plus the first seconds of gameplay
+instead. Benchmark mode self-runs, so `--drive` is unnecessary there (and
+mostly ignored by the flythrough). Note: GTA IV still auto-pauses on
+external focus theft - no blind sequence can recover that; a run that
+loses the window mid-session is diagnosable via `[win] LOST` in the log.
+
+Standalone smoke drive (game already running): `python tools/autotest/pad.py wander`.
 
 ### manifest.json
 
@@ -131,9 +191,9 @@ battery itself.
 
 ## Host facts discovered by this rig (do not relearn)
 
-- GTA IV ignores ALL injected input (DInput) - menus cannot be clicked
-  through synthetically. `-benchmark` is the only deterministic gameplay
-  route.
+- GTA IV ignores ALL injected keyboard/mouse input (DInput) - but a
+  ViGEmBus virtual X360 pad (pad.py, `--drive`) DOES drive menus and
+  gameplay. `-benchmark` is still the only input-free gameplay route.
 - Clean launch -> main menu in ~75 s. With layer+daemon the load is ~2x
   slower (~150 s); the VISIBLE window can sit on the legal screen while the
   game renders internally - plan `--pre-roll` accordingly.

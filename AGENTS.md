@@ -52,9 +52,11 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
   ALL injected input - mouse_event, SendInput mouse+key, PostMessage
   WM_LBUTTONDOWN, MCP Click, UIA Invoke all no-op (verified 2026-10-03);
   SetCursorPos DOES move the OS cursor and PostMessage BM_CLICK DOES click
-  native dialog buttons. Consequence: menu/gameplay progression cannot be
-  driven synthetically on this host - only Sunshine's virtual HID (the
-  owner's Moonlight session) or a physical mouse reaches the game.
+  native dialog buttons. BUT the ViGEmBus virtual X360 pad WORKS end-to-end
+  (verified 2026-10-05: vgamepad Python module, drives menus + gameplay) -
+  gamepad input is THE synthetic route for menu/gameplay automation, see
+  tools/autotest/pad.py. Keyboard/mouse progression still needs Sunshine's
+  virtual HID (owner's Moonlight session) or a physical device.
 - Sunshine coexists with our DuplicateOutput (multiple duplications allowed).
 - **THE OWNER WATCHES THIS DESKTOP THROUGH THE MOONLIGHT STREAM** (Sunshine
   DDA capture 2560x1440). A WDA_EXCLUDEFROMCAPTURE overlay is INVISIBLE in
