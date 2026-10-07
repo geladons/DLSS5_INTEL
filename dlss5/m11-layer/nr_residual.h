@@ -132,6 +132,16 @@ long nr_residual_last_cov_pm(const NrResidual *r);
  * a subset of last_cov_pm - pres= is mask+recovered combined). */
 long nr_residual_last_recov_pm(const NrResidual *r);
 
+/* Pair accessors for the GPU mirror (nr_gpuwarp): after a successful
+ * update() these expose the exact bytes the CPU mask composes with so the
+ * GPU path can stage the same (src, res) pair. *src/*res stay owned by
+ * the module and may be overwritten by the next update() - the caller
+ * copies what it needs at drain time. Returns 1 while a valid pair is
+ * held, 0 otherwise. */
+int nr_residual_pair(const NrResidual *r, const unsigned char **src,
+                     const signed char **res, uint32_t *w, uint32_t *h,
+                     uint64_t *chain, uint64_t *stamp_ms);
+
 #ifdef __cplusplus
 }
 #endif

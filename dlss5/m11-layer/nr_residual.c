@@ -369,3 +369,17 @@ long nr_residual_last_recov_pm(const NrResidual *r)
 {
     return r ? r->last_recov_pm : 0;
 }
+
+int nr_residual_pair(const NrResidual *r, const unsigned char **src,
+                     const signed char **res, uint32_t *w, uint32_t *h,
+                     uint64_t *chain, uint64_t *stamp_ms)
+{
+    if (!r || !r->valid) return 0;
+    if (src) *src = r->src;
+    if (res) *res = r->res;
+    if (w) *w = r->w;
+    if (h) *h = r->h;
+    if (chain) *chain = r->chain;
+    if (stamp_ms) *stamp_ms = r->stamp_ms;
+    return 1;
+}

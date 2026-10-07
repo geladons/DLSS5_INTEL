@@ -107,6 +107,20 @@
  *   NR_LAYER_WARP_PROBES    per-pixel probe cap (def 48).
  *   NR_LAYER_WARP_BUDGET    per-call probe budget, per-mille of the
  *                     pixel count (def 4000 = ~4 probes/px average).
+ *   NR_LAYER_GPUWARP  1 = move the residual compose onto the game's own
+ *                     VkDevice/queue (default OFF; opt-in, async TCP
+ *                     path only, framegen mode 2 excluded). Three
+ *                     embedded compute passes (nr_gpuwarp.c): quarter-res
+ *                     box downsample -> 3x3-SAD block match -> per-pixel
+ *                     masked compose that re-tries rejects at the
+ *                     field-proposed displaced position. The composite
+ *                     is written straight into the swapchain image; any
+ *                     Vulkan error poisons the module for the session
+ *                     and the CPU masked path takes over seamlessly.
+ *   NR_LAYER_GPUWARP_RADIUS block-match radius in quarter-res px
+ *                     (def 16 = +-64 full-res px).
+ *   NR_LAYER_GPUWARP_DBG    1 = also record the applied offset per pixel
+ *                     into a host-visible buffer (offline verifier).
  *
  * Live knobs: %TEMP%\m13_phase30_knobs.json is rewritten by the m13 manager
  * on every knob change. A running game's env is frozen at launch, so the
@@ -146,6 +160,7 @@
 #include "nr_async.h"
 #include "nr_residual.h"
 #include "nr_warp.h"
+#include "nr_gpuwarp.h"
 #include "daemon_client.h"
 #include "gdi_guard.h"
 #include "nr_ui.h"
@@ -242,6 +257,10 @@ typedef struct device_data {
     /* Displaced-transfer probe (nr_warp.h): mask-rejected pixels retry at
      * displaced source positions. Owned separately, attached to resid. */
     struct NrWarp *warp;
+    /* GPU residual compose (nr_gpuwarp.h): same mask semantics, but the
+     * displaced retry is driven by a real block-match field computed on
+     * this device's own queue. NULL = CPU path only. */
+    struct NrGpuWarp *gpuwarp;
     /* Latest daemon-FG reply (NRN2/NRN3) awaiting its one-shot display:
      * generated midpoints are display frames, never anchors - they must
      * NOT be written into result (it feeds every held/reuse path). */
@@ -337,6 +356,13 @@ static int g_warp = -1;
 static long g_warp_maxoff = 32;
 static long g_warp_cap = 48;
 static long g_warp_budget = 4000;    /* probe budget, per-mille of npix */
+/* GPU residual compose (nr_gpuwarp.h, NR_LAYER_GPUWARP): opt-in; the same
+ * mask semantics as the CPU path but the displaced retry is driven by a
+ * real quarter-res block-match field on the game's own queue. */
+static int g_gpuwarp = -1;
+static long g_gpuwarp_radius = 16;   /* DS px (NR_LAYER_GPUWARP_RADIUS) */
+static int g_gpuwarp_dbg = 0;        /* per-pixel offset record
+                                        (NR_LAYER_GPUWARP_DBG) */
 static volatile LONG g_paused;  /* CTRL+ALT+X: passthrough, full fps */
 static volatile LONG g_off;     /* CTRL+ALT+Q: layer off for good */
 static volatile LONG g_hotkeys_started;
@@ -1215,6 +1241,14 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
             if (wc) { g_warp_cap = atol(wc); if (g_warp_cap < 0) g_warp_cap = 0; }
             const char *wb = getenv("NR_LAYER_WARP_BUDGET");
             if (wb) { g_warp_budget = atol(wb); if (g_warp_budget < 0) g_warp_budget = 0; }
+            const char *gw = getenv("NR_LAYER_GPUWARP");
+            g_gpuwarp = gw && strcmp(gw, "0") != 0;
+            const char *gr = getenv("NR_LAYER_GPUWARP_RADIUS");
+            if (gr) { g_gpuwarp_radius = atol(gr);
+                      if (g_gpuwarp_radius < 4) g_gpuwarp_radius = 4;
+                      if (g_gpuwarp_radius > 64) g_gpuwarp_radius = 64; }
+            const char *gd = getenv("NR_LAYER_GPUWARP_DBG");
+            g_gpuwarp_dbg = gd && strcmp(gd, "0") != 0;
         }
         hotkeys_ensure();
         if (live_every > 0)
@@ -1236,6 +1270,11 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
                    g_resid_fb_raw ? "raw" : "stale",
                    g_warp ? "on" : "OFF", g_warp_maxoff, g_warp_cap,
                    g_warp_budget);
+            if (g_residual)
+                nr_log("[nr_layer] GPU residual compose: %s "
+                       "(radius %ld ds px, dbg %d)",
+                       g_gpuwarp ? "on" : "OFF", g_gpuwarp_radius,
+                       g_gpuwarp_dbg);
         if (static_reuse)
             nr_log("[nr_layer] static reuse on: exact-repeat frames reuse "
                  "the last processed result");
@@ -1451,6 +1490,12 @@ static void release_device(device_data *data)
     if (data->resid) {
         nr_residual_destroy(data->resid);
         data->resid = NULL;
+    }
+    /* GPU compose: waits its own fence first, then frees every Vulkan
+     * object it created on this device. NULL-safe on partial init. */
+    if (data->gpuwarp) {
+        nr_gpuwarp_destroy(data->gpuwarp);
+        data->gpuwarp = NULL;
     }
     free(data->result);
     free(data->earlier);
@@ -1669,41 +1714,52 @@ static int ensure_ring(device_data *data)
 
 static int diag_active(void);   /* fwd: per-present diagnostics gate */
 
-/* Move the presented frame between the swapchain image and the staging
- * buffer. idle sync = vkQueueWaitIdle around the transfer (default, proven);
- * semaphore sync = take over the present's wait semaphores (NR_LAYER_SYNC). */
-static int transfer(device_data *data, swapchain_data *chain, VkQueue queue,
-                    uint32_t index, int to_image)
+/* Diagnostic marker (NR_LAYER_DIAG): stamp magic + frame counter into the
+ * first pixels of every uploaded buffer. The staging image is host-visible
+ * so the GPU copy picks this up at execution. A screen-captured "insert"
+ * frame carrying this mark proves it left through our upload path; without
+ * it, the insert arrived through a non-Vulkan surface. */
+static void stamp_diag_marker(device_data *data)
 {
-    /* Diagnostic marker (NR_LAYER_DIAG): stamp magic + frame counter into the
-     * first pixels of every uploaded buffer. The staging image is host-visible
-     * so the GPU copy picks this up at execution. A screen-captured "insert"
-     * frame carrying this mark proves it left through our upload path; without
-     * it, the insert arrived through a non-Vulkan surface. */
-    if (to_image && diag_active() && data->mapped && data->staging_size >= 8) {
+    if (diag_active() && data->mapped && data->staging_size >= 8) {
         unsigned char *mk = (unsigned char *)data->mapped;
         mk[0] = 'N'; mk[1] = 'R'; mk[2] = 'M'; mk[3] = 'K';
         mk[4] = (unsigned char)(frame_counter & 0xFF);
         mk[5] = (unsigned char)((frame_counter >> 8) & 0xFF);
         mk[6] = 0; mk[7] = 0;
     }
-    /* In-game UI overlay (nr_ui.c): blend the shared-memory panel into the
-     * frame while it still sits in the host-visible staging buffer, before
-     * the copy command is recorded. Every write-back path out - processed,
-     * held, generated, frozen - funnels through this one point. Absent
-     * mapping / bad magic / hidden UI = zero behaviour. */
+}
+
+/* In-game UI overlay (nr_ui.c): blend the shared-memory panel into the
+ * frame while it still sits in the host-visible staging buffer, before
+ * the copy command is recorded. Every write-back path out - processed,
+ * held, generated, frozen, GPU-composited - funnels through this one
+ * point. Absent mapping / bad magic / hidden UI = zero behaviour. */
+static void composite_ui_into_mapped(device_data *data,
+                                     swapchain_data *chain)
+{
+    int order = frame_byte_order(chain->format);
+    if (order >= 0 && data->mapped
+        && data->staging_size >= (VkDeviceSize)chain->extent.width
+                                 * chain->extent.height * 4) {
+        NrUiFrame ui_frame;
+        ui_frame.mapped = (unsigned char *)data->mapped;
+        ui_frame.width = chain->extent.width;
+        ui_frame.height = chain->extent.height;
+        ui_frame.rgba_order = order;
+        nr_ui_composite(&ui_frame);
+    }
+}
+
+/* Move the presented frame between the swapchain image and the staging
+ * buffer. idle sync = vkQueueWaitIdle around the transfer (default, proven);
+ * semaphore sync = take over the present's wait semaphores (NR_LAYER_SYNC). */
+static int transfer(device_data *data, swapchain_data *chain, VkQueue queue,
+                    uint32_t index, int to_image)
+{
     if (to_image) {
-        int order = frame_byte_order(chain->format);
-        if (order >= 0 && data->mapped
-            && data->staging_size >= (VkDeviceSize)chain->extent.width
-                                     * chain->extent.height * 4) {
-            NrUiFrame ui_frame;
-            ui_frame.mapped = (unsigned char *)data->mapped;
-            ui_frame.width = chain->extent.width;
-            ui_frame.height = chain->extent.height;
-            ui_frame.rgba_order = order;
-            nr_ui_composite(&ui_frame);
-        }
+        stamp_diag_marker(data);
+        composite_ui_into_mapped(data, chain);
     }
     PFN_vkAllocateCommandBuffers allocate_commands = (PFN_vkAllocateCommandBuffers)
         data->get_device_proc(data->device, "vkAllocateCommandBuffers");
@@ -2016,6 +2072,19 @@ static void async_lazy_start(device_data *data)
                            g_warp_maxoff, g_warp_cap, g_warp_budget);
                 }
             }
+            /* GPU compose (opt-in): pipelines on the game's own device +
+             * present-queue family. Any failure leaves gpuwarp NULL and
+             * the CPU masked path keeps serving. */
+            if (g_gpuwarp && !data->gpuwarp) {
+                data->gpuwarp = nr_gpuwarp_create(
+                    data->physical, data->device, data->queue_family,
+                    data->get_device_proc,
+                    (nr_gw_mem_type_fn)memory_type, data,
+                    (nr_gw_fam_ok_fn)family_can_capture, data,
+                    g_gpuwarp_radius, g_gpuwarp_dbg);
+                nr_log("[nr_layer] GPU residual compose %s",
+                       data->gpuwarp ? "armed" : "unavailable");
+            }
         }
     } else {
         data->async_failed = 1;
@@ -2074,11 +2143,28 @@ static int async_drain(device_data *data)
              * is computed once inside the module (channels_ok fails on
              * packed 10-bit formats). A NULL src means the pool was dry:
              * the previous pair simply rides on. */
-            if (data->resid && d.src)
-                nr_residual_update(data->resid, d.src, d.buf, d.w, d.h,
-                                   d.chain, d.seq,
-                                   frame_byte_order((VkFormat)d.fmt) >= 0,
-                                   nr_now_ms());
+            if (data->resid && d.src) {
+                uint64_t stamp = nr_now_ms();
+                int upd = nr_residual_update(data->resid, d.src, d.buf,
+                                             d.w, d.h, d.chain, d.seq,
+                                             frame_byte_order(
+                                                 (VkFormat)d.fmt) >= 0,
+                                             stamp);
+                /* GPU mirror: stage the SAME (src, res) bytes the CPU
+                 * mask composes with. The device upload itself rides the
+                 * next eligible present's submit - here it is only a
+                 * CPU-side shadow copy + dirty flag. */
+                if (upd && data->gpuwarp) {
+                    const unsigned char *psrc;
+                    const signed char *pres;
+                    uint32_t pw, ph;
+                    uint64_t pchain, pstamp;
+                    if (nr_residual_pair(data->resid, &psrc, &pres,
+                                         &pw, &ph, &pchain, &pstamp))
+                        nr_gpuwarp_set_pair(data->gpuwarp, psrc, pres,
+                                            pw, ph, pchain, pstamp);
+                }
+            }
             else if (data->resid && !d.src) {
                 static unsigned long src_misses;
                 if ((++src_misses & 63) == 1)
@@ -2192,8 +2278,10 @@ static void serve_class_note(const char *cls, long cov_pm)
  * applies to NEW content - identical/near-identical input replays the
  * result at any age via the reuse gate (static content cannot go stale
  * visually). mapped holds the raw captured frame on entry; a 0 return
- * means mapped now holds the frame to blit. */
+ * means mapped now holds the frame to blit; a 2 return means the GPU
+ * compose already wrote the swapchain image (caller skips transfer). */
 static int async_serve_best(device_data *data, swapchain_data *chain,
+                            VkQueue queue, uint32_t index,
                             VkDeviceSize want, int have_raw)
 {
     if (!data->mapped || data->staging_size < want) {
@@ -2223,6 +2311,67 @@ static int async_serve_best(device_data *data, swapchain_data *chain,
      * have_raw=0 presents cannot produce current content either way and
      * keep the legacy stale-first order below. */
     if (have_raw && data->resid) {
+        /* GPU compose (nr_gpuwarp, opt-in): the same pair the CPU mask
+         * would serve, but the displaced retry is driven by a real
+         * quarter-res block-match field computed on the game's own
+         * queue. On success the composite already sits in the swapchain
+         * image and the caller's staging write-back is skipped (return
+         * 2). NR_GPUWARP_SKIP = the pair is ineligible this present (no
+         * pair/extent/age) - identical verdict classes to the CPU path,
+         * which then runs below. NR_GPUWARP_FAIL poisons the module for
+         * the session - the CPU path stays the fallback, so a Vulkan
+         * fault can never leave the game on a black frame.
+         * Gated off while framegen mode 2 runs: its anchor present needs
+         * mapped==P semantics for the mid interpolation, which a direct
+         * image write cannot provide - the CPU path serves there. */
+        if (data->gpuwarp
+            && !(is_framegen_enabled() && framegen_mode() == 2)) {
+            int wr = nr_gpuwarp_will_run(data->gpuwarp,
+                                         chain->extent.width,
+                                         chain->extent.height,
+                                         (uint64_t)chain->swapchain,
+                                         g_resid_ms, nr_now_ms());
+            if (wr == NR_GPUWARP_OK) {
+                /* Marker + overlay panel must ride the upload (the GPU
+                 * compose reads the staging bytes as `cur`; panel pixels
+                 * mismatch the pair source so the mask keeps them raw,
+                 * exactly like the CPU path's post-compose blend). */
+                stamp_diag_marker(data);
+                composite_ui_into_mapped(data, chain);
+                wr = nr_gpuwarp_run(data->gpuwarp, queue, data->staging,
+                                    chain->images[index],
+                                    chain->extent.width,
+                                    chain->extent.height,
+                                    (int)g_resid_px,
+                                    sync_semaphores
+                                    && !data->present_plain);
+                if (wr == NR_GPUWARP_OK) {
+                    long cov = nr_gpuwarp_last_cov_pm(data->gpuwarp);
+                    if (sync_semaphores && !data->present_plain)
+                        data->present_signal =
+                            nr_gpuwarp_done_sem(data->gpuwarp);
+                    diag_path = "gres";
+                    serve_class_note("gres", cov);
+                    {
+                        static uint64_t gcov_ms;
+                        uint64_t now = nr_now_ms();
+                        if (now - gcov_ms >= 1000) {
+                            gcov_ms = now;
+                            nr_log("[nr_layer] gpuwarp serve "
+                                   "pres=%ld.%ld%% (warp +%ld.%ld%%)",
+                                   cov / 10, cov % 10,
+                                   nr_gpuwarp_last_warp_pm(
+                                       data->gpuwarp) / 10,
+                                   nr_gpuwarp_last_warp_pm(
+                                       data->gpuwarp) % 10);
+                        }
+                    }
+                    return 2;
+                }
+                nr_log("[nr_layer] GPU compose submit failed; CPU "
+                       "masked path takes over");
+            }
+        }
         int v = nr_residual_apply(data->resid,
                                   (unsigned char *)data->mapped,
                                   chain->extent.width, chain->extent.height,
@@ -2449,8 +2598,10 @@ static int process_frame(device_data *data, swapchain_data *chain,
                 nr_log("[nr_layer] async submit dropped (frame %lu)",
                        frame_counter);
             }
-            /* have_raw=1: mapped holds THIS present's captured frame. */
-            return async_serve_best(data, chain, needed, 1);
+            /* have_raw=1: mapped holds THIS present's captured frame.
+             * queue+index are passed through for the GPU compose path,
+             * which may return 2 = "image already written". */
+            return async_serve_best(data, chain, queue, index, needed, 1);
         }
         /* worker failed to start once: sync exchange fallback below */
     }
@@ -2780,6 +2931,8 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
              * reply re-arms at the new strength in ~one round-trip). */
             if (devices[i].resid)
                 nr_residual_invalidate(devices[i].resid);
+            if (devices[i].gpuwarp)
+                nr_gpuwarp_invalidate(devices[i].gpuwarp);
         }
     }
     init_freeze_paths();
@@ -2922,7 +3075,11 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
         int diag_tr = -1;
         if (should_process) {
             int prc = process_frame(data, chain, queue, index);
-            int ok = (prc == 0);
+            /* prc 0 = mapped holds the frame to blit; prc 2 = the GPU
+             * compose already wrote the swapchain image (no write-back,
+             * no mode-2 overwrite - the generated midpoint path only
+             * makes sense when mapped holds the anchor). */
+            int ok = (prc == 0 || prc == 2);
             if (!ok) {
                 /* Splice guard: a frame that failed processing must never go
                  * out raw between processed neighbours - serve the last
@@ -2957,7 +3114,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                 nr_fg_note(&g_fg, NR_FG_PROCESSED);
                 data->holding = 1;
                 data->holding_chain = chain->swapchain;
-                if (fg_mode == 2 && fg_avail) {
+                if (fg_mode == 2 && fg_avail && prc != 2) {
                     /* Mode-2 anchor present: data->mapped currently holds P
                      * (the newest processed anchor). Overwrite it with the
                      * generated midpoint of the just-closed anchor interval
@@ -3061,10 +3218,13 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                         diag_path = "fgi";
                     }
                 }
-                diag_tr = transfer(data, chain, queue, index, 1);
-                if (diag_tr)
-                    nr_log("[nr_layer] write-back failed; raw out (frame %lu)",
-                           frame_counter);
+                /* prc==2: the GPU compose already wrote the image. */
+                if (prc == 0) {
+                    diag_tr = transfer(data, chain, queue, index, 1);
+                    if (diag_tr)
+                        nr_log("[nr_layer] write-back failed; raw out "
+                               "(frame %lu)", frame_counter);
+                }
             }
         } else if (fg_enabled && fg_avail && fg_mode == 2) {
             /* Mode-2 mid present: capture the REAL middle frame for the next
@@ -3093,10 +3253,15 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                      * natural cadence slot), else the freshest processed
                      * anchor, else the raw mid just captured. have_raw=1:
                      * the mid was captured into data->mid above and
-                     * mapped still holds it. */
-                    if (async_serve_best(data, chain, want, 1) == 0) {
+                     * mapped still holds it. 2 = the GPU compose already
+                     * wrote the swapchain image - nothing to transfer. */
+                    int sb = async_serve_best(data, chain, queue, index,
+                                              want, 1);
+                    if (sb == 0) {
                         diag_tr = transfer(data, chain, queue, index, 1);
                         held = (diag_tr == 0);
+                    } else if (sb == 2) {
+                        held = 1;
                     }
                 } else if (data->result_valid && data->result
                     && data->result_size >= want
@@ -3191,8 +3356,12 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                                 (size_t)want, NULL))
                             nr_log("[nr_layer] async NRN2 dropped "
                                    "(frame %lu)", frame_counter);
-                        /* have_raw=1: mapped is the just-captured frame. */
-                        if (async_serve_best(data, chain, want, 1) == 0) {
+                        /* have_raw=1: mapped is the just-captured frame.
+                         * 2 = GPU compose already wrote the image - count
+                         * the enhanced frame as the processed bucket. */
+                        int sb = async_serve_best(data, chain, queue,
+                                                  index, want, 1);
+                        if (sb == 0) {
                             diag_tr = transfer(data, chain, queue, index, 1);
                             if (diag_tr == 0) {
                                 generated = 1;
@@ -3201,6 +3370,9 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                                 fg_out = !strcmp(diag_path, "afgi")
                                          ? NR_FG_GENERATED : NR_FG_PROCESSED;
                             }
+                        } else if (sb == 2) {
+                            generated = 1;
+                            fg_out = NR_FG_PROCESSED;
                         } else {
                             fg_out = NR_FG_NATIVE;
                         }
@@ -3256,9 +3428,13 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                  * readback - mapped still holds the previous present's
                  * output, so serve-residual must not composite onto it
                  * (applying the delta to non-raw content double-adds). */
-                if (async_serve_best(data, chain, want, 0) == 0) {
+                int sb = async_serve_best(data, chain, queue, index,
+                                          want, 0);
+                if (sb == 0) {
                     diag_tr = transfer(data, chain, queue, index, 1);
                     held = (diag_tr == 0);
+                } else if (sb == 2) {
+                    held = 1;
                 }
             } else if (data->result_valid && data->result && data->mapped
                 && data->result_size >= want
@@ -3288,9 +3464,12 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                    g_fg.presents, g_fg.processed, g_fg.generated, g_fg.native);
         }
         if (diag_active()) {
-            /* pres = residual coverage % (last apply); -1 = no pair */
+            /* pres = residual coverage % (last apply); on a gres serve
+             * the GPU counter trails one present; -1 = no pair */
             long pr = data->resid
                       ? nr_residual_last_cov_pm(data->resid) : -1;
+            if (!strcmp(diag_path, "gres") && data->gpuwarp)
+                pr = nr_gpuwarp_last_cov_pm(data->gpuwarp);
             nr_log("[diag] f=%lu sc=%p idx=%u p=%s up=%08x res=%08x "
                    "tr=%d pres=%ld.%ld",
                    frame_counter, (void *)chain->swapchain, index, diag_path,
