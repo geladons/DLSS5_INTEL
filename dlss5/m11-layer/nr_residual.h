@@ -67,6 +67,7 @@ extern "C" {
 #endif
 
 typedef struct NrResidual NrResidual;
+struct NrWarp;   /* nr_warp.h - optional displaced-transfer extender */
 
 /* apply() verdict - also the diag class for the serve log. */
 enum {
@@ -114,6 +115,12 @@ int nr_residual_apply(NrResidual *r, unsigned char *cur,
                       uint32_t w, uint32_t h, uint64_t chain,
                       uint64_t now_ms);
 
+/* Attach a warp probe (nr_warp.h): the masked compose still runs first;
+ * the pixels it rejects are then probed at displaced source positions
+ * (the mask evaluated at warped positions). NULL detaches - pure masked
+ * path, byte-identical to before. */
+void nr_residual_set_warp(NrResidual *r, struct NrWarp *w);
+
 /* Diag: per-verdict counters, the last sampled mean diff (x100), and the
  * coverage of the last apply - the share of pixels that actually took the
  * residual, in per-mille (1000 = every pixel; this is the field metric
@@ -121,6 +128,9 @@ int nr_residual_apply(NrResidual *r, unsigned char *cur,
 unsigned long nr_residual_stat(const NrResidual *r, int verdict);
 long nr_residual_last_diff_x100(const NrResidual *r);
 long nr_residual_last_cov_pm(const NrResidual *r);
+/* share of pixels the warp probe recovered on the last apply (per-mille,
+ * a subset of last_cov_pm - pres= is mask+recovered combined). */
+long nr_residual_last_recov_pm(const NrResidual *r);
 
 #ifdef __cplusplus
 }

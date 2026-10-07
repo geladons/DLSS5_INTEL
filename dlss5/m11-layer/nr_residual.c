@@ -13,6 +13,7 @@
  * may only land where the CURRENT raw still matches the pair source.
  * ==========================================================================*/
 #include "nr_residual.h"
+#include "nr_warp.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -45,6 +46,10 @@ struct NrResidual {
     unsigned long st[NR_RESIDUAL_NCLASS];
     long last_diff_x100;
     long last_cov_pm;      /* last apply: share of pixels enhanced, pm */
+    struct NrWarp *warp;   /* optional displaced-transfer probe (nr_warp.h) */
+    uint32_t *failpx;      /* warp: pixel indices the mask rejected */
+    size_t failcap;
+    long last_recov_pm;    /* last apply: probe-recovered share, pm */
 };
 
 NrResidual *nr_residual_create(void)
@@ -68,6 +73,7 @@ void nr_residual_destroy(NrResidual *r)
     if (!r) return;
     free(r->res);
     free(r->src);
+    free(r->failpx);
     free(r);
 }
 
@@ -87,6 +93,11 @@ void nr_residual_configure(NrResidual *r, long max_age_ms,
 void nr_residual_invalidate(NrResidual *r)
 {
     if (r) r->valid = 0;
+}
+
+void nr_residual_set_warp(NrResidual *r, struct NrWarp *w)
+{
+    if (r) r->warp = w;
 }
 
 static int nr_residual_reserve(NrResidual *r, size_t bytes)
@@ -178,11 +189,13 @@ static void nr_residual_probe(NrResidual *r, const unsigned char *cur,
  * max(|dB|,|dG|,|dR|) <= px_eps on the CURRENT frame vs the pair source -
  * a hard boundary is fine because BOTH sides of it show current content
  * (enhanced vs unenhanced), never displaced pixels.
- * Returns the coverage: how many pixels took the residual (per-mille). */
-static long nr_residual_compose(NrResidual *r, unsigned char *cur)
+ * Returns the APPLIED pixel count (caller converts to per-mille). When
+ * failpx is non-NULL the pixel indices that MISSED the mask are appended
+ * into it (capacity = npix; the warp probe consumes the list). */
+static size_t nr_residual_compose(NrResidual *r, unsigned char *cur,
+                                  uint32_t *failpx, unsigned long *nfail)
 {
     const size_t bytes = r->bytes;
-    const size_t npix = bytes >> 2;
     const int eps = r->px_eps;
     size_t i = 0, applied = 0;
 #if NR_RESIDUAL_SSE2
@@ -226,6 +239,13 @@ static long nr_residual_compose(NrResidual *r, unsigned char *cur)
             mk = (unsigned)_mm_movemask_epi8(keep);
             applied += (size_t)((mk & 1) + ((mk >> 4) & 1)
                                 + ((mk >> 8) & 1) + ((mk >> 12) & 1));
+            if (failpx && mk != 0xFFFF) {
+                int lane;
+                for (lane = 0; lane < 4; lane++)
+                    if (!(mk & (1u << (lane * 4))))
+                        failpx[(*nfail)++] =
+                            (uint32_t)((i >> 2) + (size_t)lane);
+            }
         }
     }
 #endif
@@ -248,9 +268,11 @@ static long nr_residual_compose(NrResidual *r, unsigned char *cur)
             v = (int)cur[i + 2] + (int)r->res[i + 2];
             cur[i + 2] = (unsigned char)(v < 0 ? 0 : v > 255 ? 255 : v);
             /* alpha (byte 3) untouched - res alpha is 0 anyway */
+        } else if (failpx) {
+            failpx[(*nfail)++] = (uint32_t)(i >> 2);
         }
     }
-    return npix ? (long)((applied * 1000) / npix) : 0;
+    return applied;
 }
 
 int nr_residual_apply(NrResidual *r, unsigned char *cur,
@@ -280,10 +302,39 @@ int nr_residual_apply(NrResidual *r, unsigned char *cur,
     r->last_diff_x100 = mean_x100;
     if (mean_x100 > r->diff_x100 || big_share > r->big_pm) {
         r->last_cov_pm = 0;   /* rejected: nothing applied */
+        r->last_recov_pm = 0;
         verdict = NR_RESIDUAL_DIFF;
         goto out;
     }
-    r->last_cov_pm = nr_residual_compose(r, cur);
+    {
+        size_t applied;
+        const size_t npix = r->bytes >> 2;
+        if (r->warp) {
+            /* warp attached: the masked compose also emits the fail list,
+             * then the probe re-tries those pixels at displaced source
+             * positions (the same mask evaluated against warped pos). */
+            unsigned long nfail = 0, rec;
+            if (r->failcap < npix) {
+                uint32_t *nb = (uint32_t *)realloc(r->failpx,
+                                                   npix * sizeof *nb);
+                if (nb) { r->failpx = nb; r->failcap = npix; }
+            }
+            applied = nr_residual_compose(r, cur, r->failpx, &nfail);
+            rec = r->failpx
+                  ? nr_warp_probe(r->warp, cur, r->src, r->res,
+                                  r->w, r->h, r->failpx, nfail, r->px_eps)
+                  : 0;
+            r->last_recov_pm = npix
+                ? (long)((rec * 1000) / npix) : 0;
+            r->last_cov_pm = npix
+                ? (long)(((applied + rec) * 1000) / npix) : 0;
+        } else {
+            r->last_recov_pm = 0;
+            applied = nr_residual_compose(r, cur, NULL, NULL);
+            r->last_cov_pm = npix
+                ? (long)((applied * 1000) / npix) : 0;
+        }
+    }
     /* Coverage 0 = every pixel missed the mask: the output IS the raw
      * frame, so report the honest reject class (identical pixels either
      * way - the mask already kept cur untouched). */
@@ -291,6 +342,7 @@ int nr_residual_apply(NrResidual *r, unsigned char *cur,
     goto out;
 zero:
     r->last_cov_pm = 0;
+    r->last_recov_pm = 0;
 out:
     if (verdict >= 0 && verdict < NR_RESIDUAL_NCLASS)
         r->st[verdict]++;
@@ -311,4 +363,9 @@ long nr_residual_last_diff_x100(const NrResidual *r)
 long nr_residual_last_cov_pm(const NrResidual *r)
 {
     return r ? r->last_cov_pm : 0;
+}
+
+long nr_residual_last_recov_pm(const NrResidual *r)
+{
+    return r ? r->last_recov_pm : 0;
 }

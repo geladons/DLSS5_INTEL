@@ -94,6 +94,19 @@
  *                     content over stale pixels;
  *                     0 = the legacy serve-best order (stale processed
  *                     frame first) - A/B bisect knob, NOT the goal.
+ *   NR_LAYER_WARP     0 = disable the displaced-transfer probe (default
+ *                     ON when the residual itself is on). The mask still
+ *                     runs first; pixels it rejects are probed at
+ *                     displaced source positions - the first position
+ *                     whose content matches cur within the same eps
+ *                     supplies its residual. Fixes the sawtooth coverage
+ *                     the flat mask shows on sustained motion (field
+ *                     report: 55%->40% dither, rejected share flashes
+ *                     raw). Bounded by probe cap + frame budget.
+ *   NR_LAYER_WARP_MAXOFF    largest probe displacement in px (def 32).
+ *   NR_LAYER_WARP_PROBES    per-pixel probe cap (def 48).
+ *   NR_LAYER_WARP_BUDGET    per-call probe budget, per-mille of the
+ *                     pixel count (def 4000 = ~4 probes/px average).
  *
  * Live knobs: %TEMP%\m13_phase30_knobs.json is rewritten by the m13 manager
  * on every knob change. A running game's env is frozen at launch, so the
@@ -132,6 +145,7 @@
 #include "nr_util.h"
 #include "nr_async.h"
 #include "nr_residual.h"
+#include "nr_warp.h"
 #include "daemon_client.h"
 #include "gdi_guard.h"
 #include "nr_ui.h"
@@ -225,6 +239,9 @@ typedef struct device_data {
      * display CURRENT raw + the freshest enhancement delta instead of the
      * stale processed frame. Async TCP path only. */
     struct NrResidual *resid;
+    /* Displaced-transfer probe (nr_warp.h): mask-rejected pixels retry at
+     * displaced source positions. Owned separately, attached to resid. */
+    struct NrWarp *warp;
     /* Latest daemon-FG reply (NRN2/NRN3) awaiting its one-shot display:
      * generated midpoints are display frames, never anchors - they must
      * NOT be written into result (it feeds every held/reuse path). */
@@ -311,7 +328,15 @@ static long g_resid_diff = 3000;   /* scene-cut probe: sampled mean |d|
 static long g_resid_big = 800;     /* scene-cut probe: moved-pixel share
                                       bound, per-mille */
 static int g_resid_fb_raw = 1;     /* reject fallback: current raw (1) vs
-                                    legacy stale-processed order (0) */
+                                      legacy stale-processed order (0) -
+                                      NR_LAYER_RESIDUAL_FB */
+/* Displaced residual transfer (nr_warp.h, NR_LAYER_WARP): pixels the mask
+ * rejects get probed at displaced source positions - smallest matching
+ * displacement supplies the residual. */
+static int g_warp = -1;
+static long g_warp_maxoff = 32;
+static long g_warp_cap = 48;
+static long g_warp_budget = 4000;    /* probe budget, per-mille of npix */
 static volatile LONG g_paused;  /* CTRL+ALT+X: passthrough, full fps */
 static volatile LONG g_off;     /* CTRL+ALT+Q: layer off for good */
 static volatile LONG g_hotkeys_started;
@@ -1182,6 +1207,14 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
             }
             const char *fb = getenv("NR_LAYER_RESIDUAL_FB");
             g_resid_fb_raw = !fb || strcmp(fb, "0") != 0;
+            const char *we = getenv("NR_LAYER_WARP");
+            g_warp = !we || strcmp(we, "0") != 0;
+            const char *wm = getenv("NR_LAYER_WARP_MAXOFF");
+            if (wm) { g_warp_maxoff = atol(wm); if (g_warp_maxoff < 0) g_warp_maxoff = 0; }
+            const char *wc = getenv("NR_LAYER_WARP_PROBES");
+            if (wc) { g_warp_cap = atol(wc); if (g_warp_cap < 0) g_warp_cap = 0; }
+            const char *wb = getenv("NR_LAYER_WARP_BUDGET");
+            if (wb) { g_warp_budget = atol(wb); if (g_warp_budget < 0) g_warp_budget = 0; }
         }
         hotkeys_ensure();
         if (live_every > 0)
@@ -1197,10 +1230,12 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
         if (nr_port && g_async)
             nr_log("[nr_layer] serve-residual: %s (age bound %ld ms, "
                    "pixel eps %ld, cut bound %ld.%02ld, moved share %ld pm, "
-                   "reject fb %s)",
+                   "reject fb %s, warp %s maxoff %ld cap %ld budget %ld pm)",
                    g_residual ? "on" : "OFF", g_resid_ms, g_resid_px,
                    g_resid_diff / 100, g_resid_diff % 100, g_resid_big,
-                   g_resid_fb_raw ? "raw" : "stale");
+                   g_resid_fb_raw ? "raw" : "stale",
+                   g_warp ? "on" : "OFF", g_warp_maxoff, g_warp_cap,
+                   g_warp_budget);
         if (static_reuse)
             nr_log("[nr_layer] static reuse on: exact-repeat frames reuse "
                  "the last processed result");
@@ -1406,6 +1441,10 @@ static void release_device(device_data *data)
             data->fgi = NULL;
         nr_async_destroy(data->async);
         data->async = NULL;
+    }
+    if (data->warp) {
+        nr_warp_destroy(data->warp);
+        data->warp = NULL;
     }
     /* The residual module owns plain mallocs (its src copy + res delta),
      * never pool buffers - safe to destroy after the pool is gone. */
@@ -1966,6 +2005,17 @@ static void async_lazy_start(device_data *data)
                    "moved share %ld pm)",
                    g_resid_ms, g_resid_px, g_resid_diff / 100,
                    g_resid_diff % 100, g_resid_big);
+            if (g_warp && !data->warp) {
+                data->warp = nr_warp_create();
+                if (data->warp) {
+                    nr_warp_configure(data->warp, g_warp_maxoff,
+                                      g_warp_cap, g_warp_budget);
+                    nr_residual_set_warp(data->resid, data->warp);
+                    nr_log("[nr_layer] residual warp probe armed "
+                           "(maxoff %ld px, cap %ld, budget %ld pm)",
+                           g_warp_maxoff, g_warp_cap, g_warp_budget);
+                }
+            }
         }
     } else {
         data->async_failed = 1;
@@ -2189,11 +2239,25 @@ static int async_serve_best(device_data *data, swapchain_data *chain,
             serve_class_note("ares", cov);
             if (now - cov_ms >= 1000) {
                 cov_ms = now;
-                nr_log("[nr_layer] residual serve pres=%ld.%ld%% "
-                       "(diff %ld.%02ld)",
-                       cov / 10, cov % 10,
-                       nr_residual_last_diff_x100(data->resid) / 100,
-                       nr_residual_last_diff_x100(data->resid) % 100);
+                if (data->warp)
+                    nr_log("[nr_layer] residual serve pres=%ld.%ld%% "
+                           "(diff %ld.%02ld, warp +%ld.%ld%% %lu px "
+                           "%lu pr hint %ld,%ld)",
+                           cov / 10, cov % 10,
+                           nr_residual_last_diff_x100(data->resid) / 100,
+                           nr_residual_last_diff_x100(data->resid) % 100,
+                           nr_residual_last_recov_pm(data->resid) / 10,
+                           nr_residual_last_recov_pm(data->resid) % 10,
+                           nr_warp_fails(data->warp),
+                           nr_warp_probed(data->warp),
+                           nr_warp_hint_y(data->warp),
+                           nr_warp_hint_x(data->warp));
+                else
+                    nr_log("[nr_layer] residual serve pres=%ld.%ld%% "
+                           "(diff %ld.%02ld)",
+                           cov / 10, cov % 10,
+                           nr_residual_last_diff_x100(data->resid) / 100,
+                           nr_residual_last_diff_x100(data->resid) % 100);
             }
             return 0;
         }
