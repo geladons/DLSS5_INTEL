@@ -58,14 +58,14 @@
  *                     it is alive. 0 = serve the held result at any age.
  *                     Identical input never reaches the bound (the reuse
  *                     gate replays the processed result for statics).
- *   NR_LAYER_RESIDUAL 1 = enable serve-residual (default OFF; opt-in).
- *                     Field report 2026-10-06: even the per-pixel-masked
- *                     residual reads worse than a coherent stale frame on
- *                     sustained motion (coverage dithers per-pixel at ~12
- *                     Hz and rejected frames flash raw). Until the residual
- *                     is motion-warped the stale-processed serve is the
- *                     shipped default. When enabled and a present has no
- *                     fresh
+ *   NR_LAYER_RESIDUAL 0 = disable serve-residual (default ON on the async
+ *                     TCP path; bisect knob). The shipped residual path is
+ *                     the GPU warped compose (NR_LAYER_GPUWARP below): the
+ *                     residual lands at block-matched displaced positions,
+ *                     which keeps coverage ~77-90% through camera pans -
+ *                     the CPU masked path that preceded it dithered at
+ *                     40-55% (field report 2026-10-06). When a present has
+ *                     no fresh
  *                     reply for its own content, the layer displays the
  *                     CURRENT raw frame + the newest reply's enhancement
  *                     delta (proc - its source, stored by nr_residual.c)
@@ -107,9 +107,10 @@
  *   NR_LAYER_WARP_PROBES    per-pixel probe cap (def 48).
  *   NR_LAYER_WARP_BUDGET    per-call probe budget, per-mille of the
  *                     pixel count (def 4000 = ~4 probes/px average).
- *   NR_LAYER_GPUWARP  1 = move the residual compose onto the game's own
- *                     VkDevice/queue (default OFF; opt-in, async TCP
- *                     path only, framegen mode 2 excluded). Three
+ *   NR_LAYER_GPUWARP  0 = keep the residual compose on the CPU (default
+ *                     ON; async TCP path only, framegen mode 2 excluded -
+ *                     and it only runs while NR_LAYER_RESIDUAL is on).
+ *                     Three
  *                     embedded compute passes (nr_gpuwarp.c): quarter-res
  *                     box downsample -> 3x3-SAD block match -> per-pixel
  *                     masked compose that re-tries rejects at the
@@ -356,7 +357,8 @@ static int g_warp = -1;
 static long g_warp_maxoff = 32;
 static long g_warp_cap = 48;
 static long g_warp_budget = 4000;    /* probe budget, per-mille of npix */
-/* GPU residual compose (nr_gpuwarp.h, NR_LAYER_GPUWARP): opt-in; the same
+/* GPU residual compose (nr_gpuwarp.h, NR_LAYER_GPUWARP): default ON; the
+ * same
  * mask semantics as the CPU path but the displaced retry is driven by a
  * real quarter-res block-match field on the game's own queue. */
 static int g_gpuwarp = -1;
@@ -1209,7 +1211,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
                 if (g_async_stale_ms < 0) g_async_stale_ms = 0;
             }
             const char *re = getenv("NR_LAYER_RESIDUAL");
-            g_residual = re && strcmp(re, "0") != 0;
+            g_residual = !re || strcmp(re, "0") != 0;
             const char *rm = getenv("NR_LAYER_RESIDUAL_MS");
             if (rm) {
                 g_resid_ms = atol(rm);
@@ -1242,7 +1244,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
             const char *wb = getenv("NR_LAYER_WARP_BUDGET");
             if (wb) { g_warp_budget = atol(wb); if (g_warp_budget < 0) g_warp_budget = 0; }
             const char *gw = getenv("NR_LAYER_GPUWARP");
-            g_gpuwarp = gw && strcmp(gw, "0") != 0;
+            g_gpuwarp = !gw || strcmp(gw, "0") != 0;
             const char *gr = getenv("NR_LAYER_GPUWARP_RADIUS");
             if (gr) { g_gpuwarp_radius = atol(gr);
                       if (g_gpuwarp_radius < 4) g_gpuwarp_radius = 4;
