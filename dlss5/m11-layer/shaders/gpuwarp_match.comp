@@ -1,0 +1,119 @@
+#version 450
+// SPDX-License-Identifier: Apache-2.0
+// ============================================================================
+// gpuwarp_match.comp - quarter-res block-match motion field for the
+// layer-side residual compositor (nr_gpuwarp.c).
+//
+// For each quarter-res (DS) pixel q finds the offset d that best explains
+// curDS(q) by srcDS(q + d) - i.e. where the CURRENT content sits in the
+// pair source frame. The full-res compose pass then verifies the residual
+// landing per pixel (the ghost-free mask is re-checked at full res there;
+// this pass only proposes a coherent field).
+//
+// Metric: mean per-channel abs diff over a 3x3 DS block (the same SAD the
+// daemon-side framegen.comp uses - single-pixel matching shatters on
+// animated grain). Small distance prior prefers the least displacement on
+// ties.
+//
+//   binding 0 = srcDS (u32 packed rgba, quarter res)
+//   binding 1 = curDS
+//   binding 2 = field out (uvec2 per DS px):
+//               .x = int16x2 offset in FULL-RES px (dx | dy<<16)
+//               .y = best block err, 8.8 fixed (byte units << 8)
+//   pc.a = (dsW, dsH, radiusDS, 0)
+// ============================================================================
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer SrcDS { uint srcPx[]; };
+layout(std430, set = 0, binding = 1) readonly buffer CurDS { uint curPx[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer Field { uvec2 field[]; };
+
+layout(push_constant) uniform Push { ivec4 a; } pc;
+
+uvec3 px3(uint p) {
+    return uvec3(p & 0xFFu, (p >> 8) & 0xFFu, (p >> 16) & 0xFFu);
+}
+
+float blockErr(ivec2 a, ivec2 b) {
+    int W = pc.a.x, H = pc.a.y;
+    float err = 0.0;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            ivec2 sa = ivec2(clamp(a.x + dx, 0, W - 1), clamp(a.y + dy, 0, H - 1));
+            ivec2 sb = ivec2(clamp(b.x + dx, 0, W - 1), clamp(b.y + dy, 0, H - 1));
+            uvec3 pa = px3(srcPx[uint(sa.y) * uint(W) + uint(sa.x)]);
+            uvec3 pb = px3(curPx[uint(sb.y) * uint(W) + uint(sb.x)]);
+            ivec3 d = abs(ivec3(pa) - ivec3(pb));
+            err += float(d.x + d.y + d.z) * (1.0 / 3.0);
+        }
+    }
+    return err * (1.0 / 9.0);   /* mean abs channel diff, byte units 0..255 */
+}
+
+void main() {
+    ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+    int W = pc.a.x, H = pc.a.y;
+    if (q.x >= W || q.y >= H) return;
+    int R = max(pc.a.z, 4);    /* search radius in DS px (default 16) */
+
+    float bestErr = blockErr(q, q);
+    ivec2 best = ivec2(0);
+
+    /* Early exit: content that did not move needs no field. */
+    if (bestErr < 1.5) {
+        field[uint(q.y) * uint(W) + uint(q.x)] = uvec2(0u, uint(bestErr * 256.0));
+        return;
+    }
+
+    /* Coarse candidates, scaled by R: axial taps at R, 2R/3, R/3, R/6 and
+     * diagonals at 2R/3, R/3 (same shape as framegen's coarse+fine ladder,
+     * radius-normalised). */
+    {
+        int r1 = R, r2 = (R * 2) / 3, r3 = R / 3, r4 = R / 6;
+        if (r4 < 1) r4 = 1;
+        if (r3 < 2) r3 = 2;
+        if (r2 < 3) r2 = 3;
+        const int ax[4] = int[](r1, r2, r3, r4);
+        for (int i = 0; i < 4; ++i) {
+            int r = ax[i];
+            const ivec2 dirs[4] = ivec2[](
+                ivec2(r, 0), ivec2(-r, 0), ivec2(0, r), ivec2(0, -r));
+            for (int k = 0; k < 4; ++k) {
+                ivec2 d = dirs[k];
+                float err = blockErr(q + d, q) + float(abs(d.x) + abs(d.y)) * 0.5;
+                if (err < bestErr) { bestErr = err; best = d; }
+            }
+        }
+        const int di[2] = int[](r2, r3);
+        for (int i = 0; i < 2; ++i) {
+            int r = di[i];
+            const ivec2 dirs[4] = ivec2[](
+                ivec2(r, r), ivec2(-r, r), ivec2(r, -r), ivec2(-r, -r));
+            for (int k = 0; k < 4; ++k) {
+                ivec2 d = dirs[k];
+                float err = blockErr(q + d, q) + float(abs(d.x) + abs(d.y)) * 0.5;
+                if (err < bestErr) { bestErr = err; best = d; }
+            }
+        }
+    }
+
+    /* Fine +-2/+-1 refinement around the coarse winner (DS px). */
+    const ivec2 fine[12] = ivec2[](
+        ivec2(-2, 0), ivec2(2, 0), ivec2(0, -2), ivec2(0, 2),
+        ivec2(-1, -1), ivec2(1, -1), ivec2(-1, 1), ivec2(1, 1),
+        ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1));
+    for (int i = 0; i < 12; ++i) {
+        ivec2 cand = best + fine[i];
+        float err = blockErr(q + cand, q)
+                  + float(abs(cand.x) + abs(cand.y)) * 0.5;
+        if (err < bestErr) { bestErr = err; best = cand; }
+    }
+
+    /* Store FULL-RES units: the compose pass lands the residual at
+     * p + v directly. */
+    ivec2 vFull = best * 4;
+    uint pv = (uint(vFull.x) & 0xFFFFu) | (uint(vFull.y) << 16);
+    field[uint(q.y) * uint(W) + uint(q.x)] =
+        uvec2(pv, uint(min(bestErr, 255.0) * 256.0));
+}

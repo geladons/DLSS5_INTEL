@@ -1,0 +1,199 @@
+#version 450
+// SPDX-License-Identifier: Apache-2.0
+// ============================================================================
+// gpuwarp_compose.comp - motion-warped masked residual compose for the
+// layer-side serve-residual path (nr_gpuwarp.c; semantic reference:
+// nr_residual.c / nr_warp.c).
+//
+// For every output pixel p of the CURRENT frame:
+//   1. flat mask (identical to the CPU path): if max|cur(p) - src(p)| over
+//      the 3 colour bytes <= eps -> out(p) = cur(p) + res(p)  (saturating);
+//   2. else the quarter-res motion field proposes a displaced source
+//      position: sample the field bilinearly at p/4, evaluate the SAME
+//      mask at cur(p) vs src(p + v), refined over a +-2 cross and then the
+//      dense Chebyshev rings r <= 4 (the CPU warp probe's dense tier -
+//      the field covers the far probes). First verified position supplies
+//      res at that displaced index;
+//   3. nothing matched -> out(p) = cur(p) verbatim (raw current content -
+//      a rejected pixel can never carry a displaced residual, so ghosts
+//      cannot occur by construction, exactly like the CPU path).
+//
+// Coverage counters (atomic, per-workgroup reduced) land in cnt[]:
+//   [0] flat-applied px, [1] warp-applied px, [2] rejected px.
+// dbg[] (when pc.b.y bit0 set) records the applied offset per pixel for
+// the offline verifier: pack int16(dx | dy<<16); 0x7FFF7FFF = rejected.
+//
+//   binding 0 = cur   (u32 rgba per px, full res)
+//   binding 1 = src   (pair source frame)
+//   binding 2 = res   (pair residual, int8x4 lanes packed u32; alpha 0)
+//   binding 3 = field (uvec2 per DS px from gpuwarp_match)
+//   binding 4 = out   (u32 rgba per px)
+//   binding 5 = cnt   (uint[4])
+//   binding 6 = dbg   (u32 per px, flag-gated)
+//   pc.a = (w, h, dsW, dsH)   pc.b = (px_eps, flags, 0, 0)
+// ============================================================================
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer Cur { uint curPx[]; };
+layout(std430, set = 0, binding = 1) readonly buffer Src { uint srcPx[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Res { uint resPx[]; };
+layout(std430, set = 0, binding = 3) readonly buffer Field { uvec2 field[]; };
+layout(std430, set = 0, binding = 4) writeonly buffer Out { uint outPx[]; };
+layout(std430, set = 0, binding = 5) buffer Cnt { uint cnt[]; };
+layout(std430, set = 0, binding = 6) writeonly buffer Dbg { uint dbg[]; };
+
+layout(push_constant) uniform Push { ivec4 a; ivec4 b; } pc;
+
+shared uint s_flat;
+shared uint s_warped;
+shared uint s_fail;
+
+uvec4 px8(uint p) {
+    return uvec4(p & 0xFFu, (p >> 8) & 0xFFu,
+                 (p >> 16) & 0xFFu, (p >> 24) & 0xFFu);
+}
+
+/* sign-extend the four int8 residual lanes */
+ivec4 res8(uint p) {
+    return ivec4(int(p << 24) >> 24,
+                 int(p << 16) >> 24,
+                 int(p << 8) >> 24,
+                 int(p) >> 24);
+}
+
+/* max |cur - src| over colour bytes at clamped coords - the mask. */
+int maskDiff(uint c, ivec2 q) {
+    int W = pc.a.x, H = pc.a.y;
+    q = clamp(q, ivec2(0), ivec2(W - 1, H - 1));
+    uvec4 s = px8(srcPx[uint(q.y) * uint(W) + uint(q.x)]);
+    ivec4 d = abs(ivec4(px8(c)) - ivec4(s));
+    return max(d.x, max(d.y, d.z));
+}
+
+/* cur + res at displaced position, saturating, alpha = cur alpha. */
+uint applyRes(uint c, ivec2 q) {
+    int W = pc.a.x, H = pc.a.y;
+    q = clamp(q, ivec2(0), ivec2(W - 1, H - 1));
+    uint rp = resPx[uint(q.y) * uint(W) + uint(q.x)];
+    uvec4 cu = px8(c);
+    ivec4 o = ivec4(cu) + res8(rp);
+    o = clamp(o, ivec4(0), ivec4(255));
+    return uint(o.x) | (uint(o.y) << 8) | (uint(o.z) << 16)
+         | (cu.w << 24);
+}
+
+/* bilinear sample of the DS motion field (values are full-res px). */
+vec2 fieldAt(vec2 dsPos) {
+    int dW = pc.a.z, dH = pc.a.w;
+    dsPos = clamp(dsPos, vec2(0.0), vec2(float(dW - 1), float(dH - 1)));
+    ivec2 q0 = ivec2(floor(dsPos));
+    ivec2 q1 = min(q0 + ivec2(1), ivec2(dW - 1, dH - 1));
+    vec2 f = dsPos - vec2(q0);
+    vec2 acc = vec2(0.0);
+    /* manually unrolled 2x2 gather: field[] element .x is int16x2.
+     * Index order must mirror the mix() below: w1 = right of row0,
+     * w2 = left of row1 (fetching them transposed skews the blend). */
+    {
+        uint w0 = field[uint(q0.y) * uint(dW) + uint(q0.x)].x;
+        uint w1 = field[uint(q0.y) * uint(dW) + uint(q1.x)].x;
+        uint w2 = field[uint(q1.y) * uint(dW) + uint(q0.x)].x;
+        uint w3 = field[uint(q1.y) * uint(dW) + uint(q1.x)].x;
+        vec2 v0 = vec2(int(w0 << 16) >> 16, int(w0) >> 16);
+        vec2 v1 = vec2(int(w1 << 16) >> 16, int(w1) >> 16);
+        vec2 v2 = vec2(int(w2 << 16) >> 16, int(w2) >> 16);
+        vec2 v3 = vec2(int(w3 << 16) >> 16, int(w3) >> 16);
+        acc = mix(mix(v0, v1, f.x), mix(v2, v3, f.x), f.y);
+    }
+    return acc;
+}
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    int W = pc.a.x, H = pc.a.y;
+    uint i = uint(p.y) * uint(W) + uint(p.x);
+    bool inb = (p.x < W && p.y < H);
+    int eps = pc.b.x;
+    bool wrDbg = (pc.b.y & 1) != 0;
+
+    bool applied = false;
+    bool warped = false;
+    ivec2 off = ivec2(0);
+    uint outp = 0u;
+
+    if (inb) {
+        uint c = curPx[i];
+        if (maskDiff(c, p) <= eps) {
+            /* flat mask hit: identical semantics to the CPU compose. */
+            outp = applyRes(c, p);
+            applied = true;
+        } else {
+            /* Motion-compensated retry: the DS field proposes where the
+             * current content lived in the pair source. +-2 cross refine
+             * around it, then the dense r<=4 rings - first candidate
+             * whose displaced source still matches cur supplies res. */
+            /* DS texel q covers full-res [4q,4q+3], centre 4q+1.5 ->
+             * the DS-space position of pixel p is p/4 - 0.375. */
+            vec2 v = fieldAt(vec2(p) * 0.25 - 0.375);
+            ivec2 d0 = ivec2(floor(v + 0.5));
+            int bestErr = maskDiff(c, p + d0);
+            ivec2 best = d0;
+            const ivec2 cross[8] = ivec2[](
+                ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1),
+                ivec2(2, 0), ivec2(-2, 0), ivec2(0, 2), ivec2(0, -2));
+            for (int k = 0; k < 8; ++k) {
+                ivec2 cand = d0 + cross[k];
+                int e = maskDiff(c, p + cand);
+                if (e < bestErr) { bestErr = e; best = cand; }
+            }
+            if (bestErr <= eps) {
+                outp = applyRes(c, p + best);
+                applied = true; warped = true; off = best;
+            } else {
+                /* dense Chebyshev rings r = 1..4, smallest first
+                 * (same order as the CPU warp probe's dense tier). */
+                bool found = false;
+                for (int r = 1; r <= 4 && !found; ++r) {
+                    for (int dy = -r; dy <= r && !found; ++dy) {
+                        for (int dx = -r; dx <= r && !found; ++dx) {
+                            if (dy != r && dy != -r && dx != r && dx != -r)
+                                continue;
+                            if (maskDiff(c, p + ivec2(dx, dy)) <= eps) {
+                                off = ivec2(dx, dy);
+                                found = true;
+                            }
+                        }
+                    }
+                }
+                if (found) {
+                    outp = applyRes(c, p + off);
+                    applied = true; warped = true;
+                }
+            }
+            if (!applied)
+                outp = c;   /* reject: raw current pixel, verbatim */
+        }
+        outPx[i] = outp;
+        if (wrDbg) {
+            dbg[i] = applied ? ((uint(off.x) & 0xFFFFu) | (uint(off.y) << 16))
+                             : 0x7FFF7FFFu;
+        }
+    }
+
+    /* per-workgroup counter reduction -> one atomic triple per wg. */
+    if (gl_LocalInvocationIndex == 0u) {
+        s_flat = 0u; s_warped = 0u; s_fail = 0u;
+    }
+    barrier();
+    if (inb) {
+        if (applied && !warped) atomicAdd(s_flat, 1u);
+        else if (applied)         atomicAdd(s_warped, 1u);
+        else                      atomicAdd(s_fail, 1u);
+    }
+    barrier();
+    if (gl_LocalInvocationIndex == 0u) {
+        if (s_flat != 0u)   atomicAdd(cnt[0], s_flat);
+        if (s_warped != 0u) atomicAdd(cnt[1], s_warped);
+        if (s_fail != 0u)   atomicAdd(cnt[2], s_fail);
+    }
+}

@@ -1,0 +1,45 @@
+#version 450
+// SPDX-License-Identifier: Apache-2.0
+// ============================================================================
+// gpuwarp_ds.comp - quarter-res box downsample for the layer-side residual
+// compositor (nr_gpuwarp.c).
+//
+// Each invocation writes one downsampled pixel: the per-channel mean of a
+// 4x4 full-res block (edge-clamped), packed back to u32 (same byte order as
+// the source - the compositor only ever diffs the colour bytes).
+//
+//   binding 0 = source frame (u32 per pixel, full res)
+//   binding 1 = out DS frame (u32 per pixel, quarter res)
+//   pc.a = (srcW, srcH, dsW, dsH)
+// ============================================================================
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer Src { uint srcPx[]; };
+layout(std430, set = 0, binding = 1) writeonly buffer Dst { uint dstPx[]; };
+
+layout(push_constant) uniform Push { ivec4 a; } pc;
+
+void main() {
+    ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+    if (q.x >= pc.a.z || q.y >= pc.a.w) return;
+    int sw = pc.a.x, sh = pc.a.y;
+    /* 4x4 box average, edge clamped so non-multiple extents stay exact. */
+    uint acc0 = 0, acc1 = 0, acc2 = 0, acc3 = 0;
+    for (int dy = 0; dy < 4; ++dy) {
+        int sy = min(q.y * 4 + dy, sh - 1);
+        for (int dx = 0; dx < 4; ++dx) {
+            int sx = min(q.x * 4 + dx, sw - 1);
+            uint p = srcPx[uint(sy) * uint(sw) + uint(sx)];
+            acc0 += p & 0xFFu;
+            acc1 += (p >> 8) & 0xFFu;
+            acc2 += (p >> 16) & 0xFFu;
+            acc3 += (p >> 24) & 0xFFu;
+        }
+    }
+    uint o = ((acc0 + 8u) >> 4)
+           | (((acc1 + 8u) >> 4) << 8)
+           | (((acc2 + 8u) >> 4) << 16)
+           | (((acc3 + 8u) >> 4) << 24);
+    dstPx[uint(q.y) * uint(pc.a.z) + uint(q.x)] = o;
+}
