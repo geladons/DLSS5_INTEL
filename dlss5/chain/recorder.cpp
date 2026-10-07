@@ -59,14 +59,15 @@ void ChainRecorder::init(const VkCtx& c, const ChainArena& arena, const WeightsS
     chainMakePipe(c, shaderDir + "ffn_fused.spv", pFfnFused);
     chainMakePipe(c, shaderDir + "ffn1_fused.spv", pFfn1Fused);
     chainMakePipe(c, shaderDir + "attn_global.spv", pAttnGlobal);
-    std::printf("[chain] 21 pipelines up (14 kernels + gemm_m8 + featpack/headpack + pool2/upmerge + ffn1/attnG), %zu BDA chunk bases, chunk0 0x%llx\n",
+    chainMakePipe(c, shaderDir + "winblock.spv", pWinBlock);
+    std::printf("[chain] 22 pipelines up (14 kernels + gemm_m8 + featpack/headpack + pool2/upmerge + ffn1/attnG + winblock), %zu BDA chunk bases, chunk0 0x%llx\n",
                 arena.chunks.size(), (unsigned long long)arena.chunks[0].baseA);
 }
 
 void ChainRecorder::destroy(const VkCtx& c) {
     for (ChainPipe* cp : {&pGemm, &pGemm1, &pGemmM8, &pGemmI8, &pQuantAct, &pCos, &pCosW, &pSmax, &pEw, &pPart, &pTrans,
                           &pGather, &pMerge, &pFeatpack, &pHeadpack, &pPool, &pUpM, &pAttnFused, &pFfnFused,
-                          &pFfn1Fused, &pAttnGlobal}) {
+                          &pFfn1Fused, &pAttnGlobal, &pWinBlock}) {
         vkDestroyPipeline(c.dev, cp->pipe, nullptr);
         vkDestroyPipelineLayout(c.dev, cp->layout, nullptr);
         vkDestroyDescriptorSetLayout(c.dev, cp->dsl, nullptr);
@@ -471,6 +472,29 @@ void ChainRecorder::dAttnGlobal(VkCommandBuffer cb, uint64_t proj, uint64_t scal
     pmBegin(cb);
     vkCmdDispatch(cb, T6P_ / 32u, 32u, 1);
     pmEnd(cb, "attn_global", "blk", T6P_, 32, 1024, T6P_ / 32u, 32u, 1, bytes);
+}
+
+void ChainRecorder::dWinBlock(VkCommandBuffer cb, const WinBlockPush& p) {
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pWinBlock.pipe);
+    vkCmdPushConstants(cb, pWinBlock.layout, VK_SHADER_STAGE_COMPUTE_BIT,
+                       0, sizeof(p), &p);
+    // One 256-lane workgroup per 8x8 window; m wraps past the 65535 x-limit.
+    uint32_t gx = p.m > 65535u ? 65535u : p.m;
+    uint32_t gy = (p.m + 65534u) / 65535u;
+
+    // Traffic estimate (image tokens, C=32): the fp32 carrier is read twice
+    // (window gather + residual) + weights/bias ~18 KB per block + writes.
+    uint64_t tok = (uint64_t)p.image_h * p.image_w;
+    uint64_t bytes = tok * 32u * 4u * 2u
+                   + 32u * 96u * 2u + 32u * 32u * 2u + 64u * 64u * 2u
+                   + ((p.flags & (WB_PUB | WB_POOL)) ? tok * 32u * 2u : 0u)
+                   + ((p.flags & WB_RAW32) ? tok * 32u * 4u : 0u)
+                   + ((p.flags & WB_POOL) ? tok * 32u * 2u / 4u : 0u)
+                   + ((p.flags & WB_HEAD) ? (tok * 4u * 4u + 32u * 16u * 2u) : 0u);
+
+    pmBegin(cb);
+    vkCmdDispatch(cb, gx, gy, 1);
+    pmEnd(cb, "winblock", "blk", p.m, 96, 32, gx, gy, 1, bytes);
 }
 
 } // namespace d5c

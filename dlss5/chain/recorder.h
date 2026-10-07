@@ -168,6 +168,45 @@ struct AttnGlobalPush {
     uint32_t nReal;  // real tokens (softmax col mask)
     uint32_t hcount; // heads (32)
 };
+
+// winblock (winblock.comp): one 256-lane workgroup per 8x8 window runs the
+// whole attention half of a C=32/H=1 fam0 block - window gather + QKV gemm +
+// cosine publish + merged window attention + projection + residual +
+// publish, with block 0's fused e4m3+pool or block 70's head GEMM as tail
+// variants. Bit-exact vs the F_APART/COSQKV/attn_fused/GATHER_RES chain
+// (f16 accumulators, verbatim element math). Replaces the oQW/oKW/oVW/oATW/
+// oPROJW/oABW DRAM round-trips + 4 barriers with shared memory.
+struct WinBlockPush {
+    uint64_t a;      // fp32 image carrier (gather source + residual skip)
+    uint64_t b;      // qkv_weight f16 [32,96]
+    uint64_t c;      // fp32 raw image-order out (WB_RAW32), else unused
+    uint64_t d;      // attn_bias f16 [64,64]
+    uint64_t proj;   // projection_weight f16 [32,32]
+    uint64_t aux;    // WB_POOL: pooled f16 dst; WB_HEAD: headW f16 [32,16]
+    uint64_t resCos; // attn_cos_skip f32 [32]
+    uint64_t qscale; // attn_scale f32 [H] (Q scale at [0])
+    uint64_t pub;    // e4m3 f16 publish dst (WB_PUB / WB_POOL)
+    uint64_t head;   // oHEAD fp32 [TOK,4] (WB_HEAD)
+    uint32_t m;      // window count
+    uint32_t flags;  // WB_* bits
+    uint32_t image_h, image_w;
+    uint32_t window_cols;  // padded windows per row (wp8)
+    uint32_t window_pad;   // padTop | padLeft << 16
+};
+enum { WB_PUB = 1u, WB_RAW32 = 2u, WB_POOL = 4u, WB_HEAD = 8u, WB_E4SRC = 0x10u };
+// recordWindowBlock tail selector for the fused kernel. WB_TAIL_POOL (block 0)
+// publishes e4m3 to pubOff2 and pools into auxOff, replacing the standalone
+// ew3+dPool pair; WB_TAIL_HEAD (block 70) runs the head GEMM in-kernel
+// (weights at auxOff, compact fp32 [TOK,4] at headOff), replacing the
+// ew2+gemm tail. keepRaw forces the fp32 image-order store alongside WB_PUB.
+struct WinBlkTail {
+    uint32_t mode = 0;             // WB_TAIL_*
+    VkDeviceSize pubOff2 = 0;
+    VkDeviceSize auxOff = 0;
+    VkDeviceSize headOff = 0;
+    bool keepRaw = false;
+};
+enum { WB_TAIL_NONE = 0u, WB_TAIL_POOL = 1u, WB_TAIL_HEAD = 2u };
 #pragma pack(pop)
 
 enum { EPI_NONE = 0, EPI_E4M3 = 1, EPI_GATE = 2, EPI_GATE_E4M3 = 3, EPI_HALF = 4,
@@ -277,20 +316,30 @@ private:
                     uint64_t dst, uint32_t m, uint32_t C);
     void dAttnGlobal(VkCommandBuffer cb, uint64_t proj, uint64_t scale,
                      uint64_t dst);
+    void dWinBlock(VkCommandBuffer cb, const WinBlockPush& p);
 
     // block recorders
-    struct Cur { VkDeviceSize off; bool is16; uint32_t C; };
+    // off/is16 = the block input carrier (FFN GEMM operand); resOff/res16,
+    // when resOff != 0, give the FFN residual a different source - the vendor
+    // graph splits them for the 32-channel merge blocks (b66: published input,
+    // raw fp32 skip).
+    struct Cur { VkDeviceSize off; bool is16; uint32_t C; VkDeviceSize resOff; bool res16; };
     // ffnOff/ffn16 = the FFN carrier (partition source + gather_res residual).
     // qkvOff/qkv16 = the A source the fused qkv partition-load reads; differs
     // from ffnOff for fp32 carriers duplicated to f16 by F_DUP16 (fam0/2).
-    void recordWindowAttn(VkCommandBuffer cb, int famIdx, int idx, const Stage& s,
+    // Both return true when the fused winblock kernel consumed the attention
+    // half (incl. the caller's publish/pool/head tail when wb.mode != 0), so
+    // recordWindowBlock / recordChain can skip the replaced passes.
+    bool recordWindowAttn(VkCommandBuffer cb, int famIdx, int idx, const Stage& s,
                           int C, int H, int fam, int oy, int ox,
                           VkDeviceSize ffnOff, bool ffn16,
                           VkDeviceSize qkvOff, bool qkv16,
-                          VkDeviceSize rawOff, VkDeviceSize pubOff, bool publish);
-    void recordWindowBlock(VkCommandBuffer cb, int famIdx, int idx, const Stage& s,
+                          VkDeviceSize rawOff, VkDeviceSize pubOff, bool publish,
+                          const WinBlkTail& wb);
+    bool recordWindowBlock(VkCommandBuffer cb, int famIdx, int idx, const Stage& s,
                            int C, int H, int fam, int oy, int ox, bool publish, Cur& cur,
-                           VkDeviceSize rawOff, VkDeviceSize pubOff);
+                           VkDeviceSize rawOff, VkDeviceSize pubOff,
+                           const WinBlkTail& wb = WinBlkTail{});
     void recordDs(VkCommandBuffer cb, int famIdx, int idx, int C, int Cn,
                   VkDeviceSize rawOff, VkDeviceSize outOff,
                   const Stage& inS, const Stage& outS, bool pad8);
@@ -311,7 +360,7 @@ private:
 
     ChainPipe pGemm, pGemm1, pGemmI8, pQuantAct, pCos, pCosW, pSmax, pEw, pPart, pTrans, pGather,
               pMerge, pFeatpack, pHeadpack, pPool, pUpM, pAttnFused, pFfnFused,
-              pFfn1Fused, pAttnGlobal;
+              pFfn1Fused, pAttnGlobal, pWinBlock;
     ChainPipe pGemmM8;   // gemm_m8.spv: slim BM=8 tile for narrow-out large-m gemms
     bool slimGemm_ = false;  // D5C_GEMM_SLIM (default on): dispatch pGemmM8 for
                              // narrow-out gemms at m>=2048 (or >=512 batched)
@@ -333,6 +382,24 @@ private:
         std::string qkvN = tn(fam == 2 ? "block%d.layer2.qkv_weight"
                                        : "block%d.layer0.qkv_weight", idx);
         return !(isQuantized(qkvN) && pilotQKV >= 0 && idx <= pilotQKV);
+    }
+
+    // winblock (winblock.comp) mega-kernel eligibility: fam0 C=32/H=1 window
+    // blocks (b0-4, b66-70) on the f16 path - the int8 qkv/proj pilots keep
+    // their materialized oWIN path, and the kernel's gather only implements
+    // the fp32-carrier variant (fam0's oG4). D5C_WINBLOCK=0 restores the
+    // split path for bisecting; D5C_WINBLOCK_E4SRC=1 switches the gather
+    // rounding to e4m3 (vendor-graph experiment).
+    bool winBlkEligible(int fam, int idx, int C, int H) const {
+        if (parsePilot("D5C_WINBLOCK", nullptr, 1) <= 0) return false;
+        if (fam != 0 || C != 32 || H != 1) return false;
+        int pilotQKV = parsePilot("D5C_INT8_ATTN_QKV", "D5C_INT8_ATTN", -1);
+        int pilotProj = parsePilot("D5C_INT8_ATTN_PROJ", "D5C_INT8_ATTN", -1);
+        if (isQuantized(tn("block%d.layer0.qkv_weight", idx))
+                && pilotQKV >= 0 && idx <= pilotQKV) return false;
+        if (isQuantized(tn("block%d.layer0.projection_weight", idx))
+                && pilotProj >= 0 && idx <= pilotProj) return false;
+        return true;
     }
 };
 

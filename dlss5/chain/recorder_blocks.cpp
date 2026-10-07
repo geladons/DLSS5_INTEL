@@ -19,11 +19,12 @@ static void winGeo(const Stage& s, int oy, int ox,
 
 
 // ---- window attention shared tail (per-stage geometry) -----------------
-void ChainRecorder::recordWindowAttn(VkCommandBuffer cb, int famIdx, int idx, const Stage& s,
+bool ChainRecorder::recordWindowAttn(VkCommandBuffer cb, int famIdx, int idx, const Stage& s,
                                      int C, int H, int fam, int oy, int ox,
                                      VkDeviceSize ffnOff, bool ffn16,
                                      VkDeviceSize qkvOff, bool qkv16,
-                                     VkDeviceSize rawOff, VkDeviceSize pubOff, bool publish) {
+                                     VkDeviceSize rawOff, VkDeviceSize pubOff, bool publish,
+                                     const WinBlkTail& wb) {
     uint32_t padTop, padLeft, Ww, wp8;
     winGeo(s, oy, ox, padTop, padLeft, Ww, wp8);
     auto lay = [&](const char* fmt) { return tn(fmt, idx); };
@@ -38,6 +39,51 @@ void ChainRecorder::recordWindowAttn(VkCommandBuffer cb, int famIdx, int idx, co
 
     bool useI8_qkv = isQuantized(qkvN) && (pilotQKV >= 0 && idx <= pilotQKV);
     bool useI8_proj = isQuantized(projN) && (pilotProj >= 0 && idx <= pilotProj);
+
+    // winblock (winblock.comp): the attention half of a C=32/H=1 fam0 block
+    // in ONE 256-lane workgroup per 8x8 window - window gather (fp32 carrier,
+    // partition's half_round), QKV gemm, cosine_win Q/K publish, merged
+    // attn_fused attention (fused-transpose token output kept in SLM),
+    // projection and the gather_res residual+publish - plus the block-0
+    // e4m3+pool or block-70 head tail. All intermediates (Q/K/V, probs, the
+    // attended tile, proj staging) stay in the workgroup's 16 KB of shared
+    // memory: the oQW/oKW/oVW/oATW/oPROJW/oABW round-trips and the five
+    // barriers the split path emits per block disappear.
+    // Bit-exact vs that chain by construction: f16 accumulators everywhere,
+    // the identical cosine fragment tree / softmax transform+normalize
+    // ordering / fma(skip,cos,acc) residual, and pool2's fold order.
+    // D5C_WINBLOCK=0 restores the split path; D5C_WINBLOCK_E4SRC=1 switches
+    // the gather rounding to e4m3 (vendor-graph experiment).
+    if (winBlkEligible(fam, idx, C, H) && !ffn16) {
+        uint32_t wfl = 0;
+        uint64_t wC = A(rawOff), wPub = 0, wAux = 0, wHead = 0;
+        if (wb.mode == WB_TAIL_POOL) {
+            wfl = WB_POOL;                       // pool implies the pub store
+            wPub = A(wb.pubOff2);
+            wAux = A(wb.auxOff);
+        } else if (wb.mode == WB_TAIL_HEAD) {
+            wfl = WB_HEAD;
+            wAux = A(wb.auxOff);                 // headW f16 [32,16]
+            wHead = A(wb.headOff);               // oHEAD fp32 [TOK,4]
+        } else {
+            // same coverage as the EPI_GATHER_RES path: publish blocks emit
+            // e4m3 (fp32 raw skipped while D5C_SKIP_RAW>0 unless keepRaw),
+            // raw blocks emit the fp32 image-order output only.
+            int skipRawEnv = parsePilot("D5C_SKIP_RAW", nullptr, 1);
+            if (publish) wfl |= WB_PUB;
+            if (!publish || skipRawEnv <= 0 || wb.keepRaw) wfl |= WB_RAW32;
+            if (publish) wPub = A(pubOff);
+        }
+        if (parsePilot("D5C_WINBLOCK_E4SRC", nullptr, 0) > 0) wfl |= WB_E4SRC;
+        WinBlockPush p{A(ffnOff), A(woff(qkvN)), wC, A(woff(biasN)),
+                       A(woff(projN)), wAux, A(vec(acosN)), A(woff(scN)),
+                       wPub, wHead, Ww, wfl,
+                       (uint32_t)s.H, (uint32_t)s.W, wp8,
+                       padTop | (padLeft << 16)};
+        dWinBlock(cb, p);
+        bar(cb);
+        return true;
+    }
 
     // B4: partition is a pure gather (image-order ffn carrier -> window-order
     // f16 oWIN). F_APART replays partition's inverse window map inside the qkv
@@ -147,8 +193,11 @@ void ChainRecorder::recordWindowAttn(VkCommandBuffer cb, int famIdx, int idx, co
     // EPI_GATHER_RES epilogue to store ONLY the e4m3 output when publishing.
     // D5C_SKIP_RAW=0 restores the fp32 store.
     int skipRawEnv = parsePilot("D5C_SKIP_RAW", nullptr, 1);
+    // keepRaw (encoder transition blocks b4/b8/b14/b22): the published e4m3
+    // output is ALSO the decoder skip while the fp32 raw feeds the ds pool -
+    // the skip-raw optimization must stay off for them.
     uint32_t gfl = (publish ? 1u : 0u) | (ffn16 ? 2u : 0u)
-                 | ((publish && skipRawEnv > 0) ? 4u : 0u);
+                 | ((publish && skipRawEnv > 0 && !wb.keepRaw) ? 4u : 0u);
     uint32_t gGeo0 = (uint32_t)s.H | ((uint32_t)s.W << 16);
     uint32_t gGeo1 = padTop | (padLeft << 6) | (gfl << 12) | (wp8 << 16);
     uint32_t projEpi = fuseGather ? EPI_GATHER_RES : EPI_NONE;
@@ -176,17 +225,40 @@ void ChainRecorder::recordWindowAttn(VkCommandBuffer cb, int famIdx, int idx, co
                 s, (uint32_t)C, padTop, padLeft, wp8, publish, ffn16);
         bar(cb);
     }
+    return false;
 }
 
 // FFN + attention for one window block; writes raw (always) + pub (if publish).
-void ChainRecorder::recordWindowBlock(VkCommandBuffer cb, int famIdx, int idx, const Stage& s,
+// Returns true when the fused winblock kernel ran the attention half (wb.mode
+// tails included) - callers then skip the passes it replaced.
+bool ChainRecorder::recordWindowBlock(VkCommandBuffer cb, int famIdx, int idx, const Stage& s,
                                       int C, int H, int fam, int oy, int ox, bool publish, Cur& cur,
-                                      VkDeviceSize rawOff, VkDeviceSize pubOff) {
+                                      VkDeviceSize rawOff, VkDeviceSize pubOff,
+                                      const WinBlkTail& wb) {
     const ArenaOffsets& O = ar_->off;
     uint32_t TOKS = s.TOK;
     uint32_t G = C / 32;
     VkDeviceSize x16 = cur.is16 ? cur.off : O.oG2;
-    if (!cur.is16) { dEw(cb, A(cur.off), 0, 0, 0, A(O.oG2), TOKS * C, 2, 0); bar(cb); }
+    if (!cur.is16) {
+        // fp32 carrier -> f16 FFN input (only b0's stem and b70's merge land
+        // here). Ours half_rounds (kind 2); the vendor graph reads the
+        // e4m3-published copy instead ("the GEMM reads it published while the
+        // residual takes it as it came" - nr_resident.record_feed_forward).
+        // D5C_FFN_E4M3=1 runs the vendor form for A/B.
+        uint32_t inKind = (parsePilot("D5C_FFN_E4M3", nullptr, 0) > 0) ? 3u : 2u;
+        dEw(cb, A(cur.off), 0, 0, 0, A(O.oG2), TOKS * C, inKind, 0);
+        bar(cb);
+        // ...and for b0's stem specifically the vendor also takes the FFN
+        // residual from the published f16 ("published input, half skip" -
+        // opendlss-reference.md's block-0 step), while b70's merge skip stays
+        // raw fp32. oADA is only b0's source.
+        if (inKind == 3u && cur.off == O.oADA) cur = {O.oG2, true, (uint32_t)C};
+    }
+    // resA/resIs16: the FFN residual source. Normally the input carrier
+    // itself; cur.resOff overrides it (vendor: b66 reads the raw fp32 merge
+    // for the residual while the GEMM input stays published e4m3).
+    VkDeviceSize resA = cur.resOff ? cur.resOff : cur.off;
+    bool resIs16 = cur.resOff ? cur.res16 : cur.is16;
     if (fam == 0) {
         int pilotW1 = parsePilot("D5C_INT8_W1", "D5C_INT8_PILOT", 70);
         int pilotW2 = parsePilot("D5C_INT8_W2", "D5C_INT8_PILOT", 70);
@@ -199,7 +271,7 @@ void ChainRecorder::recordWindowBlock(VkCommandBuffer cb, int famIdx, int idx, c
 
         std::string w2 = tn("block%d.layer0.weight2", idx);
         bool useI8_w2 = isQuantized(w2) && (pilotW2 >= 0 && idx <= pilotW2);
-        uint32_t epi = cur.is16 ? EPI_RESIDUAL_F16 : EPI_RESIDUAL_FP32;
+        uint32_t epi = resIs16 ? EPI_RESIDUAL_F16 : EPI_RESIDUAL_FP32;
 
         bool doFusion = useI8_w1 && useI8_w2 && enableFusion;
 
@@ -208,10 +280,12 @@ void ChainRecorder::recordWindowBlock(VkCommandBuffer cb, int famIdx, int idx, c
         // is therefore duplicated to oG2 as f16 by the w2 epilogue
         // (F_DUP16, identical half_round bits to partition's fp32->f16 pass);
         // oG2 is dead after w1 consumed it. Only when the partition fusion
-        // actually runs - the int8 qkv path still partitions oG4.
+        // actually runs - the int8 qkv path still partitions oG4, and the
+        // winblock kernel gathers the fp32 carrier itself.
         bool apart = qkvApart(fam, idx);
-        uint64_t dup = apart ? A(O.oG2) : 0;
-        uint32_t dupFl = apart ? F_DUP16 : 0u;
+        bool winBlk = winBlkEligible(fam, idx, C, H);
+        uint64_t dup = (apart && !winBlk) ? A(O.oG2) : 0;
+        uint32_t dupFl = (apart && !winBlk) ? F_DUP16 : 0u;
 
         // ffn_fused (ffn_fused.comp): one 128-lane workgroup (4 subgroups)
         // per 32-token tile runs the whole i8 FFN - input quant + w1 expand
@@ -226,7 +300,7 @@ void ChainRecorder::recordWindowBlock(VkCommandBuffer cb, int famIdx, int idx, c
             uint32_t ffl = ((epi == EPI_RESIDUAL_F16) ? 1u : 0u) | (dupFl != 0u ? 2u : 0u);
             dFfnFused(cb, famIdx, A(x16), A(woff(w1)), A(woff(w2)),
                       A(wscale(w1)), A(wscale(w2)), A(O.oG4),
-                      A(cur.off), A(vec(tn("block%d.layer0.ffn_cos_skip", idx))),
+                      A(resA), A(vec(tn("block%d.layer0.ffn_cos_skip", idx))),
                       dup, TOKS, (uint32_t)C, ffl);
         } else if (doFusion) {
             dQuantAct(cb, A(x16), A(O.oQAct), A(O.oQScale), TOKS, (uint32_t)C);
@@ -242,7 +316,7 @@ void ChainRecorder::recordWindowBlock(VkCommandBuffer cb, int famIdx, int idx, c
                     TOKS, (uint32_t)C, 4 * (uint32_t)C, 1, 0, 0, 0,
                     gflags(epi, false) | F_FUSED_I8_CONSUMER | dupFl,
                     4 * (uint32_t)C, (uint32_t)C, (uint32_t)C,
-                    A(cur.off), A(vec(tn("block%d.layer0.ffn_cos_skip", idx))),
+                    A(resA), A(vec(tn("block%d.layer0.ffn_cos_skip", idx))),
                     0, dup);
         } else {
             if (useI8_w1) {
@@ -264,21 +338,21 @@ void ChainRecorder::recordWindowBlock(VkCommandBuffer cb, int famIdx, int idx, c
                         A(wscale(w2)), A(O.oQScale), 0.0f,
                         TOKS, (uint32_t)C, 4 * (uint32_t)C, 1, 0, 0, 0,
                         gflags(epi, false) | dupFl, 4 * (uint32_t)C, (uint32_t)C, (uint32_t)C,
-                        A(cur.off), A(vec(tn("block%d.layer0.ffn_cos_skip", idx))),
+                        A(resA), A(vec(tn("block%d.layer0.ffn_cos_skip", idx))),
                         0, dup);
             } else {
                 dGemm(cb, famIdx, A(O.oG3), A(woff(w2)), A(O.oG4),
                       TOKS, C, 4 * C, 1, 0, 0, 0, gflags(epi, false) | dupFl, 4 * C, C, C,
-                      A(cur.off), A(vec(tn("block%d.layer0.ffn_cos_skip", idx))), dup);
+                      A(resA), A(vec(tn("block%d.layer0.ffn_cos_skip", idx))), dup);
             }
         }
         bar(cb);
         // ffnOff stays the true fp32 carrier oG4 (partition source when
         // unfused, gather_res residual always); qkvOff is the f16 dup oG2
         // the fused A-load reads.
-        recordWindowAttn(cb, famIdx, idx, s, C, H, fam, oy, ox,
-                         O.oG4, false, apart ? O.oG2 : O.oG4, apart,
-                         rawOff, pubOff, publish);
+        return recordWindowAttn(cb, famIdx, idx, s, C, H, fam, oy, ox,
+                                O.oG4, false, apart ? O.oG2 : O.oG4, apart,
+                                rawOff, pubOff, publish, wb);
     } else if (fam == 1) {
         uint64_t expBase = A(woff(tn("block%d.layer0.ffn_expand_weight", idx)));
         uint64_t prjBase = A(woff(tn("block%d.layer0.ffn_branch_projection_weight", idx)));
@@ -303,7 +377,7 @@ void ChainRecorder::recordWindowBlock(VkCommandBuffer cb, int famIdx, int idx, c
                      && !isQuantized(woutN);
         if (fuse1) {
             dFfn1Fused(cb, famIdx, A(x16), expBase, prjBase, A(woff(woutN)),
-                       A(cur.off), A(vec(tn("block%d.layer0.ffn_cos_skip", idx))),
+                       A(resA), A(vec(tn("block%d.layer0.ffn_cos_skip", idx))),
                        A(O.oG2), TOKS, (uint32_t)C);
             bar(cb);
         } else {
@@ -338,12 +412,12 @@ void ChainRecorder::recordWindowBlock(VkCommandBuffer cb, int famIdx, int idx, c
         dGemm(cb, famIdx, A(O.oG4), A(woff(woutN)),
               A(O.oG3), TOKS, C, C, 1, 0, 0, 0, gflags(EPI_NONE, false), C, C, C);
         bar(cb);
-        dEw(cb, A(O.oG3), A(cur.off), A(O.oG3), A(vec(tn("block%d.layer0.ffn_cos_skip", idx))),
+        dEw(cb, A(O.oG3), A(resA), A(O.oG3), A(vec(tn("block%d.layer0.ffn_cos_skip", idx))),
             A(O.oG2), TOKS * C, 5, C);
         bar(cb);
         } // !fuse1
-        recordWindowAttn(cb, famIdx, idx, s, C, H, fam, oy, ox,
-                         O.oG2, true, O.oG2, true, rawOff, pubOff, publish);
+        return recordWindowAttn(cb, famIdx, idx, s, C, H, fam, oy, ox,
+                                O.oG2, true, O.oG2, true, rawOff, pubOff, publish, wb);
     } else {
         dGemm(cb, famIdx, A(x16), A(woff(tn("block%d.layer0.first_projection_weight", idx))),
               A(O.oG2), TOKS, C, C, 1, 0, 0, 0, gflags(EPI_E4M3, true), C, C, C);
@@ -358,19 +432,19 @@ void ChainRecorder::recordWindowBlock(VkCommandBuffer cb, int famIdx, int idx, c
         bar(cb);
         dEw(cb, A(O.oG4), 0, 0, 0, A(O.oG2), TOKS * C, 3, 0);
         bar(cb);
-        uint32_t epi = cur.is16 ? EPI_RESIDUAL_F16 : EPI_RESIDUAL_FP32;
+        uint32_t epi = resIs16 ? EPI_RESIDUAL_F16 : EPI_RESIDUAL_FP32;
         // B4: same trick as fam0 - duplicate the fp32 carrier oG3 into oG4
         // (dead after kind3 -> oG2) as f16 so the fused qkv A-load runs on
         // the f16 path. Skipped when the int8 qkv path needs oWIN instead.
         bool apart = qkvApart(fam, idx);
         dGemm(cb, famIdx, A(O.oG2), A(woff(tn("block%d.layer1.weight3", idx))), A(O.oG3),
               TOKS, C, C, 1, 0, 0, 0, gflags(epi, false) | (apart ? F_DUP16 : 0u), C, C, C,
-              A(cur.off), A(vec(tn("block%d.layer1.ffn_cos_skip", idx))),
+              A(resA), A(vec(tn("block%d.layer1.ffn_cos_skip", idx))),
               apart ? A(O.oG4) : 0);
         bar(cb);
-        recordWindowAttn(cb, famIdx, idx, s, C, H, fam, oy, ox,
-                         O.oG3, false, apart ? O.oG4 : O.oG3, apart,
-                         rawOff, pubOff, publish);
+        return recordWindowAttn(cb, famIdx, idx, s, C, H, fam, oy, ox,
+                                O.oG3, false, apart ? O.oG4 : O.oG3, apart,
+                                rawOff, pubOff, publish, wb);
     }
 }
 
@@ -398,10 +472,19 @@ void ChainRecorder::recordUp(VkCommandBuffer cb, int famIdx, int idx, int Ci, in
           lowS.TOK, (uint32_t)Co, (uint32_t)Ci, 1, 0, 0, 0, gflags(EPI_NONE, false),
           (uint32_t)Ci, (uint32_t)Co, (uint32_t)Co);
     bar(cb);
-    dUpMerge(cb, A(O.oG3), A(skipOff), A(O.oG4), A(vec(tn("block%d.layer0.sin", idx))), 0,
+    // Vendor: a 32-channel decoder block's FFN reads the merge published but
+    // takes its residual from the raw fp32 merge ("published input, raw skip"
+    // - opendlss-reference.md block-66 step). Route the fp32 copy to oB0RAW
+    // (dead since block 0's pool consumed it) so it survives the FFN's own
+    // oG4 output writes; cur.resOff makes the FFN residual read it. Gated by
+    // the same D5C_FFN_E4M3 vendor-FFN experiment as b0/b70.
+    bool vendorRes = Co <= 32 && parsePilot("D5C_FFN_E4M3", nullptr, 0) > 0;
+    VkDeviceSize rawDst = vendorRes ? O.oB0RAW : O.oG4;
+    dUpMerge(cb, A(O.oG3), A(skipOff), A(rawDst), A(vec(tn("block%d.layer0.sin", idx))), 0,
              A(out16Off), tgtS, lowS, (uint32_t)Co, 0);
     bar(cb);
     cur = {out16Off, true, (uint32_t)Co};
+    if (vendorRes) { cur.resOff = rawDst; cur.res16 = false; }
 }
 
 // global block (L6 grid, input f16, padded to T6P rows)
@@ -413,9 +496,11 @@ void ChainRecorder::recordGlobal(VkCommandBuffer cb, int famIdx, int idx, Cur& c
           TOKG, 4096, 1024, 1, 0, 0, 0, gflags(EPI_GATE_E4M3, true), 1024, 4096, 4096);
     bar(cb);
     uint32_t epi = cur.is16 ? EPI_RESIDUAL_F16 : EPI_RESIDUAL_FP32;
+    VkDeviceSize resA = cur.resOff ? cur.resOff : cur.off;
+    if (cur.resOff) epi = cur.res16 ? EPI_RESIDUAL_F16 : EPI_RESIDUAL_FP32;
     dGemm(cb, famIdx, A(O.oHG), A(woff(tn("block%d.layer1.weight", idx))), A(O.oG3),
           TOKG, 1024, 4096, 1, 0, 0, 0, gflags(epi, false), 4096, 1024, 1024,
-          A(cur.off), A(vec(tn("block%d.layer1.ffn_cos_skip", idx))));
+          A(resA), A(vec(tn("block%d.layer1.ffn_cos_skip", idx))));
     bar(cb);
     dEw(cb, A(O.oG3), 0, 0, 0, A(O.oG2), TOKG * 1024, 2, 0);
     bar(cb);
@@ -495,80 +580,97 @@ void ChainRecorder::recordChain(VkCommandBuffer cb) {
     // b0 (plain, publish=false) at L0; frs = e4m3(raw); pool -> L1 e4m3
     {
         Cur c0 = cur;
-        recordWindowBlock(cb, 0, 0, st_[0], 32, 1, 0, 0, 0, false, c0, O.oB0RAW, 0);
-        cur = {O.oB0RAW, false, 32};
-        dEw(cb, A(O.oB0RAW), 0, 0, 0, A(O.oFRS), st_[0].TOK * 32, 3, 0);
-        bar(cb);
-        dPool(cb, A(O.oB0RAW), A(O.oPOOL), st_[0].H, st_[0].W, st_[0].W, st_[0].H, 32, 2u);
-        bar(cb);
+        // With the winblock kernel the residual epilogue also emits oFRS
+        // (e4m3 publish) and oPOOL (the 2x2 average, pool2's fold order) -
+        // the ew3 + pool pair below is only needed on the split path.
+        WinBlkTail wb0{WB_TAIL_POOL, O.oFRS, O.oPOOL, 0, false};
+        bool fused0 = recordWindowBlock(cb, 0, 0, st_[0], 32, 1, 0, 0, 0,
+                                        false, c0, O.oB0RAW, 0, wb0);
+        if (!fused0) {
+            cur = {O.oB0RAW, false, 32};
+            dEw(cb, A(O.oB0RAW), 0, 0, 0, A(O.oFRS), st_[0].TOK * 32, 3, 0);
+            bar(cb);
+            dPool(cb, A(O.oB0RAW), A(O.oPOOL), st_[0].H, st_[0].W, st_[0].W, st_[0].H, 32, 2u);
+            bar(cb);
+        }
         cur = {O.oPOOL, true, 32};
     }
     for (int i = 1; i <= 3; ++i) {
-        VkDeviceSize out = (i == 3) ? O.oSKIP0 : O.oG1;
         auto o = originOf(i);
-        recordWindowBlock(cb, 0, i, st_[1], 32, 1, 0, o.first, o.second, true, cur, O.oRAW, out);
-        cur = {out, true, 32};
+        recordWindowBlock(cb, 0, i, st_[1], 32, 1, 0, o.first, o.second, true, cur, O.oRAW, O.oG1);
+        cur = {O.oG1, true, 32};
     }
-    {   // b4 window at L1 (publish=false) + ds to L2 C=64
+    {   // b4 window at L1 + ds to L2 C=64. Vendor graph: the TRANSITION
+        // block's published output is the level's skip (skip0), not the
+        // previous block's - so b4 publishes e4m3 to oSKIP0 while its fp32
+        // residual keeps feeding the ds pool (keepRaw).
         Cur c4 = cur;
-        recordWindowBlock(cb, 0, 4, st_[1], 32, 1, 0, -4, 0, false, c4, O.oRAW, 0);
+        WinBlkTail wb4{WB_TAIL_NONE, 0, 0, 0, true};
+        recordWindowBlock(cb, 0, 4, st_[1], 32, 1, 0, -4, 0, true, c4, O.oRAW, O.oSKIP0, wb4);
         recordDs(cb, 0, 4, 32, 64, O.oRAW, O.oB4DS, st_[1], st_[2], false);
         cur = {O.oB4DS, true, 64};
     }
 
-    // enc L2: b5-7, b8 ds -> L3 C=128
+    // enc L2: b5-7, b8 ds -> L3 C=128 (b8's published output is skip1)
     for (int i = 5; i <= 7; ++i) {
-        VkDeviceSize out = (i == 7) ? O.oSKIP1 : O.oG1;
         auto o = originOf(i);
-        recordWindowBlock(cb, 1, i, st_[2], 64, 2, 1, o.first, o.second, true, cur, O.oRAW, out);
-        cur = {out, true, 64};
+        recordWindowBlock(cb, 1, i, st_[2], 64, 2, 1, o.first, o.second, true, cur, O.oRAW, O.oG1);
+        cur = {O.oG1, true, 64};
     }
     {
         Cur ci = cur;
         auto o = originOf(8);
-        recordWindowBlock(cb, 1, 8, st_[2], 64, 2, 1, o.first, o.second, false, ci, O.oRAW, 0);
+        WinBlkTail wb8{WB_TAIL_NONE, 0, 0, 0, true};
+        recordWindowBlock(cb, 1, 8, st_[2], 64, 2, 1, o.first, o.second, true, ci, O.oRAW, O.oSKIP1, wb8);
         recordDs(cb, 1, 8, 64, 128, O.oRAW, O.oG1, st_[2], st_[3], false);
         cur = {O.oG1, true, 128};
     }
-    // enc L3: b9-13, b14 ds -> L4 C=256
+    // enc L3: b9-13, b14 ds -> L4 C=256 (b14's published output is skip2)
     for (int i = 9; i <= 13; ++i) {
-        VkDeviceSize out = (i == 13) ? O.oSKIP2 : O.oG1;
         auto o = originOf(i);
-        recordWindowBlock(cb, 1, i, st_[3], 128, 4, 1, o.first, o.second, true, cur, O.oRAW, out);
-        cur = {out, true, 128};
+        recordWindowBlock(cb, 1, i, st_[3], 128, 4, 1, o.first, o.second, true, cur, O.oRAW, O.oG1);
+        cur = {O.oG1, true, 128};
     }
     {
         Cur ci = cur;
         auto o = originOf(14);
-        recordWindowBlock(cb, 1, 14, st_[3], 128, 4, 1, o.first, o.second, false, ci, O.oRAW, 0);
+        WinBlkTail wb14{WB_TAIL_NONE, 0, 0, 0, true};
+        recordWindowBlock(cb, 1, 14, st_[3], 128, 4, 1, o.first, o.second, true, ci, O.oRAW, O.oSKIP2, wb14);
         recordDs(cb, 1, 14, 128, 256, O.oRAW, O.oG1, st_[3], st_[4], false);
         cur = {O.oG1, true, 256};
     }
-    // enc L4: b15-21, b22 ds (pad8) -> L5 C=512
+    // enc L4: b15-21, b22 ds (pad8) -> L5 C=512 (b22's published output is skip3)
     for (int i = 15; i <= 21; ++i) {
-        VkDeviceSize out = (i == 21) ? O.oSKIP3 : O.oG1;
         auto o = originOf(i);
-        recordWindowBlock(cb, 1, i, st_[4], 256, 8, 1, o.first, o.second, true, cur, O.oRAW, out);
-        cur = {out, true, 256};
+        recordWindowBlock(cb, 1, i, st_[4], 256, 8, 1, o.first, o.second, true, cur, O.oRAW, O.oG1);
+        cur = {O.oG1, true, 256};
     }
     {
         Cur ci = cur;
         auto o = originOf(22);
-        recordWindowBlock(cb, 1, 22, st_[4], 256, 8, 1, o.first, o.second, false, ci, O.oRAW, 0);
+        WinBlkTail wb22{WB_TAIL_NONE, 0, 0, 0, true};
+        recordWindowBlock(cb, 1, 22, st_[4], 256, 8, 1, o.first, o.second, true, ci, O.oRAW, O.oSKIP3, wb22);
         recordDs(cb, 1, 22, 256, 512, O.oRAW, O.oB22DS, st_[4], st_[5], true);
         cur = {O.oB22DS, true, 512};
     }
 
-    // bottleneck L5: b23-30 split window
+    // bottleneck L5: b23-30 split window. Vendor graph: b30's output has two
+    // readers - the decoder's skip takes it PUBLISHED (e4m3 into oSS) while
+    // the bottleneck's pool consumes the RAW fp32 - so b30 runs
+    // publish=false and the publish/pool both happen on the fp32 output.
     for (int i = 23; i <= 30; ++i) {
         VkDeviceSize out = (i == 30) ? O.oSS : O.oG1;
         auto o = originOf(i);
-        recordWindowBlock(cb, 2, i, st_[5], 512, 16, 2, o.first, o.second, true, cur, O.oRAW, out);
+        recordWindowBlock(cb, 2, i, st_[5], 512, 16, 2, o.first, o.second,
+                          i != 30, cur, O.oRAW, out);
         cur = {out, true, 512};
     }
-    {   // b30 bridge: pad8 + pool(f16) -> half -> gemm layer4.weight -> e4m3 at L6
+    {   // b30 bridge: e4m3 publish -> oSS (the decoder skip), pad8 + pool the
+        // fp32 raw -> half -> gemm layer4.weight -> e4m3 at L6
+        dEw(cb, A(O.oRAW), 0, 0, 0, A(O.oSS), st_[5].TOK * 512, 3, 0);
+        bar(cb);
         uint32_t Hp = pad8u(st_[5].H), Wp = pad8u(st_[5].W);
-        dPool(cb, A(O.oSS), A(O.oPOOL), st_[5].H, st_[5].W, Wp, Hp, 512, 1u);
+        dPool(cb, A(O.oRAW), A(O.oPOOL), st_[5].H, st_[5].W, Wp, Hp, 512, 2u);
         bar(cb);
         dGemm(cb, 2, A(O.oPOOL), A(woff("block30.layer4.weight")), A(O.oBRIDGE),
               st_[6].TOK, 1024, 512, 1, 0, 0, 0, gflags(EPI_E4M3, true), 512, 1024, 1024);
@@ -657,21 +759,28 @@ void ChainRecorder::recordChain(VkCommandBuffer cb) {
                  A(vec("block70.layer0.inp_merge_cos")), 0, st_[0], st_[1], 32, 1);
         bar(cb);
         Cur c70{O.oMRG70, false, 32};
-        recordWindowBlock(cb, 5, 70, st_[0], 32, 1, 0, -4, -4, false, c70, O.oRAW, 0);
-        dEw(cb, A(O.oRAW), 0, 0, 0, A(O.oG2), st_[0].TOK * 32, 2, 0);
-        bar(cb);
-        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pGemm1.pipe);
-        // Head output is compact [TOK,4] fp32 (F_CN stores only C cols 0..3,
-        // ldc=4). The coopmat tile still computes all 16 columns with the
-        // identical k-loop - only the store is truncated, values bit-exact.
-        GemmPush p{A(O.oG2), A(O.oHeadW), A(O.oHEAD), st_[0].TOK, 16, 32, 1, 0, 0, 0,
-                   gflags(EPI_NONE, false) | F_CN, 32, 16, 4, 4, 0, 0, 0};
-        vkCmdPushConstants(cb, pGemm1.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
-        uint64_t gemm1_bytes = (uint64_t)st_[0].TOK * 32 * 2 + 32 * 16 * 2 + (uint64_t)st_[0].TOK * 4 * 4;
-        pmBegin(cb);
-        vkCmdDispatch(cb, 1, st_[0].TOK / 16, 1);
-        pmEnd(cb, "gemm1", "head", st_[0].TOK, 16, 32, 1, st_[0].TOK / 16, 1, gemm1_bytes);
-        bar(cb);
+        // With the winblock kernel the residual epilogue feeds the head GEMM
+        // (oHeadW [32,16] f16 -> compact fp32 [TOK,4] oHEAD) in-kernel - the
+        // ew2 f16 conversion + the gemm1 dispatch below are the split path.
+        WinBlkTail wb70{WB_TAIL_HEAD, 0, O.oHeadW, O.oHEAD, false};
+        bool fused70 = recordWindowBlock(cb, 5, 70, st_[0], 32, 1, 0, -4, -4,
+                                         false, c70, O.oRAW, 0, wb70);
+        if (!fused70) {
+            dEw(cb, A(O.oRAW), 0, 0, 0, A(O.oG2), st_[0].TOK * 32, 2, 0);
+            bar(cb);
+            vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pGemm1.pipe);
+            // Head output is compact [TOK,4] fp32 (F_CN stores only C cols 0..3,
+            // ldc=4). The coopmat tile still computes all 16 columns with the
+            // identical k-loop - only the store is truncated, values bit-exact.
+            GemmPush p{A(O.oG2), A(O.oHeadW), A(O.oHEAD), st_[0].TOK, 16, 32, 1, 0, 0, 0,
+                       gflags(EPI_NONE, false) | F_CN, 32, 16, 4, 4, 0, 0, 0};
+            vkCmdPushConstants(cb, pGemm1.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
+            uint64_t gemm1_bytes = (uint64_t)st_[0].TOK * 32 * 2 + 32 * 16 * 2 + (uint64_t)st_[0].TOK * 4 * 4;
+            pmBegin(cb);
+            vkCmdDispatch(cb, 1, st_[0].TOK / 16, 1);
+            pmEnd(cb, "gemm1", "head", st_[0].TOK, 16, 32, 1, st_[0].TOK / 16, 1, gemm1_bytes);
+            bar(cb);
+        }
     }
 }
 
