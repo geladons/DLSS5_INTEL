@@ -58,13 +58,21 @@
  *                     it is alive. 0 = serve the held result at any age.
  *                     Identical input never reaches the bound (the reuse
  *                     gate replays the processed result for statics).
- *   NR_LAYER_RESIDUAL 0 = disable serve-residual (default ON on the async
- *                     TCP path; bisect knob). The shipped residual path is
- *                     the GPU warped compose (NR_LAYER_GPUWARP below): the
- *                     residual lands at block-matched displaced positions,
- *                     which keeps coverage ~77-90% through camera pans -
- *                     the CPU masked path that preceded it dithered at
- *                     40-55% (field report 2026-10-06). When a present has
+ *   NR_LAYER_RESIDUAL 1 = enable serve-residual (default OFF on the async
+ *                     TCP path). Disabled by the owner field report: on
+ *                     sustained camera motion the masked compose still
+ *                     mixes enhanced/raw per pixel (coverage saws
+ *                     99->20->99%), and at tuning intensity that spatial
+ *                     mix itself reads as colour-play + boundary shimmer -
+ *                     the same artifact class the mask was meant to kill.
+ *                     A coherent stale processed frame reads better than
+ *                     a 60 fps speckle. When enabled, the shipped residual
+ *                     path is the GPU warped compose (NR_LAYER_GPUWARP
+ *                     below): the residual lands at block-matched
+ *                     displaced positions, which keeps coverage ~77-90%
+ *                     through camera pans - the CPU masked path that
+ *                     preceded it dithered at 40-55% (field report
+ *                     2026-10-06). When a present has
  *                     no fresh
  *                     reply for its own content, the layer displays the
  *                     CURRENT raw frame + the newest reply's enhancement
@@ -108,8 +116,8 @@
  *   NR_LAYER_WARP_BUDGET    per-call probe budget, per-mille of the
  *                     pixel count (def 4000 = ~4 probes/px average).
  *   NR_LAYER_GPUWARP  0 = keep the residual compose on the CPU (default
- *                     ON; async TCP path only, framegen mode 2 excluded -
- *                     and it only runs while NR_LAYER_RESIDUAL is on).
+ *                     ON whenever NR_LAYER_RESIDUAL itself is enabled;
+ *                     async TCP path only, framegen mode 2 excluded).
  *                     Three
  *                     embedded compute passes (nr_gpuwarp.c): quarter-res
  *                     box downsample -> 3x3-SAD block match -> per-pixel
@@ -1211,7 +1219,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
                 if (g_async_stale_ms < 0) g_async_stale_ms = 0;
             }
             const char *re = getenv("NR_LAYER_RESIDUAL");
-            g_residual = !re || strcmp(re, "0") != 0;
+            g_residual = re && strcmp(re, "0") != 0;
             const char *rm = getenv("NR_LAYER_RESIDUAL_MS");
             if (rm) {
                 g_resid_ms = atol(rm);
