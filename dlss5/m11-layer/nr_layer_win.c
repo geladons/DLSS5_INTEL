@@ -68,13 +68,18 @@
  *                     content rather than the daemon's reply rate.
  *   NR_LAYER_RESIDUAL_MS    age bound for the residual pair (default 400);
  *                     older than this the pair is stale, 0 = no age bound.
- *   NR_LAYER_RESIDUAL_DIFF  content bound: sampled mean |cur - pair src|
- *                     per channel in hundredths (default 1000 = 10.00);
- *                     past it the residual would land displaced - the
- *                     serve falls back to the serve-best order.
- *   NR_LAYER_RESIDUAL_BIG   second half of the content bound: allowed
- *                     share of sampled pixels moved >48/255, per-mille
- *                     (default 400). A scene cut trips both bounds.
+ *   NR_LAYER_RESIDUAL_PX    per-pixel mask eps in LSB (default 12): a
+ *                     pixel takes the residual only while every colour
+ *                     channel of the CURRENT raw stays within +-eps of the
+ *                     pair source. Moved content can never receive a
+ *                     displaced delta - this is what kills the ghosts.
+ *   NR_LAYER_RESIDUAL_DIFF  scene-CUT short-circuit: sampled mean
+ *                     |cur - pair src| per channel in hundredths
+ *                     (default 3000 = 30.00 - only a real cut reaches it;
+ *                     in-motion frames go to the per-pixel mask instead).
+ *   NR_LAYER_RESIDUAL_BIG   second half of the cut probe: allowed share
+ *                     of sampled pixels moved >48/255, per-mille
+ *                     (default 800). A scene cut trips both bounds.
  *   NR_LAYER_RESIDUAL_FB    what a REJECTED residual serve falls back to
  *                     when mapped holds the current raw frame:
  *                     1 (default) = the current raw frame itself - the
@@ -292,8 +297,13 @@ static long g_async_stale_ms = 500;
  * stale processed frame. -1 = env not parsed yet. */
 static int g_residual = -1;
 static long g_resid_ms = 400;      /* pair age bound (NR_LAYER_RESIDUAL_MS) */
-static long g_resid_diff = 1000;   /* sampled mean |d| bound, x100 per ch */
-static long g_resid_big = 400;     /* moved-pixel share bound, per-mille */
+static long g_resid_px = 12;       /* per-pixel mask eps, LSB
+                                      (NR_LAYER_RESIDUAL_PX) */
+static long g_resid_diff = 3000;   /* scene-cut probe: sampled mean |d|
+                                      bound, x100 per ch (cut-only now
+                                      that the pixel mask gates) */
+static long g_resid_big = 800;     /* scene-cut probe: moved-pixel share
+                                      bound, per-mille */
 static int g_resid_fb_raw = 1;     /* reject fallback: current raw (1) vs
                                     legacy stale-processed order (0) */
 static volatile LONG g_paused;  /* CTRL+ALT+X: passthrough, full fps */
@@ -1158,6 +1168,12 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
                 g_resid_big = atol(rb);
                 if (g_resid_big < 0) g_resid_big = 0;
             }
+            const char *px = getenv("NR_LAYER_RESIDUAL_PX");
+            if (px) {
+                g_resid_px = atol(px);
+                if (g_resid_px < 0) g_resid_px = 0;
+                if (g_resid_px > 255) g_resid_px = 255;
+            }
             const char *fb = getenv("NR_LAYER_RESIDUAL_FB");
             g_resid_fb_raw = !fb || strcmp(fb, "0") != 0;
         }
@@ -1174,9 +1190,9 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
                    g_async ? "on" : "OFF (sync exchange)", g_async_stale_ms);
         if (nr_port && g_async)
             nr_log("[nr_layer] serve-residual: %s (age bound %ld ms, "
-                   "diff bound %ld.%02ld, moved share %ld pm, "
+                   "pixel eps %ld, cut bound %ld.%02ld, moved share %ld pm, "
                    "reject fb %s)",
-                   g_residual ? "on" : "OFF", g_resid_ms,
+                   g_residual ? "on" : "OFF", g_resid_ms, g_resid_px,
                    g_resid_diff / 100, g_resid_diff % 100, g_resid_big,
                    g_resid_fb_raw ? "raw" : "stale");
         if (static_reuse)
@@ -1938,11 +1954,12 @@ static void async_lazy_start(device_data *data)
         if (g_residual && !data->resid) {
             data->resid = nr_residual_create();
             nr_residual_configure(data->resid, g_resid_ms,
-                                  g_resid_diff, g_resid_big);
+                                  g_resid_diff, g_resid_big, g_resid_px);
             nr_log("[nr_layer] serve-residual compositor armed (age bound "
-                   "%ld ms, diff bound %ld.%02ld, moved share %ld pm)",
-                   g_resid_ms, g_resid_diff / 100, g_resid_diff % 100,
-                   g_resid_big);
+                   "%ld ms, pixel eps %ld, cut bound %ld.%02ld, "
+                   "moved share %ld pm)",
+                   g_resid_ms, g_resid_px, g_resid_diff / 100,
+                   g_resid_diff % 100, g_resid_big);
         }
     } else {
         data->async_failed = 1;
@@ -2082,8 +2099,9 @@ static int async_take_fgi(device_data *data, swapchain_data *chain,
 
 /* Low-rate serve-class diag: one line per policy class TRANSITION
  * (residual-served vs stale-served vs raw vs generated), capped at ~3/s
- * with the suppressed flips counted into the next line. */
-static void serve_class_note(const char *cls)
+ * with the suppressed flips counted into the next line. cov_pm carries
+ * the residual coverage (per-mille) for the "ares" class, -1 elsewhere. */
+static void serve_class_note(const char *cls, long cov_pm)
 {
     static char last[16];
     static uint64_t last_ms;
@@ -2091,9 +2109,16 @@ static void serve_class_note(const char *cls)
     uint64_t now = nr_now_ms();
     if (!strcmp(cls, last)) { run++; return; }
     if (now - last_ms >= 300) {
-        nr_log("[nr_layer] serve class %s -> %s (prev x%lu%s)",
-               last[0] ? last : "none", cls, run,
-               skipped ? ", flips suppressed" : "");
+        if (cov_pm >= 0)
+            nr_log("[nr_layer] serve class %s -> %s (prev x%lu%s, "
+                   "pres=%ld.%ld%%)",
+                   last[0] ? last : "none", cls, run,
+                   skipped ? ", flips suppressed" : "",
+                   cov_pm / 10, cov_pm % 10);
+        else
+            nr_log("[nr_layer] serve class %s -> %s (prev x%lu%s)",
+                   last[0] ? last : "none", cls, run,
+                   skipped ? ", flips suppressed" : "");
         last_ms = now;
         skipped = 0;
     } else skipped++;
@@ -2117,16 +2142,19 @@ static int async_serve_best(device_data *data, swapchain_data *chain,
 {
     if (!data->mapped || data->staging_size < want) {
         diag_path = "araw";
-        serve_class_note("araw");
+        serve_class_note("araw", -1);
         return -2;
     }
     if (async_take_fgi(data, chain, want)) {
         diag_path = "afgi";
-        serve_class_note("afgi");
+        serve_class_note("afgi", -1);
         return 0;
     }
-    /* Serve-residual: mapped holds the CURRENT captured raw frame. A
-     * residual-composited display frame is display content ONLY - it is
+    /* Serve-residual: mapped holds the CURRENT captured raw frame. The
+     * composite is per-pixel masked (nr_residual.c): only pixels that
+     * still match the pair's source take the delta, moved content shows
+     * raw current pixels - the residual can never land displaced.
+     * A residual-composited display frame is display content ONLY - it is
      * never written into result/mid/earlier/fgi, so it can never become
      * an anchor or a reuse source (the mode-2 mid frame is captured from
      * mapped BEFORE this call).
@@ -2144,13 +2172,29 @@ static int async_serve_best(device_data *data, swapchain_data *chain,
                                   chain->extent.width, chain->extent.height,
                                   (uint64_t)chain->swapchain, nr_now_ms());
         if (v == NR_RESIDUAL_APPLIED) {
+            /* Coverage = the field signal: pres~100% = full enhancement,
+             * low% = mostly raw current pixels (still correct - moved
+             * content shows the CURRENT frame, just unenhanced). Logged
+             * at ~1 Hz while the class stays ares. */
+            long cov = nr_residual_last_cov_pm(data->resid);
+            static uint64_t cov_ms;
+            uint64_t now = nr_now_ms();
             diag_path = "ares";
-            serve_class_note("ares");
+            serve_class_note("ares", cov);
+            if (now - cov_ms >= 1000) {
+                cov_ms = now;
+                nr_log("[nr_layer] residual serve pres=%ld.%ld%% "
+                       "(diff %ld.%02ld)",
+                       cov / 10, cov % 10,
+                       nr_residual_last_diff_x100(data->resid) / 100,
+                       nr_residual_last_diff_x100(data->resid) % 100);
+            }
             return 0;
         }
         if (g_resid_fb_raw && frame_byte_order(chain->format) >= 0) {
             diag_path = "arej";
-            serve_class_note("arej");
+            serve_class_note("arej",
+                             nr_residual_last_cov_pm(data->resid));
             return -2;
         }
     }
@@ -2163,15 +2207,15 @@ static int async_serve_best(device_data *data, swapchain_data *chain,
             || nr_now_ms() - data->result_ms <= (uint64_t)g_async_stale_ms) {
             memcpy(data->mapped, data->result, (size_t)want);
             diag_path = "aserv";
-            serve_class_note("aserv");
+            serve_class_note("aserv", -1);
             return 0;
         }
         diag_path = "astale";
-        serve_class_note("astale");
+        serve_class_note("astale", -1);
         return -2;
     }
     diag_path = "araw";
-    serve_class_note("araw");
+    serve_class_note("araw", -1);
     return -2;
 }
 
@@ -3174,10 +3218,15 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                    g_fg.presents, g_fg.processed, g_fg.generated, g_fg.native);
         }
         if (diag_active()) {
-            nr_log("[diag] f=%lu sc=%p idx=%u p=%s up=%08x res=%08x tr=%d",
+            /* pres = residual coverage % (last apply); -1 = no pair */
+            long pr = data->resid
+                      ? nr_residual_last_cov_pm(data->resid) : -1;
+            nr_log("[diag] f=%lu sc=%p idx=%u p=%s up=%08x res=%08x "
+                   "tr=%d pres=%ld.%ld",
                    frame_counter, (void *)chain->swapchain, index, diag_path,
                    diag_crc(data->mapped, want),
-                   diag_crc(data->result, data->result_size), diag_tr);
+                   diag_crc(data->result, data->result_size), diag_tr,
+                   pr < 0 ? -1 : pr / 10, pr < 0 ? 0 : pr % 10);
         }
         }
     }

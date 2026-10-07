@@ -17,14 +17,24 @@
  * frame. It is the same residual-transfer idea as framegen mode 1, minus
  * the motion warp: the similarity bound below replaces the warp.
  *
- * Staleness policy - BOTH bounds must pass, else the caller falls back to
- * the serve-best order (stale processed -> raw):
+ * Staleness policy - the AGE bound must pass, else the caller falls back
+ * to the serve-best order (stale processed -> raw):
  *   - age:     now_ms - reply_ms <= max_age_ms; a daemon that stops
  *              answering lets the pair expire instead of riding forever.
- *   - content: sampled mean |cur - src| per channel <= the diff bound AND
- *              the share of sampled pixels whose max channel delta exceeds
- *              big_pix stays under big_pm. A real scene move/cut trips
- *              this - the residual would land displaced there.
+ *   - cut:     a coarse sampled probe (mean |cur - src| + moved share)
+ *              still trips NR_RESIDUAL_DIFF on a full scene CUT - there is
+ *              nothing to enhance and the pass is skipped wholesale.
+ *
+ * Per-pixel mask (the actual gate): the residual is a positional map of
+ * an OLDER frame - applying it frame-wide ghosts every moved edge even
+ * when the sampled mean stays inside the bound. So the compose is masked
+ * per pixel: the delta lands only where the CURRENT raw still matches the
+ * pair source (max |dB|,|dG|,|dR| <= px_eps). Where content moved, the
+ * output is the current raw pixel untouched - ghosts cannot occur BY
+ * CONSTRUCTION (the residual can never sit on displaced content), and
+ * moving silhouettes show unenhanced current pixels instead of a hard
+ * frame-level apply/reject pump. A frame may pass the cut probe yet take
+ * residual on only its static regions; coverage (below) reports how much.
  *
  * The pair is FULL-RES already: the daemon replies at the submitted extent
  * (the render scale lives inside the chain's residual reconstruction -
@@ -63,20 +73,25 @@ enum {
     NR_RESIDUAL_NONE = 0,   /* no usable pair held */
     NR_RESIDUAL_EXTENT,     /* extent/chain mismatch */
     NR_RESIDUAL_AGE,        /* pair older than the time bound */
-    NR_RESIDUAL_DIFF,       /* current frame moved too far from pair source */
-    NR_RESIDUAL_APPLIED,    /* cur now holds cur_raw + residual */
+    NR_RESIDUAL_DIFF,       /* scene cut, or zero pixels matched the mask */
+    NR_RESIDUAL_APPLIED,    /* cur holds cur_raw + masked residual */
     NR_RESIDUAL_NCLASS
 };
 
 NrResidual *nr_residual_create(void);
 void nr_residual_destroy(NrResidual *r);
 
-/* Policy bounds. max_age_ms <= 0 disables the age bound (content bound
- * still applies); diff_x100 is the sampled mean |cur-src| bound per
- * channel in hundredths (800 = 8.0); big_pm is the allowed share of
- * "moved" pixels (max channel delta > big_pix) in per-mille. */
+/* Policy bounds. max_age_ms <= 0 disables the age bound. diff_x100 /
+ * big_pm are the scene-cut short-circuit (sampled mean |cur-src| per
+ * channel in hundredths, and the allowed share of sampled pixels moved
+ * > big_pix in per-mille) - they only skip the pass on full cuts; the
+ * per-pixel mask is what gates application. px_eps is that mask: a pixel
+ * takes the residual only while every colour channel of the current raw
+ * stays within +-px_eps LSB of the pair source (hard mask - both sides of
+ * the boundary show CURRENT content, so no soft edge is needed).
+ * Passing <0 leaves a bound unchanged. */
 void nr_residual_configure(NrResidual *r, long max_age_ms,
-                           long diff_x100, long big_pm);
+                           long diff_x100, long big_pm, long px_eps);
 
 /* Drop the held pair (knob turn invalidates the enhancement it encodes). */
 void nr_residual_invalidate(NrResidual *r);
@@ -90,17 +105,22 @@ int nr_residual_update(NrResidual *r, const unsigned char *src,
                        uint64_t chain, unsigned long seq,
                        int channels_ok, uint64_t now_ms);
 
-/* Try to composite cur (w*h*4 BGRA/RGBA, in/out) with the held residual.
- * Returns an NR_RESIDUAL_* verdict; on APPLIED cur has been rewritten in
- * place. The content bound is probed against the CURRENT cur every call -
- * a frame that moved beyond it falls through to the caller's fallback. */
+/* Try to composite cur (w*h*4 BGRA/RGBA, in/out) with the held residual
+ * under the per-pixel mask. Returns an NR_RESIDUAL_* verdict; on APPLIED
+ * cur has been rewritten in place (moved pixels keep their raw value).
+ * DIFF means the cut probe tripped OR every pixel missed the mask - in
+ * both cases cur is untouched. */
 int nr_residual_apply(NrResidual *r, unsigned char *cur,
                       uint32_t w, uint32_t h, uint64_t chain,
                       uint64_t now_ms);
 
-/* Diag: per-verdict counters and the last sampled mean diff (x100). */
+/* Diag: per-verdict counters, the last sampled mean diff (x100), and the
+ * coverage of the last apply - the share of pixels that actually took the
+ * residual, in per-mille (1000 = every pixel; this is the field metric
+ * that distinguishes "enhancement working" from "silently all-raw"). */
 unsigned long nr_residual_stat(const NrResidual *r, int verdict);
 long nr_residual_last_diff_x100(const NrResidual *r);
+long nr_residual_last_cov_pm(const NrResidual *r);
 
 #ifdef __cplusplus
 }
