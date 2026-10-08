@@ -219,10 +219,14 @@ enum { F_NARROW = 0x1000, F_TRANSPOSE = 1, F_FUSED_I8_PRODUCER = 0x2000, F_FUSED
        F_APART = 0x8000,     // gemm.comp only: A operand gathers through the
                              // inverse window map (partition fused; gGeo0/gGeo1
                              // carry the window geometry, gfl bit0 = f16 src)
-       F_DUP16 = 0x10000 };  // residual epilogue also writes an f16 duplicate
+       F_DUP16 = 0x10000,    // residual epilogue also writes an f16 duplicate
                              // (half_round of the fp32 result, partition's exact
                              // bits) to the image-order buffer in `cosd` - lets
                              // the fused qkv A-load take the cheap f16 path.
+       F_PUBE4M3 = 0x20000 };// same slot, e4m3 publish instead of half_round:
+                             // folds the elementwise kind-0/5 'h' store into
+                             // the producer's residual epilogue (float16_t(
+                             // e4m3(acc+res*skip)) = ew's exact bits).
 
 struct ChainPipe {
     VkPipeline pipe = VK_NULL_HANDLE;
@@ -239,6 +243,11 @@ public:
 
     // Optional per-dispatch profiler (M10). Not owned; nullptr = disabled.
     void setProf(ChainProf* p) { prof_ = p; }
+
+    // The b0 input-adapter GEMM emits its f16 carrier through the residual
+    // epilogue (pc.res == 0 = pass-through) + F_DUP16 -> oG2, replacing the
+    // standalone kind-2 convert. No scratch pre-fill is required.
+    bool adaDup16() const { return adaDup16_; }
 
     // Records the full 71-block chain (~1400 dispatches) into cb.
     // Input: oX16 (f16 features via featpack); output: oHEAD (fp32 [TOK0,16]).
@@ -364,6 +373,23 @@ private:
     ChainPipe pGemmM8;   // gemm_m8.spv: slim BM=8 tile for narrow-out large-m gemms
     bool slimGemm_ = false;  // D5C_GEMM_SLIM (default on): dispatch pGemmM8 for
                              // narrow-out gemms at m>=2048 (or >=512 batched)
+
+    // EW-fusion pilots (M11d latency): fold the standalone elementwise
+    // convert/residual+publish passes into their producer's epilogue. Each
+    // site reuses a mechanism the split path already relies on - the e4m3
+    // narrow store, the f16 duplicate store, and the residual epilogue
+    // (whose `stage + res*skip` expression the compiler contracts to the
+    // same fma the ew shader emits, so outputs stay bit-exact).
+    bool ewFuse_   = false;  // D5C_EW_FUSE (default OFF, opt-in): producer-
+                             // epilogue converts measured ~+0.4 ms net on B50
+                             // at scale 0.58 - the fused stores serialise in
+                             // saturated GEMM tails. 1 re-enables (kind 2/3
+                             // converts, kind 0/5 residual+publish, b30
+                             // bridge publish, b70 upmerge dup).
+    bool adaDup16_ = true;   // D5C_ADA_DUP (default on): the b0 input adapter
+                             // GEMM emits the f16 carrier itself via F_DUP16
+                             // (residual self-alias x zero skip = store
+                             // pass-through), removing b0's kind-2 convert.
 
     uint64_t A(VkDeviceSize o) const { return ar_->A(o); }
     uint64_t vec(const std::string& n) const { return ar_->vecOff.at(n); }

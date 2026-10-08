@@ -283,8 +283,14 @@ bool ChainEngine::processFrame(const uint8_t* bgraIn, uint8_t* bgraOut, long fra
     if (prof_.enabled()) prof_.collect(c.dev, tsPeriodNs_, frameIndex);
 
     std::memcpy(bgraOut, rbFinalPtr_, (size_t)W_ * H_ * 4);
-    havePrevProcessed_ = true;   // bufPrevFrame_/bufPrevRaw_ now hold a pair
-    if (anchorCount_ < 2) anchorCount_++;   // mode-2 anchors rotate too
+    // Anchor validity must mirror what the record tail actually wrote: with
+    // framegen disabled (fgMode_ 0) no anchor copies were recorded, so the
+    // flags stay cleared and a later transfer/interp falls back to a full
+    // process - which then re-records fresh anchors on its way out.
+    if (fgMode_ != 0) {
+        havePrevProcessed_ = true;   // bufPrevFrame_/bufPrevRaw_ now hold a pair
+        if (anchorCount_ < 2) anchorCount_++;   // mode-2 anchors rotate too
+    }
     framesDone_++;               // bufHist_ now holds this frame's output -
                                  // next frame's features read it as history
     if (cfg_.debugDumps && frameIndex == 1) writeDebugDumps();

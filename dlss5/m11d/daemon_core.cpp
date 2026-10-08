@@ -93,7 +93,7 @@ bool DaemonCore::ensureEngine(uint32_t w, uint32_t h) {
     }
     engine = std::move(ne);     // deleter shuts the outgoing engine down
     curW = w; curH = h;
-    engine->setFrameGenMode(fgMode >= 2 ? 2 : 1);
+    engine->setFrameGenMode(fgMode);
     return true;
 }
 
@@ -147,7 +147,7 @@ void DaemonCore::builderLoop() {
                 engine->setPhase30(p30Ctl.params());
                 engine->setTemporal(temporal);
                 engine->setSharpness(sharpness);
-                engine->setFrameGenMode(fgMode >= 2 ? 2 : 1);
+                engine->setFrameGenMode(fgMode);
                 std::printf("[m11d] engine hot-swapped (%ux%u scale %.2f temporal %d)\n",
                             pb.w, pb.h, (double)pb.scale, temporal ? 1 : 0);
             }
@@ -253,7 +253,7 @@ void DaemonCore::handleCtrlLocked(const uint32_t hdr[4], uint32_t rep[4]) {
     } else if (hdr[1] == 5) {            // SETFRAMEGEN (on/off; mode preserved)
         fgMode = (hdr[2] != 0) ? (fgModeConfigured ? fgModeConfigured : 1) : 0;
         if (!fgMode) havePrev = false;
-        if (engine) engine->setFrameGenMode(fgMode >= 2 ? 2 : 1);
+        if (engine) engine->setFrameGenMode(fgMode);
         rep[1] = 1;
         std::printf("[m11d] ctrl: framegen -> %d\n", fgMode);
     } else if (hdr[1] == 6) {            // SETLOCALTONE: hdr[2] = float bits
@@ -317,7 +317,7 @@ void DaemonCore::handleCtrlLocked(const uint32_t hdr[4], uint32_t rep[4]) {
         fgMode = m;
         fgModeConfigured = m;
         if (!fgMode) havePrev = false;
-        if (engine) engine->setFrameGenMode(fgMode >= 2 ? 2 : 1);
+        if (engine) engine->setFrameGenMode(fgMode);
         rep[1] = 1;
         std::printf("[m11d] ctrl: fg mode -> %d\n", fgMode);
     } else {
@@ -521,11 +521,18 @@ void DaemonCore::handleFrame(SOCKET s, const uint32_t hdr[4], ULONGLONG deadline
     // held-still UI pixels (mask) pass through untouched. For a
     // generated frame the loop is a byte-exact no-op: framegen
     // mode 1 already packs the current raw alpha (cur.a).
-    for (size_t i = 0; i < px; ++i) {
-        if (masked && maskBuf[i]) {
-            std::memcpy(&outBuf[i * 4], &inBuf[i * 4], 4);
+    // Dword-wise form: identical bytes, ~4x fewer operations, and the
+    // unmasked case vectorizes (single linear pass over 1.9 MB each way).
+    {
+        const uint32_t* in32 = (const uint32_t*)inBuf.data();
+        uint32_t* out32 = (uint32_t*)outBuf.data();
+        if (!masked) {
+            for (size_t i = 0; i < px; ++i)
+                out32[i] = (out32[i] & 0x00FFFFFFu) | (in32[i] & 0xFF000000u);
         } else {
-            outBuf[i * 4 + 3] = inBuf[i * 4 + 3];
+            for (size_t i = 0; i < px; ++i)
+                out32[i] = maskBuf[i] ? in32[i]
+                                      : ((out32[i] & 0x00FFFFFFu) | (in32[i] & 0xFF000000u));
         }
     }
     if (!writeAll(s, outBuf.data(), px * 4))

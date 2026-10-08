@@ -246,8 +246,15 @@ bool ChainRecorder::recordWindowBlock(VkCommandBuffer cb, int famIdx, int idx, c
         // residual takes it as it came" - nr_resident.record_feed_forward).
         // D5C_FFN_E4M3=1 runs the vendor form for A/B.
         uint32_t inKind = (parsePilot("D5C_FFN_E4M3", nullptr, 0) > 0) ? 3u : 2u;
-        dEw(cb, A(cur.off), 0, 0, 0, A(O.oG2), TOKS * C, inKind, 0);
-        bar(cb);
+        // D5C_ADA_DUP: b0's adapter GEMM already wrote this f16 carrier to
+        // oG2 through its F_DUP16 epilogue (identical half_round bits) -
+        // skip the redundant standalone convert. Only the kind-2 default
+        // path: the vendor e4m3 form still needs its own publish here.
+        bool preDup = adaDup16_ && cur.off == O.oADA && inKind == 2u;
+        if (!preDup) {
+            dEw(cb, A(cur.off), 0, 0, 0, A(O.oG2), TOKS * C, inKind, 0);
+            bar(cb);
+        }
         // ...and for b0's stem specifically the vendor also takes the FFN
         // residual from the published f16 ("published input, half skip" -
         // opendlss-reference.md's block-0 step), while b70's merge skip stays
@@ -409,12 +416,27 @@ bool ChainRecorder::recordWindowBlock(VkCommandBuffer cb, int famIdx, int idx, c
                 bar(cb);
             }
         }
+        if (ewFuse_) {
+            // Fold the kind-5 'residual-in-place + e4m3 publish' pass into
+            // wout's epilogue: the residual epilogue computes acc+res*skip
+            // (the same expression ew emits, contracted to the same fma)
+            // and F_PUBE4M3 stores float16_t(e4m3(result)) to oG2 -
+            // identical bits, one dispatch + barrier + round-trip less.
+            uint32_t epi5 = resIs16 ? EPI_RESIDUAL_F16 : EPI_RESIDUAL_FP32;
+            dGemm(cb, famIdx, A(O.oG4), A(woff(woutN)),
+                  A(O.oG3), TOKS, C, C, 1, 0, 0, 0,
+                  gflags(epi5, false) | F_PUBE4M3, C, C, C,
+                  A(resA), A(vec(tn("block%d.layer0.ffn_cos_skip", idx))),
+                  A(O.oG2));
+            bar(cb);
+        } else {
         dGemm(cb, famIdx, A(O.oG4), A(woff(woutN)),
               A(O.oG3), TOKS, C, C, 1, 0, 0, 0, gflags(EPI_NONE, false), C, C, C);
         bar(cb);
         dEw(cb, A(O.oG3), A(resA), A(O.oG3), A(vec(tn("block%d.layer0.ffn_cos_skip", idx))),
             A(O.oG2), TOKS * C, 5, C);
         bar(cb);
+        }
         } // !fuse1
         return recordWindowAttn(cb, famIdx, idx, s, C, H, fam, oy, ox,
                                 O.oG2, true, O.oG2, true, rawOff, pubOff, publish, wb);
@@ -426,12 +448,23 @@ bool ChainRecorder::recordWindowBlock(VkCommandBuffer cb, int famIdx, int idx, c
               A(O.oG3), TOKS, 256, 64, 8, 64, 64 * 256, TOKS * 256,
               gflags(EPI_GATE, true), C, 256, 256);
         bar(cb);
+        if (ewFuse_) {
+            // Publish straight from the accumulator: the e4m3 narrow store
+            // writes oG2 in [TOKS,C] f16 image order (batch slices interleave
+            // via sc/ldc, same indices the standalone kind-3 pass covered) -
+            // drops the fp32 oG4 round-trip, a dispatch and a barrier.
+            dGemm(cb, famIdx, A(O.oG3), A(woff(tn("block%d.layer0.group_project_weight", idx))),
+                  A(O.oG2), TOKS, 64, 256, 8, TOKS * 256, 256 * 64, 64,
+                  gflags(EPI_E4M3, true), 256, 64, C);
+            bar(cb);
+        } else {
         dGemm(cb, famIdx, A(O.oG3), A(woff(tn("block%d.layer0.group_project_weight", idx))),
               A(O.oG4), TOKS, 64, 256, 8, TOKS * 256, 256 * 64, 64,
               gflags(EPI_NONE, false), 256, 64, C);
         bar(cb);
         dEw(cb, A(O.oG4), 0, 0, 0, A(O.oG2), TOKS * C, 3, 0);
         bar(cb);
+        }
         uint32_t epi = resIs16 ? EPI_RESIDUAL_F16 : EPI_RESIDUAL_FP32;
         // B4: same trick as fam0 - duplicate the fp32 carrier oG3 into oG4
         // (dead after kind3 -> oG2) as f16 so the fused qkv A-load runs on
@@ -499,11 +532,17 @@ void ChainRecorder::recordGlobal(VkCommandBuffer cb, int famIdx, int idx, Cur& c
     VkDeviceSize resA = cur.resOff ? cur.resOff : cur.off;
     if (cur.resOff) epi = cur.res16 ? EPI_RESIDUAL_F16 : EPI_RESIDUAL_FP32;
     dGemm(cb, famIdx, A(O.oHG), A(woff(tn("block%d.layer1.weight", idx))), A(O.oG3),
-          TOKG, 1024, 4096, 1, 0, 0, 0, gflags(epi, false), 4096, 1024, 1024,
-          A(resA), A(vec(tn("block%d.layer1.ffn_cos_skip", idx))));
+          TOKG, 1024, 4096, 1, 0, 0, 0,
+          gflags(epi, false) | (ewFuse_ ? F_DUP16 : 0u), 4096, 1024, 1024,
+          A(resA), A(vec(tn("block%d.layer1.ffn_cos_skip", idx))),
+          ewFuse_ ? A(O.oG2) : 0);
     bar(cb);
-    dEw(cb, A(O.oG3), 0, 0, 0, A(O.oG2), TOKG * 1024, 2, 0);
-    bar(cb);
+    // D5C_EW_FUSE: the f16 carrier the qkv gemm consumes was written by the
+    // w2 residual epilogue's F_DUP16 store (same half_round bits as kind-2).
+    if (!ewFuse_) {
+        dEw(cb, A(O.oG3), 0, 0, 0, A(O.oG2), TOKG * 1024, 2, 0);
+        bar(cb);
+    }
     dGemm(cb, famIdx, A(O.oG2), A(woff(tn("block%d.layer2.qkv_weight", idx))), A(O.oPROJG),
           TOKG, 3072, 1024, 1, 0, 0, 0, gflags(EPI_NONE, false), 1024, 3072, 3072);
     bar(cb);
@@ -534,18 +573,38 @@ void ChainRecorder::recordGlobal(VkCommandBuffer cb, int famIdx, int idx, Cur& c
         bar(cb);
         dSmaxG(cb, A(O.oSCG), A(O.oPRG));
         bar(cb);
+        if (ewFuse_) {
+            // PV gemm publishes its own e4m3 output: the narrow store lands
+            // at the same [tok, z*32+ch] f16 indices the kind-3 pass wrote.
+            dGemm(cb, famIdx, A(O.oPRG), A(O.oVG), A(O.oATG), TOKG, 32, TOKG, 32,
+                  TOKG * TOKG, 32, 32, gflags(EPI_E4M3, true), TOKG, 1024, 1024);
+            bar(cb);
+        } else {
         dGemm(cb, famIdx, A(O.oPRG), A(O.oVG), A(O.oMGG), TOKG, 32, TOKG, 32,
               TOKG * TOKG, 32, 32, gflags(EPI_NONE, false), TOKG, 1024, 1024);
         bar(cb);
         dEw(cb, A(O.oMGG), 0, 0, 0, A(O.oATG), TOKG * 1024, 3, 0);
         bar(cb);
+        }
     }
+    if (ewFuse_) {
+        // attn projection: residual (pre-attn carrier oG3, fp32) + cos_skip
+        // + e4m3 publish all in the epilogue - the kind-0 ew pass and its
+        // oABG intermediate disappear; oBRG keeps the fp32 result verbatim.
+        dGemm(cb, famIdx, A(O.oATG), A(woff(tn("block%d.layer4.projection_weight", idx))), A(O.oBRG),
+              TOKG, 1024, 1024, 1, 0, 0, 0,
+              gflags(EPI_RESIDUAL_FP32, false) | F_PUBE4M3, 1024, 1024, 1024,
+              A(O.oG3), A(vec(tn("block%d.layer4.attn_cos_skip", idx))),
+              A(pubOff));
+        bar(cb);
+    } else {
     dGemm(cb, famIdx, A(O.oATG), A(woff(tn("block%d.layer4.projection_weight", idx))), A(O.oABG),
           TOKG, 1024, 1024, 1, 0, 0, 0, gflags(EPI_NONE, false), 1024, 1024, 1024);
     bar(cb);
     dEw(cb, A(O.oABG), A(O.oG3), A(O.oBRG), A(vec(tn("block%d.layer4.attn_cos_skip", idx))),
         A(pubOff), TOKG * 1024, 0, 1024);
     bar(cb);
+    }
     (void)rawOff;
 }
 
@@ -574,8 +633,15 @@ void ChainRecorder::recordChain(VkCommandBuffer cb) {
     Cur cur{O.oADA, false, 32};
 
     // adapter GEMM at L0: x16 @ input_adapter_weight -> fp32
+    // D5C_ADA_DUP: emit the f16 carrier (b0's FFN input) through the
+    // residual epilogue too - pc.res == 0 makes it a pure pass-through
+    // store (bit-identical incl. -0.0) while F_DUP16 writes half_round(acc)
+    // into oG2, replacing b0's standalone kind-2 convert.
+    const uint32_t adaFl = adaDup16_ ? (gflags(EPI_RESIDUAL_FP32, false) | F_DUP16)
+                                   : gflags(EPI_NONE, false);
     dGemm(cb, 0, A(O.oX16), A(woff("block0.layer0.input_adapter_weight")), A(O.oADA),
-          st_[0].TOK, 32, 16, 1, 0, 0, 0, gflags(EPI_NONE, false), 16, 32, 32);
+          st_[0].TOK, 32, 16, 1, 0, 0, 0, adaFl, 16, 32, 32,
+          0, 0, adaDup16_ ? A(O.oG2) : 0);
     bar(cb);
     // b0 (plain, publish=false) at L0; frs = e4m3(raw); pool -> L1 e4m3
     {
@@ -656,19 +722,26 @@ void ChainRecorder::recordChain(VkCommandBuffer cb) {
 
     // bottleneck L5: b23-30 split window. Vendor graph: b30's output has two
     // readers - the decoder's skip takes it PUBLISHED (e4m3 into oSS) while
-    // the bottleneck's pool consumes the RAW fp32 - so b30 runs
-    // publish=false and the publish/pool both happen on the fp32 output.
+    // the bottleneck's pool consumes the RAW fp32. D5C_EW_FUSE lets b30's
+    // own epilogue emit both copies (publish + keepRaw keeps the fp32 store
+    // the pool reads) - the standalone kind-3 pass below is dropped. On the
+    // split path (ewFuse_=0) b30 runs publish=false and the publish/pool
+    // both happen on the fp32 output as before.
     for (int i = 23; i <= 30; ++i) {
         VkDeviceSize out = (i == 30) ? O.oSS : O.oG1;
         auto o = originOf(i);
+        WinBlkTail wbT{};
+        if (i == 30 && ewFuse_) wbT.keepRaw = true;
         recordWindowBlock(cb, 2, i, st_[5], 512, 16, 2, o.first, o.second,
-                          i != 30, cur, O.oRAW, out);
+                          i != 30 || ewFuse_, cur, O.oRAW, out, wbT);
         cur = {out, true, 512};
     }
     {   // b30 bridge: e4m3 publish -> oSS (the decoder skip), pad8 + pool the
         // fp32 raw -> half -> gemm layer4.weight -> e4m3 at L6
-        dEw(cb, A(O.oRAW), 0, 0, 0, A(O.oSS), st_[5].TOK * 512, 3, 0);
-        bar(cb);
+        if (!ewFuse_) {
+            dEw(cb, A(O.oRAW), 0, 0, 0, A(O.oSS), st_[5].TOK * 512, 3, 0);
+            bar(cb);
+        }
         uint32_t Hp = pad8u(st_[5].H), Wp = pad8u(st_[5].W);
         dPool(cb, A(O.oRAW), A(O.oPOOL), st_[5].H, st_[5].W, Wp, Hp, 512, 2u);
         bar(cb);
@@ -755,10 +828,17 @@ void ChainRecorder::recordChain(VkCommandBuffer cb) {
     }
 
     {   // b70: upsample L1->L0, merge up*sin + frs*cos (fp32) -> window plain -> head
+        // D5C_EW_FUSE: upmerge also emits the f16 duplicate (half_round, same
+        // bits as elementwise kind 2) straight to oG2 - the block entry's
+        // fp32->f16 carrier convert is folded away. c70 then carries the f16
+        // input while resOff keeps the raw fp32 merge for the FFN residual
+        // (same contract the standalone convert produced).
         dUpMerge(cb, A(cur.off), A(O.oFRS), A(O.oMRG70), A(vec("block70.layer0.inp_merge_sin")),
-                 A(vec("block70.layer0.inp_merge_cos")), 0, st_[0], st_[1], 32, 1);
+                 A(vec("block70.layer0.inp_merge_cos")), ewFuse_ ? A(O.oG2) : 0,
+                 st_[0], st_[1], 32, 1);
         bar(cb);
-        Cur c70{O.oMRG70, false, 32};
+        Cur c70 = ewFuse_ ? Cur{O.oG2, true, 32, O.oMRG70, false}
+                          : Cur{O.oMRG70, false, 32};
         // With the winblock kernel the residual epilogue feeds the head GEMM
         // (oHeadW [32,16] f16 -> compact fp32 [TOK,4] oHEAD) in-kernel - the
         // ew2 f16 conversion + the gemm1 dispatch below are the split path.

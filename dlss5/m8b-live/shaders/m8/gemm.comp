@@ -61,6 +61,12 @@ const uint F_CN              = 0x2u;    // compact-N C store: only cols
                                      // [0, pc.pad) of each row are written
                                      // (head [TOK,4] store); tile compute is
                                      // unchanged, values bit-identical.
+const uint F_PUBE4M3         = 0x20000u; // residual epilogue writes the e4m3
+                                     // publish of the result to pc.cosd
+                                     // instead of the half_round duplicate:
+                                     // folds elementwise kind 0/5's 'h'
+                                     // (float16_t(e4m3(r)) bits verbatim)
+                                     // into the producing GEMM.
 
 // fp16-island rounding ops, verbatim from cosine_win.comp (EPI_COSQKV must
 // reproduce that kernel's exact float math sequence for bit-exactness).
@@ -629,21 +635,33 @@ void main() {
         // F_DUP16: also emit the f16 duplicate the fused qkv partition-load
         // consumes (partition writes half_round(src fp32) -> f16; the epilogue
         // reproduces those exact bits without the oWIN round-trip).
+        // F_PUBE4M3: same store slot, e4m3-rounded - reproduces the bits an
+        // elementwise kind-0/5 residual+publish writes to 'h'.
         bool dup16 = (pc.flags & F_DUP16) != 0u;
+        bool pube4 = (pc.flags & F_PUBE4M3) != 0u;
+        // pc.res == 0 = no residual (adapter dup): the C store is the plain
+        // widened accumulator - skipping the res*skip add also preserves a
+        // -0.0 accumulator bit-exactly (a real add would flip it to +0.0).
+        const bool hasRes = (pc.res != 0);
         for (uint e = gl_LocalInvocationID.x; e < BM * BN; e += 32u) {
             uint r = row + e / BN;
             uint c = col + e % BN;
             if (r >= pc.m || c >= pc.n) continue;
             uint ch = c % pc.n;
             uint idx = co + r * ldc + c;
-            float resVal = (epilogue == EPI_RESIDUAL_F16)
-                ? f16_widen(uint(float16BitsToUint16(HalfBuf(pc.res).v[idx])))
-                : FloatBuf(pc.res).v[idx];
-            float skipVal = FloatBuf(pc.skip).v[ch];
-            float acc_val = float(stage[e]) + resVal * skipVal;
+            float acc_val = float(stage[e]);
+            if (hasRes) {
+                float resVal = (epilogue == EPI_RESIDUAL_F16)
+                    ? f16_widen(uint(float16BitsToUint16(HalfBuf(pc.res).v[idx])))
+                    : FloatBuf(pc.res).v[idx];
+                float skipVal = FloatBuf(pc.skip).v[ch];
+                acc_val += resVal * skipVal;
+            }
             pc.c.v[idx] = acc_val;
             if (dup16)
                 HalfBuf(uint64_t(pc.cosd)).v[idx] = float16_t(half_round(acc_val));
+            else if (pube4)
+                HalfBuf(uint64_t(pc.cosd)).v[idx] = float16_t(e4m3(acc_val));
         }
         return;
     }

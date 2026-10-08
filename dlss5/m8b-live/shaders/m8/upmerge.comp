@@ -15,6 +15,9 @@
  * kind 1: b70 pre-merge (fp32 out, no publish):
  *             c[y,x,ch] = widen(a[y/2,x/2,ch]) * sin[ch] + widen(b[y,x,ch]) * cos[ch]
  *          a = f16 low-scale value (b69 out), b = full-resolution skip f16.
+ *          h != 0 additionally stores half_round(r) f16 - the fp32 carrier's
+ *          f16 duplicate (b70's FFN input), same bits as elementwise kind 2
+ *          (software half_round: f16 subnormals reach memory here).
  * sin/cos tables are fp32 side tables (placeVecF16 widened on the host).
  */
 #extension GL_EXT_buffer_reference : require
@@ -105,6 +108,14 @@ void main() {
             precise float r3 = av.w * sv.w + bv.w * cv.w;
 
             Float4Buf(pc.c).v4[t4 + ch4] = vec4(r0, r1, r2, r3);
+            if (pc.h != 0) {
+                Half4Buf(pc.h).v4[t4 + ch4] = f16vec4(
+                    float16_t(half_round(r0)),
+                    float16_t(half_round(r1)),
+                    float16_t(half_round(r2)),
+                    float16_t(half_round(r3))
+                );
+            }
         }
     }
 }

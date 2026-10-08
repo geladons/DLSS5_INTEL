@@ -272,7 +272,7 @@ public:
     }
 
     void setFrameGenMode(int mode) {
-        fgMode_ = (mode == 2) ? 2 : 1;
+        fgMode_ = (mode == 2) ? 2 : (mode >= 1 ? 1 : 0);
         if (initialized_) {
             engine_.setFrameGenMode(fgMode_);
         }

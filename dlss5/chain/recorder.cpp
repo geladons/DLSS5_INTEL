@@ -41,6 +41,14 @@ void ChainRecorder::init(const VkCtx& c, const ChainArena& arena, const WeightsS
     chainMakePipe(c, shaderDir + "gemm_rn1.spv", pGemm1);
     chainMakePipe(c, shaderDir + "gemm_m8.spv", pGemmM8);
     slimGemm_ = parsePilot("D5C_GEMM_SLIM", nullptr, 1) > 0;
+    // D5C_EW_FUSE measured net-negative on B50 (~+0.4 ms at 0.58): folding
+    // the standalone ew converts into the fam/global/b30/b70 epilogues
+    // serialises the extra stores inside already-saturated GEMMs - the
+    // removed passes were cheaper at full memory bandwidth. Kept opt-in.
+    // D5C_ADA_DUP is neutral-to-slightly-positive (one 66K-elem convert
+    // folded into the tiny adapter GEMM tail).
+    ewFuse_   = parsePilot("D5C_EW_FUSE", nullptr, 0) > 0;
+    adaDup16_ = parsePilot("D5C_ADA_DUP", nullptr, 1) > 0;
     chainMakePipe(c, shaderDir + "gemm_i8.spv", pGemmI8);
     chainMakePipe(c, shaderDir + "quant_act.spv", pQuantAct);
     chainMakePipe(c, shaderDir + "cosine.spv", pCos);

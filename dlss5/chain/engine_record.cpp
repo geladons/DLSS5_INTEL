@@ -335,8 +335,13 @@ void ChainEngine::recordFrame(long frameIndex) {
         //   procA <- procB <- imgFinal   (bufPrevFrame_ <- bufCurProc_ <- new)
         //   rawA  <- rawB  <- imgIn      (bufPrevRaw_  <- bufCurrFrame_ <- new)
         // Mode <=1 keeps the single previous pair (byte-identical stream).
+        // fgMode_==0 skips the copies outright: nothing consumes the anchor
+        // buffers while framegen is disabled, and the validity flags stay
+        // cleared (see processFrame) so a re-enable request falls back to a
+        // full process that re-records them fresh.
         const bool fg2 = (fgMode_ == 2 && bufCurProc_);
         const VkDeviceSize fb2 = (VkDeviceSize)W_ * H_ * 4;
+        if (fgMode_ != 0) {
         if (fg2) {
             VkBufferCopy cpRot{0, 0, fb2};
             vkCmdCopyBuffer(cmd_, bufCurProc_, bufPrevFrame_, 1, &cpRot);
@@ -363,6 +368,7 @@ void ChainEngine::recordFrame(long frameIndex) {
             } else {
                 vkCmdCopyImageToBuffer(cmd_, imgIn_, VK_IMAGE_LAYOUT_GENERAL, bufPrevRaw_, 1, &rgn);
             }
+        }
         }
         VkMemoryBarrier hb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         hb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; hb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;

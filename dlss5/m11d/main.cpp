@@ -421,6 +421,17 @@ int main(int argc, char** argv) {
         DWORD tv = 20000;
         setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
         setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof tv);
+        // One connection per frame over loopback: Nagle's delay would park
+        // the 16-byte header until the payload flush anyway; kill it. Big
+        // kernel buffers cut the 1.9 MB payload/reply into far fewer recv/
+        // send syscalls (~64 KiB default -> 512 KiB).
+        {
+            const int one = 1;
+            setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char*)&one, sizeof one);
+            int kbuf = 512 * 1024;
+            setsockopt(s, SOL_SOCKET, SO_RCVBUF, (const char*)&kbuf, sizeof kbuf);
+            setsockopt(s, SOL_SOCKET, SO_SNDBUF, (const char*)&kbuf, sizeof kbuf);
+        }
 
         // The whole request (header + payload + optional mask) gets one
         // 8-second budget; the serial loop can't be held hostage by a

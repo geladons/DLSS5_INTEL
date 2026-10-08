@@ -119,7 +119,10 @@ void ChainEngine::setFrameGenMode(int mode) {
         mode = 1;
     }
     if (mode != fgMode_) {
-        fgMode_ = (mode == 2) ? 2 : 1;
+        // mode 0 disables framegen entirely: processFrame skips the anchor
+        // copies and leaves the validity flags cleared, so a later transfer/
+        // interp request falls back to a full process which re-records them.
+        fgMode_ = (mode == 2) ? 2 : (mode >= 1 ? 1 : 0);
         resetAnchors();   // anchors are mode-shaped state
     }
 }
