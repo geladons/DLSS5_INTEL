@@ -131,4 +131,15 @@ private:
     // process so the game reclaims the device in pure passthrough.
     int deadEngines_ = 0;
     static const int kDeadEngineLimit = 3;
+    // Sliding-window fault bound: a served frame resets the consecutive
+    // streak but cannot un-happen the TDR - an engine that served 1-3
+    // frames then faulted kept zeroing deadEngines_ while taking the GPU
+    // down every time (field report 2026-10-08: repeated
+    // VULKANCOMPUTE/TRINITY11 PAGEFAULT storms inside one daemon lifetime,
+    // bound never tripped). >= kWindowFaultLimit faults inside
+    // kFaultWindowMs exits exactly like the streak bound.
+    int windowFaults_ = 0;
+    ULONGLONG lastFaultAt_ = 0;
+    static const int kWindowFaultLimit = 3;
+    static const ULONGLONG kFaultWindowMs = 120000;
 };

@@ -543,22 +543,34 @@ void DaemonCore::handleFrame(SOCKET s, const uint32_t hdr[4], ULONGLONG deadline
                 engine.reset();
                 curW = 0; curH = 0;
             }
+            // Sliding-window fault count FIRST - it also feeds the settle
+            // escalation below (deadEngines_ alone resets on every served
+            // frame and never accumulates during a storm).
+            ULONGLONG nowMs = GetTickCount64();
+            if (nowMs - lastFaultAt_ > kFaultWindowMs) windowFaults_ = 0;
+            lastFaultAt_ = nowMs;
+            ++windowFaults_;
             /* The fault means the driver just went through a TDR; the
              * device it hands out for the next seconds is not guaranteed
              * stable. Every rebuild kicked from now on first waits out
              * the settle floor (cleared on the next clean frame). */
-            buildSettleUntil_ = GetTickCount64()
-                + 4000 * std::min<int64_t>(deadEngines_ + 1, 5);
+            buildSettleUntil_ = nowMs + 4000 * std::min<int64_t>(
+                std::max(deadEngines_, windowFaults_) + 1, 5);
         }
         // A fault that survives a full rebuild is not transient (driver
         // reset loop, deterministic dispatch fault): each retry costs the
-        // game ~3.5 s of GPU at the moment it needs it most. Bound the
-        // streak - after kDeadEngineLimit dead engines we exit and the
-        // layer's passthrough gives the device back to the game.
-        if (++deadEngines_ >= kDeadEngineLimit) {
-            std::fprintf(stderr, "[m11d] %d consecutive engine losses - "
-                        "exiting so the game reclaims the GPU\n",
-                        kDeadEngineLimit);
+        // game ~3.5 s of GPU at the moment it needs it most. Bound it -
+        // either streak (no good frame between losses) or the sliding
+        // window (losses keep coming around served frames) trips the exit,
+        // and the layer's passthrough gives the device back to the game.
+        ++deadEngines_;
+        if (deadEngines_ >= kDeadEngineLimit
+                || windowFaults_ >= kWindowFaultLimit) {
+            std::fprintf(stderr, "[m11d] engine-loss bound hit (streak %d, "
+                        "window %d in %llus) - exiting so the game "
+                        "reclaims the GPU\n",
+                        deadEngines_, windowFaults_,
+                        (unsigned long long)(kFaultWindowMs / 1000));
             writeFenceFile();
             std::fflush(stderr);
             std::exit(4);
