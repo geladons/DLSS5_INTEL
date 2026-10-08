@@ -374,7 +374,7 @@ void DaemonCore::handleCtrlLocked(const uint32_t hdr[4], uint32_t rep[4]) {
 }
 
 // ------------------------------------------------------------- frame path --
-void DaemonCore::handleFrame(SOCKET s, const uint32_t hdr[4], ULONGLONG deadline,
+bool DaemonCore::handleFrame(SOCKET s, const uint32_t hdr[4], ULONGLONG deadline,
                              std::vector<uint8_t>& inBuf, std::vector<uint8_t>& outBuf,
                              std::vector<uint8_t>& maskBuf) {
     const bool masked = hdr[0] == MAGIC_MASKED;
@@ -382,14 +382,14 @@ void DaemonCore::handleFrame(SOCKET s, const uint32_t hdr[4], ULONGLONG deadline
     const bool fgiReq = hdr[0] == MAGIC_FGI;
     if (hdr[0] != MAGIC_PLAIN && !masked && !fgReq && !fgiReq) {
         std::fprintf(stderr, "[m11d] bad magic 0x%08x - dropping connection\n", hdr[0]);
-        return;
+        return false;
     }
     const uint32_t w = hdr[1], h = hdr[2];
     const uint32_t fmt = hdr[3];
     const size_t px = (size_t)w * h;
     if (!w || !h || px > 16384ull * 16384ull) {
         std::fprintf(stderr, "[m11d] insane extent %ux%u - dropping\n", w, h);
-        return;
+        return false;
     }
     // Only B8G8R8A8 wire order is valid: the shaders decode B,G,R,A bytes.
     // An R8G8B8A8 (37/43) or packed-10 swapchain would come back channel-
@@ -397,7 +397,7 @@ void DaemonCore::handleFrame(SOCKET s, const uint32_t hdr[4], ULONGLONG deadline
     if (fmt != 44 && fmt != 50) {
         std::fprintf(stderr, "[m11d] VkFormat %u is not B8G8R8A8 - dropping "
                      "(layer must gate non-BGRA formats)\n", fmt);
-        return;
+        return false;
     }
     // Engine acquisition BEFORE the payload read: when nothing usable
     // exists the async builder is already running - closing now lets the
@@ -407,7 +407,7 @@ void DaemonCore::handleFrame(SOCKET s, const uint32_t hdr[4], ULONGLONG deadline
     // behind a 3-14 s build -> "daemon did not answer" + restart loops).
     std::shared_ptr<d5c::ChainEngine> eng = requestEngine(w, h);
     if (!eng)
-        return;
+        return false;
     // Live knobs ride the frame channel. Env is spawn-frozen and already
     // applied at startup: re-reading it per frame reverted live knob
     // pushes to the launch baseline (the "env leash").
@@ -443,11 +443,11 @@ void DaemonCore::handleFrame(SOCKET s, const uint32_t hdr[4], ULONGLONG deadline
     inBuf.resize(px * 4);
     outBuf.resize(px * 4);
     if (!readAllDeadline(s, inBuf.data(), px * 4, deadline))
-        return;
+        return false;
     if (masked) {   // held-still UI mask: read and (v0) ignore
         maskBuf.resize(px);
         if (!readAllDeadline(s, maskBuf.data(), px, deadline))
-            return;
+            return false;
     }
     if (w != prevW || h != prevH) {
         havePrev = false;
@@ -575,7 +575,7 @@ void DaemonCore::handleFrame(SOCKET s, const uint32_t hdr[4], ULONGLONG deadline
             std::fflush(stderr);
             std::exit(4);
         }
-        return;
+        return false;
     }
     deadEngines_ = 0;   // a served frame proves the current engine healthy
     {
@@ -634,8 +634,10 @@ void DaemonCore::handleFrame(SOCKET s, const uint32_t hdr[4], ULONGLONG deadline
             }
         }
     }
-    if (!writeAll(s, outBuf.data(), px * 4))
+    if (!writeAll(s, outBuf.data(), px * 4)) {
         std::fprintf(stderr, "[m11d] reply write failed\n");
+        return false;
+    }
     // Stage timing in the chain parens: fe=features fp=featpack chain=net
     // tail=encode/compose (engine GPU timestamps; sums < wall = host side:
     // TCP recv + staging upload + reply write).
@@ -649,4 +651,5 @@ void DaemonCore::handleFrame(SOCKET s, const uint32_t hdr[4], ULONGLONG deadline
                 generated == 1 ? "transfer" : "chain",
                 st.feMs, st.fpMs,
                 generated ? st.gpuTotalMs : st.chainMs, st.tailMs);
+    return true;
 }

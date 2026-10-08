@@ -2915,3 +2915,39 @@ receptive field, cannot process sub-rects independently. Mask
 staleness was the real problem, not the delta-vs-image choice.
 
 Deployed: x86+x64 layer DLLs -> production/runtime/layer/{x86,x64}.
+
+## 2026-10-08 Stage 44 - sync present mode + keep-alive daemon protocol
+
+OWNER FIELD TEST (residual compositor live): benchmark flythrough was
+smooth, but menu showed mouse ghosts+flicker, transitions threw digital
+garbage, gameplay had light mask-noise. Owner's proposal: "limit the
+game fps to the engine speed". ADOPTED - at ~42 ms/frame daemon the
+residual can only ever be 3-6 presents stale; a fully-processed frame
+at ~20-25 fps beats a fast frame wearing a stale delta.
+
+IMPLEMENTATION:
+- gamelaunch.py: x86 daemon-path launches now default to SYNC mode
+  (env NR_LAYER_ASYNC=0); per-game meta "async": true restores async
+  serving. residual/gpuwarp envs still armed (fallback + async opt-in).
+- First sync test exposed a protocol defect: exchange() opened a NEW
+  TCP connection per present (one-conn-per-frame protocol). At
+  loading/menu present rates (~300-390 fps) this flooded the backlog-4
+  listen queue -> connect RSTs -> presents failed fast -> game ran raw
+  at full speed while the daemon starved (TIME_WAIT pileup 240+).
+- FIX both ends: daemon accept loop now serves keep-alive connections
+  (inner request loop until close/fail; handleFrame returns conn
+  health; ctrl conns stay one-shot). Layer sync path uses new
+  exchange_keepalive(): persistent socket + 150 ms reconnect backoff
+  on fast failures (<20 ms - RST/clean-close) so a dead/rebuilding
+  daemon can't spin the present loop; timeouts self-pace.
+- Verified live via controller launch: "async OFF (sync exchange)"
+  banner, presents=processed 1:1, daemon serves at ~42 ms, socket
+  count flat (TIME_WAIT draining), DDA snapshot = clean processed
+  selector frame. Static frames still pass at full rate (reuse) - the
+  cap engages only on unique content, ~20-25 fps on motion.
+
+Note on Stage 43 fixes: all three (gres fresco feed, cut gate,
+coherence vote) remain correct and stay for the async opt-in path -
+but the dominant artifact was residual staleness itself, which only
+sync removes. Per-game meta: "sync" semantics = NR_LAYER_ASYNC=0
+(default x86), "async":true = opt out.

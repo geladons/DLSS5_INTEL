@@ -25,6 +25,14 @@ extern long nr_port;
 int exchange(const void *header, size_t header_size, const void *payload,
              size_t payload_size, void *reply, size_t reply_size);
 
+/* Same exchange over a PERSISTENT connection (sync present path): the
+ * daemon round-trip itself throttles the presents. Adds a 150 ms
+ * reconnect backoff on fast failures so a dead/rebuilding daemon cannot
+ * spin the present loop. Same return codes as exchange(). */
+int exchange_keepalive(const void *header, size_t header_size,
+                       const void *payload, size_t payload_size,
+                       void *reply, size_t reply_size);
+
 /* Fire a 16-byte NRCT control command through the same bounded exchange
  * (header-only, 16-byte reply). 0 = daemon ok; <0 transport; 1 = rejected. */
 int nr_ctrl(uint32_t cmd, uint32_t payload_arg);

@@ -435,7 +435,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "[FAIL] bind/listen 127.0.0.1:%d (%d)\n", port, WSAGetLastError());
         return 1;
     }
-    std::printf("[m11d] listening on 127.0.0.1:%d (one connection per frame)\n", port);
+    std::printf("[m11d] listening on 127.0.0.1:%d (keep-alive frame conns)\n", port);
 
     std::vector<uint8_t> inBuf, outBuf, maskBuf;
     for (;;) {
@@ -445,10 +445,9 @@ int main(int argc, char** argv) {
         DWORD tv = 20000;
         setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
         setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof tv);
-        // One connection per frame over loopback: Nagle's delay would park
-        // the 16-byte header until the payload flush anyway; kill it. Big
-        // kernel buffers cut the 1.9 MB payload/reply into far fewer recv/
-        // send syscalls (~64 KiB default -> 512 KiB).
+        // Nagle's delay would park the 16-byte header until the payload
+        // flush anyway; kill it. Big kernel buffers cut the 1.9 MB
+        // payload/reply into far fewer recv/send syscalls.
         {
             const int one = 1;
             setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char*)&one, sizeof one);
@@ -457,20 +456,25 @@ int main(int argc, char** argv) {
             setsockopt(s, SOL_SOCKET, SO_SNDBUF, (const char*)&kbuf, sizeof kbuf);
         }
 
-        // The whole request (header + payload + optional mask) gets one
-        // 8-second budget; the serial loop can't be held hostage by a
-        // client that stops mid-transfer.
-        const ULONGLONG deadline = GetTickCount64() + 8000;
-        uint32_t hdr[4]{};
-        if (!readAllDeadline(s, (uint8_t*)hdr, 16, deadline)) {
-            closesocket(s); continue;
+        // Keep-alive: the layer's SYNC path reuses one connection per
+        // present - per-frame connect() was a SYN/RST storm at loading-
+        // screen rates (300+/s) that drowned the accept backlog. Serve
+        // requests until the client closes or a transfer fails; the
+        // async worker's one-frame conns still work (client close ends
+        // the inner loop identically). Each request gets its own 8 s
+        // budget so the loop can't be held hostage mid-transfer.
+        for (;;) {
+            const ULONGLONG deadline = GetTickCount64() + 8000;
+            uint32_t hdr[4]{};
+            if (!readAllDeadline(s, (uint8_t*)hdr, 16, deadline))
+                break;
+            if (hdr[0] == MAGIC_CTRL) {
+                core.handleCtrl(s, hdr);
+                break;          // ctrl conns stay one-shot
+            }
+            if (!core.handleFrame(s, hdr, deadline, inBuf, outBuf, maskBuf))
+                break;
         }
-        if (hdr[0] == MAGIC_CTRL) {
-            core.handleCtrl(s, hdr);
-            closesocket(s);
-            continue;
-        }
-        core.handleFrame(s, hdr, deadline, inBuf, outBuf, maskBuf);
         closesocket(s);
     }
     return 0;

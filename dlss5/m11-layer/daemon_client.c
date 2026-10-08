@@ -104,6 +104,123 @@ int exchange(const void *header, size_t header_size, const void *payload,
     return 0;
 }
 
+/* Persistent-connection exchange for the SYNC present path
+ * (NR_LAYER_ASYNC=0): the daemon now serves many frames on one
+ * connection, so the keep-alive socket rides between presents and the
+ * daemon round-trip itself is the frame-rate throttle (the whole point
+ * of sync mode). The old per-frame connect() was a SYN/RST storm at
+ * loading-screen present rates (300+/s into a backlog-4 listen queue)
+ * that made every exchange fail fast - presents then ran raw at full
+ * speed while the daemon starved.
+ *
+ * Failure policy mirrors exchange(): -2 = cannot connect (daemon
+ * absent/backoff), -1 = transport broke mid-exchange. A FAST failure
+ * (<20 ms - RST on connect, clean close, instant send fail) arms a
+ * 150 ms reconnect backoff so a dead/rebuilding daemon does not turn
+ * the present loop into a connect storm; a slow timeout already paces
+ * itself. Any failure invalidates the socket - a partial reply can
+ * never resync the stream, so the next present reconnects. */
+static SOCKET g_ka_fd = INVALID_SOCKET;
+static ULONGLONG g_ka_next_ms;
+
+static SOCKET ka_connect(void)
+{
+    SOCKET fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (fd == INVALID_SOCKET) return INVALID_SOCKET;
+    DWORD tv = 1500;
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)&tv, sizeof tv);
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof tv);
+    {
+        int nd = 1;
+        int bs = 4 * 1024 * 1024;
+        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (const char *)&nd, sizeof nd);
+        setsockopt(fd, SOL_SOCKET, SO_SNDBUF, (const char *)&bs, sizeof bs);
+        setsockopt(fd, SOL_SOCKET, SO_RCVBUF, (const char *)&bs, sizeof bs);
+    }
+    struct sockaddr_in address;
+    memset(&address, 0, sizeof address);
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = htons((u_short)nr_port);
+    u_long nbio = 1;
+    ioctlsocket(fd, FIONBIO, &nbio);
+    int conn_rc = connect(fd, (struct sockaddr *)&address, sizeof address);
+    if (conn_rc != 0 && WSAGetLastError() == WSAEWOULDBLOCK) {
+        fd_set wf, ef;
+        struct timeval ctv;
+        ctv.tv_sec = 1;
+        ctv.tv_usec = 500000;
+        FD_ZERO(&wf); FD_SET(fd, &wf);
+        FD_ZERO(&ef); FD_SET(fd, &ef);
+        int sel = select(0, NULL, &wf, &ef, &ctv);
+        if (sel > 0 && FD_ISSET(fd, &wf) && !FD_ISSET(fd, &ef)) {
+            int soerr = 0;
+            int slen = sizeof soerr;
+            getsockopt(fd, SOL_SOCKET, SO_ERROR, (char *)&soerr, &slen);
+            conn_rc = soerr ? -1 : 0;
+        } else {
+            conn_rc = -1;
+        }
+    }
+    nbio = 0;
+    ioctlsocket(fd, FIONBIO, &nbio);
+    if (conn_rc != 0) {
+        closesocket(fd);
+        return INVALID_SOCKET;
+    }
+    return fd;
+}
+
+static int ka_fail(ULONGLONG t0)
+{
+    if (g_ka_fd != INVALID_SOCKET) {
+        closesocket(g_ka_fd);
+        g_ka_fd = INVALID_SOCKET;
+    }
+    if (GetTickCount64() - t0 < 20)
+        g_ka_next_ms = GetTickCount64() + 150;
+    return -1;
+}
+
+int exchange_keepalive(const void *header, size_t header_size,
+                       const void *payload, size_t payload_size,
+                       void *reply, size_t reply_size)
+{
+    if (!winsock_up()) return -2;
+    ULONGLONG t0 = GetTickCount64();
+    if (g_ka_fd == INVALID_SOCKET) {
+        if (t0 < g_ka_next_ms) return -2;
+        g_ka_fd = ka_connect();
+        if (g_ka_fd == INVALID_SOCKET) {
+            g_ka_next_ms = t0 + 150;
+            return -2;
+        }
+    }
+    const unsigned char *out = (const unsigned char *)header;
+    for (size_t sent = 0; sent < header_size; ) {
+        int n = send(g_ka_fd, (const char *)out + sent,
+                     (int)(header_size - sent), 0);
+        if (n <= 0) return ka_fail(t0);
+        sent += (size_t)n;
+    }
+    if (payload_size) {
+        out = (const unsigned char *)payload;
+        for (size_t sent = 0; sent < payload_size; ) {
+            int n = send(g_ka_fd, (const char *)out + sent,
+                         (int)(payload_size - sent), 0);
+            if (n <= 0) return ka_fail(t0);
+            sent += (size_t)n;
+        }
+    }
+    unsigned char *in = (unsigned char *)reply;
+    for (size_t got = 0; got < reply_size; ) {
+        int n = recv(g_ka_fd, (char *)in + got, (int)(reply_size - got), 0);
+        if (n <= 0) return ka_fail(t0);
+        got += (size_t)n;
+    }
+    return 0;
+}
+
 int nr_ctrl(uint32_t cmd, uint32_t payload_arg)
 {
     uint32_t hdr[4] = { 0x5443524Eu, cmd, payload_arg, 0 };

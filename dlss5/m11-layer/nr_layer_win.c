@@ -2852,8 +2852,9 @@ static int process_frame(device_data *data, swapchain_data *chain,
      * first reply byte arrives, so the alias is safe). Receiving anywhere
      * else - into data->result as the old code did - lets a timed-out recv
      * tear the last processed frame we may still want to hold. */
-    int erc = exchange(header, sizeof header, data->mapped, (size_t)needed,
-                       data->mapped, (size_t)needed);
+    int erc = exchange_keepalive(header, sizeof header, data->mapped,
+                                 (size_t)needed, data->mapped,
+                                 (size_t)needed);
     if (erc) {
         int hold = 0;
         int dlog = nr_degrade_note_fail(&g_dg,

@@ -233,11 +233,26 @@ with tempfile.TemporaryDirectory() as td:
         ok, msg = gamelaunch.launch_game(dummy_x86, "dx9", cfg=cfg)
         assert ok, "x86 launch failed: %s" % msg
         env = captured[dummy_x86]
+        assert env.get("NR_LAYER_ASYNC") == "0", \
+            "x86 dx9 launch defaults to engine-synced presents"
         assert env.get("NR_LAYER_RESIDUAL") == "1", \
             "x86 dx9 launch must enable the residual compositor"
         assert env.get("NR_LAYER_GPUWARP") == "1", \
             "x86 dx9 launch must enable GPU warp by default"
-        print("  x86 dx9: NR_LAYER_RESIDUAL=1 + NR_LAYER_GPUWARP=1 [PASS]")
+        print("  x86 dx9: NR_LAYER_ASYNC=0 + residual/gpuwarp envs [PASS]")
+
+        # Per-game "async": true restores the async serve path.
+        games = cfg.get("games")
+        games[dummy_x86]["async"] = True
+        cfg.set("games", games)
+        ok, msg = gamelaunch.launch_game(dummy_x86, "dx9", cfg=cfg)
+        assert ok, "async opt-in launch failed: %s" % msg
+        env = captured[dummy_x86]
+        assert env.get("NR_LAYER_ASYNC") != "0", \
+            "async:true must not force the sync exchange"
+        print("  per-game async:true honoured [PASS]")
+        games[dummy_x86]["async"] = False
+        cfg.set("games", games)
 
         ok, msg = gamelaunch.launch_game(dummy_x64, "vulkan", cfg=cfg)
         assert ok, "x64 launch failed: %s" % msg

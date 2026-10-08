@@ -94,9 +94,11 @@ public:
     // magic/extent/format, reads payload (+mask), runs process/transfer/
     // interpolate with the FG+gap policy and writes the BGRA reply (or
     // closes silently on failure - never echoes raw input as "processed").
-    // Caller closes the socket. Scratch buffers are caller-owned so the
-    // accept loop reuses their capacity across frames.
-    void handleFrame(SOCKET s, const uint32_t hdr[4], ULONGLONG deadline,
+    // Returns true while the connection is still usable: the accept loop
+    // keeps a persistent (keep-alive) connection open for the next frame
+    // and closes the socket only on false. Scratch buffers are
+    // caller-owned so the accept loop reuses their capacity across frames.
+    bool handleFrame(SOCKET s, const uint32_t hdr[4], ULONGLONG deadline,
                      std::vector<uint8_t>& inBuf, std::vector<uint8_t>& outBuf,
                      std::vector<uint8_t>& maskBuf);
 

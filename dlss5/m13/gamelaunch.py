@@ -400,19 +400,20 @@ def launch_game(exe_path, mode, scale=None, gain=None, blend=None, cfg=None, sha
         print("[launch] framegen on x86: daemon residual-transfer path",
               flush=True)
 
-    # x86 daemon-path cadence fix: the daemon answers ~15-18/s while the
-    # game presents 60+/s, and serve-stale alone re-blits the same held
-    # result - visible stepping on any animated content. The residual
-    # compositor instead shows CURRENT content + the freshest applicable
-    # neural residual on every present: flat-masked pixels take the pair
-    # delta, the GPU block-match (nr_gpuwarp) re-applies it displaced on
-    # moved regions, and rejected pixels keep current raw - ghosts are
-    # impossible by construction (field-verified GTA IV: ~90% coverage,
-    # 77% of presents GPU-composited, no cadence flicker). Opt-out per
-    # game: "residual": false restores pure held-result serving;
-    # "gpuwarp": false keeps the residual composite on the CPU mask only.
+    # x86 daemon-path mode: the daemon answers ~15-18/s while the game
+    # presents 60+/s. ASYNC (present never blocks) therefore has to serve
+    # 3-6-present-stale residuals - the field-tested "digital garbage":
+    # partial coverage mottling, transition speckle, temporal smear baked
+    # into the delta. SYNC (default) blocks the present on the daemon
+    # round-trip: every displayed frame is fully processed at the engine
+    # cadence (~18-20 fps), zero residual artifacts, and the daemon's
+    # temporal history sees consecutive frames (less smear inside the
+    # net too). Opt-out per game: "async": true restores async serving
+    # (the residual compositor envs below still apply there).
     if (mode in ("dx9", "dx11", "vulkan")
             and isinstance(meta, dict) and meta.get("arch") == "x86"):
+        if not meta.get("async", False):
+            env["NR_LAYER_ASYNC"] = "0"
         if meta.get("residual", True):
             env["NR_LAYER_RESIDUAL"] = "1"
             env["NR_LAYER_GPUWARP"] = \
