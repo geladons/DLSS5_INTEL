@@ -277,7 +277,15 @@ bool ChainEngine::processFrame(const uint8_t* bgraIn, uint8_t* bgraOut, long fra
 
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.commandBufferCount = 1; si.pCommandBuffers = &cmd_;
-    D5C_VK_RET(vkQueueSubmit(c.queue, 1, &si, fence_));
+    {
+        VkResult sr = vkQueueSubmit(c.queue, 1, &si, fence_);
+        if (sr != VK_SUCCESS) {
+            std::fprintf(stderr, "[VK-FAIL] vkQueueSubmit -> %d at %s:%d\n",
+                         (int)sr, __FILE__, __LINE__);
+            if (sr == VK_ERROR_DEVICE_LOST) DumpDeviceFault(c);
+            return false;
+        }
+    }
     D5C_VK_RET(vkWaitForFences(c.dev, 1, &fence_, VK_TRUE, UINT64_MAX));
     vkResetFences(c.dev, 1, &fence_);
     if (prof_.enabled()) prof_.collect(c.dev, tsPeriodNs_, frameIndex);

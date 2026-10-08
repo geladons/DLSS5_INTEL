@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <ctime>
 
 #include "daemon_io.h"
 #include "engine_seh.h"
@@ -20,6 +21,21 @@ static const uint32_t MAGIC_MASKED = 0x314E524Eu;
 static const uint32_t MAGIC_FGT = 0x324E524Eu;    // "NRN2" - framegen transfer
 static const uint32_t MAGIC_FGI = 0x334E524Eu;    // "NRN3" - framegen interpolate (mode 2)
 static const uint32_t MAGIC_CTRL = 0x5443524Eu;   // "NRCT" - M13 control
+
+// Bound-exit marker: on a deliberate dead-engine exit we drop a timestamped
+// file the m13 monitor reads so it does not immediately restart us into a
+// still-resetting driver (each restart = a multi-GB engine build burst -
+// fuel for an ongoing TDR storm). Freshness is checked by mtime.
+static void writeFenceFile() {
+    char tmp[MAX_PATH];
+    DWORD n = GetTempPathA(MAX_PATH, tmp);
+    if (!n || n >= MAX_PATH) return;
+    std::string p = std::string(tmp) + "m11d_fenced.flag";
+    FILE* f = std::fopen(p.c_str(), "w");
+    if (!f) return;
+    std::fprintf(f, "%lld\n", (long long)std::time(nullptr));
+    std::fclose(f);
+}
 
 // ------------------------------------------------------ engine lifecycle --
 // EngineConfig assembly shared by the synchronous path and the async
@@ -169,6 +185,7 @@ void DaemonCore::builderLoop() {
                 if (++deadEngines_ >= kDeadEngineLimit) {
                     std::fprintf(stderr, "[m11d] %d consecutive engine "
                                 "failures - exiting\n", kDeadEngineLimit);
+                    writeFenceFile();
                     std::fflush(stderr);
                     std::exit(4);
                 }
@@ -530,7 +547,8 @@ void DaemonCore::handleFrame(SOCKET s, const uint32_t hdr[4], ULONGLONG deadline
              * device it hands out for the next seconds is not guaranteed
              * stable. Every rebuild kicked from now on first waits out
              * the settle floor (cleared on the next clean frame). */
-            buildSettleUntil_ = GetTickCount64() + 4000;
+            buildSettleUntil_ = GetTickCount64()
+                + 4000 * std::min<int64_t>(deadEngines_ + 1, 5);
         }
         // A fault that survives a full rebuild is not transient (driver
         // reset loop, deterministic dispatch fault): each retry costs the
@@ -541,6 +559,7 @@ void DaemonCore::handleFrame(SOCKET s, const uint32_t hdr[4], ULONGLONG deadline
             std::fprintf(stderr, "[m11d] %d consecutive engine losses - "
                         "exiting so the game reclaims the GPU\n",
                         kDeadEngineLimit);
+            writeFenceFile();
             std::fflush(stderr);
             std::exit(4);
         }

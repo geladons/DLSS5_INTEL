@@ -146,8 +146,19 @@ class StateMonitor(threading.Thread):
             # racing a slow spawn). Bounded: one attempt per 30 ticks, max
             # 5 per monitor lifetime, so a permanently broken daemon does
             # not spin a restart loop.
+            # EXCEPTION: a daemon that hit its dead-engine bound writes
+            # %TEMP%\m11d_fenced.flag before exit(4). Restarting inside that
+            # window re-runs a multi-GB engine build on a driver that is
+            # still resetting - observed to feed a TDR storm (4 LiveKernel-
+            # Events in 45 s on BMG/101.8805). Fence lasts 5 min.
+            fenced = False
+            try:
+                ff = os.path.join(tempfile.gettempdir(), "m11d_fenced.flag")
+                fenced = (time.time() - os.path.getmtime(ff)) < 300.0
+            except OSError:
+                pass
             if (not ctl.daemon.running and self._x86_seen
-                    and not ctl.client.alive()):
+                    and not ctl.client.alive() and not fenced):
                 last = getattr(self, "_daemon_restart_at", 0.0)
                 tries = getattr(self, "_daemon_restarts", 0)
                 now = time.monotonic()

@@ -87,6 +87,15 @@ int main(int argc, char** argv) {
     // pressure, field reports 2026-10-08). Env override wins.
     if (!std::getenv("D5C_QUEUE_PRIO"))
         _putenv_s("D5C_QUEUE_PRIO", "low");
+    // A fresh daemon clears the bound-exit fence (see writeFenceFile in
+    // daemon_core.cpp): a running m11d means the fence no longer describes
+    // the current device state.
+    {
+        char tmp[MAX_PATH];
+        DWORD n = GetTempPathA(MAX_PATH, tmp);
+        if (n && n < MAX_PATH)
+            DeleteFileA((std::string(tmp) + "m11d_fenced.flag").c_str());
+    }
     int port = 48990;
     const char* port_env = std::getenv("NR_LAYER_PORT");
     if (!port_env) port_env = std::getenv("DLSS5_PORT");

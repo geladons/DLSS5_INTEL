@@ -193,10 +193,15 @@ bool VkContext::createDevice(const VkContextConfig& cfg) {
     if (nExt) vkEnumerateDeviceExtensionProperties(vk.pd, nullptr, &nExt,
                                                    extProps.data());
     bool hasGlobalPrio = false;
-    for (const auto& e : extProps)
+    bool hasDeviceFault = false;
+    for (const auto& e : extProps) {
         if (!std::strcmp(e.extensionName,
                          VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME))
             hasGlobalPrio = true;
+        if (!std::strcmp(e.extensionName,
+                         VK_EXT_DEVICE_FAULT_EXTENSION_NAME))
+            hasDeviceFault = true;
+    }
     VkQueueGlobalPriority wantPrio = VK_QUEUE_GLOBAL_PRIORITY_MEDIUM;
     {
         const char* p = std::getenv("D5C_QUEUE_PRIO");
@@ -207,13 +212,11 @@ bool VkContext::createDevice(const VkContextConfig& cfg) {
     const bool usePrio = hasGlobalPrio &&
         wantPrio != VK_QUEUE_GLOBAL_PRIORITY_MEDIUM;
 
-    const char* wantNoSwap[] = {VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME};
-    const char* wantNoSwapP[] = {VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME,
-                                 VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME};
-    const char* wantSwap[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME};
-    const char* wantSwapP[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-                               VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME,
-                               VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME};
+    std::vector<const char*> exts;
+    exts.push_back(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
+    if (cfg.needSwapchain) exts.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+    if (usePrio) exts.push_back(VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME);
+    if (hasDeviceFault) exts.push_back(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
     float prio = 1.0f;
     VkDeviceQueueGlobalPriorityCreateInfo gprio{
         VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO};
@@ -223,10 +226,8 @@ bool VkContext::createDevice(const VkContextConfig& cfg) {
     if (usePrio) qci.pNext = &gprio;
     VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     dci.queueCreateInfoCount = 1; dci.pQueueCreateInfos = &qci;
-    dci.enabledExtensionCount = (usePrio ? 2u : 1u) + (cfg.needSwapchain ? 1u : 0u);
-    dci.ppEnabledExtensionNames =
-        cfg.needSwapchain ? (usePrio ? wantSwapP : wantSwap)
-                          : (usePrio ? wantNoSwapP : wantNoSwap);
+    dci.enabledExtensionCount = (uint32_t)exts.size();
+    dci.ppEnabledExtensionNames = exts.data();
     // m8 shaders declare Float16/Int64/16-bit storage/memory-model/BDA/coopmat —
     // features must be enabled or the device faults (Arc device-lost).
     VkPhysicalDeviceFeatures fe{};

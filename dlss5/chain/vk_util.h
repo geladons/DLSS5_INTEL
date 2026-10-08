@@ -69,6 +69,37 @@ struct VkCtx {
     bool sparseBinding = false;   // queue family supports VK_QUEUE_SPARSE_BINDING_BIT
 };
 
+// VK_EXT_device_fault: dump whatever the driver reports after DEVICE_LOST
+// (faulting VA ranges, vendor codes, human description). No-op when the
+// extension or entry point is absent. Call right after a failed submit.
+inline void DumpDeviceFault(const VkCtx& c) {
+    auto fp = (PFN_vkGetDeviceFaultInfoEXT)
+        vkGetDeviceProcAddr(c.dev, "vkGetDeviceFaultInfoEXT");
+    if (!fp) return;
+    VkDeviceFaultCountsEXT counts{VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
+    if (fp(c.dev, &counts, nullptr) != VK_SUCCESS) return;
+    std::vector<VkDeviceFaultAddressInfoEXT> addrs(counts.addressInfoCount);
+    std::vector<VkDeviceFaultVendorInfoEXT> vendors(counts.vendorInfoCount);
+    VkDeviceFaultInfoEXT info{VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT};
+    info.pAddressInfos = addrs.data();
+    info.pVendorInfos = vendors.data();
+    if (fp(c.dev, &counts, &info) != VK_SUCCESS) return;
+    std::fprintf(stderr, "[VK-FAULT] \"%s\" addrs=%u vendors=%u binary=%llu\n",
+                 info.description, counts.addressInfoCount,
+                 counts.vendorInfoCount,
+                 (unsigned long long)counts.vendorBinarySize);
+    for (uint32_t i = 0; i < counts.addressInfoCount; ++i)
+        std::fprintf(stderr, "[VK-FAULT] addr[%u] type=%d va=0x%llx prec=%llu\n",
+                     i, (int)addrs[i].addressType,
+                     (unsigned long long)addrs[i].reportedAddress,
+                     (unsigned long long)addrs[i].addressPrecision);
+    for (uint32_t i = 0; i < counts.vendorInfoCount; ++i)
+        std::fprintf(stderr, "[VK-FAULT] vendor[%u] code=0x%llx \"%s\"\n", i,
+                     (unsigned long long)vendors[i].vendorFaultCode,
+                     vendors[i].description);
+    std::fflush(stderr);
+}
+
 inline uint32_t FindMemType(const VkCtx& c, uint32_t typeBits, VkMemoryPropertyFlags want) {
     for (uint32_t i = 0; i < c.memProps.memoryTypeCount; ++i) {
         if (!(typeBits & (1u << i))) continue;

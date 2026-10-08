@@ -284,6 +284,19 @@ class GameLauncher:
                             ctl.client.set_temporal(bool(t_meta))
                         except Exception:
                             pass
+                    # Settle window: the warmup just ran a ~5 s burst of
+                    # pipeline compiles + ~1 GB of allocations. Spawning the
+                    # game in the same instant stacks that storm on top of
+                    # the game's own Vulkan/DXVK init burst - the exact
+                    # overlap observed to trigger igdkmdnd64 TDRs on BMG.
+                    # Runs on this dedicated launch thread, not the worker.
+                    try:
+                        settle_ms = int(os.environ.get(
+                            "D5C_LAUNCH_SETTLE_MS", "4000"))
+                    except Exception:
+                        settle_ms = 4000
+                    if settle_ms > 0:
+                        time.sleep(settle_ms / 1000.0)
                     return True, ("daemon running (warmup %s)"
                                   % ("ok" if okw else "failed"))
                 if ctl.daemon.running:
