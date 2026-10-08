@@ -87,7 +87,7 @@ if errorlevel 1 (
     echo [FAIL] cl x86 nr_gpuwarp
     exit /b 1
 )
-link /nologo /DLL /DEF:"%SRC%\nr_layer_win.def" ws2_32.lib user32.lib ^
+link /nologo /DLL /DEF:"%SRC%\nr_layer_win.def" ws2_32.lib user32.lib gdi32.lib ^
    "%OUT%\nr_layer_win32.obj" "%OUT%\nr_framegen.obj" "%OUT%\nr_degrade.obj" ^
    "%OUT%\nr_util.obj" "%OUT%\daemon_client.obj" "%OUT%\gdi_guard.obj" ^
    "%OUT%\nr_ui.obj" "%OUT%\nr_async.obj" "%OUT%\nr_residual.obj" ^

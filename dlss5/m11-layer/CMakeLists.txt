@@ -37,7 +37,7 @@ add_library(nr_layer_win SHARED nr_layer_win.c nr_framegen.c nr_degrade.c
             daemon_client.c gdi_guard.c nr_ui.c nr_layer_win.def)
 add_dependencies(nr_layer_win gpuwarp_spv)
 target_include_directories(nr_layer_win PRIVATE "${VULKAN_SDK}/Include" "${CMAKE_CURRENT_SOURCE_DIR}/../chain")
-target_link_libraries(nr_layer_win PRIVATE ws2_32)
+target_link_libraries(nr_layer_win PRIVATE ws2_32 gdi32)
 # No libvulkan link: the layer resolves everything through the loader's
 # GetProcAddr chain, like the Linux original.
 set_target_properties(nr_layer_win PROPERTIES PREFIX "" OUTPUT_NAME "nr_layer_win")

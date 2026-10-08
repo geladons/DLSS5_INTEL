@@ -16,6 +16,12 @@ extern "C" {
 
 void nr_guard_window(HWND hwnd);
 void nr_unguard_all(void);
+/* Feed the latest written-back frame into the redirection-surface fresco
+ * (paint handlers + periodic refresh keep the bitmap current so a DWM
+ * splice shows live content instead of a stale snapshot). rgba_order: 0 =
+ * B,G,R,A pixel bytes, 1 = R,G,B,A. */
+void nr_guard_feed_surface(const void *pixels, unsigned w, unsigned h,
+                           int rgba_order);
 
 #ifdef __cplusplus
 }

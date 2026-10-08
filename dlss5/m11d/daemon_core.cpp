@@ -560,6 +560,30 @@ void DaemonCore::handleFrame(SOCKET s, const uint32_t hdr[4], ULONGLONG deadline
                                       : ((out32[i] & 0x00FFFFFFu) | (in32[i] & 0xFF000000u));
         }
     }
+    // Diagnostics: M11D_DUMP=<dir> dumps every in/out pair as <dir>\in_NNNNN.raw /
+    // out_NNNNN.raw (16-byte NRN0 header + w*h*4 payload). Field tool only -
+    // ~4 MB/frame at 800x600, never enable in production runs.
+    {
+        static const char* const dd = std::getenv("M11D_DUMP");
+        if (dd && *dd) {
+            char path[MAX_PATH];
+            const uint32_t oh[4] = { hdr[0], w, h, fmt };
+            std::snprintf(path, sizeof path, "%s\\in_%05lu.raw", dd,
+                          (unsigned long)frameCounter);
+            if (FILE* f = std::fopen(path, "wb")) {
+                std::fwrite(oh, 4, 4, f);
+                std::fwrite(inBuf.data(), 1, px * 4, f);
+                std::fclose(f);
+            }
+            std::snprintf(path, sizeof path, "%s\\out_%05lu.raw", dd,
+                          (unsigned long)frameCounter);
+            if (FILE* f = std::fopen(path, "wb")) {
+                std::fwrite(oh, 4, 4, f);
+                std::fwrite(outBuf.data(), 1, px * 4, f);
+                std::fclose(f);
+            }
+        }
+    }
     if (!writeAll(s, outBuf.data(), px * 4))
         std::fprintf(stderr, "[m11d] reply write failed\n");
     std::printf("[m11d] frame %ld %ux%u%s%s in %.1f ms (%s %.1f)\n",

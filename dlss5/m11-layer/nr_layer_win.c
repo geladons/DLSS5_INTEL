@@ -298,6 +298,10 @@ typedef struct device_data {
      * so age alone cannot tell "stale" from "still current"). */
     uint32_t result_src_crc;     /* crc of the raw frame result answers;
                                   * 0 when the reply carried no source */
+    uint32_t last_in_crc;        /* crc of the raw input captured THIS
+                                  * present (pre-serve); 0 before first
+                                  * capture. Lets diag attribute a served
+                                  * flash to its true source frame. */
     uint32_t result_fmt;         /* wire format of the held result */
     unsigned long result_age;    /* submits issued since the answer frame */
     uint32_t cap_crc[NR_CAP_RING]; /* last captured-upload CRCs */
@@ -1848,6 +1852,13 @@ static int transfer(device_data *data, swapchain_data *chain, VkQueue queue,
     if (to_image) {
         stamp_diag_marker(data);
         composite_ui_into_mapped(data, chain);
+        /* Keep the window's redirection bitmap a mirror of what we are
+         * about to blit into the swapchain image: DWM splices that bitmap
+         * over the live surface on repaint events, and a stale bitmap is
+         * the menu-flash artifact seen on GTA IV. Throttled internally. */
+        nr_guard_feed_surface(data->mapped, chain->extent.width,
+                              chain->extent.height,
+                              frame_byte_order(chain->format) == 1);
     }
     PFN_vkAllocateCommandBuffers allocate_commands = (PFN_vkAllocateCommandBuffers)
         data->get_device_proc(data->device, "vkAllocateCommandBuffers");
@@ -2612,7 +2623,8 @@ static int process_frame(device_data *data, swapchain_data *chain,
      * held result answer content the user recently saw" - repeated
      * bit-identical frames share the same CRC, so a static scene keeps
      * its replies content-fresh however the submits are paced. */
-    data->cap_crc[data->cap_next] = diag_crc(data->mapped, needed);
+    data->last_in_crc = diag_crc(data->mapped, needed);
+    data->cap_crc[data->cap_next] = data->last_in_crc;
     data->cap_next = (data->cap_next + 1) % NR_CAP_RING;
     if (data->cap_fill < NR_CAP_RING) data->cap_fill++;
 
@@ -2621,7 +2633,17 @@ static int process_frame(device_data *data, swapchain_data *chain,
      * holds the last processed frame (in-process or TCP path). Bit-identical
      * input always replays free (static content, deterministic output);
      * near-identical input replays at most reuse_cap() times in a row so a
-     * slow drift or an unfelt motion pattern cannot freeze the picture. */
+     * slow drift or an unfelt motion pattern cannot freeze the picture.
+     *
+     * Ownership check (ghost-serve fix): `earlier` tracks the last SEEN
+     * input, but a content transition whose first present found the async
+     * queue busy never reached the daemon - its submit was paced out and
+     * `earlier` still got overwritten. memcmp alone then replayed the OLD
+     * frame's answer on every identical present forever (the "frozen dark
+     * screen while the game shows new content" field bug). Requiring
+     * result_src_crc == current-input crc makes the replay provably answer
+     * THIS content; a mismatched result falls through to the submit path,
+     * which retries until the frame actually reaches the engine. */
     if (static_reuse && data->have_earlier && !data->earlier_pending &&
         data->earlier_size >= needed &&
         data->result_valid && data->result && data->result_size >= needed &&
@@ -2629,9 +2651,18 @@ static int process_frame(device_data *data, swapchain_data *chain,
         data->result_h == chain->extent.height &&
         data->holding_chain == chain->swapchain) {
         int bit_ident =
-            memcmp(data->mapped, data->earlier, (size_t)needed) == 0;
+            memcmp(data->mapped, data->earlier, (size_t)needed) == 0
+            && data->result_src_crc
+            && data->result_src_crc == data->last_in_crc;
+        /* The near-identical replay is only honest when the held result
+         * answers `earlier` (the content it is being compared to): a reply
+         * for an older frame must not ride this branch either. */
+        int src_answers_earlier =
+            data->result_src_crc
+            && data->result_src_crc
+                   == diag_crc(data->earlier, needed);
         if (bit_ident ||
-            (data->reuse_run < reuse_cap() &&
+            (src_answers_earlier && data->reuse_run < reuse_cap() &&
              nearly_identical((const unsigned char *)data->mapped,
                               data->earlier, (size_t)needed,
                               chain->extent.width))) {
@@ -2691,6 +2722,7 @@ static int process_frame(device_data *data, swapchain_data *chain,
                 data->result_valid = 1;
                 data->holding_chain = chain->swapchain;
                 data->result_fmt = (uint32_t)chain->format;
+                data->result_src_crc = data->last_in_crc;
                 data->earlier_pending = 0;
             }
             dump_capture(capture_out_path, header, (const unsigned char *)data->mapped, needed);
@@ -2837,6 +2869,7 @@ static int process_frame(device_data *data, swapchain_data *chain,
     data->result_valid = 1;
     data->holding_chain = chain->swapchain;
     data->result_fmt = (uint32_t)chain->format;
+    data->result_src_crc = data->last_in_crc;
     data->earlier_pending = 0;
     dump_capture(capture_out_path, header, data->result, needed);
     nr_log("[nr_layer] processed %ux%u", chain->extent.width, chain->extent.height);
@@ -2936,6 +2969,7 @@ static int resend_raw(device_data *data, swapchain_data *chain)
             data->result_valid = 1;
             data->holding_chain = chain->swapchain;
             data->result_fmt = (uint32_t)chain->format;
+            data->result_src_crc = 0;   /* answers data->raw, not live input */
             /* result now holds P(raw_frozen), not P(earlier): the
              * earlier->result mapping is broken, so a post-unfreeze frame
              * byte-identical to the stale earlier must not replay this. */
@@ -2973,6 +3007,7 @@ static int resend_raw(device_data *data, swapchain_data *chain)
     data->result_valid = 1;
     data->holding_chain = chain->swapchain;
     data->result_fmt = (uint32_t)chain->format;
+    data->result_src_crc = 0;           /* answers data->raw, not live input */
     data->have_earlier = 0;  /* result is P(raw), not P(earlier) - see above */
     nr_log("[nr_layer] reprocessed the held frame (live knob turn)");
     return 0;
@@ -3012,6 +3047,7 @@ static int freeze_capture(device_data *data, swapchain_data *chain,
             data->result_valid = 1;
             data->holding_chain = chain->swapchain;
             data->result_fmt = (uint32_t)chain->format;
+            data->result_src_crc = 0;   /* result is the raw frame itself */
             data->have_earlier = 0;  /* result is raw, not P(earlier) */
         }
         nr_log("[nr_layer] daemon unavailable; freezing the original frame unprocessed");
@@ -3661,10 +3697,12 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
             if (!strcmp(diag_path, "gres") && data->gpuwarp)
                 pr = nr_gpuwarp_last_cov_pm(data->gpuwarp);
             nr_log("[diag] f=%lu sc=%p idx=%u p=%s up=%08x res=%08x "
-                   "tr=%d pres=%ld.%ld",
+                   "in=%08x src=%08x t=%llu tr=%d pres=%ld.%ld",
                    frame_counter, (void *)chain->swapchain, index, diag_path,
                    diag_crc(data->mapped, want),
-                   diag_crc(data->result, data->result_size), diag_tr,
+                   diag_crc(data->result, data->result_size),
+                   data->last_in_crc, data->result_src_crc,
+                   (unsigned long long)nr_now_ms(), diag_tr,
                    pr < 0 ? -1 : pr / 10, pr < 0 ? 0 : pr % 10);
         }
         }
