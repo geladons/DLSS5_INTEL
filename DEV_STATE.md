@@ -1,4 +1,38 @@
-# DEV_STATE.md - where we are (updated 2026-10-05 by Devin)
+# DEV_STATE.md - where we are (updated 2026-10-08 by Devin)
+
+## Stage 40: stale-serve ghost root-caused + redirect-surface fresco (2026-10-08)
+
+GTA IV field report: visible flicker unchanged despite earlier numeric
+wins. DDA forensics (`src=`/`in=` CRC stamps in the layer diag line)
+proved the on-screen frame answered a DIFFERENT input than the one
+being presented (`src=c147fc05` vs `in=702e97f8` on every reuse line):
+
+- **Stale-result reuse (ghost), `5bbe603`**: the reuse gate compared
+  current input to `earlier` (last SUBMITTED frame) but replayed
+  `result` without checking which frame it answered. A transition whose
+  first present found the async queue busy was never submitted, yet
+  `earlier` was overwritten anyway - then every identical present
+  memcmp-matched and replayed the OLD frame's answer forever (dark
+  title-screen result pinned over the live menu). Fix: `result_src_crc`
+  ownership - bit-identical replay requires result_src == current input
+  crc; near-identical requires the result to answer `earlier`; all
+  result writers (in-process, sync-TCP, resend_raw, freeze) now set or
+  invalidate the tag. Verified: 0/36867 reuse lines with src!=in;
+  captured pixels = daemon reply (mad 1.92, H.264 noise), not raw
+  (18.38), not ghost; flat luma, zero jumps.
+- **Redirect-surface fresco**: the GDI guard used to eat WM_PAINT dry,
+  so the window's redirection bitmap rotted and DWM periodically
+  spliced a minutes-old snapshot over the live swapchain (the "second
+  menu version" pulse every ~1.6 s). `nr_guard_feed_surface` now
+  mirrors every write-back into the bitmap (400 ms cadence) and paint-
+  class handlers draw the latest frame; `NR_LAYER_NOREDIR=1` strips
+  WS_EX_NOREDIRECTIONBITMAP entirely as an opt-in alternative.
+- **Forensics tooling**: `M11D_DUMP=<dir>` dumps every daemon in/out
+  pair (field-only, ~4 MB/frame); diag line stamps `in=`/`src=`/`t=`;
+  `NR_LAYER_GUARD_TRACE` logs paint-class wndproc messages.
+- Earlier same session: `2bffa57` bounded m11d engine-loss rebuilds
+  (exit after 3 dead engines -> layer falls back to native instead of
+  freezing the desktop through an endless rebuild storm after a TDR).
 
 ## Stage 39: frame-uniformity fixes + framed overlay redesign (2026-10-05)
 
