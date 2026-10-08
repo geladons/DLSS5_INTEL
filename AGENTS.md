@@ -69,7 +69,9 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
   returns VK_ERROR_DEVICE_LOST - in-bounds verified, pure driver limit.
   Production never emits such spans; if a future batching change does,
   split the batch.
-- Machine: real GPU = Arc Pro B50 (PCI DEV_E212, LUID ...95a2, driver 101.8805,
+- Machine: real GPU = Arc Pro B50 (PCI DEV_E212, LUID ...95a2, driver 101.8976
+  as of 2026-09-28 - TDRs still reproduce on it; do not assume a driver
+  update fixed BMG coopmat/WDDM faults),
   Vulkan 1.4.348, coopmat rev2). "Arc Pro B500" in WMI = virtual root display,
   IGNORE for compute. Primary display \\.\DISPLAY5 2560x1440 @ (0,0). QEMU basic
   adapter present. Two DEFAULT_MONITOR (Unknown) = virtual displays (Sunshine +
