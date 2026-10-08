@@ -20,6 +20,9 @@
 //   binding 2 = field out (uvec2 per DS px):
 //               .x = int16x2 offset in FULL-RES px (dx | dy<<16)
 //               .y = best block err, 8.8 fixed (byte units << 8)
+//   binding 3 = shared counter buf (nr_gpuwarp.c r_cnt, GW_CNT_BYTES):
+//               [3] = DS blocks with no plausible displaced match -
+//               the scene-cut signal gpuwarp_compose reads same-submit.
 //   pc.a = (dsW, dsH, radiusDS, 0)
 // ============================================================================
 
@@ -28,8 +31,15 @@ layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 layout(std430, set = 0, binding = 0) readonly buffer SrcDS { uint srcPx[]; };
 layout(std430, set = 0, binding = 1) readonly buffer CurDS { uint curPx[]; };
 layout(std430, set = 0, binding = 2) writeonly buffer Field { uvec2 field[]; };
+layout(std430, set = 0, binding = 3) buffer Cnt { uint cnt[]; };
 
 layout(push_constant) uniform Push { ivec4 a; } pc;
+
+shared uint s_un;
+
+/* mean|d|/channel over a 3x3 DS block, byte units: crossfades/cuts leave
+ * ~every block above this; in-motion content still matches displaced. */
+#define GW_UNMATCH_ERR 24.0
 
 uvec3 px3(uint p) {
     return uvec3(p & 0xFFu, (p >> 8) & 0xFFu, (p >> 16) & 0xFFu);
@@ -54,66 +64,82 @@ float blockErr(ivec2 a, ivec2 b) {
 void main() {
     ivec2 q = ivec2(gl_GlobalInvocationID.xy);
     int W = pc.a.x, H = pc.a.y;
-    if (q.x >= W || q.y >= H) return;
-    int R = max(pc.a.z, 4);    /* search radius in DS px (default 16) */
+    bool inb = (q.x < W && q.y < H);
+    bool un = false;
+    if (inb) {
+        int R = max(pc.a.z, 4);    /* search radius in DS px (default 16) */
 
-    float bestErr = blockErr(q, q);
-    ivec2 best = ivec2(0);
+        float bestErr = blockErr(q, q);
+        ivec2 best = ivec2(0);
 
-    /* Early exit: content that did not move needs no field. */
-    if (bestErr < 1.5) {
-        field[uint(q.y) * uint(W) + uint(q.x)] = uvec2(0u, uint(bestErr * 256.0));
-        return;
-    }
-
-    /* Coarse candidates, scaled by R: axial taps at R, 2R/3, R/3, R/6 and
-     * diagonals at 2R/3, R/3 (same shape as framegen's coarse+fine ladder,
-     * radius-normalised). */
-    {
-        int r1 = R, r2 = (R * 2) / 3, r3 = R / 3, r4 = R / 6;
-        if (r4 < 1) r4 = 1;
-        if (r3 < 2) r3 = 2;
-        if (r2 < 3) r2 = 3;
-        const int ax[4] = int[](r1, r2, r3, r4);
-        for (int i = 0; i < 4; ++i) {
-            int r = ax[i];
-            const ivec2 dirs[4] = ivec2[](
-                ivec2(r, 0), ivec2(-r, 0), ivec2(0, r), ivec2(0, -r));
-            for (int k = 0; k < 4; ++k) {
-                ivec2 d = dirs[k];
-                float err = blockErr(q + d, q) + float(abs(d.x) + abs(d.y)) * 0.5;
-                if (err < bestErr) { bestErr = err; best = d; }
+        /* Early exit: content that did not move needs no field. */
+        if (bestErr < 1.5) {
+            field[uint(q.y) * uint(W) + uint(q.x)] =
+                uvec2(0u, uint(bestErr * 256.0));
+        } else {
+            /* Coarse candidates, scaled by R: axial taps at R, 2R/3, R/3,
+             * R/6 and diagonals at 2R/3, R/3 (same shape as framegen's
+             * coarse+fine ladder, radius-normalised). */
+            {
+                int r1 = R, r2 = (R * 2) / 3, r3 = R / 3, r4 = R / 6;
+                if (r4 < 1) r4 = 1;
+                if (r3 < 2) r3 = 2;
+                if (r2 < 3) r2 = 3;
+                const int ax[4] = int[](r1, r2, r3, r4);
+                for (int i = 0; i < 4; ++i) {
+                    int r = ax[i];
+                    const ivec2 dirs[4] = ivec2[](
+                        ivec2(r, 0), ivec2(-r, 0), ivec2(0, r), ivec2(0, -r));
+                    for (int k = 0; k < 4; ++k) {
+                        ivec2 d = dirs[k];
+                        float err = blockErr(q + d, q) + float(abs(d.x) + abs(d.y)) * 0.5;
+                        if (err < bestErr) { bestErr = err; best = d; }
+                    }
+                }
+                const int di[2] = int[](r2, r3);
+                for (int i = 0; i < 2; ++i) {
+                    int r = di[i];
+                    const ivec2 dirs[4] = ivec2[](
+                        ivec2(r, r), ivec2(-r, r), ivec2(r, -r), ivec2(-r, -r));
+                    for (int k = 0; k < 4; ++k) {
+                        ivec2 d = dirs[k];
+                        float err = blockErr(q + d, q) + float(abs(d.x) + abs(d.y)) * 0.5;
+                        if (err < bestErr) { bestErr = err; best = d; }
+                    }
+                }
             }
-        }
-        const int di[2] = int[](r2, r3);
-        for (int i = 0; i < 2; ++i) {
-            int r = di[i];
-            const ivec2 dirs[4] = ivec2[](
-                ivec2(r, r), ivec2(-r, r), ivec2(r, -r), ivec2(-r, -r));
-            for (int k = 0; k < 4; ++k) {
-                ivec2 d = dirs[k];
-                float err = blockErr(q + d, q) + float(abs(d.x) + abs(d.y)) * 0.5;
-                if (err < bestErr) { bestErr = err; best = d; }
+
+            /* Fine +-2/+-1 refinement around the coarse winner (DS px). */
+            const ivec2 fine[12] = ivec2[](
+                ivec2(-2, 0), ivec2(2, 0), ivec2(0, -2), ivec2(0, 2),
+                ivec2(-1, -1), ivec2(1, -1), ivec2(-1, 1), ivec2(1, 1),
+                ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1));
+            for (int i = 0; i < 12; ++i) {
+                ivec2 cand = best + fine[i];
+                float err = blockErr(q + cand, q)
+                          + float(abs(cand.x) + abs(cand.y)) * 0.5;
+                if (err < bestErr) { bestErr = err; best = cand; }
             }
+
+            /* Store FULL-RES units: the compose pass lands the residual
+             * at p + v directly. */
+            ivec2 vFull = best * 4;
+            uint pv = (uint(vFull.x) & 0xFFFFu) | (uint(vFull.y) << 16);
+            field[uint(q.y) * uint(W) + uint(q.x)] =
+                uvec2(pv, uint(min(bestErr, 255.0) * 256.0));
+            /* Unmatched block: the best displaced candidate still diverges
+             * (prior removed) - coherent motion always matches somewhere;
+             * only cuts/crossfades leave every block stranded. */
+            un = (bestErr - float(abs(best.x) + abs(best.y)) * 0.5)
+                 > GW_UNMATCH_ERR;
         }
     }
-
-    /* Fine +-2/+-1 refinement around the coarse winner (DS px). */
-    const ivec2 fine[12] = ivec2[](
-        ivec2(-2, 0), ivec2(2, 0), ivec2(0, -2), ivec2(0, 2),
-        ivec2(-1, -1), ivec2(1, -1), ivec2(-1, 1), ivec2(1, 1),
-        ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1));
-    for (int i = 0; i < 12; ++i) {
-        ivec2 cand = best + fine[i];
-        float err = blockErr(q + cand, q)
-                  + float(abs(cand.x) + abs(cand.y)) * 0.5;
-        if (err < bestErr) { bestErr = err; best = cand; }
-    }
-
-    /* Store FULL-RES units: the compose pass lands the residual at
-     * p + v directly. */
-    ivec2 vFull = best * 4;
-    uint pv = (uint(vFull.x) & 0xFFFFu) | (uint(vFull.y) << 16);
-    field[uint(q.y) * uint(W) + uint(q.x)] =
-        uvec2(pv, uint(min(bestErr, 255.0) * 256.0));
+    /* workgroup reduce -> one global atomic per wg. ALL invocations must
+     * reach these barriers; the inb/un flags replace early returns. */
+    if (gl_LocalInvocationIndex == 0u) s_un = 0u;
+    barrier();
+    if (inb && un) atomicAdd(s_un, 1u);
+    barrier();
+    if (gl_LocalInvocationIndex == 0u && s_un != 0u)
+        atomicAdd(cnt[3], s_un);
 }

@@ -115,7 +115,17 @@ VkSemaphore nr_gpuwarp_done_sem(const NrGpuWarp *g);
  * warped subset, fails). Trails one present by design. */
 long nr_gpuwarp_last_cov_pm(const NrGpuWarp *g);
 long nr_gpuwarp_last_warp_pm(const NrGpuWarp *g);
+/* Diag: share of DS blocks the match pass could not displace-match
+ * (per-mille) - the scene-cut signal. Trails one present; -1 unknown. */
+long nr_gpuwarp_last_unmatched_pm(const NrGpuWarp *g);
 int  nr_gpuwarp_poisoned(const NrGpuWarp *g);
+
+/* Tune the compose policy. cut_pm: unmatched-block share (per-mille of
+ * DS blocks) above which the compose emits raw cur verbatim - the
+ * scene-cut gate; 0 disables. nhits: of a pixel's 4 neighbours how many
+ * must also pass the mask at the SAME offset for the apply to stick -
+ * kills chance-match speckle; 0 disables the vote. */
+void nr_gpuwarp_configure(NrGpuWarp *g, long cut_pm, int nhits);
 
 /* Test/diag surface (offline harness): the raw per-category pixel counts
  * of the most recent SUBMITTED compose - only meaningful after that

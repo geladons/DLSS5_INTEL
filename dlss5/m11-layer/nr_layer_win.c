@@ -434,6 +434,10 @@ static int g_gpuwarp = -1;
 static long g_gpuwarp_radius = 16;   /* DS px (NR_LAYER_GPUWARP_RADIUS) */
 static int g_gpuwarp_dbg = 0;        /* per-pixel offset record
                                         (NR_LAYER_GPUWARP_DBG) */
+static long g_gpuwarp_cut = 500;     /* unmatched-block cut gate, pm
+                                        (NR_LAYER_GPUWARP_CUT) */
+static int g_gpuwarp_nh = 2;         /* neighbour votes at same offset
+                                        (NR_LAYER_GPUWARP_NH) */
 static volatile LONG g_paused;  /* CTRL+ALT+X: passthrough, full fps */
 static volatile LONG g_off;     /* CTRL+ALT+Q: layer off for good */
 static volatile LONG g_hotkeys_started;
@@ -1320,6 +1324,14 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
                       if (g_gpuwarp_radius > 64) g_gpuwarp_radius = 64; }
             const char *gd = getenv("NR_LAYER_GPUWARP_DBG");
             g_gpuwarp_dbg = gd && strcmp(gd, "0") != 0;
+            const char *gc = getenv("NR_LAYER_GPUWARP_CUT");
+            if (gc) { g_gpuwarp_cut = atol(gc);
+                      if (g_gpuwarp_cut < 0) g_gpuwarp_cut = 0;
+                      if (g_gpuwarp_cut > 1000) g_gpuwarp_cut = 1000; }
+            const char *gh = getenv("NR_LAYER_GPUWARP_NH");
+            if (gh) { g_gpuwarp_nh = atoi(gh);
+                      if (g_gpuwarp_nh < 0) g_gpuwarp_nh = 0;
+                      if (g_gpuwarp_nh > 4) g_gpuwarp_nh = 4; }
             const char *sv = getenv("NR_LAYER_SERVE_STALE");
             g_serve_stale = !sv || strcmp(sv, "0") != 0;
             const char *sm = getenv("NR_LAYER_STALE_MATCH");
@@ -2181,6 +2193,9 @@ static void async_lazy_start(device_data *data)
                     (nr_gw_mem_type_fn)memory_type, data,
                     (nr_gw_fam_ok_fn)family_can_capture, data,
                     g_gpuwarp_radius, g_gpuwarp_dbg);
+                if (data->gpuwarp)
+                    nr_gpuwarp_configure(data->gpuwarp,
+                                         g_gpuwarp_cut, g_gpuwarp_nh);
                 nr_log("[nr_layer] GPU residual compose %s",
                        data->gpuwarp ? "armed" : "unavailable");
             }
@@ -2457,6 +2472,17 @@ static int async_serve_best(device_data *data, swapchain_data *chain,
                     if (sync_semaphores && !data->present_plain)
                         data->present_signal =
                             nr_gpuwarp_done_sem(data->gpuwarp);
+                    /* The GPU compose bypasses transfer(): the GDI
+                     * redirection bitmap must still be fed or it freezes
+                     * at the last CPU-path frame and DWM splices it over
+                     * the live surface on every input event (the menu
+                     * cursor-ghost/flash on GTA IV). staging already holds
+                     * cur + marker + UI - position-correct, always fresh. */
+                    nr_guard_feed_surface(data->mapped,
+                                          chain->extent.width,
+                                          chain->extent.height,
+                                          frame_byte_order(chain->format)
+                                          == 1);
                     diag_path = "gres";
                     serve_class_note("gres", cov);
                     {
@@ -2465,11 +2491,16 @@ static int async_serve_best(device_data *data, swapchain_data *chain,
                         if (now - gcov_ms >= 1000) {
                             gcov_ms = now;
                             nr_log("[nr_layer] gpuwarp serve "
-                                   "pres=%ld.%ld%% (warp +%ld.%ld%%)",
+                                   "pres=%ld.%ld%% (warp +%ld.%ld%%, "
+                                   "unmatched %ld.%ld%%)",
                                    cov / 10, cov % 10,
                                    nr_gpuwarp_last_warp_pm(
                                        data->gpuwarp) / 10,
                                    nr_gpuwarp_last_warp_pm(
+                                       data->gpuwarp) % 10,
+                                   nr_gpuwarp_last_unmatched_pm(
+                                       data->gpuwarp) / 10,
+                                   nr_gpuwarp_last_unmatched_pm(
                                        data->gpuwarp) % 10);
                         }
                     }

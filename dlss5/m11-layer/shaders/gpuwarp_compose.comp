@@ -28,9 +28,9 @@
 //   binding 2 = res   (pair residual, int8x4 lanes packed u32; alpha 0)
 //   binding 3 = field (uvec2 per DS px from gpuwarp_match)
 //   binding 4 = out   (u32 rgba per px)
-//   binding 5 = cnt   (uint[4])
+//   binding 5 = cnt   (uint[4]: [0-2] coverage, [3] match-unmatched/cut)
 //   binding 6 = dbg   (u32 per px, flag-gated)
-//   pc.a = (w, h, dsW, dsH)   pc.b = (px_eps, flags, 0, 0)
+//   pc.a = (w, h, dsW, dsH)   pc.b = (px_eps, flags, cut_pm, nhits)
 // ============================================================================
 
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
@@ -69,6 +69,25 @@ int maskDiff(uint c, ivec2 q) {
     uvec4 s = px8(srcPx[uint(q.y) * uint(W) + uint(q.x)]);
     ivec4 d = abs(ivec4(px8(c)) - ivec4(s));
     return max(d.x, max(d.y, d.z));
+}
+
+/* Coherence vote: how many of the 4-neighbourhood pixels ALSO pass the
+ * mask at the SAME displacement `off` (flat path: 0). A lone eps hit is
+ * texture chance/grain, not motion - real regions vote coherently. OOB
+ * neighbours abstain (maskDiff clamps; abstention keeps the gate honest
+ * at borders instead of self-voting). `need` votes required, 0 = off. */
+int nbrHits(ivec2 p, ivec2 off, int eps, int need) {
+    int W = pc.a.x, H = pc.a.y;
+    const ivec2 nb[4] = ivec2[](
+        ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1));
+    int ok = 0;
+    for (int k = 0; k < 4 && ok < need; ++k) {
+        ivec2 pn = p + nb[k];
+        if (pn.x < 0 || pn.y < 0 || pn.x >= W || pn.y >= H) continue;
+        uint cn = curPx[uint(pn.y) * uint(W) + uint(pn.x)];
+        if (maskDiff(cn, pn + off) <= eps) ++ok;
+    }
+    return ok;
 }
 
 /* cur + res at displaced position, saturating, alpha = cur alpha. */
@@ -115,6 +134,16 @@ void main() {
     bool inb = (p.x < W && p.y < H);
     int eps = pc.b.x;
     bool wrDbg = (pc.b.y & 1) != 0;
+    int need = pc.b.w;              /* coherence votes required, 0 = off */
+
+    /* Scene-cut gate: the match pass counted DS blocks with no displaced
+     * match into cnt[3]; when that share clears pc.b.z pm the pair
+     * describes another scene - every pixel falls to raw cur (the GPU
+     * twin of the CPU NR_RESIDUAL_DIFF short-circuit). Kills the
+     * crossfade speckle burst. */
+    bool cut = pc.b.z > 0
+        && cnt[3] * 1000u
+           > uint(pc.a.z) * uint(pc.a.w) * uint(pc.b.z);
 
     bool applied = false;
     bool warped = false;
@@ -123,56 +152,68 @@ void main() {
 
     if (inb) {
         uint c = curPx[i];
-        if (maskDiff(c, p) <= eps) {
-            /* flat mask hit: identical semantics to the CPU compose. */
-            outp = applyRes(c, p);
-            applied = true;
-        } else {
-            /* Motion-compensated retry: the DS field proposes where the
-             * current content lived in the pair source. +-2 cross refine
-             * around it, then the dense r<=4 rings - first candidate
-             * whose displaced source still matches cur supplies res. */
-            /* DS texel q covers full-res [4q,4q+3], centre 4q+1.5 ->
-             * the DS-space position of pixel p is p/4 - 0.375. */
-            vec2 v = fieldAt(vec2(p) * 0.25 - 0.375);
-            ivec2 d0 = ivec2(floor(v + 0.5));
-            int bestErr = maskDiff(c, p + d0);
-            ivec2 best = d0;
-            const ivec2 cross[8] = ivec2[](
-                ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1),
-                ivec2(2, 0), ivec2(-2, 0), ivec2(0, 2), ivec2(0, -2));
-            for (int k = 0; k < 8; ++k) {
-                ivec2 cand = d0 + cross[k];
-                int e = maskDiff(c, p + cand);
-                if (e < bestErr) { bestErr = e; best = cand; }
-            }
-            if (bestErr <= eps) {
-                outp = applyRes(c, p + best);
-                applied = true; warped = true; off = best;
+        if (!cut) {
+            if (maskDiff(c, p) <= eps
+                && (need <= 0
+                    || nbrHits(p, ivec2(0), eps, need) >= need)) {
+                /* flat mask hit: identical semantics to the CPU compose
+                 * plus the same-offset neighbour vote. */
+                outp = applyRes(c, p);
+                applied = true;
             } else {
-                /* dense Chebyshev rings r = 1..4, smallest first
-                 * (same order as the CPU warp probe's dense tier). */
-                bool found = false;
-                for (int r = 1; r <= 4 && !found; ++r) {
-                    for (int dy = -r; dy <= r && !found; ++dy) {
-                        for (int dx = -r; dx <= r && !found; ++dx) {
-                            if (dy != r && dy != -r && dx != r && dx != -r)
-                                continue;
-                            if (maskDiff(c, p + ivec2(dx, dy)) <= eps) {
-                                off = ivec2(dx, dy);
-                                found = true;
+                /* Motion-compensated retry: the DS field proposes where
+                 * the current content lived in the pair source. +-2 cross
+                 * refine around it, then the dense r<=4 rings - first
+                 * candidate whose displaced source still matches cur
+                 * supplies res. */
+                /* DS texel q covers full-res [4q,4q+3], centre 4q+1.5 ->
+                 * the DS-space position of pixel p is p/4 - 0.375. */
+                vec2 v = fieldAt(vec2(p) * 0.25 - 0.375);
+                ivec2 d0 = ivec2(floor(v + 0.5));
+                int bestErr = maskDiff(c, p + d0);
+                ivec2 best = d0;
+                const ivec2 cross[8] = ivec2[](
+                    ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1),
+                    ivec2(2, 0), ivec2(-2, 0), ivec2(0, 2), ivec2(0, -2));
+                for (int k = 0; k < 8; ++k) {
+                    ivec2 cand = d0 + cross[k];
+                    int e = maskDiff(c, p + cand);
+                    if (e < bestErr) { bestErr = e; best = cand; }
+                }
+                if (bestErr <= eps
+                    && (need <= 0
+                        || nbrHits(p, best, eps, need) >= need)) {
+                    outp = applyRes(c, p + best);
+                    applied = true; warped = true; off = best;
+                } else {
+                    /* dense Chebyshev rings r = 1..4, smallest first
+                     * (same order as the CPU warp probe's dense tier). */
+                    bool found = false;
+                    for (int r = 1; r <= 4 && !found; ++r) {
+                        for (int dy = -r; dy <= r && !found; ++dy) {
+                            for (int dx = -r; dx <= r && !found; ++dx) {
+                                if (dy != r && dy != -r && dx != r && dx != -r)
+                                    continue;
+                                if (maskDiff(c, p + ivec2(dx, dy)) <= eps) {
+                                    off = ivec2(dx, dy);
+                                    found = true;
+                                }
                             }
                         }
                     }
-                }
-                if (found) {
-                    outp = applyRes(c, p + off);
-                    applied = true; warped = true;
+                    /* first hit verified ONCE: a chance eps match whose
+                     * neighbours do not corroborate at the same offset is
+                     * rejected outright - the speckle kill. */
+                    if (found && (need <= 0
+                        || nbrHits(p, off, eps, need) >= need)) {
+                        outp = applyRes(c, p + off);
+                        applied = true; warped = true;
+                    }
                 }
             }
-            if (!applied)
-                outp = c;   /* reject: raw current pixel, verbatim */
         }
+        if (!applied)
+            outp = c;   /* reject OR cut: raw current pixel, verbatim */
         outPx[i] = outp;
         if (wrDbg) {
             dbg[i] = applied ? ((uint(off.x) & 0xFFFFu) | (uint(off.y) << 16))

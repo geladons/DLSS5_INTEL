@@ -2858,3 +2858,60 @@ OPEN / next levers for cadence (ordered):
 5. temporal_nr release bands could get a monotonic-drift case (emit
    cand directly when the gap direction is persistent) - reduces the
    fade shimmer; needs a direction memory - deferred, low priority.
+
+## 2026-10-08 Stage 43 - gres fresco gap + warp speckle/cut gates (owner field test)
+
+OWNER REPORT (real manager launch, GTA IV): menu = mouse ghosts +
+flicker; benchmark = SMOOTH motion ("game shows real frames, our
+processing lays a light layer on top when it can") - the residual
+compositor works as designed; but (a) digital garbage burst at
+slideshow transitions, (b) light noise during gameplay from the stale
+"mask" overlay landing on moved content.
+
+TWO AGENT AUDITS -> three mechanisms, all fixed same-day:
+
+1. MENU GHOSTS+FLICKER = GDI/DWM redirection-surface starvation on the
+   gres path (regression from enabling gpuwarp). nr_guard_feed_surface
+   mirrors the frame into the legacy GDI bitmap DWM splices over the
+   swapchain on input events - but it ran only inside transfer(1),
+   which gres bypasses (returns 2). During mouse motion serves are
+   gres-dominated -> bitmap froze with the cursor at its last resting
+   spot -> every input-driven splice flashed it: phantom cursor +
+   brightness pops (matches DEV_STATE 2406-2424 mechanism). Fix:
+   nr_layer_win.c feeds the surface on the gres path too (staging
+   already holds cur+marker+UI - position-correct, always fresh).
+
+2. TRANSITION GARBAGE = the GPU path had no scene-cut gate (CPU path
+   has DIFF/BIG probes; nr_gpuwarp_will_run checked only pair
+   eligibility). Crossfades went straight to compose -> first-hit ring
+   matches speckled deltas everywhere. Fix: gpuwarp_match counts DS
+   blocks with no plausible displaced match into cnt[3] (shares the
+   r_cnt buffer; early-returns converted to flags for barrier
+   legality); gpuwarp_compose reads cnt[3] same-submit - share
+   > cut_pm (default 500pm, NR_LAYER_GPUWARP_CUT) -> every pixel raw.
+   Field-verified live: "unmatched 97.3%" frame -> pres=0.0% = clean
+   raw, vs 0.0-6.2% on normal motion.
+
+3. GAMEPLAY SPECKLE = warp probe accepted the FIRST displaced position
+   matching within eps=12 (~80 ring candidates -> chance hits on real
+   textures get foreign deltas). Fix: nbrHits coherence vote - an
+   apply sticks only if >=nhits (default 2, NR_LAYER_GPUWARP_NH, 0=off)
+   of the pixel's 4-neighbours also pass the mask at the SAME offset.
+   Real displaced regions vote coherently; chance hits are isolated.
+   Verified: shifted coherent content 93.8% cov, uncorrelated cut 0%.
+
+Plus: unmatched-share telemetry in the 1s gpuwarp serve log
+("unmatched X.X%"), nr_gpuwarp_configure() + last_unmatched_pm() API,
+match dsl 3->4 bindings (15<=16 descriptors), cnt[3] read lag-1.
+
+OWNER IDEA RECORDED ("process only a light mask lifted from the
+original, apply it back"): this IS the shipped architecture - the net
+emits a signed delta at 0.58 scale, layer applies it onto the current
+raw frame; during the benchmark the owner literally observed it
+working ("our processing lays a small layer on top"). What remains
+unexploited: (a) daemon could reply delta-only to cut TCP bytes ~2x;
+(b) sparse/tiled processing is blocked - the U-Net needs global
+receptive field, cannot process sub-rects independently. Mask
+staleness was the real problem, not the delta-vs-image choice.
+
+Deployed: x86+x64 layer DLLs -> production/runtime/layer/{x86,x64}.

@@ -122,6 +122,9 @@ struct NrGpuWarp {
     /* coverage read-back (one present late - see header) */
     int cnt_seen;
     unsigned long last_flat, last_warped, last_fail;
+    unsigned long last_unmatched;   /* DS blocks with no displaced match */
+    long cut_pm;                    /* unmatched-share cut gate, pm */
+    int nhits;                      /* coherence votes required */
     int poisoned;
 };
 
@@ -363,6 +366,10 @@ static int gw_write_descs(NrGpuWarp *g)
     gw_bind(&wr[n], &bi[n], g->set_match, 2, g->r_field.buf,
             g->r_field.size);
     n++;
+    /* match counts unmatched DS blocks into the shared counter buf
+     * (slot [3]) - compose reads it same-submit for the cut gate. */
+    gw_bind(&wr[n], &bi[n], g->set_match, 3, g->r_cnt.buf, GW_CNT_BYTES);
+    n++;
     gw_bind(&wr[n], &bi[n], g->set_comp, 0, g->r_cur.buf, g->r_cur.size);
     n++;
     gw_bind(&wr[n], &bi[n], g->set_comp, 1, g->r_src.buf, g->r_src.size);
@@ -419,6 +426,10 @@ NrGpuWarp *nr_gpuwarp_create(VkPhysicalDevice phys, VkDevice dev,
     g->mem_ctx = mem_ctx;
     g->radius_ds = radius_ds > 0 ? radius_ds : 16;
     g->write_dbg = write_dbg;
+    g->cut_pm = 500;   /* unmatched DS blocks > 50% = the pair shows
+                        * another scene: compose emits raw cur */
+    g->nhits = 2;      /* >=2 of 4 neighbours must vote at the same
+                        * offset - kills chance-match speckle */
     if (gw_resolve(g) != 0) {
         nr_log("[gpuwarp] entry points missing; disabled");
         goto fail;
@@ -466,7 +477,7 @@ NrGpuWarp *nr_gpuwarp_create(VkPhysicalDevice phys, VkDevice dev,
         goto fail;
 
     g->dsl_ds = gw_dsl(g, 2);
-    g->dsl_match = gw_dsl(g, 3);
+    g->dsl_match = gw_dsl(g, 4);
     g->dsl_comp = gw_dsl(g, 7);
     if (!g->dsl_ds || !g->dsl_match || !g->dsl_comp) goto fail;
     g->pl_ds = gw_pl(g, g->dsl_ds, 16);
@@ -708,6 +719,7 @@ int nr_gpuwarp_run(NrGpuWarp *g, VkQueue queue, VkBuffer cur_buf,
         g->last_flat = c[0];
         g->last_warped = c[1];
         g->last_fail = c[2];
+        g->last_unmatched = c[3];
         g->cnt_seen = 1;
     }
     if (g->ResetFences(g->dev, 1, &g->fence) != VK_SUCCESS)
@@ -809,7 +821,9 @@ int nr_gpuwarp_run(NrGpuWarp *g, VkQueue queue, VkBuffer cur_buf,
     {
         uint32_t pc[8] = { w, h, dsw, dsh,
                            (uint32_t)px_eps,
-                           g->write_dbg ? 1u : 0u, 0u, 0u };
+                           g->write_dbg ? 1u : 0u,
+                           (uint32_t)g->cut_pm,
+                           (uint32_t)g->nhits };
         g->CmdBindPipeline(g->cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                            g->pipe_comp);
         g->CmdBindDescriptorSets(g->cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -923,6 +937,21 @@ long nr_gpuwarp_last_warp_pm(const NrGpuWarp *g)
 int nr_gpuwarp_poisoned(const NrGpuWarp *g)
 {
     return g ? g->poisoned : 1;
+}
+
+void nr_gpuwarp_configure(NrGpuWarp *g, long cut_pm, int nhits)
+{
+    if (!g) return;
+    g->cut_pm = cut_pm;
+    g->nhits = nhits;
+}
+
+long nr_gpuwarp_last_unmatched_pm(const NrGpuWarp *g)
+{
+    const uint64_t nblocks = g && g->extent_ok
+                             ? (uint64_t)g->dsw * g->dsh : 0;
+    if (!g || !g->cnt_seen || !nblocks) return -1;
+    return (long)(((uint64_t)g->last_unmatched * 1000) / nblocks);
 }
 
 int nr_gpuwarp_counters(const NrGpuWarp *g, unsigned long *flat,
