@@ -104,7 +104,7 @@ bool DaemonCore::ensureEngine(uint32_t w, uint32_t h) {
 // manager restart loops). Requests coalesce in pending_: the newest
 // {extent, scale} always wins.
 void DaemonCore::kickBuildLocked(uint32_t w, uint32_t h) {
-    pending_.reset(new PendingBuild{w, h, scale});
+    pending_.reset(new PendingBuild{w, h, scale, buildSettleUntil_});
     if (builderRunning_) return;          // worker picks up newer pending_
     builderRunning_ = true;
     builder_ = std::thread(&DaemonCore::builderLoop, this);
@@ -128,6 +128,16 @@ void DaemonCore::builderLoop() {
         }
         auto ne = newEnginePtr();
         const ULONGLONG t0 = GetTickCount64();
+        /* Post-fault settle: building during the driver's TDR recovery
+         * produced an engine whose first dispatch faulted the device a
+         * second time. Wait out the floor on this thread - the accept
+         * loop keeps refusing frames meanwhile (engine stays null). */
+        if (pb.notBefore > t0) {
+            const ULONGLONG wait = pb.notBefore - t0;
+            std::printf("[m11d] build settle %llu ms (post-fault)\n",
+                        (unsigned long long)wait);
+            Sleep((DWORD)wait);
+        }
         std::printf("[m11d] async engine build start (%ux%u scale %.2f)\n",
                     pb.w, pb.h, (double)pb.scale);
         bool ok = sehEngineInit(ne.get(), &cfg);
@@ -516,6 +526,11 @@ void DaemonCore::handleFrame(SOCKET s, const uint32_t hdr[4], ULONGLONG deadline
                 engine.reset();
                 curW = 0; curH = 0;
             }
+            /* The fault means the driver just went through a TDR; the
+             * device it hands out for the next seconds is not guaranteed
+             * stable. Every rebuild kicked from now on first waits out
+             * the settle floor (cleared on the next clean frame). */
+            buildSettleUntil_ = GetTickCount64() + 4000;
         }
         // A fault that survives a full rebuild is not transient (driver
         // reset loop, deterministic dispatch fault): each retry costs the
@@ -532,6 +547,10 @@ void DaemonCore::handleFrame(SOCKET s, const uint32_t hdr[4], ULONGLONG deadline
         return;
     }
     deadEngines_ = 0;   // a served frame proves the current engine healthy
+    {
+        std::lock_guard<std::mutex> lk(engMu_);
+        buildSettleUntil_ = 0;          // device is demonstrably stable again
+    }
     if (!generated) {
         // Only a real process refreshes the prev pair - a
         // generated frame is not a reconstruction and must stay

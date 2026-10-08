@@ -27,14 +27,10 @@ int nr_degrade_is_degenerate(NrDegrade *d, uint32_t w, uint32_t h, int *log)
     return 1;
 }
 
-int nr_degrade_probe_now(NrDegrade *d)
+int nr_degrade_probe_now(NrDegrade *d, uint64_t now_ms)
 {
     if (!d) return 1;
-    if (d->cooldown) {
-        d->cooldown--;
-        return 0;
-    }
-    return 1;
+    return now_ms >= d->next_probe_ms;
 }
 
 int nr_degrade_note_success(NrDegrade *d, uint64_t now_ms)
@@ -51,7 +47,7 @@ int nr_degrade_note_success(NrDegrade *d, uint64_t now_ms)
      * from posing as a recovery. */
     was_down = !d->daemon_known_up && d->last_success_ms != 0;
     d->consecutive_fail = 0;
-    d->cooldown = 0;
+    d->next_probe_ms = 0;
     d->daemon_known_up = 1;
     d->last_success_ms = now_ms;
     d->hiccup_logged = 0;
@@ -72,7 +68,7 @@ int nr_degrade_note_fail(NrDegrade *d, int fail_kind, uint64_t now_ms,
     if (fail_kind == NR_DEGRADE_FAIL_CONNECT) {
         d->daemon_known_up = 0;
         d->consecutive_fail = 0;
-        d->cooldown = NR_DEGRADE_PROBE_DOWN - 1;
+        d->next_probe_ms = now_ms + NR_DEGRADE_PROBE_DOWN_MS;
         if (!d->down_logged) {
             d->down_logged = 1;
             d->hiccup_logged = 0;
@@ -91,7 +87,7 @@ int nr_degrade_note_fail(NrDegrade *d, int fail_kind, uint64_t now_ms,
     if (d->last_success_ms &&
         now_ms - d->last_success_ms > NR_DEGRADE_STALE_MS) {
         d->daemon_known_up = 0;
-        d->cooldown = NR_DEGRADE_PROBE_DOWN - 1;
+        d->next_probe_ms = now_ms + NR_DEGRADE_PROBE_DOWN_MS;
         if (!d->down_logged) {
             d->down_logged = 1;
             d->hiccup_logged = 0;
@@ -104,7 +100,7 @@ int nr_degrade_note_fail(NrDegrade *d, int fail_kind, uint64_t now_ms,
      * last processed frame; the next real socket attempt is paced. */
     if (d->daemon_known_up) {
         if (hold) *hold = 1;
-        d->cooldown = NR_DEGRADE_PROBE_FLAP - 1;
+        d->next_probe_ms = now_ms + NR_DEGRADE_PROBE_FLAP_MS;
         if (!d->hiccup_logged) {
             d->hiccup_logged = 1;
             return NR_DEGRADE_LOG_HICCUP;
@@ -114,7 +110,7 @@ int nr_degrade_note_fail(NrDegrade *d, int fail_kind, uint64_t now_ms,
 
     /* Transport fail on a daemon that never answered (socket closed
      * mid-exchange on the first attempts, or stale above): pace probes. */
-    d->cooldown = NR_DEGRADE_PROBE_DOWN - 1;
+    d->next_probe_ms = now_ms + NR_DEGRADE_PROBE_DOWN_MS;
     return NR_DEGRADE_LOG_NONE;
 }
 

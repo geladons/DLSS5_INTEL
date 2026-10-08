@@ -111,10 +111,16 @@ private:
     void handleCtrlLocked(const uint32_t hdr[4], uint32_t rep[4]);  // engMu_ held
 
     std::mutex engMu_;
-    struct PendingBuild { uint32_t w, h; float scale; };
+    struct PendingBuild { uint32_t w, h; float scale; ULONGLONG notBefore; };
     std::unique_ptr<PendingBuild> pending_;           // config to realize next
     std::thread builder_;
     bool builderRunning_ = false;                     // guarded by engMu_
+    // Post-fault settle floor: a DEVICE_LOST means the driver is mid-TDR
+    // recovery; a device created and dispatched into in the next seconds
+    // faults again (field report 2026-10-08: rebuilt engine's first frame
+    // re-took the GPU down). Rebuilds kicked while now < buildSettleUntil_
+    // wait on the builder thread instead of racing the reset.
+    ULONGLONG buildSettleUntil_ = 0;                  // guarded by engMu_
     // Device-loss streak: consecutive engine deaths (processFrame fault,
     // typically VK_ERROR_DEVICE_LOST) without one successful frame between
     // them. A fault that survives a full engine rebuild is not transient -

@@ -51,15 +51,20 @@ enum {
  * and the stream falls back to native (a single transition, not a strobe). */
 #define NR_DEGRADE_STALE_MS 15000u
 
-/* Probe pacing between real socket attempts. A flap keeps a held frame for
+/* Probe pacing between real socket attempts, in WALL-CLOCK milliseconds.
+ * The old frame-counted cooldown made probe cadence fps-dependent: on a
+ * game crawling at 3 fps through a TDR storm, "every 32 presents" meant
+ * one probe per ~10 s - slower than a full daemon rebuild, so the layer
+ * never noticed the daemon come back and sat in raw passthrough until the
+ * game died (GTA IV field hang 2026-10-08). A flap keeps a held frame for
  * the skipped presents; a down daemon passes native between probes. */
-#define NR_DEGRADE_PROBE_FLAP 8u
-#define NR_DEGRADE_PROBE_DOWN 32u
+#define NR_DEGRADE_PROBE_FLAP_MS 250u
+#define NR_DEGRADE_PROBE_DOWN_MS 800u
 
 typedef struct NrDegrade {
     unsigned min_extent;         /* below this on either axis -> degenerate */
     unsigned consecutive_fail;   /* consecutive transport failures */
-    unsigned cooldown;           /* presents skipped before the next probe */
+    uint64_t next_probe_ms;      /* GetTickCount64 when the next probe may run */
     uint64_t last_success_ms;    /* GetTickCount64 of the last good answer */
     int daemon_known_up;         /* set only after the first real answer */
     int hiccup_logged;           /* hiccup line already emitted this streak */
@@ -90,8 +95,8 @@ int nr_degrade_is_degenerate(NrDegrade *d, uint32_t w, uint32_t h, int *log);
 
 /* Call before every real socket attempt. Returns non-zero when this present
  * may hit the socket; zero means serve this present from the held result or
- * natively without touching the network (probe pacing). */
-int nr_degrade_probe_now(NrDegrade *d);
+ * natively without touching the network (probe pacing, wall-clock). */
+int nr_degrade_probe_now(NrDegrade *d, uint64_t now_ms);
 
 /* exchange() answered: streak resets and the daemon is marked up. Returns
  * NR_DEGRADE_LOG_RECOVERY when this answer ended a fail streak. */

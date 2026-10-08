@@ -2741,7 +2741,7 @@ static int process_frame(device_data *data, swapchain_data *chain,
      * (or natively when the held extent does not match) without paying the
      * 1.5 s timeout per frame and without piling TCP backlog on a daemon
      * that is already saturated. */
-    if (!nr_degrade_probe_now(&g_dg)) {
+    if (!nr_degrade_probe_now(&g_dg, nr_now_ms())) {
         if (data->result_valid && data->result
             && data->result_size >= needed
             && data->result_w == chain->extent.width
