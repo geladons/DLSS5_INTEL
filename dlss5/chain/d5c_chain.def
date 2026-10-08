@@ -25,3 +25,4 @@ EXPORTS
     dlss5_set_temporal
     dlss5_get_temporal
     dlss5_reset_history
+    dlss5_debug_fetch

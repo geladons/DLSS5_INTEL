@@ -33,6 +33,10 @@
 // ============================================================================
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 layout(std430, set = 0, binding = 3) readonly buffer FeatV { float fv[]; };
+// Read-only view of the stored history: needed for the previous emitted
+// byte (the gate==0 latch reference - the fv 7-9 copy is box-clamped and
+// cannot express an emit outside the current 3x3 neighbourhood).
+layout(std430, set = 0, binding = 13) readonly buffer Hist { float hs[]; };
 layout(std430, set = 0, binding = 14) readonly buffer HeadRaw { float head[]; };
 layout(std430, set = 0, binding = 16) buffer Stats { uint stats[]; };
 layout(push_constant) uniform Push { ivec4 a; ivec4 b; vec4 c; vec4 d; } pc;
@@ -84,37 +88,59 @@ void main() {
         // NOTE: temporal_nr's flicker latch sits BELOW the gain anchor
         // on the pre-anchor blend - the value this pass must mirror - so
         // the same stepCap computation runs here (same metric, same
-        // constants, same fv[15]==0 skip). Keeping stats[1] honest is
-        // what lets the anchor's deadzone latch k=1 once the image pins.
+        // constants, same latchOK/refB rule including the fv[15]==0
+        // latch-on-prevB and the pc.d.x==0 reset bypass). Keeping
+        // stats[1] honest is what lets the anchor's deadzone latch k=1
+        // once the image pins.
         float gate = fv[p * 16u + 15u];
         alpha *= gate;
         // fv[15] is already 0 on a history-reset frame (features' own
-        // histValid path), so stats[1] accumulates the unblended
-        // prediction there - matching what temporal_nr emits. No pc.d.x
-        // check: the reset rides the side channel, keeping a stale-
-        // engine/new-spv pairing functional (m12 gets spv copies only).
+        // histValid path) AND pc.d.x is pushed 0 on the same frames -
+        // stats[1] then accumulates the unblended prediction, matching
+        // what temporal_nr emits (its gate==0 latch also bypasses on
+        // pc.d.x==0, see below).
         float cand[3];
         for (uint c = 0u; c < 3u; ++c) {
             float pred = clamp(col01[c] + head[p * 4u + c] * 0.25, 0.0, 1.0);
             cand[c] = pred + alpha * (h01[c] - pred);
         }
+        // Previous emitted byte from the raw stored history (same
+        // sanitise as temporal_nr: bufHist is uninitialised on frame 0).
+        float prevB[3];
+        for (uint c = 0u; c < 3u; ++c) {
+            float sraw = hs[p * 3u + c];
+            if (!(sraw > -1e9 && sraw < 1e9)) sraw = 0.0;
+            prevB[c] = floor(clamp(sraw * 8.0 + 0.5, 0.0, 1.0) * 255.0 + 0.5);
+        }
+        // Same gate==0 latch as temporal_nr: on non-reset frames rejected
+        // pixels latch against their own previous emit (prevB), not the
+        // box-clamped h01. fv[15]==0 is permanent on still pixels whose
+        // enhancement residual exceeds the gate band - without this the
+        // mirrored sum accumulated the raw per-frame prediction jitter.
+        bool latchOK = (gate > 0.0) || (pc.d.x != 0.0);
+        float refB[3];
+        for (uint c = 0u; c < 3u; ++c)
+            refB[c] = (gate > 0.0) ? h01[c] : prevB[c] * (1.0 / 255.0);
         float stepCap = 2.0;
-        if (gate > 0.0) {
-            float dl = abs(0.299 * (cand[0] - h01[0])
-                         + 0.587 * (cand[1] - h01[1])
-                         + 0.114 * (cand[2] - h01[2]));
-            float dc = max(abs(cand[0] - h01[0]),
-                           max(abs(cand[1] - h01[1]),
-                               abs(cand[2] - h01[2])));
+        if (latchOK) {
+            float dl = abs(0.299 * (cand[0] - refB[0])
+                         + 0.587 * (cand[1] - refB[1])
+                         + 0.114 * (cand[2] - refB[2]));
+            float dc = max(abs(cand[0] - refB[0]),
+                           max(abs(cand[1] - refB[1]),
+                               abs(cand[2] - refB[2])));
             float dMetric = max(dl, 2.5 * dc);
             stepCap = (dMetric >= DB_CUT)  ? 2.0
                     : (dMetric >= DB_MID)  ? STEP_HI
                     : (dMetric >= DB_HOLD) ? STEP_LO
                     :                        0.0;
         }
+        // Same emit as temporal_nr: latch reference inside the deadband,
+        // reference stepped toward the candidate by at most stepCap.
         for (uint c = 0u; c < 3u; ++c) {
-            luma += W[c] * (h01[c] + clamp(cand[c] - h01[c],
-                                           -stepCap, stepCap));
+            float e = refB[c] + clamp(cand[c] - refB[c], -stepCap, stepCap);
+            float b = floor(clamp(e, 0.0, 1.0) * 255.0 + 0.5);
+            luma += W[c] * (b * (1.0 / 255.0));
         }
         atomicAdd(sLum, uint(luma * 256.0 + 0.5));
     }

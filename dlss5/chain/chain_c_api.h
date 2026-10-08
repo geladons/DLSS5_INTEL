@@ -80,6 +80,10 @@ DLSS5_API void dlss5_set_color_strength(void* handle, float color_strength);
 DLSS5_API void dlss5_set_temporal(void* handle, int enable);
 DLSS5_API int dlss5_get_temporal(void* handle);
 DLSS5_API void dlss5_reset_history(void* handle);
+// Diagnostics (non-contract): dump internal buffer `which` to `path` after the
+// last frame. 0=history fp32[TOK*3], 1=featV fp32[TOK*16], 2=head fp32[TOK*4],
+// 3=x16 fp16[TOK*16], 4=stats u32[8], 5=netRgb fp32[netW*netH*3].
+DLSS5_API int dlss5_debug_fetch(void* handle, int which, const char* path);
 
 // Frame Generation (FSR 3.1 / Optical Flow Interpolation):
 // Interpolate an intermediate frame between frame0 and frame1 using GPU optical flow.

@@ -142,9 +142,16 @@ const float DB_CUT  = 128.0 / 255.0; // >= this = real change, emit uncapped
 const float STEP_LO =  8.0 / 255.0;  // emit cap in the [DB_HOLD,DB_MID) band
 const float STEP_HI = 24.0 / 255.0;  // emit cap in the [DB_MID,DB_CUT) band
 
+// (The earlier "direction trit" experiment - a per-channel reversal sign
+// packed into the low mantissa bits of the history store - was removed:
+// device readback showed the sustained static wander lived ENTIRELY in
+// the fv[15]==0 pixel class that bypassed the latch outright, so a
+// release-band reversal guard could never engage it. The banded latch
+// below is what pins; plain scaled_color values are stored again.)
+
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 layout(std430, set = 0, binding = 3) readonly buffer FeatV { float fv[]; };
-layout(std430, set = 0, binding = 13) writeonly buffer Hist { float hs[]; };
+layout(std430, set = 0, binding = 13) buffer Hist { float hs[]; };
 layout(std430, set = 0, binding = 14) buffer HeadRaw { float head[]; };
 // Gain-anchor luma sums (see temporal_stats.comp for the slot layout).
 // Read by every invocation (uniform value -> broadcast); slots [4],[5]
@@ -258,8 +265,9 @@ void main() {
         anchored[c] = col01[c] + (cand[c] - col01[c]) * k;
 
     // Hold/release latch + banded rate limit: distance between the
-    // blended candidate and the CURRENT history (the previous emitted
-    // output, already AABB-clamped upstream) through the same
+    // blended candidate and the LATCH REFERENCE (gated pixels: h01, the
+    // AABB-clamped current history; fv[15]==0 pixels: prevB, the previous
+    // emitted byte verbatim - see below) through the same
     // chroma-aware metric features.comp uses for the fv[15] gate -
     // max(BT.601 luma distance, 2.5 * max per-channel distance) so
     // isoluminant chroma drift cannot sneak under a luma-only check.
@@ -270,19 +278,54 @@ void main() {
     // release bands (bounded micro-steps instead of a full-candidate
     // pop - a threshold-straddler can no longer emit a ~32+/255 jump),
     // and 2.0 (= uncapped, deltas are <=1.0) past DB_CUT where a real
-    // change must land in one frame. The whole check is skipped when
-    // gate==0 (history reset / rejected): the reset frame must emit the
-    // unblended prediction so the NEXT frame's delta is ~0 (fast lock
-    // after scene cuts), and a rejected history has no business holding
-    // the output at all.
+    // change must land in one frame.
+    //
+    // Previous emitted byte, decoded from the raw stored history (the
+    // fv 7-9 copy is AABB-clamped and cannot express an emit that sits
+    // outside the current 3x3 box). Sanitised: bufHist is uninitialized
+    // device memory on the first-ever frame, and a NaN/inf there must
+    // not poison the gate==0 latch reference - comparisons against NaN
+    // are all false, so the range test folds NaN to 0 as well as infs.
+    float prevB[3];
+    for (uint c = 0u; c < 3u; ++c) {
+        float sraw = hs[p * 3u + c];
+        if (!(sraw > -1e9 && sraw < 1e9)) sraw = 0.0;
+        prevB[c] = floor(clamp(sraw * 8.0 + 0.5, 0.0, 1.0) * 255.0 + 0.5);
+    }
+
+    // fv[15]==0 pixels get the latch too - THIS is the shimmer fix. The
+    // gate compares the previous PROCESSED emit to the current RAW input,
+    // so on still content whose enhancement residual exceeds ~25/255 the
+    // gate reads a permanent "moved" and fv[15]==0 forever (~47% of a GTA
+    // IV menu frame). The old code left those pixels unlatched: every
+    // frame emitted the raw unblended prediction, which jitters +-1-6
+    // LSB from the per-frame noise channels and global net coupling -
+    // the measured wander lived ENTIRELY in this class (95%+ of its
+    // pixels re-emitted a different byte every frame; gated pixels were
+    // pinned to <1%). The reference is the previous EMIT (prevB, the raw
+    // stored byte - never the box-clamped h01: a legitimate emit may sit
+    // outside the current 3x3 box, and holding at h01 there would emit
+    // the box edge, store it, clamp it back - an artificial 2-cycle).
+    // dist(cand, prevB) < DB_HOLD means the prediction is sitting on
+    // its own last output -> re-emit the stored byte verbatim, an exact
+    // fixed point whatever the noise does. Real motion/cuts land
+    // >DB_CUT away -> uncapped, instant fresh emit. The one exception:
+    // the history-reset frame (pc.d.x==0 - scene cut / stream start /
+    // resetHistory), where bufHist still holds ANOTHER scene's emit and
+    // must not anchor anything.
+    bool latchOK = (gate > 0.0) || (pc.d.x != 0.0);
+    float refB[3];
+    for (uint c = 0u; c < 3u; ++c)
+        refB[c] = (gate > 0.0) ? h01[c] : prevB[c] * (1.0 / 255.0);
+
     float stepCap = 2.0;
-    if (gate > 0.0) {
-        float dl = abs(0.299 * (cand[0] - h01[0])
-                     + 0.587 * (cand[1] - h01[1])
-                     + 0.114 * (cand[2] - h01[2]));
-        float dc = max(abs(cand[0] - h01[0]),
-                       max(abs(cand[1] - h01[1]),
-                           abs(cand[2] - h01[2])));
+    if (latchOK) {
+        float dl = abs(0.299 * (cand[0] - refB[0])
+                     + 0.587 * (cand[1] - refB[1])
+                     + 0.114 * (cand[2] - refB[2]));
+        float dc = max(abs(cand[0] - refB[0]),
+                       max(abs(cand[1] - refB[1]),
+                           abs(cand[2] - refB[2])));
         float dMetric = max(dl, 2.5 * dc);
         stepCap = (dMetric >= DB_CUT)  ? 2.0
                 : (dMetric >= DB_MID)  ? STEP_HI
@@ -290,16 +333,19 @@ void main() {
                 :                        0.0;
     }
 
-    // Pass 2b: emit = history inside the latch, else history stepped
-    // toward the anchored candidate by at most stepCap per channel -
-    // then snapped to the output byte grid so the emitted value is
-    // always an exact display byte. The SAME value feeds the head
-    // residual AND the history store - emitting and storing must never
-    // diverge or the loop wanders again.
+    // Pass 2b: emit = the latch reference inside the deadband, else the
+    // reference stepped toward the anchored candidate by at most stepCap
+    // per channel - then snapped to the output byte grid so the emitted
+    // value is always an exact display byte. The SAME value feeds the
+    // head residual AND the history store - emitting and storing must
+    // never diverge or the loop wanders again. When the latch is off
+    // (gate==0 reset frame) stepCap stays 2.0 >= any 0..1 delta, so the
+    // expression collapses to `anchored` verbatim - the uncapped emit.
     for (uint c = 0u; c < 3u; ++c) {
-        float outp = h01[c] + clamp(anchored[c] - h01[c],
+        float outp = refB[c] + clamp(anchored[c] - refB[c],
                                     -stepCap, stepCap);       // latch+step
-        outp = floor(clamp(outp, 0.0, 1.0) * 255.0 + 0.5) * (1.0 / 255.0);
+        float b = floor(clamp(outp, 0.0, 1.0) * 255.0 + 0.5); // emit byte
+        outp = b * (1.0 / 255.0);
         head[hP + c] = halfr((outp - col01[c]) * 4.0);
         float s = halfr(outp);                            // scaled_color(outp)
         s = halfr(s - 0.5);

@@ -309,6 +309,12 @@ public:
         }
     }
 
+    // Diagnostics: device->host dump of an internal buffer (see
+    // ChainEngine::debugFetch for the `which` map). Returns 0 on success.
+    int debugFetch(int which, const char* path) {
+        return initialized_ && engine_.debugFetch(which, path) ? 0 : -1;
+    }
+
     int getFrameGen() const {
         return frameGenEnabled_ ? 1 : 0;
     }
@@ -790,6 +796,20 @@ DLSS5_API void dlss5_reset_history(void* handle) {
         auto* ctx = static_cast<EngineContext*>(handle);
         ctx->resetHistory();
     } catch (...) {
+    }
+}
+
+// Diagnostics export (not part of the shipped contract): dumps one internal
+// device buffer to `path` after the last processed frame. which:
+// 0=history fp32[TOK*3], 1=featV fp32[TOK*16], 2=head fp32[TOK*4],
+// 3=x16 fp16[TOK*16], 4=stats u32[8], 5=netRgb fp32[netW*netH*3].
+DLSS5_API int dlss5_debug_fetch(void* handle, int which, const char* path) {
+    if (!handle || !path) return -1;
+    try {
+        auto* ctx = static_cast<EngineContext*>(handle);
+        return ctx->debugFetch(which, path);
+    } catch (...) {
+        return -1;
     }
 }
 

@@ -137,6 +137,12 @@ public:
     float renderScale() const { return cfg_.renderScale; }
     const Stage* stages() const { return st_; }
 
+    // Diagnostics (engine.cpp): one-shot device->host dump of an internal
+    // buffer into `path`. which: 0=bufHist fp32[TOK*3], 1=oFeatV fp32[TOK*16],
+    // 2=oHEAD fp32[TOK*4], 3=oX16 fp16[TOK*16], 4=bufStats u32[8],
+    // 5=bufNetRgb fp32[netW*netH*3].
+    bool debugFetch(int which, const char* path);
+
 private:
     bool createFrontEnd();        // buffers/images/descriptors/transport pipelines
     void recordFrame(long frameIndex);  // into cmd (not submitted yet)

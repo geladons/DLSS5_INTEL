@@ -187,10 +187,21 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
     gaps <64/255 the ratchet is monotonic and provably terminates
     (unit-proven: +-35/255 alternation collapses to one 8/255 micro-
     step then pins). >64/255 persistent alternation can still shuttle,
-    bounded at STEP_HI/frame vs the old full-gap pops. Real per-pixel
-    changes >~25/255 bypass the latch entirely via the fv[15] gate=0
-    path (unblended full emit) - the bands only mediate stable-input
-    boundary straddlers.
+    bounded at STEP_HI/frame vs the old full-gap pops.
+    fv[15]==0 pixels are LATCHED TOO (2026-10-07 static-shimmer fix):
+    the gate compares the previous PROCESSED emit to the RAW input, so
+    still pixels whose enhancement residual exceeds the band stayed
+    gate=0 forever and re-emitted the raw unblended prediction every
+    frame - the measured 1-6 LSB wander lived entirely there (~47% of a
+    GTA IV menu frame, 95%+ re-emitting a new byte/frame; gated pixels
+    were pinned to <1%). On non-reset frames (pc.d.x=1) gate=0 pixels
+    now run the same banded latch against prevB = their own previous
+    EMITTED BYTE (the raw stored history, never the box-clamped h01 -
+    a legit emit may sit outside the 3x3 box and an h01 hold would
+    ratchet into a 2-cycle). Static pred jitter << DB_HOLD pins; real
+    motion lands >DB_CUT and emits instantly; only the history-reset
+    frame bypasses (stale bufHist must not anchor). Same bands and
+    reference rule must stay mirrored in temporal_stats.comp.
   - Input contract = 16 feature channels exactly (input_adapter_weight
     [16,32]): ch 0-2 noise, 3 const, 4-6 scaled colour, 7-9 history,
     10-14 Phase30 controls, 15 zero. NO motion-vector/depth slots - the
