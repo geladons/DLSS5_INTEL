@@ -116,6 +116,11 @@ int main(int argc, char** argv) {
         int m = std::atoi(fm_env);
         core.fgMode = (m >= 0 && m <= 2) ? m : core.fgMode;
     }
+    // (shader dir is logged in the banner once resolution below is done -
+    // a DLSS5_SHADER_DIR inherited from a launcher process can silently
+    // point at another runtime's spv set: field report 2026-10-08, m13
+    // seeds its env with the x64 layer dir and manager-spawned daemons
+    // built engines on a half-stale kernel set - TDR storms).
     core.fgModeConfigured = core.fgMode;
     // Temporal conditioning default ON (the flicker fix). Env is the
     // launch BASELINE only - live flips arrive over NRCT SETTEMPORAL into
@@ -152,8 +157,9 @@ int main(int argc, char** argv) {
         size_t sep = core.shaderDir.find_last_of("\\/");
         core.shaderDir = (sep == std::string::npos) ? ".\\" : core.shaderDir.substr(0, sep + 1);
     }
+    const char* shaderDirSrc = "exe-relative";
     if (const char* sd = std::getenv("DLSS5_SHADER_DIR")) {
-        if (*sd) { core.shaderDir = sd; if (core.shaderDir.back() != '\\' && core.shaderDir.back() != '/') core.shaderDir += "\\"; }
+        if (*sd) { core.shaderDir = sd; if (core.shaderDir.back() != '\\' && core.shaderDir.back() != '/') core.shaderDir += "\\"; shaderDirSrc = "DLSS5_SHADER_DIR env"; }
     }
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -180,6 +186,7 @@ int main(int argc, char** argv) {
             core.shaderDir = argv[++i];
             if (!core.shaderDir.empty() && core.shaderDir.back() != '\\' && core.shaderDir.back() != '/')
                 core.shaderDir += "\\";
+            shaderDirSrc = "--shader-dir arg";
         }
         else if (a == "--dump") core.dump = true;
         else if (a == "--selftest" && i + 1 < argc) selftest = argv[++i];
@@ -229,6 +236,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::printf("=== M11D: DLSSNR daemon (real 71-block DLSS 5 U-Net) ===\n");
+    std::printf("[m11d] shader dir: %s (source: %s)\n", core.shaderDir.c_str(), shaderDirSrc);
     std::printf("weights: %s\nPhase30: intensity=%.2f tone=%.2f struct=%.2f skin=%.2f mask=%d style=%d color=%.2f\nscale: %.2f framegen: %d\n",
                 core.weights.c_str(), (double)core.p30Ctl.params().intensity, (double)core.p30Ctl.params().localTone,
                 (double)core.p30Ctl.params().localStructure, (double)core.p30Ctl.params().skinStructure,

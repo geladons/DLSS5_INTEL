@@ -118,12 +118,13 @@ def stop_pid(pid, force=True):
     return r.returncode == 0, (r.stdout + r.stderr).strip()
 
 
-def start_detached(exe, args, cwd, log_path):
-    """Launch detached; stdout/stderr appended to log_path. No console."""
+def start_detached(exe, args, cwd, log_path, env=None):
+    """Launch detached; stdout/stderr appended to log_path. No console.
+    env=None inherits our process env; pass a mapping to override it."""
     lf = open(log_path, "a", buffering=1)
     return subprocess.Popen([exe] + list(args), cwd=cwd, stdout=lf,
                             stderr=subprocess.STDOUT, close_fds=True,
-                            creationflags=DETACHED)
+                            creationflags=DETACHED, env=env)
 
 
 class ManagedProcess:
@@ -144,11 +145,11 @@ class ManagedProcess:
     def running(self):
         return self.pid is not None
 
-    def start(self, args=()):
+    def start(self, args=(), env=None):
         if self.running:
             return False, "already running (pid %d)" % self.pid
         start_detached(self.exe_path, self.extra_args + list(args),
-                       self.cwd, self.log_path)
+                       self.cwd, self.log_path, env=env)
         return True, "started %s (log: %s)" % (self.exe_name, self.log_path)
 
     def stop(self):

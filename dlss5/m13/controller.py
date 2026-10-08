@@ -441,7 +441,13 @@ class M13Controller:
             ok, msg = self.screen.stop()
             notes.append("screen overlay stopped (%s)" % msg)
         p30 = self.cfg.get_phase30()
+        # Pin the shader dir: our own os.environ carries DLSS5_SHADER_DIR
+        # pointing at the x64 layer runtime (engine_env seeding for
+        # in-process consumers) - the daemon would silently inherit it and
+        # build its engine on that dir's kernel set, which can drift stale
+        # vs this exe (TDR storms 2026-10-08). --shader-dir wins over env.
         args = ["--port", str(DEFAULT_PORT),
+                "--shader-dir", M11D_CWD + "\\",
                 "--gain", "%.3f" % float(self.cfg.get("gain") or 1.0),
                 "--intensity", "%.3f" % p30["intensity"],
                 "--local-tone", "%.3f" % p30["local_tone"],
@@ -454,7 +460,14 @@ class M13Controller:
                 "--framegen", "2" if self.cfg.get("frame_gen") else "0",
                 "--log", M11D_LOG,
                 "--weights", self.cfg.get("weights_path")]
-        ok, msg = self.daemon.start(args)
+        # Belt to the --shader-dir suspender above: the shader-path env we
+        # seed for in-process consumers must never reach the daemon even if
+        # arg handling ever changes. Strip only the two path vars - the
+        # daemon legitimately reads other DLSS5_*/NR_LAYER_* knobs.
+        env = dict(os.environ)
+        for k in ("DLSS5_SHADER_DIR", "NR_LAYER_SHADERS"):
+            env.pop(k, None)
+        ok, msg = self.daemon.start(args, env=env)
         if notes:
             msg = " | ".join(notes + [msg])
         return ok, msg
