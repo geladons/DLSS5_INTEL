@@ -80,6 +80,13 @@ static const uint32_t MAGIC_CTRL = 0x5443524Eu;   // "NRCT" - M13 control
 int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
     install_death_witnesses();
+    // The daemon is a background compute worker sharing one GPU with the
+    // game and (on this host class) a realtime encoder - submit at LOW
+    // global queue priority so our multi-dispatch quantum preempts cleanly
+    // instead of competing at the foreground slot (TDR/pagerefault
+    // pressure, field reports 2026-10-08). Env override wins.
+    if (!std::getenv("D5C_QUEUE_PRIO"))
+        _putenv_s("D5C_QUEUE_PRIO", "low");
     int port = 48990;
     const char* port_env = std::getenv("NR_LAYER_PORT");
     if (!port_env) port_env = std::getenv("DLSS5_PORT");

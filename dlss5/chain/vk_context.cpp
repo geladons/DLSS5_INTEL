@@ -5,6 +5,7 @@
 #include "vk_context.h"
 
 #include <cstdlib>
+#include <cstring>
 
 namespace d5c {
 
@@ -179,15 +180,53 @@ bool VkContext::checkCoopmat() {
 }
 
 bool VkContext::createDevice(const VkContextConfig& cfg) {
+    /* Queue global priority (VK_KHR_global_priority): D5C_QUEUE_PRIO =
+     * low|medium|high|realtime. A background process (m11d daemon) that
+     * submits a ~50 ms multi-dispatch compute quantum on the default
+     * priority shares the scheduling slot with the game's DXVK work and a
+     * realtime encoder (Sunshine/QSV) - the preempt/fault class that
+     * produced BMG_HWS_VULKANCOMPUTE_PAGEFAULT TDRs in the field. LOW
+     * makes our work cleanly preemptible instead of competing. */
+    uint32_t nExt = 0;
+    vkEnumerateDeviceExtensionProperties(vk.pd, nullptr, &nExt, nullptr);
+    std::vector<VkExtensionProperties> extProps(nExt);
+    if (nExt) vkEnumerateDeviceExtensionProperties(vk.pd, nullptr, &nExt,
+                                                   extProps.data());
+    bool hasGlobalPrio = false;
+    for (const auto& e : extProps)
+        if (!std::strcmp(e.extensionName,
+                         VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME))
+            hasGlobalPrio = true;
+    VkQueueGlobalPriority wantPrio = VK_QUEUE_GLOBAL_PRIORITY_MEDIUM;
+    {
+        const char* p = std::getenv("D5C_QUEUE_PRIO");
+        if (p && !std::strcmp(p, "low")) wantPrio = VK_QUEUE_GLOBAL_PRIORITY_LOW;
+        else if (p && !std::strcmp(p, "high")) wantPrio = VK_QUEUE_GLOBAL_PRIORITY_HIGH;
+        else if (p && !std::strcmp(p, "realtime")) wantPrio = VK_QUEUE_GLOBAL_PRIORITY_REALTIME;
+    }
+    const bool usePrio = hasGlobalPrio &&
+        wantPrio != VK_QUEUE_GLOBAL_PRIORITY_MEDIUM;
+
     const char* wantNoSwap[] = {VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME};
+    const char* wantNoSwapP[] = {VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME,
+                                 VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME};
     const char* wantSwap[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME};
+    const char* wantSwapP[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+                               VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME,
+                               VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME};
     float prio = 1.0f;
+    VkDeviceQueueGlobalPriorityCreateInfo gprio{
+        VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO};
+    gprio.globalPriority = wantPrio;
     VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
     qci.queueFamilyIndex = vk.qf; qci.queueCount = 1; qci.pQueuePriorities = &prio;
+    if (usePrio) qci.pNext = &gprio;
     VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     dci.queueCreateInfoCount = 1; dci.pQueueCreateInfos = &qci;
-    dci.enabledExtensionCount = cfg.needSwapchain ? 2u : 1u;
-    dci.ppEnabledExtensionNames = cfg.needSwapchain ? wantSwap : wantNoSwap;
+    dci.enabledExtensionCount = (usePrio ? 2u : 1u) + (cfg.needSwapchain ? 1u : 0u);
+    dci.ppEnabledExtensionNames =
+        cfg.needSwapchain ? (usePrio ? wantSwapP : wantSwap)
+                          : (usePrio ? wantNoSwapP : wantNoSwap);
     // m8 shaders declare Float16/Int64/16-bit storage/memory-model/BDA/coopmat —
     // features must be enabled or the device faults (Arc device-lost).
     VkPhysicalDeviceFeatures fe{};
@@ -216,8 +255,11 @@ bool VkContext::createDevice(const VkContextConfig& cfg) {
     dci.pEnabledFeatures = &fe;
     D5C_VK_RET(vkCreateDevice(vk.pd, &dci, nullptr, &vk.dev));
     vkGetDeviceQueue(vk.dev, vk.qf, 0, &vk.queue);
-    std::printf("[VK] logical device up (compute+graphics family %u%s)\n", vk.qf,
-                cfg.needSwapchain ? ", swapchain + coopmat" : ", coopmat (headless)");
+    std::printf("[VK] logical device up (compute+graphics family %u%s%s)\n", vk.qf,
+                cfg.needSwapchain ? ", swapchain + coopmat" : ", coopmat (headless)",
+                usePrio ? (wantPrio == VK_QUEUE_GLOBAL_PRIORITY_LOW ? ", queue-prio LOW"
+                         : wantPrio == VK_QUEUE_GLOBAL_PRIORITY_HIGH ? ", queue-prio HIGH"
+                         : ", queue-prio REALTIME") : "");
     return true;
 }
 
