@@ -2801,3 +2801,60 @@ luma reduction) or stronger damping via alpha scaling.
   pans (needs a global-gain anchor with a stats pass - deferred,
   designed), local shimmer confined to the moving sprite (inherent
   pixel-only trade).
+
+## 2026-10-08 Stage 42 - visible judder root-caused + residual compositor enabled on x86
+
+OWNER REPORT: GTA IV launches clean (post shader-poisoning fix) but
+"flicker and artifacts too visible to continue" - owner stopped at menu.
+
+FORENSICS (all instrumented, no blind retests):
+- Daemon out-dumps (153 pairs): output tracks input faithfully, zero
+  stale emits, coherent on menu + transitions.
+- m1dda live snapshots: presented screen pixel-clean throughout.
+- Layer serve classes (real session): reuse 25049 / gres 574 / arej 13 /
+  araw 5 - zero period-2 alternation, zero post-warmup raw.
+- Chain timing (new m11d stage breakdown): fe 0.3 + fp 0 + c ~43 + tail
+  ~0.3 of ~46-50 ms total -> the net IS the frame cost; env fusions
+  (D5C_FFN_FUSED=0 med 42.6, D5C_EW_FUSE=1 med 42.8) move nothing;
+  scale is nearly free up to 0.75 (43.3 ms) but 1.00 jumps to ~97 ms
+  (different path - never raise the x86 default past ~0.75).
+- Verdict: not pixel corruption - the ~15-18 fps held-result cadence
+  (daemon ~46-50 ms serial accept->recv->GPU->reply vs 60+ fps presents)
+  makes every animated surface step in ~65-85 ms lumps. That IS the
+  "flicker": stepped motion + Sunshine encoder amplifying it.
+- Temporal release-pops confirmed separately (synthetic fade probe:
+  18% of px step >=8/255 per frame on slow fades; on real content ~0.7%
+  of slow px - bounded shimmer, secondary).
+
+FIX: enabled the serve-residual compositor on the x86 daemon path
+(gamelaunch.py: NR_LAYER_RESIDUAL=1 + NR_LAYER_GPUWARP=1 for
+dx9/dx11/vulkan launches whose game meta arch=="x86"). Every present now
+shows CURRENT content + the freshest applicable neural residual (flat
+mask + GPU block-match re-application on moved regions; rejected pixels
+keep current raw - ghosts impossible by construction). Field-verified
+previously on this exact stack: ~90% coverage, 77% of presents GPU-
+composited, no cadence flicker. Per-game opt-outs: meta "residual":false
+(legacy held-result serving), "gpuwarp":false (CPU masked compose only).
+
+ddarec root cause found (tool, not product): stdout was left in CRT text
+mode - every 0x0A pixel byte became 0x0D0A, +243,596 bytes over 360
+frames = the "corruption" in every '-' pipe capture. File-path output
+was always clean. Fixed with _O_BINARY on stdout; also landed the
+mutex-scoped slot write (capture could overwrite the slot mid-emit) and
+ReleaseFrame-after-Map ordering (async copy could read a DWM-recycled
+surface) - all three were real latent bugs. Verified: idle+churn
+capture now byte-exact (0 extra bytes, sane mad).
+
+m11d diagnostics: per-frame log now carries the stage breakdown
+"(chain fe %.1f fp %.1f c %.1f tail %.1f)" - host-side vs GPU split is
+visible per frame (host ~= wall - GPU sum ~3-5 ms).
+
+OPEN / next levers for cadence (ordered):
+1. fam0-FFN -> winblock fusion: est -3..-6 ms of ~43 (agent audit).
+2. Global-L6 stage consolidation: est -1..-4 ms.
+3. Daemon accept/recv pipelining with GPU work: ~-3..-5 ms (host side).
+4. Frame-gen stays OFF by default - neutral under saturation (field
+   report 1882482): mids share the anchor FIFO.
+5. temporal_nr release bands could get a monotonic-drift case (emit
+   cand directly when the gap direction is persistent) - reduces the
+   fade shimmer; needs a direction memory - deferred, low priority.

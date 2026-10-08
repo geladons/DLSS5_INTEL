@@ -38,6 +38,8 @@
 #include <thread>
 #include <atomic>
 #include <condition_variable>
+#include <io.h>
+#include <fcntl.h>
 
 using Microsoft::WRL::ComPtr;
 using std::chrono::steady_clock;
@@ -87,6 +89,12 @@ int main(int argc, char** argv) {
     if (std::strcmp(outPath, "-") != 0) {
         out = std::fopen(outPath, "wb");
         if (!out) { std::fprintf(stderr, "[FAIL] cannot open %s\n", outPath); return 1; }
+    } else {
+        /* Without O_BINARY the CRT text-mode stream translates every 0x0A
+         * pixel byte to 0x0D 0x0A - an extra byte per LF shifts all later
+         * pixels and bakes in as banded/hue-shifted tears. The pipe is
+         * rawvideo - never let stdio re-encode it. */
+        _setmode(_fileno(stdout), _O_BINARY);
     }
 
     // ------------------------------------------------- D3D11 + duplication
@@ -203,25 +211,39 @@ int main(int argc, char** argv) {
                 }
                 fw = td.Width; fh = td.Height; fmt = td.Format;
                 conv.resize((size_t)fw * fh * 4);
+                std::fprintf(stderr, "[ddarec] frame fmt=%d %ux%u\n",
+                             (int)fmt, fw, fh);
             }
             context->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, tex.Get(), 0, nullptr);
-            dup->ReleaseFrame();
+            /* ReleaseFrame must wait until the staging copy has actually
+             * run: the CopySubresourceRegion above is async - releasing
+             * here lets DWM re-composite into the source while our copy
+             * is still queued, and the staged frame reads back as a
+             * splice of two desktop states (the banded/hue-shifted
+             * corruption seen under high desktop update rates). Map()
+             * below blocks until the copy lands, so release after Unmap. */
             D3D11_MAPPED_SUBRESOURCE ms{};
-            if (FAILED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &ms))) { ++errors; continue; }
-            // source is pinned B8G8R8A8 -> straight row copy
-            int idx = (latestIdx.load() + 1) & 1;
-            slots[idx].buf.resize((size_t)fw * fh * 4);
-            for (uint32_t y = 0; y < fh; ++y)
-                std::memcpy(&slots[idx].buf[(size_t)y * fw * 4],
-                            (const uint8_t*)ms.pData + (size_t)y * ms.RowPitch,
-                            (size_t)fw * 4);
-            context->Unmap(staging.Get(), 0);
+            if (FAILED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &ms))) { dup->ReleaseFrame(); ++errors; continue; }
+            // source is pinned B8G8R8A8 -> straight row copy. The whole
+            // slot write runs under mtx: two slots only give one frame of
+            // buffer separation, and when acquisitions outpace emits the
+            // next copy would otherwise land in the slot the emitter is
+            // still reading - spliced rows bake in as horizontal tears.
             {
                 std::lock_guard<std::mutex> lk(mtx);
-                slots[idx].w = fw; slots[idx].h = fh;
-                slots[idx].seq = acquired.load() + 1;
+                int idx = (latestIdx.load() + 1) & 1;
+                FrameSlot& s = slots[idx];
+                s.buf.resize((size_t)fw * fh * 4);
+                for (uint32_t y = 0; y < fh; ++y)
+                    std::memcpy(&s.buf[(size_t)y * fw * 4],
+                                (const uint8_t*)ms.pData + (size_t)y * ms.RowPitch,
+                                (size_t)fw * 4);
+                context->Unmap(staging.Get(), 0);
+                dup->ReleaseFrame();
+                s.w = fw; s.h = fh;
+                s.seq = acquired.load() + 1;
                 latestIdx.store(idx);
-                latestSeq.store(slots[idx].seq);
+                latestSeq.store(s.seq);
             }
             ++acquired;
         }
@@ -248,20 +270,28 @@ int main(int argc, char** argv) {
     while (seconds <= 0.0 || duration<double>(steady_clock::now() - t0).count() < seconds) {
         next += std::chrono::duration_cast<steady_clock::duration>(framePeriod);
         std::this_thread::sleep_until(next);
-        int idx = latestIdx.load();
-        const FrameSlot& s = slots[idx];
-        if (!s.w || !s.h) continue;
-        // crop rows out of the full frame
-        for (int y = 0; y < cropH; ++y) {
-            const uint8_t* src = &s.buf[((size_t)(cropY + y) * s.w + cropX) * 4];
-            std::memcpy(&line[(size_t)y * cropW * 4], src, (size_t)cropW * 4);
+        uint64_t sSeq;
+        {
+            // The capture thread memcpy's into slots[] concurrently - read
+            // under the same mutex or the crop can splice two acquisitions
+            // (row N from frame A, row N+1 from frame B = horizontal tears
+            // baked into the recording).
+            std::lock_guard<std::mutex> lk(mtx);
+            int idx = latestIdx.load();
+            const FrameSlot& s = slots[idx];
+            if (!s.w || !s.h) continue;
+            for (int y = 0; y < cropH; ++y) {
+                const uint8_t* src = &s.buf[((size_t)(cropY + y) * s.w + cropX) * 4];
+                std::memcpy(&line[(size_t)y * cropW * 4], src, (size_t)cropW * 4);
+            }
+            sSeq = s.seq;
         }
         if (std::fwrite(line.data(), 1, cropBytes, out) != cropBytes) {
             std::fprintf(stderr, "[ddarec] output write failed (pipe closed?)\n");
             break;
         }
         ++emitted;
-        if (s.seq == lastSeq) ++repeated; else lastSeq = s.seq;
+        if (sSeq == lastSeq) ++repeated; else lastSeq = sSeq;
     }
 
     stop.store(true);

@@ -636,7 +636,10 @@ void DaemonCore::handleFrame(SOCKET s, const uint32_t hdr[4], ULONGLONG deadline
     }
     if (!writeAll(s, outBuf.data(), px * 4))
         std::fprintf(stderr, "[m11d] reply write failed\n");
-    std::printf("[m11d] frame %ld %ux%u%s%s in %.1f ms (%s %.1f)\n",
+    // Stage timing in the chain parens: fe=features fp=featpack chain=net
+    // tail=encode/compose (engine GPU timestamps; sums < wall = host side:
+    // TCP recv + staging upload + reply write).
+    std::printf("[m11d] frame %ld %ux%u%s%s in %.1f ms (%s fe %.1f fp %.1f c %.1f tail %.1f)\n",
                 frameCounter, w, h, masked ? " +mask" : "",
                 generated == 2 ? " +fgi" :
                 generated == 1 ? " +fg" :
@@ -644,5 +647,6 @@ void DaemonCore::handleFrame(SOCKET s, const uint32_t hdr[4], ULONGLONG deadline
                 wall,
                 generated == 2 ? "interp" :
                 generated == 1 ? "transfer" : "chain",
-                generated ? st.gpuTotalMs : st.chainMs);
+                st.feMs, st.fpMs,
+                generated ? st.gpuTotalMs : st.chainMs, st.tailMs);
 }
