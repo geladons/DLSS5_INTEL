@@ -237,6 +237,13 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
 - m11d: DLSSNR frame daemon for 32-bit x86 titles (TCP 127.0.0.1:48990).
   Lifecycle is auto-managed by `m13`: starts for x86 games, stops after the
   x86 exit grace period, and is reclaimed immediately before an x64 launch.
+  m13 monitor auto-restarts a dead daemon while an x86 game lives (bounded:
+  5 tries, one per 30 s). m11d self-bounds engine loss: kDeadEngineLimit=3
+  consecutive dead engines or failed builds without a served frame between
+  -> exit(4). Never widen it - an unbounded rebuild loop after a TDR
+  (VK_ERROR_DEVICE_LOST) starves the game with back-to-back ~3.5 s/676 MB
+  builds (2026-10-07: two BMG_HWS_VULKANCOMPUTE_PAGEFAULT resets froze the
+  session; the storm, not the first fault, is what hung everything).
 - m13: DLSS 5 Manager GUI (`m13.pyw`) & In-Game Overlay (`CTRL+ALT+G`).
   - Launch: `launcher.py` GameLauncher runs each launch on its own
     "m13-launch" thread as timed steps (guard_busy, register, resolve,

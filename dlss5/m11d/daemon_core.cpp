@@ -151,6 +151,18 @@ void DaemonCore::builderLoop() {
                 std::printf("[m11d] engine hot-swapped (%ux%u scale %.2f temporal %d)\n",
                             pb.w, pb.h, (double)pb.scale, temporal ? 1 : 0);
             }
+            if (!ok) {
+                // A build that keeps failing (bad weights, missing spv, a
+                // driver that never comes back) is the same starvation loop
+                // as a dead engine - every frame re-kicks a multi-second
+                // build. Count it into the same bound.
+                if (++deadEngines_ >= kDeadEngineLimit) {
+                    std::fprintf(stderr, "[m11d] %d consecutive engine "
+                                "failures - exiting\n", kDeadEngineLimit);
+                    std::fflush(stderr);
+                    std::exit(4);
+                }
+            }
             // A newer request during the build overwrote pending_: only
             // clear it when it still asks for what we just built (or
             // failed to build - the next frame re-kicks a retry).
@@ -505,8 +517,21 @@ void DaemonCore::handleFrame(SOCKET s, const uint32_t hdr[4], ULONGLONG deadline
                 curW = 0; curH = 0;
             }
         }
+        // A fault that survives a full rebuild is not transient (driver
+        // reset loop, deterministic dispatch fault): each retry costs the
+        // game ~3.5 s of GPU at the moment it needs it most. Bound the
+        // streak - after kDeadEngineLimit dead engines we exit and the
+        // layer's passthrough gives the device back to the game.
+        if (++deadEngines_ >= kDeadEngineLimit) {
+            std::fprintf(stderr, "[m11d] %d consecutive engine losses - "
+                        "exiting so the game reclaims the GPU\n",
+                        kDeadEngineLimit);
+            std::fflush(stderr);
+            std::exit(4);
+        }
         return;
     }
+    deadEngines_ = 0;   // a served frame proves the current engine healthy
     if (!generated) {
         // Only a real process refreshes the prev pair - a
         // generated frame is not a reconstruction and must stay

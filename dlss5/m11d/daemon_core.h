@@ -115,4 +115,14 @@ private:
     std::unique_ptr<PendingBuild> pending_;           // config to realize next
     std::thread builder_;
     bool builderRunning_ = false;                     // guarded by engMu_
+    // Device-loss streak: consecutive engine deaths (processFrame fault,
+    // typically VK_ERROR_DEVICE_LOST) without one successful frame between
+    // them. A fault that survives a full engine rebuild is not transient -
+    // rebuilding forever burns ~3.5 s x 676 MB of GPU work per attempt and
+    // starves the very game we serve (field report 2026-10-07: repeated
+    // VULKANCOMPUTE_PAGEFAULT TDRs put the daemon in a rebuild loop and the
+    // game froze behind it). deadEngines_ >= kDeadEngineLimit exits the
+    // process so the game reclaims the device in pure passthrough.
+    int deadEngines_ = 0;
+    static const int kDeadEngineLimit = 3;
 };
