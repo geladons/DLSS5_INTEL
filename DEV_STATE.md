@@ -1,5 +1,43 @@
 # DEV_STATE.md - where we are (updated 2026-10-08 by Devin)
 
+## Stage 41: TDR root cause - daemon shader-dir poisoning (2026-10-08)
+
+GTA IV launch through the manager reliably TDR'd (BMG_HWS_VULKANCOMPUTE /
+TRINITY11 pagefaults, VK_ERROR_DEVICE_LOST, game hang) while standalone
+daemon harnesses passed cleanly. Root cause found after ruling out
+Sunshine (no active stream in the failing window), the GUI, screen mode,
+the monitor thread, and daemon/game spawn adjacency:
+
+- **m13 seeds its own `os.environ`** with `DLSS5_SHADER_DIR` /
+  `NR_LAYER_SHADERS` pointing at `runtime\layer\x64` (engine_env for
+  in-process consumers). A manager-spawned m11d inherited that dir -
+  m11d honours `DLSS5_SHADER_DIR` over its exe-relative default.
+- **The x64 layer spv set was stale**: 11/31 kernels differed from
+  m11d's own dir (Oct-4 artifacts incl. `gemm_m8.spv`, the coopmat GEMM).
+  Engine code + half-old kernel contract = cooperative-matrix dispatches
+  faulting under driver 32.0.101.8976 (installed 2026-09-28; the bug
+  class is publicly tracked as IGCIT #1487 but our instance was an
+  application-side contamination).
+
+Fix (`0504a04`, deployed): `daemon_start` pins `--shader-dir
+<runtime\m11d>` (arg wins over env) AND strips the two shader-path vars
+from the daemon child env; `start_detached`/`ManagedProcess.start` take
+an env override; m11d logs `shader dir: <path> (source: ...)` in its
+banner so a bad resolution self-documents. All 31 spv synced from the
+canonical build into layer/x64, m11d, m12 (the stale x64 set also
+affected the in-process path after today's dll redeploy).
+
+Verified on the real manager stack (controller+launcher+monitor, no
+GUI, fresh daemon, Sunshine running): warmup ok -> GTA IV spawned ->
+158 frames @ ~85 ms, zero DEVICE_LOST, zero new LiveKernelEvents, log
+shows `runtime\m11d\ (source: --shader-dir arg)`.
+
+Earlier hardening retained: LOW `VK_KHR_global_priority` daemon queue,
+4 s launch settle, escalating rebuild settle, sliding-window fault
+bound (3 faults/120 s -> exit + `%TEMP%\m11d_fenced.flag` suppresses
+monitor restarts for 5 min), `VK_EXT_device_fault` reporting (Intel
+returns empty dumps - no fault forensics available).
+
 ## Stage 40: stale-serve ghost root-caused + redirect-surface fresco (2026-10-08)
 
 GTA IV field report: visible flicker unchanged despite earlier numeric
