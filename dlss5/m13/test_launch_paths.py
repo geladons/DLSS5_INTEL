@@ -195,4 +195,77 @@ with tempfile.TemporaryDirectory() as td:
         ctl.shutdown()
 
 
+print("\n=== Test G: x86 daemon-path launches get the residual compositor env ===")
+with tempfile.TemporaryDirectory() as td:
+    dummy_x86 = os.path.join(td, "game_x86.exe")
+    dummy_x64 = os.path.join(td, "game_x64b.exe")
+    for d in (dummy_x86, dummy_x64):
+        with open(d, "w") as f:
+            f.write("dummy")
+    cfg_file = os.path.join(td, "test_cfg.json")
+    cfg = Config(cfg_file)
+    cfg.set("games", {
+        dummy_x86: {"mode": "dx9", "arch": "x86", "name": "TestX86"},
+        dummy_x64: {"mode": "vulkan", "arch": "x64", "name": "TestX64"},
+    })
+
+    captured = {}
+
+    def fake_launch(exe_path, env_extra=None, args=None):
+        captured[exe_path] = dict(env_extra or {})
+        return True, "launched pid 1"
+
+    class _Cfg(Config):
+        def get_phase30(self, exe=None):
+            return {"intensity": 1.0, "local_tone": 1.0,
+                    "local_structure": 1.0, "skin_structure": -1.0,
+                    "auto_mask": False, "style_index": 0,
+                    "color_strength": 1.0}
+
+    cfg = _Cfg(cfg_file)
+    cfg.set("games", {
+        dummy_x86: {"mode": "dx9", "arch": "x86", "name": "TestX86"},
+        dummy_x64: {"mode": "vulkan", "arch": "x64", "name": "TestX64"},
+    })
+    with patch("m13.gamelaunch._launch", side_effect=fake_launch), \
+         patch("m13.gamelaunch._flag_set"), \
+         patch("m13.gamelaunch.freeze_set"):
+        ok, msg = gamelaunch.launch_game(dummy_x86, "dx9", cfg=cfg)
+        assert ok, "x86 launch failed: %s" % msg
+        env = captured[dummy_x86]
+        assert env.get("NR_LAYER_RESIDUAL") == "1", \
+            "x86 dx9 launch must enable the residual compositor"
+        assert env.get("NR_LAYER_GPUWARP") == "1", \
+            "x86 dx9 launch must enable GPU warp by default"
+        print("  x86 dx9: NR_LAYER_RESIDUAL=1 + NR_LAYER_GPUWARP=1 [PASS]")
+
+        ok, msg = gamelaunch.launch_game(dummy_x64, "vulkan", cfg=cfg)
+        assert ok, "x64 launch failed: %s" % msg
+        env = captured[dummy_x64]
+        assert "NR_LAYER_RESIDUAL" not in env, \
+            "x64 launch must NOT set the x86 residual env"
+        print("  x64 vulkan: no residual env [PASS]")
+
+        # Per-game opt-outs win over the defaults.
+        games = cfg.get("games")
+        games[dummy_x86]["residual"] = False
+        cfg.set("games", games)
+        ok, msg = gamelaunch.launch_game(dummy_x86, "dx9", cfg=cfg)
+        assert ok, "opt-out launch failed: %s" % msg
+        env = captured[dummy_x86]
+        assert "NR_LAYER_RESIDUAL" not in env, \
+            "residual:false must suppress the compositor env"
+        games[dummy_x86]["residual"] = True
+        games[dummy_x86]["gpuwarp"] = False
+        cfg.set("games", games)
+        ok, msg = gamelaunch.launch_game(dummy_x86, "dx9", cfg=cfg)
+        assert ok, "gpuwarp opt-out launch failed: %s" % msg
+        env = captured[dummy_x86]
+        assert env.get("NR_LAYER_RESIDUAL") == "1", \
+            "gpuwarp:false keeps the CPU masked residual"
+        assert env.get("NR_LAYER_GPUWARP") == "0", \
+            "gpuwarp:false must explicitly disable the GPU path"
+        print("  per-game opt-outs (residual/gpuwarp) honoured [PASS]")
+
+
 print("\nALL LAUNCH PATH TESTS PASSED!")
