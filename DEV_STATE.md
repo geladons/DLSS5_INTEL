@@ -33,6 +33,18 @@ being presented (`src=c147fc05` vs `in=702e97f8` on every reuse line):
 - Earlier same session: `2bffa57` bounded m11d engine-loss rebuilds
   (exit after 3 dead engines -> layer falls back to native instead of
   freezing the desktop through an endless rebuild storm after a TDR).
+- **TDR-storm survivability** (`593bc52`, field hang 2026-10-08): two
+  igfxnd TDRs (BMG_HWS_VULKANCOMPUTE_PAGEFAULT) seconds after daemon
+  start under game load froze GTA IV and dropped Sunshine's stream.
+  Root causes of the non-recovery: (a) the rebuilt engine's first
+  dispatch ran inside the driver's reset window and faulted again -
+  rebuilds after an engine loss now wait a 4 s settle floor on the
+  builder thread; (b) layer probe pacing was frame-counted (every 8/32
+  presents) - at the ~3 fps the storm left that is one probe per ~10 s,
+  slower than a full daemon rebuild, so the layer never noticed the
+  daemon return and sat in raw passthrough until the game died. Probes
+  are wall-clock now: 250 ms flap / 800 ms down. Verified: same harness
+  ran GTA IV end-to-end, 0 TDRs, 0/30422 stale reuse, flat luma.
 
 ## Stage 39: frame-uniformity fixes + framed overlay redesign (2026-10-05)
 
