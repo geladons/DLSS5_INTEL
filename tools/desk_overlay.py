@@ -10,9 +10,11 @@
 # the manager's apply() == respawn-with-new-panels.
 #
 #   CLOCK  - date + HH:MM:SS, refreshed at 5 Hz (video timecode)
-#   FPS    - game present rate. Sources, first fresh wins:
-#              daemon m11d_last.log  "frame N ... in X ms"  (x86 TCP path:
-#                sync serving means the daemon cadence IS the game rate)
+#   FPS    - game present rate. Sources, first fresh+advancing wins:
+#              daemon m11d log  "frame N ... in X ms"  (x86 TCP path:
+#                sync serving means the daemon cadence IS the game rate;
+#                candidates: bundle\logs\m11d.log, work\_m11\m11d.log,
+#                %TEMP%\m11d_last.log / m11d_serve.log)
 #              layer nr_layer_win.log "[diag] f=N"         (NR_LAYER_DIAG)
 #              layer "fg stats: presents=N" delta          (sparse, x64)
 #            eng = the daemon's last chain ms, shown only while that log
@@ -41,10 +43,22 @@ import time
 import tkinter as tk
 
 LAYER_LOG = os.path.join(tempfile.gettempdir(), "nr_layer_win.log")
-DAEMON_LOG = os.path.join(tempfile.gettempdir(), "m11d_last.log")
 POS_FILE = os.path.join(tempfile.gettempdir(), "desk_overlay_pos.json")
 PID_FILE = os.path.join(tempfile.gettempdir(), "desk_overlay.pid")
 FRESH_S = 4.0                    # a log older than this feeds '--'
+PLAUSIBLE_FPS = 500.0            # above this the counter math is lying
+
+
+def _daemon_log_candidates():
+    """m11d stdout logs, most authoritative first. The manager's daemon
+    writes <bundle>\\logs\\m11d.log (production) or <repo>\\work\\_m11\\
+    m11d.log (dev); manual/probe daemons land in %TEMP%."""
+    here = os.path.dirname(os.path.abspath(__file__))   # .../tools
+    root = os.path.dirname(here)
+    return (os.path.join(root, "logs", "m11d.log"),
+            os.path.join(root, "work", "_m11", "m11d.log"),
+            os.path.join(tempfile.gettempdir(), "m11d_last.log"),
+            os.path.join(tempfile.gettempdir(), "m11d_serve.log"))
 
 BG, FG, DIM = "#0a0e0a", "#9dff57", "#5c7a4a"
 FONT_VAL = ("Consolas", 18, "bold")
@@ -174,34 +188,57 @@ def _fresh(path):
 
 
 class FpsSource:
-    """Present-rate estimator with three sources, first fresh wins:
+    """Present-rate estimator. Sources, first fresh+advancing wins:
 
-    1. daemon m11d_last.log `frame N` counter - live only while the log
-       file is being written (mtime fresh). Under the x86 sync path the
-       daemon's served cadence IS the displayed frame rate.
+    1. daemon m11d log `frame N` counter - live only while the daemon
+       writes (mtime fresh). Under the x86 sync path the daemon's served
+       cadence IS the displayed frame rate.
     2. layer nr_layer_win.log `[diag] f=N` counter (needs NR_LAYER_DIAG).
     3. layer `fg stats: presents=N` - written every 300 presents; sparse
        but path-agnostic, covers the x64 in-process engine.
+
+    Rate math: a source's state advances ONLY when its counter does, so
+    a sparse counter (one line per ~11 s at sync cadence) divides its
+    delta by the real inter-write span - never by the UI tick. Counters
+    that reset (daemon restart) or freeze (game idle) yield None, and a
+    bogus >500 result is dropped. The last good rate is replayed for at
+    most FRESH_S so the label does not flap between samples; after that
+    the panel shows '--'.
     """
 
     def __init__(self):
-        self._s = {}                 # source -> (counter, t)
+        self._s = {}                 # source -> (counter, t_value_seen)
         self._last_fps = None
+        self._last_fps_t = 0.0
 
     def _rate(self, key, cur):
+        now = time.time()
         prev = self._s.get(key)
-        self._s[key] = (cur, time.time())
         if prev is None:
+            self._s[key] = (cur, now)
             return None
-        dt = time.time() - prev[1]
-        if 0.15 < dt < 5.0 and cur > prev[0]:
-            return (cur - prev[0]) / dt
+        pv, pt = prev
+        if cur <= pv:                # frozen counter or post-restart reset
+            if cur < pv:
+                self._s[key] = (cur, now)
+            return None
+        dt = now - pt                # span over which the delta accrued
+        self._s[key] = (cur, now)
+        if dt <= 0:
+            return None
+        r = (cur - pv) / dt
+        return r if r <= PLAUSIBLE_FPS else None
+
+    def _daemon_buf(self):
+        for cand in _daemon_log_candidates():
+            if _fresh(cand):
+                return _tail(cand, 32768)
         return None
 
     def sample(self):
         fps = eng = None
-        if _fresh(DAEMON_LOG):
-            buf = _tail(DAEMON_LOG, 32768)
+        buf = self._daemon_buf()
+        if buf is not None:
             m = list(_DF_RE.finditer(buf))
             if m:
                 r = self._rate("daemon", int(m[-1].group(1)))
@@ -210,27 +247,28 @@ class FpsSource:
             d = list(_MS_RE.finditer(buf))
             if d:
                 eng = float(d[-1].group(1))
-            if fps is None:
-                fps = self._last_fps          # between counter lines
         if fps is None and _fresh(LAYER_LOG):
             buf = _tail(LAYER_LOG)
             m = list(_F_RE.finditer(buf))
             if m:
-                fps = self._rate("diag", int(m[-1].group(1)))
+                r = self._rate("diag", int(m[-1].group(1)))
+                if r is not None:
+                    fps = r
             if fps is None:
                 p = list(_PRES_RE.finditer(buf))
                 if p:
-                    fps = self._rate("stats", int(p[-1].group(1)))
-            if fps is None:
-                fps = self._last_fps
-        if fps is None and self._s:
-            # every source quiet -> forget the last rate so '--' shows
-            last_t = max(t for _c, t in self._s.values())
-            if time.time() - last_t > FRESH_S:
-                self._last_fps = None
+                    r = self._rate("stats", int(p[-1].group(1)))
+                    if r is not None:
+                        fps = r
+        now = time.time()
         if fps is not None:
-            self._last_fps = fps
-        return self._last_fps, eng
+            self._last_fps, self._last_fps_t = fps, now
+            return fps, eng
+        if (self._last_fps is not None
+                and now - self._last_fps_t < FRESH_S):
+            return self._last_fps, eng     # brief smoothing, then '--'
+        self._last_fps = None
+        return None, eng
 
 
 # ---------------------------------------------------------------- widgets
@@ -268,6 +306,19 @@ class Panel(tk.Toplevel):
         return lbl
 
 
+# ------------------------------------------------------- parent watchdog
+def _pid_alive(pid):
+    """True while `pid` maps to a still-running process (exit-code based,
+    so a released-but-reaped handle cannot fake liveness)."""
+    h = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIM
+    if not h:
+        return False
+    code = wt.DWORD()
+    ok = ctypes.windll.kernel32.GetExitCodeProcess(h, ctypes.byref(code))
+    ctypes.windll.kernel32.CloseHandle(h)
+    return bool(ok) and code.value == 259      # STILL_ACTIVE
+
+
 # ------------------------------------------------------------ single inst
 def _claim_instance():
     """Kill a previous overlay (pidfile) and take over the slot."""
@@ -296,6 +347,9 @@ def main():
     ap = argparse.ArgumentParser(prog="desk_overlay")
     ap.add_argument("--panels", default=",".join(ALL_PANELS),
                     help="comma list: clock,fps,load")
+    ap.add_argument("--parent-pid", type=int, default=0,
+                    help="die when this pid exits (manager-spawned panels);"
+                         " 0 = standalone, outlive everything")
     args = ap.parse_args()
     want = [p for p in args.panels.split(",") if p in ALL_PANELS]
     if not want:
@@ -311,10 +365,10 @@ def main():
     panels = {}
 
     def on_close():
-        p = {k: (w.winfo_x(), w.winfo_y()) for k, w in panels.items()}
         try:
+            p = {k: (w.winfo_x(), w.winfo_y()) for k, w in panels.items()}
             json.dump(p, open(POS_FILE, "w"))
-        except OSError:
+        except (OSError, tk.TclError):
             pass
         gpu.stop()
         try:
@@ -354,6 +408,13 @@ def main():
         return ema[k]
 
     def tick():
+        # parent watchdog rides the existing tick - Tk is single-threaded,
+        # so the check lives on the main loop instead of a worker thread
+        # (after() posted from a foreign thread is not guaranteed to wake
+        # the notifier under pythonw; a timer-driven poll always fires).
+        if args.parent_pid and not _pid_alive(args.parent_pid):
+            on_close()
+            return
         if clock_lbl is not None:
             clock_lbl.config(text=time.strftime("%d.%m.%Y %H:%M:%S"))
         if fps_lbl is not None:

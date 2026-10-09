@@ -7,8 +7,9 @@
 # panels (clock / fps / load) meant to be captured by a whole-desktop
 # recording next to the game window. Single-instance by pidfile: starting
 # a new copy kills the previous one, so "apply" is just "spawn again with
-# the new panel set". The overlay intentionally OUTLIVES the manager - the
-# owner records after closing the UI.
+# the new panel set". Manager-spawned panels carry --parent-pid and die
+# with the manager; panels started by DESK OVERLAY.cmd have no parent and
+# persist for standalone recording.
 # ============================================================================
 import os
 import subprocess
@@ -99,7 +100,8 @@ def apply(panels):
     # a fresh spawn replaces any running copy (overlay kills its
     # predecessor via the pidfile on startup) - so apply() == respawn
     subprocess.Popen(
-        [pyw, script, "--panels", ",".join(panels)],
+        [pyw, script, "--panels", ",".join(panels),
+         "--parent-pid", str(os.getpid())],
         cwd=os.path.dirname(script),
         creationflags=_CREATE_NO_WINDOW | _DETACHED
         | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
