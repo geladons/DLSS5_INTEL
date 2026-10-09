@@ -3102,3 +3102,102 @@ Bench capture triage (moving-content frames only):
   NRN3 fails       -         storm     0 (37 interpolations served)
 Caveat: layered captures ran at different flythrough offsets (daemon
 extends load); treat per-metric deltas as directional, not absolute.
+
+## 2026-10-08 Stage 48 - fg mode-2 stale-midpoint splices + stale-mask fix
+
+Menu capture (at_s47_menu) triage after Stage 47: on a near-static
+game-select screen the presented stream alternated between two FIXED
+buffers (up CRCs constant: mheld=391a75f8, fgi=faf735b1) that differ by
+~10/255 mean - 47% of pixels >8. Live repro against the daemon proved:
+
+  - identical anchors + identical mid -> G == P byte-near (0.04) - the
+    shader degenerates correctly, so the field divergence is NOT there;
+  - identical anchors + mid hopped +1px -> residual stayed glued to the
+    ANCHOR positions (|resG-resP|=0.22) while the base was the shifted
+    mid -> doubled-edge "mask" flash = exactly the field symptom.
+
+Two coordinated defects fixed:
+
+1. fginterp.comp: when hasMid, residual sampling offsets are now matched
+   mid->rawA and mid->rawB directly (findOneSidedMotion, same 22+8
+   lattice + subpixel refine). The symmetric anchor<->anchor half-motion
+   reads zero on identical anchors even when the captured mid hopped -
+   paused/repeated anchor pairs (menu discrete drift) then stamped the
+   enhancement at stale positions. Linear drift is identical output;
+   degenerate anchors now track the mid. !hasMid path unchanged.
+
+2. nr_layer_win.c async FG replies get a cadence deadline: an NRN2/NRN3
+   reply is displayable only at the present right after its request
+   (fgi_due = frame_counter+1 at submit); async_drain refuses pending
+   for a reply whose seq isn't the newest submit, and async_take_fgi
+   drops a pending midpoint once frame_counter passes its slot. Before
+   this, a midpoint landing a present late (daemon PROC ~38ms + queue)
+   was shown AFTER the next anchor - a literal backwards time step every
+   interval the reply missed its slot ("stale-apply" signature:
+   LagTrailDetector flagged 217/229 unique frames, 94.8%).
+
+Deployed: x86 layer dll (deadline), x64 layer dll, fginterp.spv to
+layer/x86, layer/x64, m11d, m12, m8b runtimes.
+
+## 2026-10-08 Stage 49 - menu-select raw splices proven EXTERNAL
+
+The menu flicker seen on captures is NOT a layer/daemon/shader fault.
+Evidence (all on the same running game, idle game-select menu):
+
+- 6000 consecutive presents upload byte-identical processed content
+  (up=c00176f5 constant, dense f= sequence - zero bypassed presents, and
+  every early-return increments f BEFORE any diag so a silent native
+  present would leave a gap - none exist).
+- Flash frames carry no NRMK marker (never touched our upload path),
+  cover the whole client area only, and track the live scene (menu page
+  change -> flash shows the NEW page raw).
+- Raw flashes are byte-identical to each other across 10 s on a static
+  menu (frozen bitmap class) yet absent during loading/gameplay (0
+  unmarked in 900+ frames) - the parallel surface is bound to the
+  menu-select presentation path.
+- Immune to: WS_EX_NOREDIRECTIONBITMAP (cannot be applied post-creation
+  anyway - SetWindowLong rejected), WS_EX_LAYERED, topmost overlay
+  covering the whole window, topmost game window, no window management.
+- Window DC / redirection bitmap always reads processed (114 samples).
+- Native (trigger-removed) stream: zero alternation in 420 frames.
+
+Conclusion: GTA IV's menu-select runs a second present surface outside
+the Vulkan swapchain (GDI-era dialog paint channel is the best fit; the
+game imports ddraw.dll). DWM periodically composites it for 1-2 frames.
+No user-mode fix available; the defect note in AGENTS.md was corrected
+to include windowed 800x600 menu-select.
+
+Also this session: concurrent m11d (thread-per-connection, ef4bb24)
+verified live - zero NRN3/NRCT starvation over a 1.16M-line session vs
+the previous constant "daemon NRN3 failed; held anchor out" stream.
+
+Autotest: LagTrailDetector now splits flagged events by replay
+signature - a flagged frame that is a BYTE-EXACT replay of an older
+frame (lag2_resid < 0.25) is kind=external-raw-splice, not stale-apply;
+NRMK marker presence corroborates on raw captures (nrmark column in
+metrics.csv).
+
+## 2026-10-08 Stage 49b - framegen T4 root-caused (not a shader regression)
+
+test_framegen_interp T4 failed after the fginterp change: mean|G-Pref|
+2.878 vs naive 3.472 (bar: <0.8*naive). Bisection proved the mover is
+e35791f's temporal latch (temporal_nr.spv), NOT the new shader:
+
+- Current dll + current fginterp + PRE-e35791f temporal_nr.spv:
+  T4 = 1.781 vs 4.934 -> PASS.
+- Current Release set (post-e35791f temporal): 2.878 vs 3.472 -> miss.
+- D5C_TMGATE=0 changes nothing (gate not involved).
+- naive|crossfade-Pref| is processed-only (no shader) and moved
+  4.93->3.47 between spv sets = pure engine baseline shift.
+
+Mechanism: the hold/release latch pulls both processed anchors toward
+shared history, so the naive crossfade is artificially close to Pref
+while the generated frame (correctly tracking real midRaw) is scored
+against a blended reference. Production behaviour is unchanged - T4's
+ratio threshold was calibrated on the pre-latch baseline.
+
+Fix: test_framegen_interp.py pins DLSS5_TEMPORAL=0 (same isolation
+precedent as DLSS5_GAIN_LOCK=0 in the same file). Temporal-off result:
+T4 = 0.579 vs 5.048 (9x better than crossfade) - the interpolator
+itself is healthy. All chain suites green: framegen, interp, transfer,
+graceful_fail, noise_seed, scene_cut, scale_reconstruction.

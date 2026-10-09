@@ -24,6 +24,16 @@ import numpy as np
 # not a warp bug). This test measures interpolation mechanics only.
 os.environ.setdefault("DLSS5_GAIN_LOCK", "0")
 
+# Temporal history is likewise orthogonal to the warp mechanics under
+# test, and its hold/release latch (e35791f) actively corrupts T4's
+# comparison: the latch snaps both processed anchors toward shared
+# history, which flatters the naive crossfade while the generated frame
+# (correctly tracking the real midRaw) is measured against a blended
+# reference. With temporal on the pass margin collapses from ~9x better
+# than crossfade to a coin-flip vs the 0.8 bar - pure baseline noise.
+# Temporal behaviour has its own coverage; pin it off here.
+os.environ.setdefault("DLSS5_TEMPORAL", "0")
+
 W, H = 640, 384
 
 

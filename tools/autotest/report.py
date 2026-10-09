@@ -23,7 +23,7 @@ CSV_COLS = ["frame", "t", "luma_mean", "luma_std", "cb_mean", "cr_mean",
             "edge_energy", "flicker_frac", "flicker_mag", "flicker_color",
             "flicker_strong", "patch_idx", "ghost_echo", "static_var",
             "updates_per_s", "lag_dy", "lag_dx", "lag_pk", "lag_gain",
-            "lag2_resid", "cad_cv"]
+            "lag2_resid", "cad_cv", "nrmark"]
 
 
 def write_metrics_csv(path, ctx):
@@ -50,7 +50,8 @@ def write_metrics_csv(path, ctx):
                 "%d" % s["lag_dy"][i], "%d" % s["lag_dx"][i],
                 "%.3f" % s["lag_pk"][i], "%.3f" % s["lag_gain"][i],
                 "%.3f" % s["lag2_resid"][i],
-                "%.3f" % s["cad_cv"][i]]) + "\n")
+                "%.3f" % s["cad_cv"][i],
+                "%d" % s["nrmark"][i] if "nrmark" in s else "1"]) + "\n")
 
 
 def write_heatmaps(outdir, ctx):

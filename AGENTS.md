@@ -135,6 +135,21 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
     frames that bypass every layer path (marker-proven). Fix: native-res
     fullscreen or windowed, both measured clean; m13 launch_args support
     {screen_w}/{screen_h} for this.
+    2026-10-08 UPDATE: the same defect fires in 800x600 WINDOWED mode on
+    the game-select screen specifically. Proven exhaustively: 6000
+    consecutive presents upload byte-identical processed content (constant
+    up= CRC, dense f=, zero bypassed/native presents), yet ~every 0.5-3 s
+    a 1-2-frame raw flash splices the whole CLIENT area only (borders
+    untouched), carrying NO NRMK marker and tracking the LIVE scene. Not
+    the redirection bitmap (DC polls show processed 114/114), not IFlip
+    (topmost full-cover overlay no-op), not WS_EX_LAYERED/TOPMOST, not
+    device resets (none during captures), not trigger/_access flicker
+    (file never missing). Flashes are ABSENT on the loading screen and in
+    gameplay (marker scan clean over 900+ frames) - the defect is bound to
+    the menu-select presentation mode. No user-mode fix found; only the
+    native-res/fullscreen path avoids the arbitration. Autotest labels
+    these "external-raw-splice" (byte-exact replay of an older frame:
+    lag2_resid ~0, NRMK absent when it survives the codec).
 - m12-dxgi: DirectX 12 present hook (GTA V Enhanced). Dynamically loads
   `d5c_chain.dll` via C ABI to process present buffers in-process (0 ms TCP lag).
 - chain: THE model as an OOP module (`d5c::ChainEngine`). Exported via clean

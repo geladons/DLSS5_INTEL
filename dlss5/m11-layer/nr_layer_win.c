@@ -329,6 +329,13 @@ typedef struct device_data {
     VkDeviceSize fgi_size;
     int fgi_pending;             /* fgi holds a reply not yet displayed */
     unsigned long fgi_seq;       /* request seq that produced it */
+    unsigned long fgi_seq_submit;/* seq of the newest NRN2/NRN3 submitted -
+                                  * a pending reply with any older seq is
+                                  * always late (its cadence slot passed) */
+    unsigned long fgi_due;       /* frame_counter deadline: a midpoint may
+                                  * only display at the mid present right
+                                  * after its anchor; later it steps the
+                                  * stream BACK in time (stale flash) */
     uint64_t fgi_ms;             /* tick it landed (staleness check) */
     uint64_t fgi_chain;
     uint32_t fgi_w, fgi_h;
@@ -2319,14 +2326,23 @@ static int async_drain(device_data *data)
             data->fgi = d.buf;
             data->fgi_size = d.buf_bytes;
             d.buf = old;
-            data->fgi_pending = 1;
-            data->fgi_seq = d.seq;
-            data->fgi_ms = nr_now_ms();
-            data->fgi_chain = d.chain;
-            data->fgi_w = d.w;
-            data->fgi_h = d.h;
-            nr_log("[nr_layer] daemon framegen reply %ux%u seq=%lu "
-                   "awaiting display", d.w, d.h, d.seq);
+            /* Only the NEWEST submitted midpoint may go pending: the
+             * worker is FIFO so replies land in submit order, and a reply
+             * for an already-superseded request can only display behind
+             * its own interval - a backwards time step on screen. */
+            if (d.seq == data->fgi_seq_submit) {
+                data->fgi_pending = 1;
+                data->fgi_seq = d.seq;
+                data->fgi_ms = nr_now_ms();
+                data->fgi_chain = d.chain;
+                data->fgi_w = d.w;
+                data->fgi_h = d.h;
+                nr_log("[nr_layer] daemon framegen reply %ux%u seq=%lu "
+                       "awaiting display", d.w, d.h, d.seq);
+            } else {
+                nr_log("[nr_layer] stale framegen reply seq=%lu dropped "
+                       "(newest submit %lu)", d.seq, data->fgi_seq_submit);
+            }
         }
         /* The swapped-out result/fgi slot is pool-owned once a zero-copy
          * publish has happened, but it starts life as the staging-path
@@ -2353,6 +2369,20 @@ static int async_take_fgi(device_data *data, swapchain_data *chain,
         || data->fgi_h != chain->extent.height) return 0;
     if (g_async_stale_ms > 0
         && nr_now_ms() - data->fgi_ms > (uint64_t)g_async_stale_ms) {
+        data->fgi_pending = 0;
+        return 0;
+    }
+    /* Cadence deadline: the midpoint belongs to the interval that closed
+     * at its anchor present; its only correct display slot is the very
+     * next present (the mid slot). A reply that only became displayable
+     * after that - or that a newer NRN request has since superseded -
+     * shows content from behind the stream's current position: drop it
+     * and let serve-best fall back to the residual composite/result. */
+    if (data->fgi_due && frame_counter > data->fgi_due) {
+        data->fgi_pending = 0;
+        return 0;
+    }
+    if (data->fgi_seq != data->fgi_seq_submit) {
         data->fgi_pending = 0;
         return 0;
     }
@@ -3414,11 +3444,21 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                                 chain->extent.width, chain->extent.height,
                                 (uint32_t)chain->format };
                             if (data->async) {
+                                /* The generated midpoint is only on-time at
+                                 * the very next present (the mid slot); a
+                                 * reply landing later is dropped at
+                                 * async_take_fgi rather than spliced behind
+                                 * the stream's position. */
+                                unsigned long fseq = 0;
                                 if (nr_async_submit(data->async, NR_ASYNC_FGI,
                                         (uint64_t)chain->swapchain, fgi_hdr,
-                                        data->mid, (size_t)want, NULL))
+                                        data->mid, (size_t)want, &fseq))
                                     nr_log("[nr_layer] async NRN3 dropped "
                                            "(frame %lu)", frame_counter);
+                                else {
+                                    data->fgi_seq_submit = fseq;
+                                    data->fgi_due = frame_counter + 1;
+                                }
                             } else {
                             if (data->interp_size < want) {
                                 unsigned char *grown = (unsigned char *)realloc(data->interp, (size_t)want);
@@ -3602,12 +3642,20 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                                              chain->extent.height,
                                              (uint32_t)chain->format };
                     if (data->async) {
+                        /* Same one-slot deadline as NRN3: the transfer
+                         * frame is built on THIS raw - landing later it
+                         * would display behind the stream's position. */
+                        unsigned long fseq = 0;
                         if (nr_async_submit(data->async, NR_ASYNC_FGT,
                                 (uint64_t)chain->swapchain, fgheader,
                                 (const unsigned char *)data->mapped,
-                                (size_t)want, NULL))
+                                (size_t)want, &fseq))
                             nr_log("[nr_layer] async NRN2 dropped "
                                    "(frame %lu)", frame_counter);
+                        else {
+                            data->fgi_seq_submit = fseq;
+                            data->fgi_due = frame_counter + 1;
+                        }
                         /* have_raw=1: mapped is the just-captured frame.
                          * 2 = GPU compose already wrote the image - count
                          * the enhanced frame as the processed bucket. */

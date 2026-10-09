@@ -119,6 +119,20 @@ float anchorBlockErr(ivec2 c0, ivec2 c1) {
     return err * 0.1111;
 }
 
+// One-sided 3x3 SAD: refFrame block at c0 vs tgtFrame block at c1.
+float blockErr(ivec2 c0, ivec2 c1, int refId, int tgtId) {
+    float err = 0.0;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            vec4 p0 = getPixel(c0.x + dx, c0.y + dy, refId);
+            vec4 p1 = getPixel(c1.x + dx, c1.y + dy, tgtId);
+            vec3 d = abs(p0.rgb - p1.rgb);
+            err += (d.r + d.g + d.b) * 0.3333;
+        }
+    }
+    return err * 0.1111;
+}
+
 // Symmetric anchor-to-anchor half-motion: find offset d with
 // rawA(pos + d) ~= rawB(pos - d). 3x3 SAD keeps the match honest on
 // animated grain; a distance prior prefers the smallest explaining
@@ -208,6 +222,87 @@ vec2 findAnchorMotion(ivec2 pos, out float bestErr) {
     return bestOffset;
 }
 
+// One-sided mid-relative match: find d with refId(pos) ~= tgtId(pos + d).
+// Used when a REAL mid frame is bound (hasMid): the residual must be
+// sampled where the mid pixel's content sat inside each anchor, which the
+// symmetric anchor<->anchor half-motion cannot express when the two
+// anchors are identical but the mid frame has already moved (paused or
+// repeated anchor pair - a discrete content hop). Measuring mid->anchor
+// directly keeps the enhancement grid glued to the mid's own geometry
+// instead of stamping it at stale anchor positions.
+vec2 findOneSidedMotion(ivec2 pos, int refId, int tgtId, out float bestErr) {
+    vec4 r0 = getPixel(pos.x, pos.y, refId);
+    vec4 t0 = getPixel(pos.x, pos.y, tgtId);
+
+    float minErr = blockErr(pos, pos, refId, tgtId);
+    vec2 bestOffset = vec2(0.0);
+
+    float lDiff = abs(getLuma(r0.rgb) - getLuma(t0.rgb))
+                + length(r0.rgb - t0.rgb) * 0.5;
+    if (lDiff < 0.012) {
+        bestErr = 0.0;
+        return vec2(0.0);
+    }
+
+    const ivec2 coarseCandidates[22] = ivec2[](
+        ivec2(-48, 0), ivec2(48, 0), ivec2(0, -48), ivec2(0, 48),
+        ivec2(-32, -32), ivec2(32, -32), ivec2(-32, 32), ivec2(32, 32),
+        ivec2(-24, 0), ivec2(24, 0), ivec2(0, -24), ivec2(0, 24),
+        ivec2(-16, -16), ivec2(16, -16), ivec2(-16, 16), ivec2(16, 16),
+        ivec2(-12, 0), ivec2(12, 0), ivec2(0, -12), ivec2(0, 12),
+        ivec2(-6, -6), ivec2(6, -6)
+    );
+
+    for (int i = 0; i < 22; ++i) {
+        ivec2 d = coarseCandidates[i];
+        float err = blockErr(pos, pos + d, refId, tgtId)
+                  + float(abs(d.x) + abs(d.y)) * 0.004;
+        if (err < minErr) {
+            minErr = err;
+            bestOffset = vec2(d);
+        }
+    }
+
+    const ivec2 fineCandidates[8] = ivec2[](
+        ivec2(-2, 0), ivec2(2, 0), ivec2(0, -2), ivec2(0, 2),
+        ivec2(-1, -1), ivec2(1, -1), ivec2(-1, 1), ivec2(1, 1)
+    );
+
+    vec2 base = bestOffset;
+    for (int i = 0; i < 8; ++i) {
+        ivec2 d = fineCandidates[i];
+        vec2 cand = base + vec2(d);
+        float err = blockErr(pos, pos + ivec2(int(cand.x), int(cand.y)), refId, tgtId)
+                  + float(abs(cand.x) + abs(cand.y)) * 0.004;
+        if (err < minErr) {
+            minErr = err;
+            bestOffset = cand;
+        }
+    }
+
+    // Subpixel luminance-gradient refinement on the target anchor
+    vec2 p1 = vec2(pos) + bestOffset;
+
+    float l1_xp = getLuma(sampleBilinear(p1 + vec2(1.0, 0.0), tgtId).rgb);
+    float l1_xm = getLuma(sampleBilinear(p1 - vec2(1.0, 0.0), tgtId).rgb);
+    float l1_yp = getLuma(sampleBilinear(p1 + vec2(0.0, 1.0), tgtId).rgb);
+    float l1_ym = getLuma(sampleBilinear(p1 - vec2(0.0, 1.0), tgtId).rgb);
+
+    float gradX = 0.5 * (l1_xp - l1_xm);
+    float gradY = 0.5 * (l1_yp - l1_ym);
+    float gradT = getLuma(r0.rgb) - getLuma(sampleBilinear(p1, tgtId).rgb);
+
+    float gradLenSq = gradX * gradX + gradY * gradY;
+    if (gradLenSq > 1e-4) {
+        vec2 subDelta = (gradT * vec2(gradX, gradY)) / (gradLenSq + 0.01);
+        subDelta = clamp(subDelta, vec2(-0.5), vec2(0.5));
+        bestOffset += subDelta;
+    }
+
+    bestErr = minErr;
+    return bestOffset;
+}
+
 void main() {
     ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
     if (pos.x >= pc.a.x || pos.y >= pc.a.y) return;
@@ -215,9 +310,43 @@ void main() {
     float factor = (pc.c.x > 0.0 && pc.c.x < 1.0) ? pc.c.x : 0.5;
     float occlThreshold = pc.c.y > 0.0 ? pc.c.y : 0.20;
 
-    // Symmetric half-motion on the raw anchors
+    // Residual sampling offsets: where the mid pixel's content sat inside
+    // each anchor. With a real mid bound (hasMid) they are measured
+    // mid->anchor directly - the symmetric anchor<->anchor half-motion
+    // reads ZERO whenever the two anchors are identical, even when the
+    // captured mid has already hopped (paused/repeated anchor pairs on
+    // slow menus): the residual then stamps at stale anchor positions and
+    // the generated frame flashes a doubled-edge mask beside the held
+    // anchors. The mid-relative match is identical to the symmetric form
+    // on linear motion, so this only changes the degenerate-anchor case.
     float matchErr;
-    vec2 halfMotion = findAnchorMotion(pos, matchErr);
+    float errA = 0.0;
+    float errB = 0.0;
+    vec2 pos0;
+    vec2 pos1;
+    if (pc.b.x != 0) {
+        pos0 = vec2(pos) + findOneSidedMotion(pos, 4, 2, errA);  // mid -> rawA
+        pos1 = vec2(pos) + findOneSidedMotion(pos, 4, 1, errB);  // mid -> rawB
+    } else {
+        vec2 halfMotion = findAnchorMotion(pos, matchErr);
+        pos0 = vec2(pos) + 2.0 * (1.0 - factor) * halfMotion;
+        pos1 = vec2(pos) - 2.0 * factor * halfMotion;
+    }
+
+    // Anchor weighting by match proximity (hasMid only): the residual
+    // blend follows each anchor's MATCH quality instead of the fixed
+    // temporal factor. On a degenerate pair - rawA != rawB but the mid
+    // has already converged to one side (discrete menu hop, then
+    // static) - a fixed 0.5 mix pastes half of the STALE anchor's
+    // residual field into the generated frame, so G alternates with
+    // the held procB stream (the afgi class-flash). errB ~ 0 means the
+    // mid's content is where rawB has it, so resB is the state the
+    // held stream shows; symmetric the other way; 0.5 on a tie.
+    float wB = factor;
+    if (pc.b.x != 0) {
+        wB = (errA + 0.02) / (errA + errB + 0.04);
+        matchErr = mix(errA, errB, wB);
+    }
 
     // Warp the PROCESSED anchors minus their own RAW anchors: the neural +
     // Phase30 residual rides the motion onto the REAL middle frame. The
@@ -231,14 +360,12 @@ void main() {
     // reported. Residual transfer sits the generated frame on real
     // midpoint content with the same processing footprint as the
     // anchors - the displayed G/P slots carry matching texture.
-    vec2 pos0 = vec2(pos) + 2.0 * (1.0 - factor) * halfMotion;
-    vec2 pos1 = vec2(pos) - 2.0 * factor * halfMotion;
 
     vec4 sample0 = sampleBilinear(pos0, 0);   // warped procA
     vec4 sample1 = sampleBilinear(pos1, 3);   // warped procB
     vec3 resA = sample0.rgb - sampleBilinear(pos0, 2).rgb;  // procA - rawA
     vec3 resB = sample1.rgb - sampleBilinear(pos1, 1).rgb;  // procB - rawB
-    vec3 warpedRes = mix(resA, resB, factor);
+    vec3 warpedRes = mix(resA, resB, wB);
 
     // Confidence: warped-sample disagreement OR hopeless block match.
     // Disagreement catches disocclusion/misses; matchErr catches
@@ -282,7 +409,7 @@ void main() {
     // frame between two processed ones.
     vec3 resLocalA = directA.rgb - getPixel(pos.x, pos.y, 2).rgb;
     vec3 resLocalB = directB.rgb - getPixel(pos.x, pos.y, 1).rgb;
-    vec3 resLocal = mix(resLocalA, resLocalB, factor);
+    vec3 resLocal = mix(resLocalA, resLocalB, wB);
     vec3 outRgb = base + mix(warpedRes, resLocal, conf);
     float outA = (abs(directA.a - directB.a) < 0.05)
                ? directB.a : mix(directA.a, directB.a, factor);

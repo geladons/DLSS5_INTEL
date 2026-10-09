@@ -497,13 +497,28 @@ class LagTrailDetector:
             m1 = float(np.median(s["lag_resid"][u]))
             m2 = float(np.median(s["lag2_resid"][u]))
             margin = (m1 - m2) / max(m1, 1e-6)
+            # External splice split: a parallel raw surface replays a
+            # frame byte-exactly (GTA IV menu-select: flagged frame is
+            # pixel-identical to the earlier occurrence, lag2_resid ~0).
+            # A true stale-coordinate residual lands on CHANGED content so
+            # its two-back residual stays meaningfully nonzero. Marker
+            # corroborates on raw captures (h264 smears the 2px stamp).
+            replay = m2 < 0.25
+            marked = s["nrmark"][u] > 0 if "nrmark" in s else None
+            unmarked = int((~marked).sum()) if marked is not None else 0
+            ext = replay
+            kind = ("external-raw-splice"
+                    if (replay
+                        and (marked is None or unmarked > len(u) // 2))
+                    else "stale-apply")
             evs.append(_event(
                 self.name, a, b, fps,
                 min(1.0, margin * 2.0 + len(seg) / 30.0),
-                kind="stale-apply",
+                kind=kind,
                 lag2_pk=round(float(np.median(s["lag2_pk"][u])), 3),
                 lag_resid=round(m1, 3), lag2_resid=round(m2, 3),
-                margin_pct=round(100.0 * margin, 1), frames=b - a))
+                margin_pct=round(100.0 * margin, 1), frames=b - a,
+                replayed=int(replay), unmarked=unmarked))
 
         # judder is a clip-level stat: flag the runs where the rolling
         # gap CV is hot while content is moving
@@ -532,7 +547,14 @@ class LagTrailDetector:
         elif judder or cad_p95 > 0.5:
             verdict = WARN
         n_stale = int(stale.sum())
+        nr = s.get("nrmark")
+        unmarked = int((nr[uniq[stale]] <= 0).sum()) if nr is not None else -1
         notes = [
+            "marker coverage: %d/%d unique frames carry NRMK; %d of %d "
+            "flagged frames are UNMARKED (external raw splice, bypasses "
+            "every layer path)" % (
+                int((nr[uniq] > 0).sum()) if nr is not None else -1,
+                len(uniq), unmarked, n_stale),
             "stale-apply unique frames: %d/%d (%.1f%%); flagged event "
             "time %.2fs" % (n_stale, len(uniq),
                             100.0 * n_stale / max(1, len(uniq)), t_evt),

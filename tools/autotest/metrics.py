@@ -124,6 +124,20 @@ class MetricAccumulator:
         # --- scalar metrics ---
         row["luma_mean"] = float(g_full.mean())
         row["luma_std"] = float(g_full.std())
+        # NRMK diagnostic marker: the layer stamps 'NRMK' into the upload
+        # buffer at client (0,0); in an RGB frame that lands as
+        # R=77,G=82,B=78. A presented frame WITHOUT the marker never went
+        # through the layer's write path - the whole-frame "raw splice"
+        # GTA IV's menu-select screen throws via a parallel surface.
+        # Scan a generous corner window: the capture crop is the window
+        # rect (client origin ~ (8,31)) or the client itself (0,0).
+        # +-2 tolerance: h264 lossy coding shifts the marker pixel slightly.
+        # Frames arrive bgr24: the marker lands as B=78(N) G=82(R) R=77(M).
+        corner = rgb[:64, :64].astype(np.int16)
+        row["nrmark"] = int(
+            ((np.abs(corner[..., 0] - 78) <= 2)
+             & (np.abs(corner[..., 1] - 82) <= 2)
+             & (np.abs(corner[..., 2] - 77) <= 2)).any())
         row["cb_mean"] = float(rgb_a16[..., 0].mean()) - row["luma_mean"]
         row["cr_mean"] = float(rgb_a16[..., 2].mean()) - row["luma_mean"]
         row["hash"] = zlib.crc32(rgb.tobytes()) & 0xFFFFFFFF
