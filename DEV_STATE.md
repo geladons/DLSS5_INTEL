@@ -3351,3 +3351,24 @@ session stable, deploy to production x86+x64. vkcube is NOT a usable
 harness on this host (creates its swapchain through the layer then never
 reaches QueuePresent - pre-existing WSI quirk, unrelated); m8blive is
 deliberately bypassed (dlss5_inprocess).
+
+## 2026-10-09 field hang root cause: unmanaged x64 app at 1440p + ceiling fix
+
+Owner report: "something was running and it hung the whole PC". Forensics:
+%TEMP%\nr_layer_win.log tail shows an x64 process presenting a
+2560x1440 swapchain through the layer (sc=00000281991CE848, ~60-110 s
+per `in-process processed` frame between ~09:44 and ~10:34) - the
+in-process engine defaults to scale=1.0, so a full-desktop Vulkan app
+ran the 71-block chain at full 1440p: GPU starvation for everything
+else = the desktop freeze the owner closed manually. m8blive was ruled
+out (name bypass `dlss5_inprocess` worked); candidate is a leftover/
+maximized vkcube or another env-inheriting Vulkan app.
+
+Also found + killed: daemon_stub.py still listening on 127.0.0.1:48990
+(would have hijacked the next session's TCP frames).
+
+Fix (nr_layer_win.c): `NR_LAYER_INPROC_MAXPX` pixel ceiling on the
+in-process path, default 1 Mpx (~1280x800). Bigger extents skip the
+engine and fall through to the TCP daemon/native path - graceful
+degradation instead of a desktop hang. 0 disables for managed setups
+once a bigger extent is actually validated. Deployed x86+x64.

@@ -49,6 +49,13 @@
  *                     sprite's trail accumulates until it outgrows the
  *                     bound or NR_LAYER_PATCH_CAP (default 48) frames and
  *                     a real exchange resyncs.
+ *   NR_LAYER_INPROC_MAXPX  N (default 1000000, 0=off): pixel ceiling for
+ *                     the in-process x64 engine. The chain's cost scales
+ *                     with the frame extent - an unmanaged 2560x1440 app
+ *                     measured ~60-110 s/frame and froze the whole
+ *                     desktop (field hang 2026-10-09). Bigger extents
+ *                     skip the engine and take the TCP daemon/native
+ *                     path, which scales internally.
  *   NR_LAYER_ASYNC    1 = async TCP serving: the present submits the
  *                     frame to a worker mailbox (bounded, drop-oldest)
  *                     and shows the newest completed reply it already
@@ -2182,6 +2189,22 @@ static int patch_enabled(void)
     return g_patch;
 }
 
+/* In-process engine extent ceiling (pixels). Default ~1 Mpx: 1280x800
+ * and under run the engine; bigger unmanaged frames would take minutes
+ * (2560x1440 measured ~60-110 s/frame) and freeze the desktop. The TCP
+ * daemon path handles big extents via its own render scale, so skipping
+ * in-process degrades gracefully instead of hanging. 0 = no ceiling. */
+static long g_inproc_max_px = -1;
+static long inproc_max_px(void)
+{
+    if (g_inproc_max_px < 0) {
+        const char *e = getenv("NR_LAYER_INPROC_MAXPX");
+        g_inproc_max_px = (e && *e) ? atol(e) : 1000000;
+        if (g_inproc_max_px < 0) g_inproc_max_px = 0;
+    }
+    return g_inproc_max_px;
+}
+
 /* Exact diff between the current input and the last answered input.
  * Returns 1 + the tight bounding box / differing-pixel count when any
  * pixel differs, 0 when bit-identical (the reuse gate owns that case).
@@ -2928,9 +2951,25 @@ static int process_frame(device_data *data, swapchain_data *chain,
         }
     }
 
-    /* In-process DLSS 5 engine execution: bypass TCP socket entirely */
+    /* In-process DLSS 5 engine execution: bypass TCP socket entirely.
+     * Extent ceiling: engine cost scales with the FRAME extent, and at
+     * 2560x1440 an unmanaged app measured ~60-110 s per frame - a frozen
+     * desktop (field hang 2026-10-09). Above NR_LAYER_INPROC_MAXPX
+     * (default ~1 Mpx; 0 disables) skip the in-process call and fall
+     * through to the TCP daemon path, which applies its own scale. */
     ensure_inprocess();
-    if (g_inprocess_active && pfn_dlss5_process_frame && g_engine) {
+    if (g_inprocess_active && pfn_dlss5_process_frame && g_engine
+        && (uint64_t)chain->extent.width * chain->extent.height
+           > (uint64_t)inproc_max_px()) {
+        static int inproc_cap_logged;
+        if (!inproc_cap_logged) {
+            inproc_cap_logged = 1;
+            nr_log("[nr_layer] in-process skipped: extent %ux%u over the "
+                   "%ld px ceiling (NR_LAYER_INPROC_MAXPX); daemon/native",
+                   chain->extent.width, chain->extent.height,
+                   inproc_max_px());
+        }
+    } else if (g_inprocess_active && pfn_dlss5_process_frame && g_engine) {
         int r = pfn_dlss5_process_frame(g_engine, chain->extent.width, chain->extent.height,
                                         data->mapped, data->mapped, (long)frame_counter);
         if (r == 0) {
