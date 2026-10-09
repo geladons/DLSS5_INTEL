@@ -117,6 +117,14 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
     serve); autotest launches set ASYNC=1 directly. m13 gamelaunch pins
     ASYNC=0/RESIDUAL=1/GPUWARP=1 for every arch=x86 game - do not launch
     x86 test sessions with hand envs that miss this block.
+  - Small-delta patch serve (NR_LAYER_PATCH, default ON, sync path only):
+    input differing from the last ANSWERED frame only inside a
+    cursor-scale box (<=2% px / <=8% bbox, env-tunable) is served
+    instantly as held processed result + raw bbox region - the menu
+    cursor runs at full present rate instead of the ~15 fps daemon
+    cadence (owner lag complaint). Anchor (`earlier`) is NOT advanced;
+    trail accumulates until bounds or NR_LAYER_PATCH_CAP (48) force a
+    resync exchange. diag tag `p=patch`.
   - NO HUD/positional masking (removed Stage 25 - field test showed it covered
     game content and looked worse than no mask). Every pixel is neural-processed;
     the only passthrough is exact-repeat reuse: a frame byte-identical to the

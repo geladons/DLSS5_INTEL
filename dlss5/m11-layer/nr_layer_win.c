@@ -38,6 +38,17 @@
  *   NR_LAYER_NEAR_REUSE 1 = also reuse on near-identical input (sampled eps,
  *                     capped replays). OPT-IN, default OFF: stale-result
  *                     replay judders on slow pans / animated grain.
+ *   NR_LAYER_PATCH    0 = disable the small-delta patch serve (default on,
+ *                     sync path only): an input that differs from the last
+ *                     answered frame only inside a cursor-scale bounding
+ *                     box (<2% pixels inside an 8%-of-frame box) is served
+ *                     instantly - held processed result + the raw changed
+ *                     region patched in - skipping the engine round-trip
+ *                     so cursor updates run at the full present rate.
+ *                     The earlier anchor is not advanced, so a moving
+ *                     sprite's trail accumulates until it outgrows the
+ *                     bound or NR_LAYER_PATCH_CAP (default 48) frames and
+ *                     a real exchange resyncs.
  *   NR_LAYER_ASYNC    1 = async TCP serving: the present submits the
  *                     frame to a worker mailbox (bounded, drop-oldest)
  *                     and shows the newest completed reply it already
@@ -263,6 +274,9 @@ typedef struct device_data {
     unsigned reuse_run;          /* consecutive near-identical replays; capped
                                   * so a moving-but-small element (cursor,
                                   * head edge) cannot ride a stale result */
+    unsigned patch_run;          /* consecutive small-delta patch serves;
+                                  * capped so the daemon anchor resyncs
+                                  * periodically instead of drifting */
     unsigned char *raw;          /* freeze mode: the held UNPROCESSED frame */
     VkDeviceSize raw_size;
     int raw_held;
@@ -411,6 +425,21 @@ static int g_serve_stale = 1;
 static long g_stale_match = 4;
 static int g_submit_idle = 1;
 static long g_submit_every = 1;
+/* Small-delta patch serve (NR_LAYER_PATCH, default ON on the sync path):
+ * when the current input differs from the last ANSWERED input only
+ * inside a small bounding box - a cursor sprite riding a still menu, a
+ * blinking HUD element - the present shows the held processed result
+ * with the raw changed region patched in, instantly. The daemon/engine
+ * round-trip is skipped, so cursor-scale updates run at the full
+ * present rate instead of the ~15 fps engine cadence. earlier stays the
+ * anchor (NOT advanced): the sprite's trail accumulates into the bbox
+ * until it outgrows the bound or the run cap, then a real exchange
+ * resyncs. -1 = env not parsed; NR_LAYER_PATCH_CAP overrides the run
+ * cap (default 48). */
+static int g_patch = -1;
+static long g_patch_cap = 48;
+static long g_patch_px = 2;      /* changed-pixel share bound, % of frame */
+static long g_patch_area = 8;    /* bounding-box share bound, % of frame */
 /* Serve-residual (NR_LAYER_RESIDUAL, async TCP path only): while the
  * newest reply pair is fresh AND the current frame still resembles the
  * pair's source, a present displays cur_raw + residual instead of the
@@ -1398,6 +1427,10 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
         if (static_reuse)
             nr_log("[nr_layer] static reuse on: exact-repeat frames reuse "
                  "the last processed result");
+        if (!g_async && patch_enabled())
+            nr_log("[nr_layer] small-delta patch serve on (cap %ld, px %ld%%, "
+                   "area %ld%%): cursor-scale changes ride the held frame",
+                   g_patch_cap, g_patch_px, g_patch_area);
         ensure_inprocess();
         {
             int fg_on = is_framegen_enabled();
@@ -2125,6 +2158,63 @@ static int nearly_identical(const unsigned char *a, const unsigned char *b,
            (big * 1000) / samples <= (uint64_t)eps_big_pm;
 }
 
+static int patch_enabled(void)
+{
+    if (g_patch < 0) {
+        const char *e = getenv("NR_LAYER_PATCH");
+        g_patch = !e || strcmp(e, "0") != 0;
+        const char *c = getenv("NR_LAYER_PATCH_CAP");
+        if (c && *c) {
+            long v = atol(c);
+            if (v > 0) g_patch_cap = v;
+        }
+        c = getenv("NR_LAYER_PATCH_PX");
+        if (c && *c) {
+            long v = atol(c);
+            if (v > 0 && v <= 100) g_patch_px = v;
+        }
+        c = getenv("NR_LAYER_PATCH_AREA");
+        if (c && *c) {
+            long v = atol(c);
+            if (v > 0 && v <= 100) g_patch_area = v;
+        }
+    }
+    return g_patch;
+}
+
+/* Exact diff between the current input and the last answered input.
+ * Returns 1 + the tight bounding box / differing-pixel count when any
+ * pixel differs, 0 when bit-identical (the reuse gate owns that case).
+ * Row-wise u32 compare: a 800x600 BGRA frame costs well under a ms. */
+static int small_diff_bbox(const unsigned char *a, const unsigned char *b,
+                           uint32_t w, uint32_t h,
+                           uint32_t *x0, uint32_t *y0,
+                           uint32_t *x1, uint32_t *y1, uint32_t *diffpx)
+{
+    uint32_t lx = w, ly = h, hx = 0, hy = 0, diff = 0;
+    for (uint32_t y = 0; y < h; y++) {
+        const uint32_t *ra = (const uint32_t *)(a + (size_t)y * w * 4);
+        const uint32_t *rb = (const uint32_t *)(b + (size_t)y * w * 4);
+        uint32_t rfirst = w, rlast = 0;
+        for (uint32_t x = 0; x < w; x++) {
+            if (ra[x] != rb[x]) {
+                diff++;
+                if (x < rfirst) rfirst = x;
+                rlast = x;
+            }
+        }
+        if (rfirst <= rlast) {
+            if (y < ly) ly = y;
+            hy = y;
+            if (rfirst < lx) lx = rfirst;
+            if (rlast > hx) hx = rlast;
+        }
+    }
+    if (!diff) return 0;
+    *x0 = lx; *y0 = ly; *x1 = hx; *y1 = hy; *diffpx = diff;
+    return 1;
+}
+
 static void dump_capture(const char *path, const uint32_t *header,
                          const unsigned char *pixels, VkDeviceSize size)
 {
@@ -2743,6 +2833,69 @@ static int process_frame(device_data *data, swapchain_data *chain,
         }
     }
 
+    /* Small-delta patch serve (NR_LAYER_PATCH): the input changed, but
+     * only inside a small bounding box - the field case is a menu cursor
+     * the owner watches lag at the ~15 fps engine cadence. Serve the
+     * held processed result with the raw changed region patched in and
+     * skip the round-trip entirely: the sprite updates at the game's
+     * full present rate. `earlier` deliberately stays the answered
+     * anchor (not advanced): a moving sprite's trail accumulates into
+     * the bbox until it outgrows the bound (real content change) or
+     * patch_run hits the cap - both fall through to a real exchange,
+     * which resyncs anchor + result. */
+    if (patch_enabled() && !g_async
+        && data->have_earlier && !data->earlier_pending
+        && data->earlier_size >= needed
+        && data->result_valid && data->result && data->result_size >= needed
+        && data->result_w == chain->extent.width
+        && data->result_h == chain->extent.height
+        && data->holding_chain == chain->swapchain
+        && data->result_src_crc
+        && data->result_src_crc == diag_crc(data->earlier, needed)
+        && data->patch_run < (unsigned)g_patch_cap) {
+        uint32_t x0 = 0, y0 = 0, x1 = 0, y1 = 0, dpx = 0;
+        if (small_diff_bbox((const unsigned char *)data->mapped,
+                            data->earlier,
+                            chain->extent.width, chain->extent.height,
+                            &x0, &y0, &x1, &y1, &dpx)) {
+            uint32_t w = chain->extent.width, h = chain->extent.height;
+            uint64_t px = (uint64_t)w * h;
+            uint64_t area = (uint64_t)(x1 - x0 + 1) * (y1 - y0 + 1);
+            /* Bounds: change must stay a cursor-scale island - under
+             * PATCH_PX% of the pixels inside a PATCH_AREA%-of-frame box.
+             * Anything larger is real content and takes the engine path. */
+            if (dpx * 100 <= px * (uint64_t)g_patch_px
+                && area * 100 <= px * (uint64_t)g_patch_area) {
+                /* Grow the patch a few pixels so the raw/processed seam
+                 * does not sit exactly on the sprite edge. */
+                const uint32_t m = 6;
+                x0 = x0 > m ? x0 - m : 0;
+                y0 = y0 > m ? y0 - m : 0;
+                if (x1 + m < w) x1 += m; else x1 = w - 1;
+                if (y1 + m < h) y1 += m; else y1 = h - 1;
+                uint32_t bw = x1 - x0 + 1, bh = y1 - y0 + 1;
+                unsigned char *tmp =
+                    (unsigned char *)malloc((size_t)bw * bh * 4);
+                if (tmp) {
+                    unsigned char *cur = (unsigned char *)data->mapped;
+                    unsigned char *res = data->result;
+                    for (uint32_t r = 0; r < bh; r++)
+                        memcpy(tmp + (size_t)r * bw * 4,
+                               cur + ((size_t)(y0 + r) * w + x0) * 4,
+                               (size_t)bw * 4);
+                    memcpy(cur, res, (size_t)needed);
+                    for (uint32_t r = 0; r < bh; r++)
+                        memcpy(cur + ((size_t)(y0 + r) * w + x0) * 4,
+                               tmp + (size_t)r * bw * 4, (size_t)bw * 4);
+                    free(tmp);
+                    data->patch_run++;
+                    diag_path = "patch";
+                    return 0;
+                }
+            }
+        }
+    }
+
     /* Save native input into data->earlier before processing */
     if (data->earlier_size < needed) {
         unsigned char *grown = (unsigned char *)realloc(data->earlier, (size_t)needed);
@@ -2794,6 +2947,7 @@ static int process_frame(device_data *data, swapchain_data *chain,
                 data->result_fmt = (uint32_t)chain->format;
                 data->result_src_crc = data->last_in_crc;
                 data->earlier_pending = 0;
+                data->patch_run = 0;
             }
             dump_capture(capture_out_path, header, (const unsigned char *)data->mapped, needed);
             nr_log("[nr_layer] in-process processed %ux%u (frame %lu)",
@@ -2942,6 +3096,7 @@ static int process_frame(device_data *data, swapchain_data *chain,
     data->result_fmt = (uint32_t)chain->format;
     data->result_src_crc = data->last_in_crc;
     data->earlier_pending = 0;
+    data->patch_run = 0;
     dump_capture(capture_out_path, header, data->result, needed);
     nr_log("[nr_layer] processed %ux%u", chain->extent.width, chain->extent.height);
     diag_path = "tcp";

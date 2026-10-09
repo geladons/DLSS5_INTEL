@@ -3298,3 +3298,56 @@ cfg keys, i18n en+ru, restored on manager start, panels outlive the
 manager for recording). deskpanel.py resolves tools/desk_overlay.py in
 both repo and production layouts; _build_production copies it into the
 bundle and generates DESK OVERLAY.cmd.
+
+## 2026-10-09 daemon scheduling probe: queue-prio A/B = null result, keep LOW
+
+Chasing the remaining defects (menu cursor lag, rare phantom spots) the
+daemon's per-frame cost was re-profiled. Standalone hammer (no game):
+stable ~45 ms/frame for 4 min straight (3946 frames) - no thermal
+collapse, the ~60-80 ms seen in-game is contention, not throttle.
+Under a synthetic competing GPU load (m8blive, ~11.7 GB resident) the
+daemon degraded to ~55-83 ms rtt - the same band GTA IV shows, and
+consistent with game+daemon sharing the one Arc B50 (the benchmark's
+"AMD Radeon RX 6700 XT" line is the D3D9 masked adapter; DXVK renders
+on the Intel card).
+
+`D5C_QUEUE_PRIO` A/B under that same contention: daemon relaunched with
+prio=medium delivered ~82 ms mean rtt - statistically identical to the
+LOW baseline. The bottleneck is raw GPU throughput sharing, not
+scheduling, so the deliberate LOW queue (TDR/page-fault hardening,
+Stage 41) stays. Raising priority gains nothing while re-exposing the
+fault surface; do not flip this knob expecting latency wins.
+
+Remaining cursor-lag lever is therefore the chain's ~35 ms GPU time
+itself (fe/fp/tail are already ~1 ms combined) - i.e. net cost at
+scale 0.58, or a client-side small-delta fast serve (menu cursor moves
+a few dozen px over a byte-static background; a bounded bbox patch of
+last-processed could serve instantly). Not yet implemented.
+
+## 2026-10-09 small-delta patch serve: cursor lag fix on the sync path
+
+Owner's remaining complaint: menu cursor visibly lags - it renders inside
+the game frame, so on the sync TCP path its update rate is the daemon's
+~15 fps cadence (35-65 ms round-trip per present). Queue-priority tuning
+was ruled out (see A/B above: zero gain under contention).
+
+Fix in nr_layer_win.c (NR_LAYER_PATCH, default ON, sync path only): when
+the current input differs from the last ANSWERED input only inside a
+small bounding box - <=2% of pixels inside an <=8%-of-frame box (envs
+NR_LAYER_PATCH_PX/_AREA for field tuning) - the present is served
+instantly as held processed result + the raw changed region patched in
+(+6 px seam margin). `earlier` stays the answered anchor so a moving
+sprite's trail accumulates into the bbox; when it outgrows the bound or
+patch_run hits NR_LAYER_PATCH_CAP (48) a real exchange resyncs anchor
+and result. Menu cursor now moves at the game's full present rate over
+the processed background. Async path unchanged (residual compositor owns
+that policy).
+
+Verified: C unit harness (Temp/_patch_unit.c) - tight/union/full-frame
+bbox math, bounds rejection, composite correctness; live GTA IV via
+daemon sync path - 261 `p=patch` presents, anchor semantics correct in
+diag (src= frozen on the answered frame, up= deterministic per input),
+session stable, deploy to production x86+x64. vkcube is NOT a usable
+harness on this host (creates its swapchain through the layer then never
+reaches QueuePresent - pre-existing WSI quirk, unrelated); m8blive is
+deliberately bypassed (dlss5_inprocess).

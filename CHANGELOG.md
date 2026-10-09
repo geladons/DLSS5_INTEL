@@ -4,6 +4,24 @@ All notable changes to this project. The day-by-day engineering log with
 measured numbers lives in [DEV_STATE.md](DEV_STATE.md); this file tracks
 user-visible milestones.
 
+## Unreleased — patch serve + defect-class autotest + desk panels (2026-10-09)
+
+### Added
+- **Small-delta patch serve** (`NR_LAYER_PATCH`, on by default): a
+  present that differs from the last processed frame only inside a
+  cursor-scale box is served instantly — held processed result plus the
+  raw changed pixels — skipping the daemon round-trip. Menu cursor now
+  tracks at the full present rate instead of the ~15 fps engine cadence
+  (owner-reported lag). Verified live on GTA IV (261 patch serves).
+- **Autotest owner-defect coverage**: `static-scene-flicker` (A/B replay
+  on a closed-state scene, splices classified via NRMK + lag residual),
+  `phantom-spot` (transient concentrated hotspots, persistence-rejected
+  so real explosions/movers pass), `cursor bound` p95/max inter-update
+  gap metric on calm scenes.
+- **Benchmark desk panel**: manager settings section with three toggles
+  (clock / fps / load); pythonw-spawned always-on-top panels, no console,
+  real FPS from the daemon frame counter. For whole-desktop recording.
+
 ## Unreleased — in-layer game overlay (2026-10-05)
 
 ### Added
