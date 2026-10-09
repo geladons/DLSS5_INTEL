@@ -82,6 +82,9 @@ MAGIC_FRAME = 0x304E524E         # 'NRN0' frame channel
 # Benchmark: -benchmark self-runs a flythrough then auto-exits the game.
 MODE_ARGS = {
     "menu": "-windowed\r\n-width 800\r\n-height 600\r\n",
+    # 720p variant: probes whether the menu-select raw-splice defect is
+    # bound to the tiny 800x600 client or fires at any windowed extent.
+    "menu720": "-windowed\r\n-width 1280\r\n-height 720\r\n",
     "benchmark": "-benchmark\r\n-windowed\r\n-width 800\r\n-height 600\r\n",
 }
 
