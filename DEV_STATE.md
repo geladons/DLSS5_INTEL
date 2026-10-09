@@ -3413,3 +3413,66 @@ Owner verdict: "result unacceptable". Four findings, disposition:
 Verification: autotest synth battery re-run - every detector still
 fires on its planted artifact. Clean state: port 48990 free, no stale
 daemon/stub/game/smoke processes, Sunshine untouched.
+
+## 2026-10-09 Stage 52 - flicker forensics: splice confirmed; desk overlay v3
+
+Owner re-test complaints triaged with real DDA captures + autotest:
+
+1. Menu flicker ("much worse when mouse idle") - NOT a bounded-queue
+   regression: zero "queue drain bound hit" lines in the field layer log
+   and zero in the capture segments. at_s52_menu (800x600 windowed, sync
+   env, 15.7 s rec on the EFLC select screen): lag-trail + flicker
+   detectors classify the flap as external-raw-splice (unmarked frames,
+   lag2_resid ~0.01-0.3, ~0.6 events/s, diff ~17.5 luma). at_s52_720
+   (1280x720) same signature at ~10 luma. The layer was serving the
+   whole time (p=reuse on byte-identical inputs; up= CRC constant over
+   60k presents). Conclusion: the known external defect, screen-bound,
+   unchanged in mechanism. No new user-mode fix found; the practical
+   mitigation is skipping the select screen (pad A) or native-res
+   fullscreen.
+
+2. Bench "phantoms + constant flicker" - at_s52_bench3 caught ~26 s of
+   real flythrough (sync serving, 2898 tcp presents, 0 pheld, 0 drain
+   hits, lag-trail clean: no stale-apply/splice). Detectors on the
+   flythrough: garland FAIL (motion alternation, mag clipped 250),
+   ghost-double-contour FAIL (2 echo events, 0.82-0.89 = processed frame
+   shown ~45-80 ms stale under fast pan = the visible "phantom"),
+   static-region-noise FAIL p95 15.4. NATIVE control (at_s52_benchnat,
+   --native, same flythrough): garland FAIL 0.753 (worse than layered
+   0.56), ghost FAIL 0.059, static-noise FAIL 1.0, phantom-spot FAIL
+   (layered was PASS - temporal denoise kills native specks). Verdict:
+   the bench flythrough is a worst-case strobe scene; detectors flag
+   NATIVE content the same way. The only layer-attributable term is the
+   ~45-80 ms sync staleness echo on pans - inherent to the cadence, not
+   a bug. Phantom-spot (isolated noise blob) is BETTER under the layer.
+
+3. desk_overlay FPS panel rewired (owner: "700+ fps, stuck, panel
+   outlived the manager"):
+   - FpsSource rate math fixed: a source state advances only when its
+     counter does; sparse counters (fg stats: +300/~11 s) divide the
+     delta by the real inter-write span - no more tick-rate division
+     => no more 700+ spikes. Counter resets (daemon restart) yield
+     None instead of a garbage delta; >500 fps results dropped.
+   - Freshness gating: every source must have mtime < 4 s; no live
+     source => the label shows "--" after a 4 s grace (no stale
+     numbers after game exit). eng ms shown only while daemon log
+     is live.
+   - Lifetime: new --parent-pid arg; the parent liveness check rides
+     the 400 ms Tk tick (pythonw-safe: no cross-thread after() posts).
+     deskpanel.apply() passes the manager pid - panels die ~1 s after
+     the manager exits. DESK OVERLAY.cmd standalone launch keeps no
+     parent = persistent. Verified: synthetic _test_fps.py (sparse
+     counter ~27 fps, reset -> None -> resume sane), live watchdog
+     test (panel gone ~1 s post-parent-death), toggle path applies
+     (respawn-with-new-panels via pidfile single-instance).
+   - Deployed: production tools/desk_overlay.py + m13/deskpanel.py
+     hash-matched to repo.
+
+4. AGENTS.md corrected: NR_LAYER_PATCH doc said default ON; source has
+   been opt-in OFF since the owner rejected the raw-rectangle artifact.
+
+Known leftovers / proposed (not implemented): bench flythrough echo is
+the sync trade-off (accepted by design); select-screen splice remains
+an external defect - a manager-side "auto-A past the episode picker"
+(ViGEm pad on GTA IV launches) would dodge it entirely but is a UX
+feature to discuss first.
