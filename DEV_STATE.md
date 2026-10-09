@@ -3232,3 +3232,42 @@ its spatial speckle on camera motion was deliberately rejected by the
 owner earlier; m13 still arms RESIDUAL=1+GPUWARP=1 for x86 games.
 
 Deployed: x86+x64 layer dlls rebuilt and copied to production.
+
+## 2026-10-09 Stage 51 - owner verification: playable; new defect classes wired
+
+Owner replayed GTA IV through m13 after the Stage 50 fixes. Field verdict:
+FPS playable (in-game benchmark: avg 23.11 fps over 37.12 s, 800x600@144
+Medium - Benchmark261009075918.txt). Remaining owner-reported artefacts:
+
+- Menu flicker only on FULL static (idle cursor). With cursor motion only
+  faint colour-play remains - the external-raw-splice defect is still
+  menu-select-bound but now gated on scene stillness.
+- Phantom noise blobs in 2-3 spots across the whole benchmark (isolated,
+  not a pattern). No judder/shaking during loading.
+- Menu cursor still lags visibly (daemon ~15-20 fps update cadence is the
+  felt bound - mouse deltas render on the next processed anchor).
+
+Autotest coverage added for these owner classes (tools/autotest):
+
+- static-scene-flicker detector: a static scene is detected by a CLOSED
+  state space - every unique frame replays its 1/2-back neighbour
+  (min(lag_resid, lag2_resid) rolling-median < 0.25). Any diff spike or
+  unmarked frame inside such a window is flagged; events classify as
+  external-raw-splice (lag2_resid<0.25) vs static-flicker. Verified: s50
+  menu capture -> FAIL, 9 events (7 correctly tagged splice); s45
+  gameplay -> PASS.
+- phantom-spot detector: isolated concentrated anomaly - hottest 8x8
+  block delta >6x the frame-mean delta AND flagged runs <=3 unique
+  frames (sustained anomalies stay with patchwork/static-noise). Events
+  carry the block bbox + peak_frame for suspects. s45/s50 -> PASS.
+- update-rate note "cursor bound": p95/max inter-unique gap inside calm
+  scenes - the honest input->pixel latency bound the owner feels in the
+  menu (s50 menu: 460 ms worst).
+
+desk_overlay.py (tools/, deployed to production/tools + "DESK OVERLAY.cmd"):
+three borderless always-on-top panels for the owner's whole-desktop
+recording - CLOCK (date + HH:MM:SS @5 Hz), FPS (game present rate from
+the layer diag f= counter delta; engine ms from m11d log tail; '--'
+when the log stops growing), LOAD (CPU/RAM via ctypes, GPU% via
+typeperf GPU-Engine counters). Draggable, positions persist in
+%TEMP%\desk_overlay_pos.json, right-click/Esc exits. No new deps.

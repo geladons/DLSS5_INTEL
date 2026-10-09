@@ -8,7 +8,7 @@
 #                     [--suspects 30] [--keep-frames <dir>]
 #
 # Pipeline: decode (ffmpeg rawvideo pipe) -> MetricAccumulator single pass
-# (per-frame scalar timeline + accumulated spatial maps) -> seven artifact
+# (per-frame scalar timeline + accumulated spatial maps) -> ten artifact
 # detectors -> report.md / metrics.csv / events.json / suspects/ / heatmaps.
 #
 # numpy only (cv2 optional but not required). Reuses the decode/probe/

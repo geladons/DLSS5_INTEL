@@ -7,7 +7,7 @@ processed frames while the visible output still flashes, flickers or stalls.
 
 ```
 capture_session.py -> game launch + daemon + layer + DDA record -> capture.mp4 + manifest.json
-analyze.py         -> decode + 7 detectors -> report.md + events.json + metrics.csv
+analyze.py         -> decode + 10 detectors -> report.md + events.json + metrics.csv
                       + suspects/*.png + heatmaps (+ optional --baseline A/B table)
 synth_fixture.py   -> synthesises one injected artifact per detector; self-tests
                       the battery without a game
@@ -160,6 +160,13 @@ Outputs in `<reportdir>`:
 | ghost-double-contour | pixels held >=8 frames inside a moving, edged 32x32 block (latched smear) + lagged edge echo; chronic-hold fraction reported for FG-heavy footage |
 | scene-change-staleness | histogram-distance cut followed by a >=0.5 s freeze with motion before/after; tolerant of encoder settling after cuts |
 | static-region-noise | pixels near their running mean but with high temporal std (jittering menu/loading chrome) |
+| lag-trail-stale-apply | delta composited at a stale translation (two-back match beats one-back) + update-gap judder; byte-exact replays (lag2_resid~0, NRMK absent) reclassify as `external-raw-splice` |
+| static-scene-flicker | closed state space (every unique replays 1/2-back: rolling median of min(lag,lag2 resid) <0.25) + a diff spike or unmarked frame = flicker on a static scene; events split external-raw-splice vs static-flicker |
+| phantom-spot | isolated concentrated anomaly: hottest 8x8 block delta >6x the frame-mean delta in a <=3-unique run (a transient noise blob); sustained anomalies stay with patchwork/static-noise |
+
+Also: update-rate's notes carry a "cursor bound" - the p95/max
+inter-unique gap inside calm scenes, i.e. the felt input->pixel latency
+bound (menu mouse lag reports map straight onto it).
 
 Verdicts: PASS = nothing, WARN = worth a look, FAIL = inspect suspects.
 

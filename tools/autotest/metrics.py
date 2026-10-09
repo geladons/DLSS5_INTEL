@@ -181,6 +181,7 @@ class MetricAccumulator:
             row["patch_idx"] = 0.0
             row["ghost_echo"] = 0.0
             row["static_var"] = 0.0
+            row.update({"spot_max": 0.0, "spot_x": 0.0, "spot_y": 0.0})
             row.update({"flicker_frac": 0.0, "flicker_mag": 0.0,
                         "flicker_color": 0.0, "flicker_strong": 0.0})
             row.update({"lag_dy": 0, "lag_dx": 0, "lag_pk": 0.0,
@@ -189,6 +190,9 @@ class MetricAccumulator:
             self._segment_event(idx, 0.0, self._zero_mag, None)
         else:
             row["patch_idx"] = self._patchwork(d_full)
+            row.update({"spot_max": self._spot[0],
+                        "spot_x": self._spot[1],
+                        "spot_y": self._spot[2]})
             # a globally-frozen scene produces only legit stale pixels;
             # smear detection needs some live motion in the frame
             row["ghost_echo"] = (self._ghost(g)
@@ -224,6 +228,7 @@ class MetricAccumulator:
         self._bb = {k: np.zeros(shape, bool)
                     for k in ("up", "dn", "flip", "alt")}
         self._zero_mag = np.zeros(shape, np.float32)
+        self._spot = (0.0, 0.0, 0.0)
         self._static_thr_t = 0.0
         self.prev_full = g_full
         self.prev_hist = hist
@@ -233,6 +238,7 @@ class MetricAccumulator:
     def _fill_first(self, row):
         row.update({"diff_mean": 0.0, "dup": 0, "dup_run": 0,
                     "hist_dist": 0.0, "patch_idx": 0.0, "ghost_echo": 0.0,
+                    "spot_max": 0.0, "spot_x": 0.0, "spot_y": 0.0,
                     "static_var": 0.0, "flicker_frac": 0.0,
                     "flicker_mag": 0.0, "flicker_color": 0.0,
                     "flicker_strong": 0.0, "lag_dy": 0, "lag_dx": 0,
@@ -248,6 +254,7 @@ class MetricAccumulator:
         Natural motion clusters held blocks together (static background
         with a few movers) so the fraction stays low. Accumulates a
         per-block std-contrast evidence map for the heatmap."""
+        self._spot = (0.0, 0.0, 0.0)
         b = self.block
         h = d_full.shape[0] // b * b
         w = d_full.shape[1] // b * b
@@ -264,6 +271,13 @@ class MetricAccumulator:
         # interleaves them densely -> fraction jumps to ~0.5+.
         held = bm < 1.0
         live = bm > 4.0
+        # hottest block this frame: a concentrated transient anomaly
+        # (phantom noise blob) shows a single block-mean spike while the
+        # frame-mean delta stays calm; real wide motion spreads the mass
+        bi = int(np.argmax(bm))
+        self._spot = (float(bm.max()),
+                      float((bi % bm.shape[1]) * b),
+                      float((bi // bm.shape[1]) * b))
         hp = np.pad(held, 1)
         lp = np.pad(live, 1)
         nb_held = (hp[:-2, 1:-1] | hp[2:, 1:-1] |

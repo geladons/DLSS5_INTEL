@@ -139,10 +139,25 @@ class UpdateRateDetector:
             verdict = FAIL
         elif events:
             verdict = WARN
+        # cursor-response bound: on a nearly-static scene (menu idle) the
+        # only updates ARE the cursor - the inter-unique gap distribution
+        # is then the honest bound on felt input->pixel latency (field
+        # report 2026-10-09: menu mouse "can't keep up" at ~15/s cadence)
+        gaps = np.diff(ctx["uniq_idx"]).astype(np.float64)
+        du = s["diff_mean"][ctx["uniq_idx"]]
+        calm = du[:-1] < 1.0 if len(du) > 1 else np.zeros(0, bool)
+        calm_gaps = gaps[calm] if len(calm) else np.array([])
+        cur_note = ("cursor bound (calm scenes): inter-update gap p95 "
+                    "%.0f ms, max %.0f ms"
+                    % (float(np.percentile(calm_gaps, 95)) * 1000 / fps,
+                       float(calm_gaps.max()) * 1000 / fps)
+                    if calm_gaps.size else
+                    "cursor bound: no calm segments in clip")
         notes = ["median distinct-update rate: %.1f/s  (low threshold %.1f/s)"
                  % (med_rate, low_thr),
                  "time below threshold: %.1fs (%.0f%% of clip)"
-                 % (t_low, 100 * frac)]
+                 % (t_low, 100 * frac),
+                 cur_note]
         return Result(self.name, verdict, frac, events, notes)
 
 
@@ -568,6 +583,176 @@ class LagTrailDetector:
                       max(top, min(1.0, t_evt / 4.0)), evs, notes)
 
 
+# ------------------------------------------------- 9 static-scene flicker
+class StaticFlickerDetector:
+    """Owner defect class 2026-10-09: on a FULLY STATIC scene (menu idle,
+    no cursor motion) single frames flash a different state. The proven
+    GTA IV menu-select variant is the external raw splice - an unmarked
+    byte-exact replay of an older frame - but a stale-serve pop lands the
+    same signature minus the replay. Both are defects: on content whose
+    local baseline is calm, ANY isolated frame spike is wrong.
+
+    Unique-stream test: rolling median of diff_mean over +-15 uniques
+    marks the calm baseline (<0.5); a frame spikes if its diff exceeds
+    max(baseline+1.5, 1.5) OR it carries no NRMK marker while changing
+    visibly (the parallel surface never stamps). Events classify as
+    'external-raw-splice' when the two-back replay signature holds
+    (lag2_resid<0.25), else 'static-flicker'.
+    """
+    name = "static-scene-flicker"
+
+    def run(self, ctx):
+        s, fps, n = ctx["series"], ctx["fps"], ctx["n"]
+        uniq = ctx["uniq_idx"]
+        du = s["diff_mean"][uniq]
+        if len(uniq) < 9:
+            return Result(self.name, PASS, 0.0, [],
+                          ["clip too short for static-flicker test"])
+        # A static SCENE does not mean calm diffs: the flicker itself is
+        # the diff. The real signature is a closed state space - every
+        # unique frame replays its 1-back or 2-back neighbour (the menu
+        # ping-pongs between two rendered states). Slow REAL motion emits
+        # uniques matching neither and exits the test on its own.
+        rep = np.minimum(s["lag_resid"][uniq], s["lag2_resid"][uniq])
+        rep[:3] = 1.0               # no 1/2-back history -> not a replay
+        win = min(31, len(rep) | 1)
+        pad = np.pad(rep, win // 2, mode="edge")
+        med = np.median(
+            np.lib.stride_tricks.sliding_window_view(pad, win), axis=1)
+        static = med < 0.25
+        spikes = static & (du > 1.5)
+        spikes[:3] = False          # first uniques have no lag history
+        if "nrmark" in s:
+            spikes |= static & (du > 0.75) & (s["nrmark"][uniq] <= 0)
+        idx_of = np.zeros(n, bool)
+        idx_of[uniq[spikes]] = True
+        dil = idx_of.copy()
+        for _ in range(4):
+            dil[1:] |= dil[:-1]
+            dil[:-1] |= dil[1:]
+        evs = []
+        n_ext = n_flick = 0
+        for a, b in _runs(dil):
+            seg = np.nonzero(idx_of[a:b])[0]
+            if not len(seg):
+                continue
+            u = uniq[(uniq >= a) & (uniq < b)]
+            m2 = float(np.median(s["lag2_resid"][u]))
+            ext = m2 < 0.25
+            kind = "external-raw-splice" if ext else "static-flicker"
+            n_ext, n_flick = n_ext + ext, n_flick + (not ext)
+            evs.append(_event(
+                self.name, a, b, fps,
+                min(1.0, float(du[(uniq >= a) & (uniq < b)].max()) / 20.0),
+                kind=kind, lag2_resid=round(m2, 3),
+                diff_max=round(float(du[(uniq >= a) & (uniq < b)].max()), 2),
+                frames=b - a))
+        t_evt = sum(e["f1"] - e["f0"] for e in evs) / fps
+        verdict = PASS
+        if len(evs) > 4 or t_evt > 1.0:
+            verdict = FAIL
+        elif evs:
+            verdict = WARN
+        notes = ["calm-scene spikes: %d events (%.2fs) - %d "
+                 "external-raw-splice, %d static-flicker"
+                 % (len(evs), t_evt, n_ext, n_flick)]
+        return Result(self.name, verdict,
+                      min(1.0, t_evt / 3.0), evs, notes)
+
+
+# ------------------------------------------------------- 10 phantom spot
+class PhantomSpotDetector:
+    """Owner defect class 2026-10-09: rare (2-3 per benchmark) transient
+    NOISE BLOBS - a compact region flashes anomalous content for 1-3
+    unique frames while the rest of the frame is calm. Signature: the
+    hottest 8x8 block delta (spot_max) concentrates >>6x the frame-mean
+    delta AND the flag run is short. Two persistence gates separate the
+    blob from legit transient content: the flag must spike >2x over the
+    LOCAL rolling median of spot_max (a sustained mover raises its own
+    baseline to ~1x), and the spot's region must go QUIET - no other hot
+    blocks within +-112 px over the surrounding uniques outside the run
+    itself (a real flash/explosion approaches and fades through its
+    neighbourhood; verified 2026-10-09 vs the s45 explosion frames).
+    """
+    name = "phantom-spot"
+
+    def run(self, ctx):
+        s, fps, n = ctx["series"], ctx["fps"], ctx["n"]
+        uniq = ctx["uniq_idx"]
+        if "spot_max" not in s or len(uniq) < 5:
+            return Result(self.name, PASS, 0.0, [],
+                          ["no spot metrics in this metrics build"])
+        sm = s["spot_max"][uniq]
+        du = s["diff_mean"][uniq]
+        conc = sm > np.maximum(du * 6.0, 12.0)
+        win = min(31, len(sm) | 1)
+        pad = np.pad(sm, win // 2, mode="edge")
+        med = np.median(
+            np.lib.stride_tricks.sliding_window_view(pad, win), axis=1)
+        flag = conc & (sm > 2.0 * med)
+        # keep only ISOLATED spots: <=3 consecutive flagged uniques AND
+        # the region goes quiet afterwards. A REAL transient (muzzle
+        # flash, explosion) persists: its hot block keeps firing in the
+        # same neighbourhood for the next uniques - the phantom pops
+        # once and the region reverts to calm.
+        idx_of = np.zeros(n, bool)
+        idx_of[uniq[flag]] = True
+        sx_u, sy_u = s["spot_x"][uniq], s["spot_y"][uniq]
+        upos = {int(f): k for k, f in enumerate(uniq)}
+
+        def region_reignites(pk, pkval, run_lo, run_hi):
+            """Count hot blocks near the peak's region OUTSIDE its own
+            flagged run: a real transient (explosion) approaches and
+            fades with many hot neighbours; a phantom run only ever
+            contains itself."""
+            pu = upos.get(pk)
+            if pu is None:
+                return False
+            bx, by = sx_u[pu], sy_u[pu]
+            hot = 0
+            for k in range(max(0, pu - 8), min(pu + 9, len(uniq))):
+                if run_lo <= uniq[k] < run_hi:
+                    continue
+                if (sm[k] > 0.4 * pkval
+                        and abs(sx_u[k] - bx) < 112
+                        and abs(sy_u[k] - by) < 112):
+                    hot += 1
+            return hot >= 2
+
+        evs = []
+        for a, b in _runs(idx_of):
+            flagged = np.nonzero(idx_of[a:b])[0] + a
+            u = uniq[(uniq >= a) & (uniq < b)]
+            if len(flagged) > 3 or not len(u):
+                continue
+            pk = int(u[np.argmax(s["spot_max"][u])])
+            if region_reignites(pk, float(s["spot_max"][pk]), a, b):
+                continue
+            bx, by = s["spot_x"][pk], s["spot_y"][pk]
+            blk = 8 * ctx["s"]
+            evs.append(_event(
+                self.name, a, b, fps,
+                min(1.0, float(s["spot_max"][u].max()) / 60.0),
+                kind="phantom-spot",
+                spot_max=round(float(s["spot_max"][u].max()), 2),
+                frame_mean=round(float(du[(uniq >= a) & (uniq < b)].mean()), 2),
+                bbox=[int(bx), int(by), int(bx + blk), int(by + blk)],
+                peak_frame=pk))
+        verdict = PASS
+        if len(evs) > 6 or any(e["evidence"]["spot_max"] > 60
+                               for e in evs):
+            verdict = FAIL
+        elif evs:
+            verdict = WARN
+        notes = ["isolated concentrated spikes: %d (%.1f%% of unique "
+                 "frames); largest block delta %.1f luma"
+                 % (len(evs), 100.0 * flag.mean() if len(flag) else 0.0,
+                    float(sm.max()) if len(sm) else 0.0)]
+        top = max((e["score"] for e in evs), default=0.0)
+        return Result(self.name, verdict, top, evs, notes)
+
+
 ALL_DETECTORS = [UpdateRateDetector, GarlandDetector, PumpingDetector,
                  PatchworkDetector, GhostDetector, StalenessDetector,
-                 StaticNoiseDetector, LagTrailDetector]
+                 StaticNoiseDetector, LagTrailDetector,
+                 StaticFlickerDetector, PhantomSpotDetector]

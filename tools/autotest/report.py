@@ -23,7 +23,8 @@ CSV_COLS = ["frame", "t", "luma_mean", "luma_std", "cb_mean", "cr_mean",
             "edge_energy", "flicker_frac", "flicker_mag", "flicker_color",
             "flicker_strong", "patch_idx", "ghost_echo", "static_var",
             "updates_per_s", "lag_dy", "lag_dx", "lag_pk", "lag_gain",
-            "lag2_resid", "cad_cv", "nrmark"]
+            "lag_resid", "lag2_resid", "spot_max", "spot_x", "spot_y",
+            "cad_cv", "nrmark"]
 
 
 def write_metrics_csv(path, ctx):
@@ -49,7 +50,10 @@ def write_metrics_csv(path, ctx):
                 "%.1f" % rate[i],
                 "%d" % s["lag_dy"][i], "%d" % s["lag_dx"][i],
                 "%.3f" % s["lag_pk"][i], "%.3f" % s["lag_gain"][i],
+                "%.3f" % s["lag_resid"][i],
                 "%.3f" % s["lag2_resid"][i],
+                "%.2f" % s["spot_max"][i],
+                "%.0f" % s["spot_x"][i], "%.0f" % s["spot_y"][i],
                 "%.3f" % s["cad_cv"][i],
                 "%d" % s["nrmark"][i] if "nrmark" in s else "1"]) + "\n")
 

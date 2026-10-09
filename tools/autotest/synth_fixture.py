@@ -53,7 +53,7 @@ def base_frame(i, w, h, rng):
 
 def gen(out, w, h, fps):
     rng = np.random.RandomState(7)
-    n = int(11 * fps)
+    n = int(12 * fps)
     tmp = tempfile.mkdtemp(prefix="synth_")
     frozen = None
     scene_b = None
@@ -61,6 +61,7 @@ def gen(out, w, h, fps):
     slide = None
     ghost_patch = None
     prev_rgb = None
+    ab_states = None
     for i in range(n):
         t = i / fps
         rgb, (bx, by) = base_frame(i, w, h, rng)
@@ -112,7 +113,7 @@ def gen(out, w, h, fps):
                 slide = rgb
             rgb = slide
             frames_since_update += 1
-        elif 9.0 <= t:                           # static noise
+        elif 9.0 <= t < 10.6:                    # static noise
             if i == int(9.0 * fps):
                 frozen = rgb
             rgb = frozen.copy()
@@ -120,6 +121,20 @@ def gen(out, w, h, fps):
             rgb[240:300, 400:490] = np.clip(
                 rgb[240:300, 400:490].astype(np.int16) + nz, 0, 255
                 ).astype(np.uint8)
+            if t >= 9.5 and i == int(9.5 * fps):  # phantom-spot (1 frame)
+                rgb[100:150, 60:110] = np.clip(
+                    rgb[100:150, 60:110].astype(np.int16) + 90, 0, 255
+                    ).astype(np.uint8)
+        elif 10.6 <= t:                          # static-scene flicker
+            # A/B alternation of two frozen states: every unique frame
+            # replays its 2-back neighbour while diff stays large - the
+            # closed-state-space signature of a flickering static scene
+            if ab_states is None:
+                a = frozen.copy() if frozen is not None else rgb.copy()
+                b = np.clip(a.astype(np.int16) + 45, 0, 255
+                            ).astype(np.uint8)
+                ab_states = (a, b)
+            rgb = ab_states[i % 2]
         write_png(os.path.join(tmp, "f%05d.png" % i), rgb[..., ::-1])
         prev_rgb = rgb.copy()
         # rgb[] is r,g,b order in base_frame; write_png expects raw array,
