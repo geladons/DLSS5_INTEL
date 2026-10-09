@@ -3476,3 +3476,73 @@ the sync trade-off (accepted by design); select-screen splice remains
 an external defect - a manager-side "auto-A past the episode picker"
 (ViGEm pad on GTA IV launches) would dodge it entirely but is a UX
 feature to discuss first.
+
+
+## Stage 53 - drift gate (freeze->slow-pan phantom mask) + overlay load meters
+
+Owner field report follow-up: "scenes that hold ~1 s then slowly turn the
+camera show STRONG phantoms - the mask is visible and applied crooked";
+also "load panel shows impossible numbers".
+
+Drift gate (dlss5/chain/engine.cpp detectSceneCut, engine.h):
+- Root cause: the motion gate measured only PER-FRAME velocity - the
+  fraction of 64x36 thumb cells moving >10/255 luma per frame. A slow
+  camera turn (~0.25 px/frame) moves each cell <10 luma, so tmFrac~0 and
+  the gate never fired, while the per-pixel emit latch kept re-emitting
+  the frozen enhancement mask on content that slid under it. Same story
+  for the (uncommitted) velocity accumulator: tmFrac=1.7% < floor.
+- Mechanism added: driftThumb_ = thumb snapshot at the last SETTLED
+  pose; driftFrac_ = fraction of cells displaced >5/255 from it on the
+  3x3-box-smoothed thumb (smoothing halves noise sigma - measured:
+  sigma=6 codec grain -> 1% displaced, a 1 px pan -> 10%, 2 px -> 19%,
+  so the threshold sits far above any realistic grain).
+- Suppression at driftFrac>0.20: histSuppressed_ -> histValid=0 -> the
+  per-pixel latch releases (temporal_nr latchOK=false -> uncapped emit)
+  = the mask tracks content instantly.
+- Release needs BOTH near-zero coarse velocity (tmFrac<0.005 - even a
+  0.25 px/f pan still moves ~2% coarse cells, so saturation plateaus
+  cannot falsely release mid-pan) AND driftFrac plateau (<0.008) for 8
+  frames, then the anchor re-bases. Second path: driftFrac<0.05 (content
+  returned near the anchor) also releases after the calm count.
+- Verified on the daemon probe (real GTA IV frame, 800x600, sync TCP):
+  freeze 30 f -> 0.25 px/f pan -> suppression at pan frame ~15
+  (~0.7 s at 22 fps cadence), stale-byte fraction drops 4-5% -> 0.6-1%,
+  resid 13.5 -> ~9.5, holds through the whole pan, releases ~8 frames
+  after the pan parks (log: "history off ... drift 20.5%" -> "history
+  on (moved 0.0%, drift 0.0%)"). Freeze phase stays latched (0.0%
+  wander), 1-2 px/f pans still trip the instant gate on frame 1.
+- Envs: D5C_TMGATE_DRIFT=0 disables; _HI/_LO/_EPS/_CALM/_SETTLE/_DELTA/
+  _RELLO retune. Debug: D5C_DEBUG_TMGATE=1 prints transitions to stderr.
+- The velocity accumulator from the previous attempt (tmAcc_) was
+  replaced - displacement-from-anchor detects the same sustained-motion
+  class strictly better (noise cannot pile up a drift).
+
+Overlay load meters (tools/desk_overlay.py):
+- CPU: GetSystemTimes kernel deltas INCLUDE idle - subtract idle or the
+  panel reads ~4x high (idle desktop showed ~54% vs real ~12%).
+- GPU: typeperf engine columns restricted to engtype_3D/Compute/Copy -
+  Sunshine's always-on VideoDecode/Encode engines were pinning the meter
+  ~30% on an idle GPU.
+- Both deployed to production (sha1 matched), verified live: idle GPU
+  ~4-5%, CPU ~12-15% matching typeperf cross-check.
+
+Verification chain for the visual fix:
+- synthetic detector self-test: synth.mp4 -> analyze, all detectors fire.
+- daemon probe numbers above (suppression timing, stale-byte %).
+- real DDA capture at_s53_bench2 (45 s inside the flythrough, 537 real
+  frames acquired): scene-change-staleness PASS, static-region-noise
+  PASS (was FAIL p95 15.4 at bench3), ghost-double-contour downgraded to
+  WARN (1 event, echo 0.32 on a bike scene), lag-trail-stale-apply
+  effectively clean. garland still FAILs (0.689, biggest event = 3.4 s
+  muzzle-flash action sequence - the same content class the NATIVE
+  control flags at 0.753); phantom-spot FAILs on 4 isolated 8x8 px
+  spots inside fade/action frames - also present in the native run,
+  looks like real game particles. update-rate FAIL is the sync-cadence
+  ceiling (~9 distinct updates/s), unchanged by design. No new artifact
+  class introduced; the crooked-mask mechanism is closed.
+
+NOTE on capture cadence: GTA IV bench flythrough ends ~+165-175 s after
+window-stable; the window then VANISHES (proc alive). Record window must
+land inside +120..+165 - at_s53_bench1 with pre-roll 180 recorded only
+repeated desktop (ddarec acquired=10/emitted=2885). at_s53_bench2 used
+pre-roll 100 dur 45 (+123..+168).

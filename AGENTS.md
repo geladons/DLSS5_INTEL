@@ -248,6 +248,27 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
     re-engage, hysteresis holds between. History keeps refreshing on
     suppressed frames, so re-engage is transient-free. Envs
     *_TMGATE=0 off, *_TMGATE_HI/LO retune, D5C_DEBUG_TMGATE=1 logs.
+    DRIFT GATE (same detectSceneCut pass, 2026-10-09): per-frame velocity
+    is blind to slow pans - a ~0.25 px/frame turn keeps every coarse cell
+    under the 10/255 delta so tmFrac ~ 0 and the gate never sees motion,
+    while the per-pixel emit latch keeps re-emitting the frozen mask on
+    content that slid under it ("scene holds ~1 s then slowly turns ->
+    mask applied crooked"). driftThumb_ snapshots the thumb at the last
+    SETTLED pose; driftFrac_ = fraction of cells displaced >DRIFT_DELTA
+    (5/255) from it on the 3x3-box-smoothed thumb (box filtering halves
+    noise sigma: sigma=6 grain = 1% displaced, a 1 px pan = 10%).
+    driftFrac > DRIFT_HI (0.20) suppresses identically; while suppressed
+    the anchor stays FROZEN so a continuing pan keeps driftFrac rising -
+    release needs near-zero coarse velocity (tmFrac < DRIFT_RELLO 0.005;
+    even a slow pan still moves a few coarse cells) AND driftFrac
+    plateaued (<DRIFT_EPS 0.008) for DRIFT_CALM (8) frames, then the
+    anchor re-bases at the new pose. While live, driftFrac < DRIFT_LO
+    (0.05) for DRIFT_SETTLE (10) frames re-bases the anchor so the
+    measure stays a displacement from a real pose. Measured on the
+    freeze->0.25 px/frame pan probe: suppression fires ~15 frames in,
+    holds for the whole pan (stale-byte fraction ~4% -> ~0.8%), releases
+    ~8 frames after the pan stops; grain-only content never trips it.
+    Envs *_TMGATE_DRIFT=0 off, _DRIFT_HI/LO/EPS/CALM/SETTLE/DELTA/RELLO.
     D5C_CUT_LIMIT=0 disables the whole thumb pass incl. the gate.
     Fixes the global-receptive-field "breathing" (cursor move re-derives
     all tones) at the x86 daemon cadence without re-importing the

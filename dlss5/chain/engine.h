@@ -130,7 +130,9 @@ public:
     // unrelated content. Also re-baselines the scene-cut thumb: the caller
     // already handled the transition, so the new content must not
     // double-fire the gate.
-    void resetHistory() { framesDone_ = 0; resetAnchors(); cutThumbValid_ = false; }
+    void resetHistory() { framesDone_ = 0; resetAnchors(); cutThumbValid_ = false;
+                          driftValid_ = false; histSuppressed_ = false;
+                          driftCalm_ = driftSettle_ = 0; }
 
     uint32_t netW() const { return netW_; }
     uint32_t netH() const { return netH_; }
@@ -265,6 +267,45 @@ private:
     bool tmGate_ = true;
     float tmSuppressHi_ = 0.20f;
     float tmSuppressLo_ = 0.05f;
+    // Displacement anchor on top of the instantaneous gate: a slow pan
+    // (~0.25 px/frame) moves each cell <kTmCellDelta so tmFrac_ ~ 0 and a
+    // per-frame velocity signal can never see it, yet over ~2-3 px of
+    // travel the emit latch is still holding the frozen mask on content
+    // that slid under it (field report: "scene holds ~1 s, then slowly
+    // turns - mask visible, applied crooked"). driftThumb_ snapshots the
+    // thumb at the last SETTLED pose; driftFrac_ is the fraction of cells
+    // displaced >tmDriftDelta_ from that anchor on the 3x3-box-SMOOTHED
+    // thumb - box filtering halves the noise sigma so codec grain never
+    // reaches the displacement threshold (measured: sigma=6 grain -> 1%
+    // displaced, a 1 px pan -> 10%, 2 px -> 19%), while any real
+    // translation accumulates regardless of per-frame speed. driftFrac >
+    // tmDriftHi_ suppresses history like the HI tripwire. While
+    // suppressed the anchor stays FROZEN, so a continuing pan keeps
+    // driftFrac rising and cannot plateau-release mid-motion: release
+    // requires near-zero coarse velocity (tmFrac_ < tmDriftRelLo_ - even
+    // a 0.25 px/frame pan still moves ~2% of coarse cells) AND driftFrac_
+    // plateaued (|delta| < tmDriftEps_) for tmDriftCalmN_ straight
+    // frames - content parked at a new pose - then the anchor re-bases
+    // there. While live, driftFrac < tmDriftLo_ for tmDriftSettleN_
+    // straight frames also re-bases (content settled near the anchor;
+    // keeps the measure a displacement from a real pose rather than
+    // unbounded history).
+    // Envs: D5C_TMGATE_DRIFT (0 disables the drift path),
+    // D5C_TMGATE_DRIFT_HI / _LO / _EPS / _CALM / _SETTLE / _DELTA.
+    uint8_t driftThumb_[kCutThumbW * kCutThumbH]{};
+    bool  driftValid_    = false;
+    float driftFrac_     = 0.0f;
+    float driftPrev_     = 0.0f;
+    int   driftCalm_     = 0;
+    int   driftSettle_   = 0;
+    bool  tmDriftOn_     = true;
+    int   tmDriftDelta_  = 5;       // smoothed-thumb luma delta = displaced
+    float tmDriftHi_     = 0.20f;   // displaced-cell fraction = suppress
+    float tmDriftLo_     = 0.05f;   // below this, anchor may re-base
+    float tmDriftRelLo_  = 0.005f;  // near-zero coarse velocity = settled
+    float tmDriftEps_    = 0.008f;  // |d(driftFrac)| plateau = settled
+    int   tmDriftCalmN_  = 8;       // settled frames before release+rebase
+    int   tmDriftSettleN_= 10;      // low-drift frames before live re-base
     bool tmDebug_ = false;
     void* uploadPtr_ = nullptr;
     void* rbFinalPtr_ = nullptr;             // persistently mapped readback

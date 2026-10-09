@@ -71,9 +71,46 @@ bool ChainEngine::init(const EngineConfig& cfg) {
         tmSuppressLo_ = (float)std::atof(e);
     else if (const char* e = std::getenv("DLSS5_TMGATE_LO"))
         tmSuppressLo_ = (float)std::atof(e);
+    if (const char* e = std::getenv("D5C_TMGATE_DRIFT"))
+        tmDriftOn_ = (std::atoi(e) != 0);
+    else if (const char* e = std::getenv("DLSS5_TMGATE_DRIFT"))
+        tmDriftOn_ = (std::atoi(e) != 0);
+    else if (const char* e = std::getenv("NR_LAYER_TMGATE_DRIFT"))
+        tmDriftOn_ = (std::atoi(e) != 0);
+    if (const char* e = std::getenv("D5C_TMGATE_DRIFT_HI"))
+        tmDriftHi_ = (float)std::atof(e);
+    else if (const char* e = std::getenv("DLSS5_TMGATE_DRIFT_HI"))
+        tmDriftHi_ = (float)std::atof(e);
+    if (const char* e = std::getenv("D5C_TMGATE_DRIFT_LO"))
+        tmDriftLo_ = (float)std::atof(e);
+    else if (const char* e = std::getenv("DLSS5_TMGATE_DRIFT_LO"))
+        tmDriftLo_ = (float)std::atof(e);
+    if (const char* e = std::getenv("D5C_TMGATE_DRIFT_EPS"))
+        tmDriftEps_ = (float)std::atof(e);
+    else if (const char* e = std::getenv("DLSS5_TMGATE_DRIFT_EPS"))
+        tmDriftEps_ = (float)std::atof(e);
+    if (const char* e = std::getenv("D5C_TMGATE_DRIFT_DELTA"))
+        tmDriftDelta_ = std::atoi(e);
+    else if (const char* e = std::getenv("DLSS5_TMGATE_DRIFT_DELTA"))
+        tmDriftDelta_ = std::atoi(e);
+    if (const char* e = std::getenv("D5C_TMGATE_DRIFT_RELLO"))
+        tmDriftRelLo_ = (float)std::atof(e);
+    else if (const char* e = std::getenv("DLSS5_TMGATE_DRIFT_RELLO"))
+        tmDriftRelLo_ = (float)std::atof(e);
+    if (const char* e = std::getenv("D5C_TMGATE_DRIFT_CALM"))
+        tmDriftCalmN_ = std::atoi(e);
+    else if (const char* e = std::getenv("DLSS5_TMGATE_DRIFT_CALM"))
+        tmDriftCalmN_ = std::atoi(e);
+    if (const char* e = std::getenv("D5C_TMGATE_DRIFT_SETTLE"))
+        tmDriftSettleN_ = std::atoi(e);
+    else if (const char* e = std::getenv("DLSS5_TMGATE_DRIFT_SETTLE"))
+        tmDriftSettleN_ = std::atoi(e);
     if (const char* d = std::getenv("D5C_DEBUG_TMGATE"))
         tmDebug_ = (std::atoi(d) != 0);
     histSuppressed_ = false;
+    driftValid_ = false;
+    driftCalm_ = driftSettle_ = 0;
+    driftPrev_ = driftFrac_ = 0.0f;
 
     if (!vkc_.create(cfg.vkCfg)) return false;
     const VkCtx& c = vkc_.vk;
@@ -273,19 +310,89 @@ bool ChainEngine::detectSceneCut(const uint8_t* bgraIn) {
     bool cut = false;
     if (cutThumbValid_) {
         tmFrac_ = (float)moved / (float)(kCutThumbW * kCutThumbH);
+        /* Displacement vs the settled anchor (see engine.h): per-frame
+         * velocity tmFrac_ is blind to slow pans - each cell moves
+         * <kTmCellDelta - but the emit latch then keeps re-emitting the
+         * frozen mask on content that slid under it. driftFrac_ counts
+         * cells displaced >tmDriftDelta_ from driftThumb_ (the thumb at
+         * the last settled pose) on the 3x3-box-smoothed thumb - the
+         * smoothing halves the noise sigma so codec grain never reaches
+         * the displacement threshold while any real translation
+         * accumulates regardless of per-frame speed. */
+        uint8_t sm[kCutThumbW * kCutThumbH];
+        for (int ty = 0; ty < kCutThumbH; ++ty)
+            for (int tx = 0; tx < kCutThumbW; ++tx) {
+                int s = 0;
+                for (int dy = -1; dy <= 1; ++dy)
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        const int yy = std::min(std::max(ty + dy, 0), kCutThumbH - 1);
+                        const int xx = std::min(std::max(tx + dx, 0), kCutThumbW - 1);
+                        s += cur[yy * kCutThumbW + xx];
+                    }
+                sm[ty * kCutThumbW + tx] = (uint8_t)((s + 4) / 9);
+            }
+        if (!driftValid_) {
+            std::memcpy(driftThumb_, sm, sizeof(driftThumb_));
+            driftValid_ = true;
+        }
+        uint32_t displaced = 0;
+        for (int i = 0; i < kCutThumbW * kCutThumbH; ++i)
+            if (std::abs((int)sm[i] - (int)driftThumb_[i]) > tmDriftDelta_)
+                ++displaced;
+        driftFrac_ = (float)displaced / (float)(kCutThumbW * kCutThumbH);
+        const bool driftHot =
+            (tmDriftOn_ && driftFrac_ > tmDriftHi_);
         if (tmGate_) {
-            if (!histSuppressed_ && tmFrac_ > tmSuppressHi_) {
+            if (!histSuppressed_
+                && (tmFrac_ > tmSuppressHi_ || driftHot)) {
                 histSuppressed_ = true;
+                driftCalm_ = 0;
                 if (tmDebug_)
                     std::fprintf(stderr, "[chain] motion gate: history off "
-                                 "(moved %.1f%%)\n", (double)(tmFrac_ * 100));
-            } else if (histSuppressed_ && tmFrac_ < tmSuppressLo_) {
-                histSuppressed_ = false;
-                if (tmDebug_)
-                    std::fprintf(stderr, "[chain] motion gate: history on "
-                                 "(moved %.1f%%)\n", (double)(tmFrac_ * 100));
+                                 "(moved %.1f%%, drift %.1f%%)\n",
+                                 (double)(tmFrac_ * 100),
+                                 (double)(driftFrac_ * 100));
+            } else if (histSuppressed_
+                       && (driftFrac_ < tmDriftLo_
+                           || (tmFrac_ < tmDriftRelLo_
+                               && std::fabs(driftFrac_ - driftPrev_)
+                                      < tmDriftEps_))) {
+                /* Release paths: (a) displacement fell back under the
+                 * floor - the motion was transient or reversed to the
+                 * anchor pose; (b) content SETTLED at a displaced pose -
+                 * with the anchor frozen a pan keeps driftFrac_ rising,
+                 * so a plateau means motion ended. The near-zero coarse
+                 * velocity guards the saturation plateau (a slow pan at
+                 * driftFrac ~ 1 still moves a few coarse cells above
+                 * kTmCellDelta, so tmFrac_ stays > tmDriftRelLo_ there).
+                 * Re-base the anchor on release so the settled pose
+                 * becomes the new zero. */
+                if (++driftCalm_ >= tmDriftCalmN_) {
+                    histSuppressed_ = false;
+                    driftCalm_ = 0;
+                    std::memcpy(driftThumb_, sm, sizeof(driftThumb_));
+                    driftFrac_ = 0.0f;
+                    if (tmDebug_)
+                        std::fprintf(stderr, "[chain] motion gate: "
+                                     "history on (moved %.1f%%, "
+                                     "drift %.1f%%)\n",
+                                     (double)(tmFrac_ * 100),
+                                     (double)(driftFrac_ * 100));
+                }
+            } else driftCalm_ = 0;
+            /* Anchor upkeep while live: content sitting under the drift
+             * floor for tmDriftSettleN_ straight frames is settled -
+             * re-base. Above the floor the anchor holds so slow pans
+             * accumulate displacement. While suppressed the anchor is
+             * frozen outright (driftFrac_ must stay comparable). */
+            if (!histSuppressed_) {
+                if (driftFrac_ < tmDriftLo_) {
+                    if (driftSettle_ < tmDriftSettleN_ && ++driftSettle_ >= tmDriftSettleN_)
+                        std::memcpy(driftThumb_, sm, sizeof(driftThumb_));
+                } else driftSettle_ = 0;
             }
         }
+        driftPrev_ = driftFrac_;
         const float mean = (float)((double)acc / (double)(kCutThumbW * kCutThumbH) / 255.0);
         cut = mean > cutLimit_;
         if (cut && cutDebug_)

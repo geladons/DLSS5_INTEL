@@ -19,8 +19,10 @@
 #              layer "fg stats: presents=N" delta          (sparse, x64)
 #            eng = the daemon's last chain ms, shown only while that log
 #            is live (>4 s stale -> '--', a dead session can't fake data)
-#   LOAD   - CPU % (GetSystemTimes), RAM % (GlobalMemoryStatusEx),
-#            GPU % (typeperf "GPU Engine" counters, busiest engine).
+#   LOAD   - CPU % (GetSystemTimes deltas; kernel time includes idle),
+#            RAM % (GlobalMemoryStatusEx), GPU % (typeperf "GPU Engine"
+#            counters, busiest 3D/Compute/Copy engine - video engines
+#            belong to Sunshine's capture and are excluded).
 #            Smoothed (EMA) so the numbers read like Task Manager, not a
 #            200 ms jitter stream.
 #
@@ -104,7 +106,10 @@ class CpuMeter:
         i, k, u = self._prev
         ni, nk, nu = self._read()
         self._prev = (ni, nk, nu)
-        busy = (nk - k) + (nu - u)
+        # GetSystemTimes kernel time INCLUDES idle - subtract it or the
+        # panel reads ~4x high (idle desktop showed ~54% instead of ~12%).
+        kern = (nk - k) - (ni - i)
+        busy = kern + (nu - u)
         total = busy + (ni - i)
         return 0.0 if total <= 0 else 100.0 * busy / total
 
@@ -119,9 +124,15 @@ def ram_percent():
 class GpuMeter(threading.Thread):
     """Streams `typeperf -si 1` GPU-engine counters; keeps the row max.
 
-    The counter set spans every (pid, luid, engine) tuple, so the busiest
-    engine across all GPUs is a fair "GPU load" proxy for a recording.
+    Columns are restricted to engines that reflect pipeline/game work
+    (3D / Compute / Copy) - video decode/encode engines are owned by
+    Sunshine's always-on capture on this host and would pin the meter at
+    ~30% while Task Manager shows the GPU idle. Falls back to the full
+    row max if the header has no recognisable columns. First sample lands
+    ~4-5 s in: typeperf spends that long enumerating ~600 counters.
     """
+
+    _ENG_OK = ("engtype_3D", "engtype_Compute", "engtype_Copy")
 
     def __init__(self):
         super().__init__(daemon=True)
@@ -137,15 +148,26 @@ class GpuMeter(threading.Thread):
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 text=True, bufsize=1,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            cols = None              # engine-column indices from header
             for line in self._proc.stdout:
                 if self._stop:
                     break
                 line = line.strip()
-                if not line.startswith('"') or "(PDH" in line:
+                if not line.startswith('"'):
+                    continue
+                if "(PDH" in line:   # header row - map engine columns
+                    try:
+                        row = next(csv.reader(io.StringIO(line)))
+                        cols = [i for i, name in enumerate(row) if i > 0
+                                and any(t in name for t in self._ENG_OK)]
+                    except csv.Error:
+                        cols = []
                     continue
                 try:
                     row = next(csv.reader(io.StringIO(line)))
-                    vals = [float(v) for v in row[1:] if v]
+                    vals = [float(row[i]) for i in cols
+                            if i < len(row) and row[i]] if cols else \
+                        [float(v) for v in row[1:] if v]
                     if vals:
                         self.value = max(vals)
                 except (ValueError, csv.Error):
