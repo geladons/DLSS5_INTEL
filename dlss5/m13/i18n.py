@@ -123,6 +123,20 @@ _S = {
               "cursor; exclusive-fullscreen games may minimize)",
         "ru": "Отдавать оверлею фокус мыши (освобождает курсор игры; "
               "эксклюзивный полноэкранный режим может свернуться)"},
+    "bench_panel": {
+        "en": "Benchmark panel (desktop recording)",
+        "ru": "Панель бенчмарка (для записи рабочего стола)"},
+    "bp_clock": {"en": "clock (date + time + seconds)",
+                 "ru": "часы (дата + время + секунды)"},
+    "bp_fps": {"en": "fps (game present rate + engine ms)",
+               "ru": "fps (рейт кадров игры + мс движка)"},
+    "bp_load": {"en": "load (CPU / RAM / GPU)",
+                "ru": "нагрузка (CPU / RAM / GPU)"},
+    "bp_hint": {
+        "en": "Borderless always-on-top panels; drag them anywhere, "
+              "right-click closes. Unchecking everything hides the panel.",
+        "ru": "Панели без рамки, всегда поверх; таскай мышью, правый "
+              "клик закрывает. Сними все галочки, чтобы скрыть."},
     "language_label": {"en": "Language / Язык:", "ru": "Language / Язык:"},
     "language_note": {"en": "takes effect after restart",
                       "ru": "применится после перезапуска"},

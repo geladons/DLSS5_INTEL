@@ -3271,3 +3271,30 @@ the layer diag f= counter delta; engine ms from m11d log tail; '--'
 when the log stops growing), LOAD (CPU/RAM via ctypes, GPU% via
 typeperf GPU-Engine counters). Draggable, positions persist in
 %TEMP%\desk_overlay_pos.json, right-click/Esc exits. No new deps.
+
+## 2026-10-09 desk overlay v2 - real data sources + manager settings
+
+Owner review of the first overlay build: FPS panel showed "--" forever,
+eng pinned at a stale 35 ms, numbers jittered vs Task Manager, and a
+console window appeared next to the panels. Fixed:
+
+- FPS sources, first fresh wins (file mtime <4 s = "live"): daemon
+  `frame N` counter (x86 TCP path - sync serving means daemon cadence IS
+  the displayed rate), layer `[diag] f=N` (NR_LAYER_DIAG), layer
+  `fg stats: presents=N` (x64 fallback, sparse). No fresh source -> '--'
+  instead of replaying a dead rate; eng ms only prints while m11d_last
+  is live.
+- Load panel smoothed (EMA a=0.35, 400 ms tick) - matches Task Manager
+  cadence instead of 200 ms jitter.
+- Single instance via %TEMP%\desk_overlay.pid: a new copy kills the old
+  one, so the manager's apply() is just respawn-with-new-panels. Pid is
+  image-name verified (python*) before terminate - no pid-reuse kills.
+- Console: managed launches spawn pythonw with CREATE_NO_WINDOW |
+  DETACHED_PROCESS | NEW_PROCESS_GROUP; the standalone DESK OVERLAY.cmd
+  also uses pythonw (no console).
+
+m13 settings got a "Benchmark panel" section (desk_panel_clock/fps/load
+cfg keys, i18n en+ru, restored on manager start, panels outlive the
+manager for recording). deskpanel.py resolves tools/desk_overlay.py in
+both repo and production layouts; _build_production copies it into the
+bundle and generates DESK OVERLAY.cmd.

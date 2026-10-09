@@ -28,7 +28,7 @@ WEIGHTS_SRC = os.path.join(_REPO, "work", "mlxw",
                            "dlssnr-logical.safetensors")
 
 PKG_FILES = ["__init__.py", "cleaner.py", "config.py", "daemonctl.py",
-             "deploy.py",
+             "deploy.py", "deskpanel.py",
              "gamelaunch.py", "gamescan.py", "gamescache.py", "i18n.py", "icons.py",
              "launcher.py", "logtail.py", "media.py", "media_img.py",
              "media_video.py", "overlay.py", "overlay_win32.py",
@@ -247,12 +247,23 @@ def main():
             shutil.copy2(int8_src, int8_dst)
         assert sha1(int8_src) == sha1(int8_dst), "int8 weights hash mismatch"
 
+    tools_dst = os.path.join(DEST, "tools")
+    os.makedirs(tools_dst, exist_ok=True)
+    ov_src = os.path.join(_REPO, "tools", "desk_overlay.py")
+    ov_dst = os.path.join(tools_dst, "desk_overlay.py")
+    if os.path.exists(ov_src):
+        shutil.copy2(ov_src, ov_dst)
+        assert sha1(ov_src) == sha1(ov_dst), "desk_overlay hash mismatch"
+
     with open(os.path.join(DEST, "DLSS5 Manager.vbs"), "w", newline="") as f:
         f.write(LAUNCHER_VBS.replace("\n", "\r\n"))
     with open(os.path.join(DEST, "M13.cmd"), "w", newline="") as f:
         f.write(LAUNCHER_CMD)
     with open(os.path.join(DEST, "DLSS 5 Manager.cmd"), "w", newline="") as f:
         f.write(LAUNCHER_CMD)
+    with open(os.path.join(DEST, "DESK OVERLAY.cmd"), "w", newline="") as f:
+        f.write(LAUNCHER_CMD.replace("m13\\m13.pyw",
+                                     "tools\\desk_overlay.py"))
     with open(os.path.join(DEST, "README.txt"), "w", newline="\r\n",
               encoding="utf-8") as f:
         f.write(README.replace("\n", "\r\n"))

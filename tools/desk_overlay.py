@@ -3,14 +3,24 @@
 # ============================================================================
 # desk_overlay.py - recording-companion overlay for DLSS5_INTEL sessions.
 #
-# Three borderless always-on-top panels meant to be captured by a
-# whole-desktop recording (OBS/Sunshine) alongside the game window:
+# Borderless always-on-top panels meant to be captured by a whole-desktop
+# recording (OBS/Sunshine) alongside the game window. Launch a subset with
+#   pythonw desk_overlay.py --panels clock,fps,load
+# Single instance: a new copy kills the previous one via the pidfile, so
+# the manager's apply() == respawn-with-new-panels.
 #
 #   CLOCK  - date + HH:MM:SS, refreshed at 5 Hz (video timecode)
-#   FPS    - game present rate derived from the layer's diag counter
-#            (f= delta / wall time) + the m11d engine's last frame ms
+#   FPS    - game present rate. Sources, first fresh wins:
+#              daemon m11d_last.log  "frame N ... in X ms"  (x86 TCP path:
+#                sync serving means the daemon cadence IS the game rate)
+#              layer nr_layer_win.log "[diag] f=N"         (NR_LAYER_DIAG)
+#              layer "fg stats: presents=N" delta          (sparse, x64)
+#            eng = the daemon's last chain ms, shown only while that log
+#            is live (>4 s stale -> '--', a dead session can't fake data)
 #   LOAD   - CPU % (GetSystemTimes), RAM % (GlobalMemoryStatusEx),
-#            GPU % (typeperf "GPU Engine" counters, busiest engine)
+#            GPU % (typeperf "GPU Engine" counters, busiest engine).
+#            Smoothed (EMA) so the numbers read like Task Manager, not a
+#            200 ms jitter stream.
 #
 # No third-party deps: tkinter + ctypes + a typeperf helper process.
 # Drag panels with the left mouse button. Right-click or Esc closes.
@@ -33,10 +43,14 @@ import tkinter as tk
 LAYER_LOG = os.path.join(tempfile.gettempdir(), "nr_layer_win.log")
 DAEMON_LOG = os.path.join(tempfile.gettempdir(), "m11d_last.log")
 POS_FILE = os.path.join(tempfile.gettempdir(), "desk_overlay_pos.json")
+PID_FILE = os.path.join(tempfile.gettempdir(), "desk_overlay.pid")
+FRESH_S = 4.0                    # a log older than this feeds '--'
 
 BG, FG, DIM = "#0a0e0a", "#9dff57", "#5c7a4a"
 FONT_VAL = ("Consolas", 18, "bold")
 FONT_LBL = ("Consolas", 9)
+
+ALL_PANELS = ("clock", "fps", "load")
 
 # ---------------------------------------------------------------- counters
 
@@ -107,7 +121,8 @@ class GpuMeter(threading.Thread):
                 ["typeperf", "-si", "1",
                  "\\GPU Engine(*)\\Utilization Percentage"],
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                text=True, bufsize=1)
+                text=True, bufsize=1,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             for line in self._proc.stdout:
                 if self._stop:
                     break
@@ -136,6 +151,8 @@ class GpuMeter(threading.Thread):
 # ---------------------------------------------------------------- fps read
 _F_RE = re.compile(rb"\bf=(\d+)")
 _MS_RE = re.compile(rb"in ([\d.]+) ms")
+_DF_RE = re.compile(rb"\bm11d\] frame (\d+)")
+_PRES_RE = re.compile(rb"presents=(\d+)")
 
 
 def _tail(path, nbytes=65536):
@@ -149,44 +166,71 @@ def _tail(path, nbytes=65536):
         return b""
 
 
+def _fresh(path):
+    try:
+        return time.time() - os.path.getmtime(path) < FRESH_S
+    except OSError:
+        return False
+
+
 class FpsSource:
-    """Present rate = layer diag f= counter delta over wall time.
-    Engine ms = last `in X ms` the daemon logged. A stale log (>4 s
-    without growth) shows '--' so a dead session can't fake a rate."""
+    """Present-rate estimator with three sources, first fresh wins:
+
+    1. daemon m11d_last.log `frame N` counter - live only while the log
+       file is being written (mtime fresh). Under the x86 sync path the
+       daemon's served cadence IS the displayed frame rate.
+    2. layer nr_layer_win.log `[diag] f=N` counter (needs NR_LAYER_DIAG).
+    3. layer `fg stats: presents=N` - written every 300 presents; sparse
+       but path-agnostic, covers the x64 in-process engine.
+    """
 
     def __init__(self):
-        self._f = None
-        self._t = None
-        self._size = 0
-        self._last_grow = time.time()
+        self._s = {}                 # source -> (counter, t)
+        self._last_fps = None
+
+    def _rate(self, key, cur):
+        prev = self._s.get(key)
+        self._s[key] = (cur, time.time())
+        if prev is None:
+            return None
+        dt = time.time() - prev[1]
+        if 0.15 < dt < 5.0 and cur > prev[0]:
+            return (cur - prev[0]) / dt
+        return None
 
     def sample(self):
-        now = time.time()
-        try:
-            size = os.path.getsize(LAYER_LOG)
-        except OSError:
-            size = 0
-        buf = _tail(LAYER_LOG)
-        m = list(_F_RE.finditer(buf))
-        cur = int(m[-1].group(1)) if m else None
-        if size != self._size:
-            self._size = size
-            self._last_grow = now
-        fps = None
-        if cur is not None and self._f is not None:
-            dt = now - self._t
-            if 0.15 < dt < 5.0 and cur > self._f:
-                fps = (cur - self._f) / dt
-        if cur is not None:
-            self._f, self._t = cur, now
-        if now - self._last_grow > 4.0:
-            fps = None
-        eng = None
-        dbuf = _tail(DAEMON_LOG, 32768)
-        d = list(_MS_RE.finditer(dbuf))
-        if d:
-            eng = float(d[-1].group(1))
-        return fps, eng
+        fps = eng = None
+        if _fresh(DAEMON_LOG):
+            buf = _tail(DAEMON_LOG, 32768)
+            m = list(_DF_RE.finditer(buf))
+            if m:
+                r = self._rate("daemon", int(m[-1].group(1)))
+                if r is not None:
+                    fps = r
+            d = list(_MS_RE.finditer(buf))
+            if d:
+                eng = float(d[-1].group(1))
+            if fps is None:
+                fps = self._last_fps          # between counter lines
+        if fps is None and _fresh(LAYER_LOG):
+            buf = _tail(LAYER_LOG)
+            m = list(_F_RE.finditer(buf))
+            if m:
+                fps = self._rate("diag", int(m[-1].group(1)))
+            if fps is None:
+                p = list(_PRES_RE.finditer(buf))
+                if p:
+                    fps = self._rate("stats", int(p[-1].group(1)))
+            if fps is None:
+                fps = self._last_fps
+        if fps is None and self._s:
+            # every source quiet -> forget the last rate so '--' shows
+            last_t = max(t for _c, t in self._s.values())
+            if time.time() - last_t > FRESH_S:
+                self._last_fps = None
+        if fps is not None:
+            self._last_fps = fps
+        return self._last_fps, eng
 
 
 # ---------------------------------------------------------------- widgets
@@ -224,7 +268,40 @@ class Panel(tk.Toplevel):
         return lbl
 
 
+# ------------------------------------------------------------ single inst
+def _claim_instance():
+    """Kill a previous overlay (pidfile) and take over the slot."""
+    try:
+        with open(PID_FILE) as f:
+            old = int(f.read().strip())
+    except (OSError, ValueError):
+        old = 0
+    if old and old != os.getpid():
+        h = ctypes.windll.kernel32.OpenProcess(0x1001, False, old)
+        if h:                               # QUERY_LIM | TERMINATE
+            buf = ctypes.create_unicode_buffer(260)
+            size = ctypes.c_ulong(260)
+            is_py = ctypes.windll.kernel32.QueryFullProcessImageNameW(
+                h, 0, buf, ctypes.byref(size)) \
+                and "python" in buf.value.lower()
+            if is_py:
+                ctypes.windll.kernel32.TerminateProcess(h, 0)
+            ctypes.windll.kernel32.CloseHandle(h)
+    with open(PID_FILE, "w") as f:
+        f.write(str(os.getpid()))
+
+
 def main():
+    import argparse
+    ap = argparse.ArgumentParser(prog="desk_overlay")
+    ap.add_argument("--panels", default=",".join(ALL_PANELS),
+                    help="comma list: clock,fps,load")
+    args = ap.parse_args()
+    want = [p for p in args.panels.split(",") if p in ALL_PANELS]
+    if not want:
+        return 0
+    _claim_instance()
+
     root = tk.Tk()
     root.withdraw()
     try:
@@ -240,6 +317,10 @@ def main():
         except OSError:
             pass
         gpu.stop()
+        try:
+            os.unlink(PID_FILE)
+        except OSError:
+            pass
         root.destroy()
 
     def spawn(key, dx, dy):
@@ -247,40 +328,49 @@ def main():
         panels[key] = Panel(root, key, x, y, on_close)
         return panels[key]
 
-    # CLOCK --------------------------------------------------------------
-    w = spawn("clock", 30, 30)
-    w.make("DATE / TIME")
-    clock_lbl = w.make("--", FONT_VAL, "#ffffff")
-
-    # FPS ----------------------------------------------------------------
-    w = spawn("fps", 30, 120)
-    w.make("GAME PRESENT / ENGINE")
-    fps_lbl = w.make("--", FONT_VAL, FG)
-
-    # LOAD ---------------------------------------------------------------
-    w = spawn("load", 30, 210)
-    w.make("CPU / RAM / GPU")
-    load_lbl = w.make("--", FONT_VAL, "#66ccff")
-
-    cpu = CpuMeter()
     gpu = GpuMeter()
-    gpu.start()
+    cpu = CpuMeter()
     fpssrc = FpsSource()
+    clock_lbl = fps_lbl = load_lbl = None
+
+    if "clock" in want:
+        w = spawn("clock", 30, 30)
+        w.make("DATE / TIME")
+        clock_lbl = w.make("--", FONT_VAL, "#ffffff")
+    if "fps" in want:
+        w = spawn("fps", 30, 120)
+        w.make("GAME PRESENT / ENGINE")
+        fps_lbl = w.make("--", FONT_VAL, FG)
+    if "load" in want:
+        w = spawn("load", 30, 210)
+        w.make("CPU / RAM / GPU")
+        load_lbl = w.make("--", FONT_VAL, "#66ccff")
+        gpu.start()
+
+    ema = {}                                 # EMA-smoothed load values
+
+    def smooth(k, v):
+        ema[k] = v if k not in ema else ema[k] * 0.65 + v * 0.35
+        return ema[k]
 
     def tick():
-        now = time.localtime()
-        clock_lbl.config(text=time.strftime("%d.%m.%Y %H:%M:%S", now))
-        fps, eng = fpssrc.sample()
-        fps_lbl.config(
-            text=("%5.1f fps" % fps if fps is not None else "  -- fps")
-                 + ("  eng %.0fms" % eng if eng is not None else ""))
-        g = gpu.value
-        load_lbl.config(text="C %3.0f%%  R %3.0f%%  G %s%%"
-                             % (cpu.sample(), ram_percent(),
-                                "%3.0f" % g if g is not None else " --"))
-        root.after(200, tick)
+        if clock_lbl is not None:
+            clock_lbl.config(text=time.strftime("%d.%m.%Y %H:%M:%S"))
+        if fps_lbl is not None:
+            fps, eng = fpssrc.sample()
+            fps_lbl.config(
+                text=("%5.1f fps" % fps if fps is not None else "  -- fps")
+                     + ("  eng %.0fms" % eng if eng is not None else ""))
+        if load_lbl is not None:
+            g = gpu.value
+            load_lbl.config(text="C %3.0f%%  R %3.0f%%  G %s%%"
+                                 % (smooth("c", cpu.sample()),
+                                    smooth("r", ram_percent()),
+                                    "%3.0f" % smooth("g", g)
+                                    if g is not None else " --"))
+        root.after(400, tick)
 
-    root.after(200, tick)
+    root.after(400, tick)
     root.mainloop()
 
 

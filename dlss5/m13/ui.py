@@ -215,6 +215,13 @@ class ManagerUI:
         for tag, color in TAG_COLORS.items():
             self.logtxt.tag_config(tag, foreground=color)
 
+        # restore the recording desk panels the owner left enabled
+        want = [k for k in ("clock", "fps", "load")
+                if self.ctl.cfg.get("desk_panel_" + k)]
+        if want:
+            from . import deskpanel
+            deskpanel.apply(want)
+
     # ------------------------------------------------------ wheel routing --
     def register_wheel_region(self, container, canvas):
         """Wheel events anywhere inside `container` (the canvas itself,
@@ -558,6 +565,23 @@ class ManagerUI:
                             "overlay_focus", bool(self.focus_var.get()))
                         ).pack(anchor="w")
 
+        bp = ttk.LabelFrame(t, text=tr("bench_panel"), padding=8)
+        bp.pack(fill="x", pady=6)
+        bp_row = ttk.Frame(bp)
+        bp_row.pack(anchor="w")
+        self.bp_vars = {}
+        for key, label in (("clock", "bp_clock"), ("fps", "bp_fps"),
+                           ("load", "bp_load")):
+            var = tk.BooleanVar(
+                value=bool(self.ctl.cfg.get("desk_panel_" + key)))
+            self.bp_vars[key] = var
+            ttk.Checkbutton(bp_row, text=tr(label), variable=var,
+                            command=self._desk_panel_toggled
+                            ).pack(side="left", padx=(0, 12))
+        ttk.Label(bp, text=tr("bp_hint"), style="Muted.TLabel",
+                  wraplength=WRAP_PX, justify="left").pack(
+                      anchor="w", pady=(4, 0))
+
         p30_wrap = tk.Frame(t, bg=PANEL, highlightthickness=1,
                             highlightbackground=BORDER)
         p30_wrap.pack(fill="x", pady=(10, 6))
@@ -656,6 +680,16 @@ class ManagerUI:
         self.ctl.submit(self.ctl.set_framegen, fg)
         if hasattr(self, "overlay") and self.overlay:
             self.overlay.sync_framegen(fg)
+
+    def _desk_panel_toggled(self):
+        want = [k for k, v in self.bp_vars.items() if v.get()]
+        for k in self.bp_vars:
+            self.ctl.cfg.set("desk_panel_" + k, k in want)
+        from . import deskpanel
+        ok = deskpanel.apply(want)
+        self.log("mgr", "desk panels %s (%s)"
+                 % ("shown: " + ",".join(want) if want else "hidden",
+                    "ok" if ok else "spawn failed"))
 
     # -------------------------------------------------------------- poll ---
     def _poll(self):
