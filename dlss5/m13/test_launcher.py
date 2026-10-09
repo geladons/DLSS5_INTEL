@@ -441,5 +441,48 @@ class TestDaemonShutdown(LauncherBase):
         self.assertEqual(d.stopped, 1)
 
 
+class TestX86DaemonKnobs(LauncherBase):
+    """x86 daemon-path launches push per-game knobs over NRCT: temporal
+    defaults OFF (the low service cadence makes the history blend a
+    stale-structure injector), meta.temporal can re-enable."""
+
+    def _x86_launch(self, meta_extra=None):
+        exe = self._mk("gtaiv.exe", mode="dx9", arch="x86")
+        if meta_extra:
+            self.ctl.cfg.get("games")[exe].update(meta_extra)
+        client = MagicMock()
+        client.warmup.return_value = True
+        self.ctl.client = client
+
+        class _Daemon:
+            pid = 4242
+            running = True
+            def stop(self):
+                self.running = False
+                return True, "stopped"
+        self.ctl.daemon = _Daemon()
+        pl, pd = self._patches()
+        with pl, pd, \
+             patch.object(deploy_mod.Deployer, "mode_status",
+                          return_value="deployed"), \
+             patch("m13.launcher._screen_extent", return_value=(800, 600)), \
+             patch.dict(os.environ, {"D5C_LAUNCH_SETTLE_MS": "0"}):
+            ok, msg = self.launcher.launch(exe)
+        self.assertTrue(ok, msg)
+        return client
+
+    def test_x86_temporal_defaults_off(self):
+        client = self._x86_launch()
+        client.set_temporal.assert_called_once_with(False)
+
+    def test_x86_temporal_meta_true_reenables(self):
+        client = self._x86_launch({"temporal": True})
+        client.set_temporal.assert_called_once_with(True)
+
+    def test_x86_temporal_meta_false_pushes(self):
+        client = self._x86_launch({"temporal": False})
+        client.set_temporal.assert_called_once_with(False)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

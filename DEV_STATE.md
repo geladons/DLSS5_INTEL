@@ -2951,3 +2951,41 @@ coherence vote) remain correct and stay for the async opt-in path -
 but the dominant artifact was residual staleness itself, which only
 sync removes. Per-game meta: "sync" semantics = NR_LAYER_ASYNC=0
 (default x86), "async":true = opt out.
+
+## 2026-10-08 Stage 45 - x86 daemon path: temporal OFF by default
+
+OWNER RETEST of sync mode (Stage 44 deployed): same artifacts - menu
+mouse ghosts/flicker, bench "mask not synced with frames -> noise".
+Log analysis proved sync WAS active (banner, presents=processed 1:1,
+daemon ~38-40 ms/frame). Conclusion: the remaining artifact lives
+INSIDE the daemon's own output - the temporal history blend injects
+one-frame-old structure into the current delta and the banded
+hold/release ratchet converges over several 40 ms frames (tuned for
+60 fps capture) = the "mask that lags".
+
+LIVE PROBES against the running daemon (Temp/_pan_ab.py, _step2.py,
+_masktrack.py, _maskjitter.py):
+- output spatially aligned to input (best shift +0px on a 4-6px/f pan)
+- scene cuts emit the new scene cleanly on the FIRST post-cut frame
+- delta field tracks content (motion-comp match >> same-pos match)
+- BUT delta jitters ~5.7/255 per frame with temporal ON vs 4.3 OFF:
+  the history blend ADDS ~33% frame-to-frame delta variance on motion
+- verbatim hold only ~4% of moved pixels - the latch is not the main
+  source, the blended history is
+
+FIX: launcher.py daemon step now pushes NRCT set_temporal(False) for
+EVERY x86-arch launch (not just explicit meta.temporal:false); explicit
+meta.temporal:true re-enables. x64 in-process path untouched. With no
+feedback loop the emitted delta is a pure function of the current
+frame - it cannot desync by construction. Residual risk: near-static
+shimmer returns (the period-2 chase the latch killed needed the
+feedback loop that no longer exists; bit-identical frames still hit
+the layer reuse path and never reach the daemon).
+
+Tests: TestX86DaemonKnobs - default-off push, meta true/false honored.
+All launcher+launch-path tests green. Deployed to production/m13.
+
+OPEN (cadence ceiling): sync still caps motion at ~25 fps; the
+game-rendered cursor teleports at that rate (baked into fresco) -
+intrinsic to a capped pipeline. Next quality levers if shimmer
+persists: render scale 0.75 (measured ~free vs 0.58), intensity trim.
