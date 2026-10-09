@@ -108,6 +108,15 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
     and executes directly in-process on host-visible staging buffers (0 ms
     socket lag, no background daemon).
   - x86 games (GTA IV via DXVK): connects over TCP (127.0.0.1:48990) to `m11d.exe`.
+    Serving is SYNC by default (present blocks on the daemon round-trip,
+    ~15-18 fps engine cadence, every displayed frame real): bare async
+    replayed whole stale frames = ghosts/flicker on motion (owner field
+    report 2026-10-08, unmanaged launch env). Explicit NR_LAYER_ASYNC=1
+    opts back into the mailbox path - only worth it with
+    NR_LAYER_RESIDUAL=1 + NR_LAYER_GPUWARP=1 armed (the masked-delta
+    serve); autotest launches set ASYNC=1 directly. m13 gamelaunch pins
+    ASYNC=0/RESIDUAL=1/GPUWARP=1 for every arch=x86 game - do not launch
+    x86 test sessions with hand envs that miss this block.
   - NO HUD/positional masking (removed Stage 25 - field test showed it covered
     game content and looked worse than no mask). Every pixel is neural-processed;
     the only passthrough is exact-repeat reuse: a frame byte-identical to the

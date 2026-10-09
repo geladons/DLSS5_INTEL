@@ -38,17 +38,18 @@
  *   NR_LAYER_NEAR_REUSE 1 = also reuse on near-identical input (sampled eps,
  *                     capped replays). OPT-IN, default OFF: stale-result
  *                     replay judders on slow pans / animated grain.
- *   NR_LAYER_ASYNC    0 = synchronous TCP round-trip inside the present
- *                     (the old behaviour, kept for bisecting). Default ON
- *                     for the daemon path: the present submits the frame
- *                     to a worker mailbox (bounded, drop-oldest) and shows
- *                     the newest completed reply it already holds - the
- *                     ~60 ms m11d round-trip runs in parallel with the
- *                     game instead of capping it (GTA IV: ~15 fps ->
- *                     engine speed, no loading-screen "Not Responding").
- *                     The processed stream simply lags the raw stream by
- *                     roughly one daemon frame; on static content the
- *                     displayed result is identical to the sync path.
+ *   NR_LAYER_ASYNC    1 = async TCP serving: the present submits the
+ *                     frame to a worker mailbox (bounded, drop-oldest)
+ *                     and shows the newest completed reply it already
+ *                     holds - the ~60 ms m11d round-trip runs in
+ *                     parallel with the game instead of capping it.
+ *                     DEFAULT OFF (sync): the daemon answers ~15/s, so
+ *                     async without the residual compositor shows whole
+ *                     stale frames on motion (ghosts/held flicker, field
+ *                     report 2026-10-08) and even with it the masked
+ *                     delta speckle is the "digital garbage" the m13 x86
+ *                     launch avoids by pinning sync. Managed launches
+ *                     set the env either way.
  *   NR_LAYER_ASYNC_STALE_MS  staleness bound for serve-best on NEW content
  *                     (default 500): while replies keep landing within
  *                     this window every present shows the freshest
@@ -1284,7 +1285,15 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
             nr_log("[nr_layer] NOPATCH: swapchains left completely alone");
         {
             const char *ae = getenv("NR_LAYER_ASYNC");
-            g_async = !ae || strcmp(ae, "0") != 0;
+            /* Async serving is opt-in: the daemon answers ~15/s while the
+             * game presents far faster, so bare async feeds 4-6-present-
+             * stale frames to the display (ghost trails + held flicker -
+             * field report 2026-10-08, unmanaged launch env). SYNC blocks
+             * the present on the round-trip: every displayed frame is a
+             * real daemon reply at the engine cadence. The m13 x86 launch
+             * sets NR_LAYER_ASYNC=0 explicitly; opt back in with =1 (the
+             * autotest does). */
+            g_async = ae && strcmp(ae, "0") != 0;
             const char *st = getenv("NR_LAYER_ASYNC_STALE_MS");
             if (st) {
                 g_async_stale_ms = atol(st);

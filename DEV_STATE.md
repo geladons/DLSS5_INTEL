@@ -3201,3 +3201,34 @@ precedent as DLSS5_GAIN_LOCK=0 in the same file). Temporal-off result:
 T4 = 0.579 vs 5.048 (9x better than crossfade) - the interpolator
 itself is healthy. All chain suites green: framegen, interp, transfer,
 graceful_fail, noise_seed, scene_cut, scale_reconstruction.
+
+## 2026-10-08 Stage 50 - owner playtest: ghosts+flicker = unmanaged env, not FG
+
+Owner's GTA IV session (f~1.26M presents, ~2h): reported ghosts and
+flicker in-game. Log forensics proved the cause is the LAUNCH ENV, not
+the new shader/deadline code:
+
+- framegen env=1 (NRN2, cadence 2) but the stale knob file
+  (m13_phase30_knobs.json frame_gen:0) is the live authority ->
+  is_framegen_enabled()=0 -> ZERO generated frames all session
+  (daemon: 0 fgi requests in 36K served frames).
+- "async daemon submit: on" + "serve-residual: OFF": the session ran
+  the bare-launch defaults (async ON, residual OFF) - NOT the m13 x86
+  block (gamelaunch.py forces NR_LAYER_ASYNC=0 + RESIDUAL=1 + GPUWARP=1
+  for arch=x86). manager_err.log untouched since 21:04 -> the game was
+  not spawned by m13 this session.
+- Daemon averaged ~67 ms/frame (chain c~61 ms - GPU contention with
+  the game; menu-only runs are faster). ~982K reuse + 210K aserv
+  presents: unserved presents replayed the whole previous processed
+  frame = ghost trails on motion + visible flicker on each fresh pop.
+- The "external-raw-splice" menu defect was menu-select-only; in-game
+  artefacts this session were the held-frame class entirely.
+
+Fix shipped: nr_layer_win.c - NR_LAYER_ASYNC now defaults OFF on the
+TCP daemon path (sync exchange_keepalive = every displayed frame is a
+real reply at engine cadence); explicit NR_LAYER_ASYNC=1 opts back in
+(autotest base env already sets it). NR_LAYER_RESIDUAL stays opt-in:
+its spatial speckle on camera motion was deliberately rejected by the
+owner earlier; m13 still arms RESIDUAL=1+GPUWARP=1 for x86 games.
+
+Deployed: x86+x64 layer dlls rebuilt and copied to production.
