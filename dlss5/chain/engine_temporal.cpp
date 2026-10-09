@@ -25,7 +25,8 @@ namespace d5c {
 //   stream start / resetHistory) -> the blend is skipped outright instead
 //   of dragging a col01-substituted "history".
 void ChainEngine::recordTemporal() {
-    const float histValid = (cfg_.temporal && framesDone_ > 0) ? 1.0f : 0.0f;
+    const float histValid = (cfg_.temporal && framesDone_ > 0
+                             && !histSuppressed_) ? 1.0f : 0.0f;
     if (pipeStats_) {
         Push sp{};
         sp.a[0] = (int32_t)st_[0].TOK;

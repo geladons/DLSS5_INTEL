@@ -246,6 +246,26 @@ private:
     bool cutThumbValid_ = false;       // first frame / after init or reset
     float cutLimit_ = 0.15f;
     bool cutDebug_ = false;
+
+    // Motion gate for history participation (detectSceneCut also counts
+    // thumb cells whose luma moved > kTmCellDelta). When the moved fraction
+    // exceeds tmSuppressHi_ the frame runs histValid=0 - a pure prediction
+    // equal to temporal-off: at the ~40 ms x86-daemon cadence a blended
+    // stale delta visibly lags the content. Below tmSuppressLo_ the latch
+    // re-engages - on near-static frames (menu + moving cursor) the
+    // hold/verbatim emit kills the global tone re-derivation ("breathing")
+    // that temporal-off exposes. The hysteresis band holds the last state
+    // so a mid-motion scene can't flap the mode per frame. History keeps
+    // refreshing on suppressed frames, so re-engagement is transient-free.
+    // Envs: D5C_TMGATE / DLSS5_TMGATE / NR_LAYER_TMGATE =0 disables the
+    // gate entirely; *_TMGATE_HI / *_TMGATE_LO retune the thresholds.
+    static constexpr int kTmCellDelta = 10;   // /255 luma per cell = "moved"
+    float tmFrac_ = 0.0f;                     // last frame's moved fraction
+    bool histSuppressed_ = false;
+    bool tmGate_ = true;
+    float tmSuppressHi_ = 0.20f;
+    float tmSuppressLo_ = 0.05f;
+    bool tmDebug_ = false;
     void* uploadPtr_ = nullptr;
     void* rbFinalPtr_ = nullptr;             // persistently mapped readback
 

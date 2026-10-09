@@ -204,6 +204,20 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
     motion lands >DB_CUT and emits instantly; only the history-reset
     frame bypasses (stale bufHist must not anchor). Same bands and
     reference rule must stay mirrored in temporal_stats.comp.
+    MOTION GATE (host-side, engine.cpp detectSceneCut): the same 64x36
+    luma thumb that detects cuts also counts moved cells (>10/255);
+    fraction >TMGATE_HI (0.20) -> histSuppressed_ -> the frame records
+    histValid=0 everywhere (features d[0], temporal_stats, temporal_nr)
+    = pure prediction, temporal-off behaviour on fast content where the
+    ~40 ms cadence would drag stale structure; <TMGATE_LO (0.05) ->
+    re-engage, hysteresis holds between. History keeps refreshing on
+    suppressed frames, so re-engage is transient-free. Envs
+    *_TMGATE=0 off, *_TMGATE_HI/LO retune, D5C_DEBUG_TMGATE=1 logs.
+    D5C_CUT_LIMIT=0 disables the whole thumb pass incl. the gate.
+    Fixes the global-receptive-field "breathing" (cursor move re-derives
+    all tones) at the x86 daemon cadence without re-importing the
+    Stage-45 stale-structure noise. Measured: jitter breathing 0.11 vs
+    2.47/255 forced-off; pan suppresses (39.9% moved -> history off).
   - Input contract = 16 feature channels exactly (input_adapter_weight
     [16,32]): ch 0-2 noise, 3 const, 4-6 scaled colour, 7-9 history,
     10-14 Phase30 controls, 15 zero. NO motion-vector/depth slots - the

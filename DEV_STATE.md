@@ -2989,3 +2989,62 @@ OPEN (cadence ceiling): sync still caps motion at ~25 fps; the
 game-rendered cursor teleports at that rate (baked into fresco) -
 intrinsic to a capped pipeline. Next quality levers if shimmer
 persists: render scale 0.75 (measured ~free vs 0.58), intensity trim.
+
+## 2026-10-08 Stage 45b - owner field result: BEST SO FAR
+
+Owner: noise gone; processing on/off during bench shows clear effect;
+fps unchanged (GTA IV bench appears CPU-bound ~25fps anyway, so the
+sync cap costs nothing here). REMAINING: flicker / "color play" - even
+mouse moves in the menu shift global colors enough that characters
+"breathe"; slow slide-shows in loading show jerks.
+
+Working hypothesis: without temporal anchoring each frame is a fresh
+net inference; the U-Net's global receptive field makes every output
+pixel depend on every input pixel - a moved cursor changes global
+context and the whole scene re-derives ("breathing"). To measure:
+global output-variance map on cursor-only input changes.
+
+## 2026-10-08 Stage 46 - motion-gated temporal history (breathing fix, measured)
+
+Owner's Stage-45b complaint isolated by direct daemon probe: on a STATIC
+menu a 24x24 cursor-block change re-derives 35.8% of output pixels
+(>8/255); ~65% of the diff energy is low-frequency tone - the U-Net's
+global receptive field re-solves the scene on any micro-change. With
+temporal OFF (Stage 45) every frame is a fresh inference, so the tone
+"breathes" under the cursor. The fix is not "temporal always on" (that
+re-imports stale structure on motion - the eliminated noise) - it is a
+per-frame GATE on history participation.
+
+Implementation (chain engine, benefits daemon + in-process x64 alike):
+- detectSceneCut's existing 64x36 luma-thumb pass now also counts cells
+  whose luma moved >10/255 (kTmCellDelta) - zero extra CPU buffers.
+- moved fraction > tmSuppressHi_ (0.20) -> histSuppressed_=true: the
+  frame records with histValid=0 (features p.d[0], temporal_stats,
+  temporal_nr) - pure prediction, identical to temporal-off; verified
+  "history off (moved 39.9%)" on a 6px/frame pan.
+- fraction < tmSuppressLo_ (0.05) -> re-engage; hysteresis band holds the
+  last state so moderate motion can't flap the mode per frame.
+- bufHist_ keeps updating on suppressed frames (temporal_nr runs, its
+  emit is pure pred), so re-engagement is transient-free.
+- Envs: D5C_TMGATE / DLSS5_TMGATE / NR_LAYER_TMGATE =0 disables;
+  *_TMGATE_HI / *_TMGATE_LO retune; D5C_DEBUG_TMGATE=1 logs transitions.
+  Note D5C_CUT_LIMIT=0 disables the whole thumb pass incl. the gate.
+
+Live-daemon A/B (production binary, 800x600, scale .58 intensity 1.3):
+  cursor-jitter breathing, mean|d| over non-cursor pixels:
+    temporal ON + gate engaged : 0.11/255, <=0.6% px >8   (PINNED)
+    temporal forced OFF (NRCT) : 2.47/255,  3.2%  px >8   (~22x worse)
+  pan 6px/f: gate logged "history off (moved 39.9%)" -> histValid=0
+    frames emit pure prediction (residual diff vs forced-OFF is only the
+    gainLock EMA anchor - bounded, intended, not stale content).
+  return to static: "history on (moved 0.0%)" -> breathing re-pins 0.12.
+
+Launcher revert (dlss5/m13/launcher.py): Stage-45's unconditional
+SETTEMPORAL=0 for x86 is removed - with the gate, daemon-baseline ON is
+both safe on motion and REQUIRED for the pinned-tone win on statics.
+Explicit meta.temporal true/false still wins via NRCT. Tests updated:
+x86 default now asserts NO set_temporal call; meta true/false push
+unchanged. m13 suite 19/19 green.
+
+Deployed: production m11d.exe + runtime/m11d + layer/x64 d5c_chain.dll
+(all carry "motion gate" strings), m13/launcher.py + test_launcher.py.

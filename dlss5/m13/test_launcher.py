@@ -442,9 +442,11 @@ class TestDaemonShutdown(LauncherBase):
 
 
 class TestX86DaemonKnobs(LauncherBase):
-    """x86 daemon-path launches push per-game knobs over NRCT: temporal
-    defaults OFF (the low service cadence makes the history blend a
-    stale-structure injector), meta.temporal can re-enable."""
+    """x86 daemon-path launches push per-game knobs over NRCT: temporal is
+    left at the daemon baseline (engine ON + the Stage-46 motion gate
+    suppresses history on fast frames - pinned tone on near-static content,
+    no stale-structure injection when things move). meta.temporal still
+    forces the member either way."""
 
     def _x86_launch(self, meta_extra=None):
         exe = self._mk("gtaiv.exe", mode="dx9", arch="x86")
@@ -471,9 +473,11 @@ class TestX86DaemonKnobs(LauncherBase):
         self.assertTrue(ok, msg)
         return client
 
-    def test_x86_temporal_defaults_off(self):
+    def test_x86_temporal_default_no_push(self):
+        # No meta.temporal -> no NRCT push; the daemon's env baseline (ON +
+        # motion gate) stands.
         client = self._x86_launch()
-        client.set_temporal.assert_called_once_with(False)
+        client.set_temporal.assert_not_called()
 
     def test_x86_temporal_meta_true_reenables(self):
         client = self._x86_launch({"temporal": True})

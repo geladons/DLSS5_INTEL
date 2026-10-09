@@ -277,18 +277,13 @@ class GameLauncher:
                         pass
                     # Same per-game channel for the temporal feed: the daemon
                     # env only knows the manager default, an explicit
-                    # meta.temporal override must reach it over NRCT.
-                    # x86 daemon path DEFAULTS TEMPORAL OFF: at the ~40 ms
-                    # service cadence the history blend injects one-frame-old
-                    # structure into the current delta (measured +33% delta
-                    # jitter on a panning frame) and the hold/release ratchet
-                    # band-steps over several 40 ms frames - the "mask that
-                    # lags the game". Off makes every output a pure function
-                    # of its own input; the period-2 chase the latch was
-                    # built for needs the feedback loop that no longer
-                    # exists. Explicit meta.temporal:true re-enables.
+                    # meta.temporal override must reach it over NRCT. The
+                    # engine's motion gate (Stage 46) suppresses history on
+                    # fast frames, so temporal ON is now safe for motion and
+                    # required for near-static content (pins the per-frame
+                    # tone re-derivation the owner saw as "breathing").
                     t_meta = meta.get("temporal")
-                    if t_meta is not None or meta.get("arch") == "x86":
+                    if t_meta is not None:
                         try:
                             ctl.client.set_temporal(bool(t_meta))
                         except Exception:

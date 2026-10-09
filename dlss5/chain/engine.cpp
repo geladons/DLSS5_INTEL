@@ -54,6 +54,27 @@ bool ChainEngine::init(const EngineConfig& cfg) {
         cutDebug_ = false;
     cutThumbValid_ = false;
 
+    // Motion gate (histSuppressed_): fraction of thumb cells that moved
+    // suppresses history participation for the frame - hysteresis hi/lo,
+    // D5C_TMGATE=0 (or the DLSS5_/NR_LAYER_ aliases) disables the gate.
+    if (const char* e = std::getenv("D5C_TMGATE"))
+        tmGate_ = (std::atoi(e) != 0);
+    if (const char* e = std::getenv("DLSS5_TMGATE"))
+        tmGate_ = (std::atoi(e) != 0);
+    if (const char* e = std::getenv("NR_LAYER_TMGATE"))
+        tmGate_ = (std::atoi(e) != 0);
+    if (const char* e = std::getenv("D5C_TMGATE_HI"))
+        tmSuppressHi_ = (float)std::atof(e);
+    else if (const char* e = std::getenv("DLSS5_TMGATE_HI"))
+        tmSuppressHi_ = (float)std::atof(e);
+    if (const char* e = std::getenv("D5C_TMGATE_LO"))
+        tmSuppressLo_ = (float)std::atof(e);
+    else if (const char* e = std::getenv("DLSS5_TMGATE_LO"))
+        tmSuppressLo_ = (float)std::atof(e);
+    if (const char* d = std::getenv("D5C_DEBUG_TMGATE"))
+        tmDebug_ = (std::atoi(d) != 0);
+    histSuppressed_ = false;
+
     if (!vkc_.create(cfg.vkCfg)) return false;
     const VkCtx& c = vkc_.vk;
 
@@ -233,6 +254,7 @@ bool ChainEngine::detectSceneCut(const uint8_t* bgraIn) {
     const uint32_t ay = std::max(1u, H_ / (uint32_t)kCutThumbH);
     uint8_t cur[kCutThumbW * kCutThumbH];
     uint64_t acc = 0;
+    uint32_t moved = 0;
     for (int ty = 0; ty < kCutThumbH; ++ty) {
         const uint32_t y = std::min(H_ - 1, (uint32_t)ty * ay);
         const uint8_t* row = bgraIn + (size_t)y * W_ * 4;
@@ -241,12 +263,29 @@ bool ChainEngine::detectSceneCut(const uint8_t* bgraIn) {
             const uint8_t* px = row + (size_t)x * 4;                        // BGRA
             const int l = (px[2] * 77 + px[1] * 150 + px[0] * 29) >> 8;     // BT.601 luma
             cur[ty * kCutThumbW + tx] = (uint8_t)l;
-            if (cutThumbValid_)
-                acc += (uint64_t)std::abs(l - (int)cutThumb_[ty * kCutThumbW + tx]);
+            if (cutThumbValid_) {
+                const int dl = std::abs(l - (int)cutThumb_[ty * kCutThumbW + tx]);
+                acc += (uint64_t)dl;
+                if (dl > kTmCellDelta) ++moved;
+            }
         }
     }
     bool cut = false;
     if (cutThumbValid_) {
+        tmFrac_ = (float)moved / (float)(kCutThumbW * kCutThumbH);
+        if (tmGate_) {
+            if (!histSuppressed_ && tmFrac_ > tmSuppressHi_) {
+                histSuppressed_ = true;
+                if (tmDebug_)
+                    std::fprintf(stderr, "[chain] motion gate: history off "
+                                 "(moved %.1f%%)\n", (double)(tmFrac_ * 100));
+            } else if (histSuppressed_ && tmFrac_ < tmSuppressLo_) {
+                histSuppressed_ = false;
+                if (tmDebug_)
+                    std::fprintf(stderr, "[chain] motion gate: history on "
+                                 "(moved %.1f%%)\n", (double)(tmFrac_ * 100));
+            }
+        }
         const float mean = (float)((double)acc / (double)(kCutThumbW * kCutThumbH) / 255.0);
         cut = mean > cutLimit_;
         if (cut && cutDebug_)
