@@ -22,7 +22,8 @@ CSV_COLS = ["frame", "t", "luma_mean", "luma_std", "cb_mean", "cr_mean",
             "hash", "dup", "dup_run", "hist_dist", "diff_mean",
             "edge_energy", "flicker_frac", "flicker_mag", "flicker_color",
             "flicker_strong", "patch_idx", "ghost_echo", "static_var",
-            "updates_per_s"]
+            "updates_per_s", "lag_dy", "lag_dx", "lag_pk", "lag_gain",
+            "lag2_resid", "cad_cv"]
 
 
 def write_metrics_csv(path, ctx):
@@ -45,7 +46,11 @@ def write_metrics_csv(path, ctx):
                 "%.5f" % s["flicker_strong"][i],
                 "%.3f" % s["patch_idx"][i], "%.5f" % s["ghost_echo"][i],
                 "%.3f" % s["static_var"][i],
-                "%.1f" % rate[i]]) + "\n")
+                "%.1f" % rate[i],
+                "%d" % s["lag_dy"][i], "%d" % s["lag_dx"][i],
+                "%.3f" % s["lag_pk"][i], "%.3f" % s["lag_gain"][i],
+                "%.3f" % s["lag2_resid"][i],
+                "%.3f" % s["cad_cv"][i]]) + "\n")
 
 
 def write_heatmaps(outdir, ctx):

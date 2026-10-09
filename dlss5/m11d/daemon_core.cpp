@@ -224,6 +224,9 @@ std::shared_ptr<d5c::ChainEngine> DaemonCore::requestEngine(uint32_t w,
 void DaemonCore::handleCtrl(SOCKET s, const uint32_t hdr[4]) {
     uint32_t rep[4] = { MAGIC_CTRL, 0, 0, 0 };
     {
+        // serveMu_ first: a ctrl request waits out an in-flight frame
+        // (<= ~40 ms) instead of racing engine state mid-processFrame.
+        std::lock_guard<std::mutex> slk(serveMu_);
         std::lock_guard<std::mutex> lk(engMu_);
         handleCtrlLocked(hdr, rep);
     }
@@ -449,6 +452,12 @@ bool DaemonCore::handleFrame(SOCKET s, const uint32_t hdr[4], ULONGLONG deadline
         if (!readAllDeadline(s, maskBuf.data(), px, deadline))
             return false;
     }
+    // Everything below owns the engine in arrival order: gap policy,
+    // prevW/prevH/havePrev/lastFrameTick/frameCounter, the process/FG
+    // dispatch and the fault path are shared DaemonCore state. Reads
+    // above stay outside so a stalled client cannot hold the engine
+    // hostage for its 8 s deadline. (serveMu_ -> engMu_ order is kept.)
+    std::lock_guard<std::mutex> serveLk(serveMu_);
     if (w != prevW || h != prevH) {
         havePrev = false;
         prevW = w;

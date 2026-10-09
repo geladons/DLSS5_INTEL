@@ -90,6 +90,8 @@ class MetricAccumulator:
         self.prev_rgbs = deque(maxlen=3)      # analysis-res int16
         self.prev_hist = None
         self.dup_run = 0
+        self.upd_gaps = deque(maxlen=30)    # frames between unique frames
+        self.last_upd = None                # idx of previous unique frame
 
         # long-term spatial accumulators (analysis res)
         self.welf_n = 0
@@ -141,6 +143,7 @@ class MetricAccumulator:
         if self.prev_full is None:
             self._init_state(g, g_full, hist)
             self.prev_hash = row["hash"]
+            self.last_upd = idx             # first frame anchors gap 0
             self._fill_first(row)
             self.rows.append(row)
             return row
@@ -166,6 +169,9 @@ class MetricAccumulator:
             row["static_var"] = 0.0
             row.update({"flicker_frac": 0.0, "flicker_mag": 0.0,
                         "flicker_color": 0.0, "flicker_strong": 0.0})
+            row.update({"lag_dy": 0, "lag_dx": 0, "lag_pk": 0.0,
+                        "lag_gain": 0.0, "lag_resid": 0.0,
+                        "lag2_resid": 0.0, "lag2_pk": 0.0, "cad_cv": 0.0})
             self._segment_event(idx, 0.0, self._zero_mag, None)
         else:
             row["patch_idx"] = self._patchwork(d_full)
@@ -175,6 +181,9 @@ class MetricAccumulator:
                                  if row["diff_mean"] > 1.0 else 0.0)
             row["static_var"] = self._static_update(g)
             row.update(self._flicker(idx, rgb_a16))
+            # must run before the prev_half append: [-1] is the previous
+            # unique frame, [-2] the one two uniques back
+            row.update(self._lag_trail(idx, g))
             self.prev_lumas.append(g.copy())
             self.prev_half.append(g[::2, ::2].copy())
             self.prev_rgbs.append(rgb_a16)
@@ -212,7 +221,9 @@ class MetricAccumulator:
                     "hist_dist": 0.0, "patch_idx": 0.0, "ghost_echo": 0.0,
                     "static_var": 0.0, "flicker_frac": 0.0,
                     "flicker_mag": 0.0, "flicker_color": 0.0,
-                    "flicker_strong": 0.0})
+                    "flicker_strong": 0.0, "lag_dy": 0, "lag_dx": 0,
+                    "lag_pk": 0.0, "lag_gain": 0.0, "lag_resid": 0.0,
+                    "lag2_resid": 0.0, "lag2_pk": 0.0, "cad_cv": 0.0})
 
     # ------------------------------------------------------------------
     def _patchwork(self, d_full):
@@ -352,6 +363,60 @@ class MetricAccumulator:
         if mask.any() and self.welf_n > 4:
             return float(d[mask].std())
         return 0.0
+
+    # ------------------------------------------------------------------
+    def _lag_trail(self, idx, g):
+        """Dominant-shift coherence of the unique stream, on the
+        half-analysis-res luma deque (the artifact_scan dom_shift
+        pattern, ~1/8-res at 1440p):
+
+        lag_dy/dx/pk - dominant integer translation vs the previous
+        unique frame + its phase-correlation peak. pk~0 means the delta
+        is not one coherent motion (re-derivation, noise, scene cut).
+
+        lag_gain - fraction of the inter-frame residual explained by
+        that single translation: r0 = mean|cur-prev|, r1 = the same
+        after rolling prev by (dy,dx); gain = (r0-r1)/r0. Coherent
+        motion -> >0.5; a pipeline that re-derives the frame instead of
+        moving it -> ~0 even though content changed.
+
+        lag_resid/lag2_resid/lag2_pk - lag_resid is r1 above;
+        lag2_resid repeats the match against the unique frame TWO back
+        (roll by its own dom_shift). A stale-application stage - delta
+        of frame k composited at frame k-2's coordinates - makes the
+        output track the older position: lag2_resid < lag_resid while
+        lag2_pk stays high. lag_resid is kept in the row (not the CSV)
+        so the detector can compare the two residuals.
+
+        cad_cv - coefficient of variation of the last <=30 gaps between
+        unique frames (in container frames). CFR delivery -> ~0;
+        irregular update cadence on moving content (judder) -> high.
+        """
+        out = {"lag_dy": 0, "lag_dx": 0, "lag_pk": 0.0, "lag_gain": 0.0,
+               "lag_resid": 0.0, "lag2_resid": 0.0, "lag2_pk": 0.0,
+               "cad_cv": 0.0}
+        q = g[::2, ::2]
+        if self.prev_half:
+            p1 = self.prev_half[-1]
+            dy, dx, pk = dom_shift(p1, q)
+            out["lag_dy"], out["lag_dx"], out["lag_pk"] = dy, dx, pk
+            r0 = float(np.abs(q - p1).mean())
+            r1 = float(np.abs(q - np.roll(p1, (dy, dx), (0, 1))).mean())
+            out["lag_resid"] = r1
+            out["lag_gain"] = (r0 - r1) / max(r0, 1e-6)
+            if len(self.prev_half) >= 2:
+                p2 = self.prev_half[-2]
+                dy2, dx2, pk2 = dom_shift(p2, q)
+                out["lag2_pk"] = pk2
+                out["lag2_resid"] = float(
+                    np.abs(q - np.roll(p2, (dy2, dx2), (0, 1))).mean())
+        if self.last_upd is not None:
+            self.upd_gaps.append(idx - self.last_upd)
+        self.last_upd = idx
+        if len(self.upd_gaps) >= 3:
+            gaps = np.asarray(self.upd_gaps, np.float64)
+            out["cad_cv"] = float(gaps.std() / max(gaps.mean(), 1e-6))
+        return out
 
     # ------------------------------------------------------------------
     def _flicker(self, idx, cur):

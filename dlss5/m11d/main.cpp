@@ -68,6 +68,7 @@
 #include <cstdlib>
 #include <io.h>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "daemon_core.h"
@@ -437,45 +438,54 @@ int main(int argc, char** argv) {
     }
     std::printf("[m11d] listening on 127.0.0.1:%d (keep-alive frame conns)\n", port);
 
-    std::vector<uint8_t> inBuf, outBuf, maskBuf;
     for (;;) {
         SOCKET s = accept(ls, nullptr, nullptr);
         if (s == INVALID_SOCKET) continue;
-        // generous timeouts: a full-extent chain can take ~1 s
-        DWORD tv = 20000;
-        setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
-        setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof tv);
-        // Nagle's delay would park the 16-byte header until the payload
-        // flush anyway; kill it. Big kernel buffers cut the 1.9 MB
-        // payload/reply into far fewer recv/send syscalls.
-        {
-            const int one = 1;
-            setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char*)&one, sizeof one);
-            int kbuf = 512 * 1024;
-            setsockopt(s, SOL_SOCKET, SO_RCVBUF, (const char*)&kbuf, sizeof kbuf);
-            setsockopt(s, SOL_SOCKET, SO_SNDBUF, (const char*)&kbuf, sizeof kbuf);
-        }
-
-        // Keep-alive: the layer's SYNC path reuses one connection per
-        // present - per-frame connect() was a SYN/RST storm at loading-
-        // screen rates (300+/s) that drowned the accept backlog. Serve
-        // requests until the client closes or a transfer fails; the
-        // async worker's one-frame conns still work (client close ends
-        // the inner loop identically). Each request gets its own 8 s
-        // budget so the loop can't be held hostage mid-transfer.
-        for (;;) {
-            const ULONGLONG deadline = GetTickCount64() + 8000;
-            uint32_t hdr[4]{};
-            if (!readAllDeadline(s, (uint8_t*)hdr, 16, deadline))
-                break;
-            if (hdr[0] == MAGIC_CTRL) {
-                core.handleCtrl(s, hdr);
-                break;          // ctrl conns stay one-shot
+        // Thread per connection. A serial inner loop over a held keep-alive
+        // conn starved EVERY other client for the whole session: the sync
+        // layer's persistent socket blocked FG mode-2's NRN3 probes (separate
+        // one-shot conn -> 8 s timeouts -> held-anchor splices mid-benchmark)
+        // and the manager's NRCT status polls (a wedged poll reads as a dead
+        // daemon). Engine access is serialized inside DaemonCore::serveMu_,
+        // so requests still reach processFrame in arrival order.
+        std::thread([s, &core] {
+            // generous timeouts: a full-extent chain can take ~1 s
+            DWORD tv = 20000;
+            setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
+            setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof tv);
+            // Nagle's delay would park the 16-byte header until the payload
+            // flush anyway; kill it. Big kernel buffers cut the 1.9 MB
+            // payload/reply into far fewer recv/send syscalls.
+            {
+                const int one = 1;
+                setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char*)&one, sizeof one);
+                int kbuf = 512 * 1024;
+                setsockopt(s, SOL_SOCKET, SO_RCVBUF, (const char*)&kbuf, sizeof kbuf);
+                setsockopt(s, SOL_SOCKET, SO_SNDBUF, (const char*)&kbuf, sizeof kbuf);
             }
-            if (!core.handleFrame(s, hdr, deadline, inBuf, outBuf, maskBuf))
-                break;
-        }
-        closesocket(s);
+
+            // Keep-alive: the layer's SYNC path reuses one connection per
+            // present - per-frame connect() was a SYN/RST storm at loading-
+            // screen rates (300+/s) that drowned the accept backlog. Serve
+            // requests until the client closes or a transfer fails; the
+            // async worker's one-frame conns still work (client close ends
+            // the inner loop identically). Each request gets its own 8 s
+            // budget so the loop can't be held hostage mid-transfer.
+            std::vector<uint8_t> inBuf, outBuf, maskBuf;
+            for (;;) {
+                const ULONGLONG deadline = GetTickCount64() + 8000;
+                uint32_t hdr[4]{};
+                if (!readAllDeadline(s, (uint8_t*)hdr, 16, deadline))
+                    break;
+                if (hdr[0] == MAGIC_CTRL) {
+                    core.handleCtrl(s, hdr);
+                    break;      // ctrl conns stay one-shot
+                }
+                if (!core.handleFrame(s, hdr, deadline, inBuf, outBuf, maskBuf))
+                    break;
+            }
+            closesocket(s);
+        }).detach();
     }
     return 0;
 }

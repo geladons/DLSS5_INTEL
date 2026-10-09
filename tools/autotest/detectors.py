@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # ============================================================================
-# detectors - the seven artifact-class detectors.
+# detectors - the artifact-class detectors.
 #
 # Each detector consumes the shared context built by MetricAccumulator and
 # returns a Result: verdict (PASS/WARN/FAIL), a scalar score, a list of
@@ -13,6 +13,7 @@
 #   GhostDetector        - lagged duplicate edges (double contour)
 #   StalenessDetector    - scene cut followed by >0.5s freeze
 #   StaticNoiseDetector  - motionless regions with high temporal variance
+#   LagTrailDetector     - delta applied at stale coords + cadence judder
 # ============================================================================
 import numpy as np
 
@@ -450,6 +451,101 @@ class StaticNoiseDetector:
         return Result(self.name, verdict, p95 / 4.0, evs, notes)
 
 
+# ----------------------------------------------------------------- 8 lag trail
+class LagTrailDetector:
+    """Two delivery-pipeline faults on the unique stream:
+
+    stale-apply (mask lag) - the frame's delta is computed from fresh
+    content but composited at the position of an OLDER anchor: output
+    then matches the frame TWO uniques back (after dominant-shift
+    compensation) better than the frame one back. Per-frame signature:
+    lag2_pk > 0.25 (the two-back match is still a coherent translation,
+    not noise) AND lag2_resid < 0.85 * lag_resid AND diff_mean > 1.0
+    (content actually moved); lag_resid > 0.5 keeps codec-quantization
+    noise floors from qualifying on a relative win of nothing.
+
+    judder - irregular update delivery on moving content: inter-update
+    gap CV (cad_cv) p95 > 0.8 while the unique-stream median diff_mean
+    is > 0.5 (a static screen's dup stream can't be "judder").
+    """
+    name = "lag-trail-stale-apply"
+
+    def run(self, ctx):
+        s, fps, n = ctx["series"], ctx["fps"], ctx["n"]
+        uniq = ctx["uniq_idx"]
+        r1 = s["lag_resid"][uniq]
+        r2 = s["lag2_resid"][uniq]
+        pk2 = s["lag2_pk"][uniq]
+        du = s["diff_mean"][uniq]
+        moving = du > 1.0
+        stale = moving & (pk2 > 0.25) & (r1 > 0.5) & (r2 < 0.85 * r1)
+
+        # unique-frame flags -> raw timeline, dilate <=6f to merge near
+        # flags into one event, drop 1-frame blips (GhostDetector conv.)
+        idx_of = np.zeros(n, bool)
+        idx_of[uniq[stale]] = True
+        dil = idx_of.copy()
+        for _ in range(6):
+            dil[1:] |= dil[:-1]
+            dil[:-1] |= dil[1:]
+        evs = []
+        for a, b in _runs(dil):
+            seg = np.nonzero(idx_of[a:b])[0]
+            if len(seg) < 2 and b - a < 3:
+                continue
+            u = uniq[(uniq >= a) & (uniq < b)]
+            m1 = float(np.median(s["lag_resid"][u]))
+            m2 = float(np.median(s["lag2_resid"][u]))
+            margin = (m1 - m2) / max(m1, 1e-6)
+            evs.append(_event(
+                self.name, a, b, fps,
+                min(1.0, margin * 2.0 + len(seg) / 30.0),
+                kind="stale-apply",
+                lag2_pk=round(float(np.median(s["lag2_pk"][u])), 3),
+                lag_resid=round(m1, 3), lag2_resid=round(m2, 3),
+                margin_pct=round(100.0 * margin, 1), frames=b - a))
+
+        # judder is a clip-level stat: flag the runs where the rolling
+        # gap CV is hot while content is moving
+        cvu = s["cad_cv"][uniq]
+        cvu = cvu[cvu > 0] if (cvu > 0).any() else cvu
+        cad_p95 = float(np.percentile(cvu, 95)) if len(cvu) else 0.0
+        diff_med = float(np.median(du)) if len(du) else 0.0
+        judder = cad_p95 > 0.8 and diff_med > 0.5
+        if judder:
+            jmask = (s["cad_cv"] > 0.8) & (s["diff_mean"] > 0.5)
+            for a, b in _runs(jmask):
+                if b - a < max(2, int(0.1 * fps)):
+                    continue
+                evs.append(_event(
+                    self.name, a, b, fps, min(1.0, cad_p95 / 1.6),
+                    kind="judder",
+                    cad_cv_max=round(float(s["cad_cv"][a:b].max()), 3),
+                    cad_cv_p95=round(cad_p95, 3),
+                    diff_med=round(diff_med, 3), frames=b - a))
+
+        t_evt = sum(e["f1"] - e["f0"] for e in evs) / fps
+        top = max((e["score"] for e in evs), default=0.0)
+        verdict = PASS
+        if evs:
+            verdict = FAIL if (t_evt > 1.5 or top >= 0.75) else WARN
+        elif judder or cad_p95 > 0.5:
+            verdict = WARN
+        n_stale = int(stale.sum())
+        notes = [
+            "stale-apply unique frames: %d/%d (%.1f%%); flagged event "
+            "time %.2fs" % (n_stale, len(uniq),
+                            100.0 * n_stale / max(1, len(uniq)), t_evt),
+            "lag coherence: lag_pk median %.3f, lag_gain median %.3f "
+            "(fraction of delta that is one translation)"
+            % (float(np.median(s["lag_pk"][uniq])) if len(uniq) else 0.0,
+               float(np.median(s["lag_gain"][uniq])) if len(uniq) else 0.0),
+            "update-gap CV p95 %.3f, unique diff median %.3f -> %s"
+            % (cad_p95, diff_med, "JUDDER" if judder else "regular")]
+        return Result(self.name, verdict,
+                      max(top, min(1.0, t_evt / 4.0)), evs, notes)
+
+
 ALL_DETECTORS = [UpdateRateDetector, GarlandDetector, PumpingDetector,
                  PatchworkDetector, GhostDetector, StalenessDetector,
-                 StaticNoiseDetector]
+                 StaticNoiseDetector, LagTrailDetector]

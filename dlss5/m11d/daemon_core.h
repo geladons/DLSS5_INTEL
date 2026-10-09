@@ -113,6 +113,15 @@ private:
     void handleCtrlLocked(const uint32_t hdr[4], uint32_t rep[4]);  // engMu_ held
 
     std::mutex engMu_;
+    // Serve serialization: the accept loop spawns one thread per
+    // connection (keep-alive conns no longer starve second clients - the
+    // sync layer's persistent socket used to block NRN3 mid-frame probes
+    // AND manager NRCT polls for the whole session). serveMu_ serializes
+    // only the engine-touching section of each request (gap policy,
+    // processFrame/FG dispatch, prev-anchor state) in arrival order;
+    // payload reads and reply writes stay per-connection concurrent.
+    // Lock order wherever both are held: serveMu_ THEN engMu_.
+    std::mutex serveMu_;
     struct PendingBuild { uint32_t w, h; float scale; ULONGLONG notBefore; };
     std::unique_ptr<PendingBuild> pending_;           // config to realize next
     std::thread builder_;

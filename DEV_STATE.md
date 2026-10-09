@@ -3048,3 +3048,57 @@ unchanged. m13 suite 19/19 green.
 
 Deployed: production m11d.exe + runtime/m11d + layer/x64 d5c_chain.dll
 (all carry "motion gate" strings), m13/launcher.py + test_launcher.py.
+
+## 2026-10-08 Stage 47 - concurrent daemon serving (NRN3/NRCT starvation fix)
+
+Owner field test after Stage 46: menu cursor "lags", flicker/color-play
+still present, bench "mask periodically falls behind -> noise/phantoms",
+FPS feels lower. Autotest capture (benchmark mode, sync, temporal+gate)
+exposed the real defect in the layer segment log:
+
+    [nr_layer] daemon NRN3 failed (rc -1); held anchor out, FG probe ...
+
+Root cause: Stage 44's keep-alive change left the accept loop SERIAL -
+while the game's sync conn held the inner loop, every other connection
+queued in the backlog for the whole session:
+  - FG mode-2 NRN3 mid-frame probes go over a SECOND one-shot conn ->
+    timed out -> layer emitted the HELD anchor at mid-cadence = stale
+    frames interleaved with fresh ones (the "mask that can't keep up"
+    + visible judder + lower effective FPS).
+  - Manager NRCT polls starved identically (a wedged status() reads as
+    a dead daemon - restart-mid-session risk).
+  - Also explains the first-connect RST seen in manual probes: a dead
+    keepalive conn sat in recv until its 8 s request deadline, starving
+    the backlog behind it.
+
+Fix: thread-per-connection. accept() spawns a detached serve thread;
+DaemonCore::serveMu_ serializes ONLY the engine-touching span (gap
+policy, prevW/havePrev/frameCounter, processFrame/FG dispatch, fault
+path, reply) in arrival order - sync clients are request-reply serial
+anyway so ordering is preserved. Payload reads stay per-connection (a
+stalled sender can't hold the engine). handleCtrl also enters under
+serveMu_ then engMu_ (one nesting order, no deadlock).
+
+Verified live (production binary): NRCT STATUS replied in 11 ms while
+a keep-alive conn was held open; a parallel frame conn was served in
+60 ms; an NRN3 interp probe on a second conn returned a real +fgi
+frame in 10 ms ("frame 5 800x600 +fgi in 4.3 ms"). Before: NRN3 starved
+~indefinitely behind the held sync conn.
+
+Autotest rig gains (tools/autotest): new metrics lag_dy/lag_dx/lag_pk,
+lag_gain, lag_resid, lag2_resid/lag2_pk (dom_shift phase-correlation on
+quarter-res luma - the "delta applied at stale coordinates" signature),
+cad_cv (inter-update gap regularity = judder), and LagTrailDetector
+(lag2-beats-lag1 stale-apply events + judder flag). metrics.csv grew
+6 columns; self-test + semantic stale-apply check both pass.
+
+Bench capture triage (moving-content frames only):
+  metric          native   s45-off   s47 (gate+concurrent)
+  upd/s            18.0      15.0      15.0
+  flicker med      0.86      0.36      0.34     (flythrough trips native)
+  ghost med/p95    .31/.35   .29/.77   .16/.75
+  static_var p95   8.6       32.4      26.7
+  lag_pk           0.93      0.37      0.36
+  NRN3 fails       -         storm     0 (37 interpolations served)
+Caveat: layered captures ran at different flythrough offsets (daemon
+extends load); treat per-metric deltas as directional, not absolute.
