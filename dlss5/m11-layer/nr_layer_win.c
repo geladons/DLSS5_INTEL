@@ -33,22 +33,30 @@
  *   NR_LAYER_CAPTURE  write the next captured frame (header+pixels) here
  *   NR_LAYER_EVERY N  capture every Nth present even without a trigger
  *   NR_LAYER_SYNC     "semaphore" = present-semaphore ring; default = idle
+ *   NR_LAYER_GPUWAIT  ms bound on the idle-mode queue drain and the
+ *                     semaphore-mode fence waits (default 2000). A wedged
+ *                     app queue then degrades to native passthrough for
+ *                     that present instead of freezing the game.
  *   NR_LAYER_UI_MASK  0 = disable exact-repeat reuse of the last processed
  *                     result (default on; legacy name)
  *   NR_LAYER_NEAR_REUSE 1 = also reuse on near-identical input (sampled eps,
  *                     capped replays). OPT-IN, default OFF: stale-result
  *                     replay judders on slow pans / animated grain.
- *   NR_LAYER_PATCH    0 = disable the small-delta patch serve (default on,
- *                     sync path only): an input that differs from the last
- *                     answered frame only inside a cursor-scale bounding
- *                     box (<2% pixels inside an 8%-of-frame box) is served
- *                     instantly - held processed result + the raw changed
- *                     region patched in - skipping the engine round-trip
- *                     so cursor updates run at the full present rate.
- *                     The earlier anchor is not advanced, so a moving
- *                     sprite's trail accumulates until it outgrows the
- *                     bound or NR_LAYER_PATCH_CAP (default 48) frames and
- *                     a real exchange resyncs.
+ *   NR_LAYER_PATCH    1 = enable the small-delta patch serve (OPT-IN,
+ *                     default OFF - field report 2026-10-09: the raw
+ *                     patched region reads as a moving "selection
+ *                     rectangle" over the processed background; rejected
+ *                     by the owner). Sync path only: an input that
+ *                     differs from the last answered frame only inside a
+ *                     cursor-scale bounding box (<2% pixels inside an
+ *                     8%-of-frame box) is served instantly - held
+ *                     processed result + the raw changed region patched
+ *                     in - skipping the engine round-trip so cursor
+ *                     updates run at the full present rate. The earlier
+ *                     anchor is not advanced, so a moving sprite's trail
+ *                     accumulates until it outgrows the bound or
+ *                     NR_LAYER_PATCH_CAP (default 48) frames and a real
+ *                     exchange resyncs.
  *   NR_LAYER_INPROC_MAXPX  N (default 1000000, 0=off): pixel ceiling for
  *                     the in-process x64 engine. The chain's cost scales
  *                     with the frame extent - an unmanaged 2560x1440 app
@@ -273,6 +281,13 @@ typedef struct device_data {
     int ring_used[SYNC_SLOTS];
     unsigned ring_next;
     int ring_ready;
+    VkFence idle_fence;            /* bounded vkQueueWaitIdle substitute:
+                                  * zero-CB submit + fence wait */
+    int idle_fence_ready;
+    int idle_fence_dirty;          /* last bounded wait timed out - the
+                                  * marker submission may still be queued,
+                                  * so the fence must not be reset; a fresh
+                                  * fence is created on next use */
     const VkSemaphore *present_wait;
     uint32_t present_wait_count;
     VkSemaphore present_signal;
@@ -432,7 +447,7 @@ static int g_serve_stale = 1;
 static long g_stale_match = 4;
 static int g_submit_idle = 1;
 static long g_submit_every = 1;
-/* Small-delta patch serve (NR_LAYER_PATCH, default ON on the sync path):
+/* Small-delta patch serve (NR_LAYER_PATCH, OPT-IN - default OFF):
  * when the current input differs from the last ANSWERED input only
  * inside a small bounding box - a cursor sprite riding a still menu, a
  * blinking HUD element - the present shows the held processed result
@@ -1630,6 +1645,13 @@ static void release_device(device_data *data)
             data->get_device_proc(data->device, "vkDestroyCommandPool");
         if (destroy) destroy(data->device, data->pool, NULL);
     }
+    if (data->idle_fence_ready) {
+        PFN_vkDestroyFence destroy_fence = (PFN_vkDestroyFence)
+            data->get_device_proc(data->device, "vkDestroyFence");
+        if (destroy_fence)
+            destroy_fence(data->device, data->idle_fence, NULL);
+        data->idle_fence_ready = 0;
+    }
     if (data->async) {
         /* result/fgi may be POOL buffers (zero-copy publish in
          * async_drain) - reclaim them first or free() below double-frees
@@ -1911,9 +1933,76 @@ static void composite_ui_into_mapped(device_data *data,
     }
 }
 
+/* vkQueueWaitIdle has NO timeout: if the app's queue is backed up (driver
+ * recovery, a device-lost cascade, another process's upload storm) the
+ * default idle-sync transfer froze the game for the duration - a ~60 s
+ * stall on GTA IV's loading screen was field-reported. Bound the drain:
+ * submit an empty batch against a persistent fence (a queue marker that
+ * signals once all prior work completes) and wait NR_LAYER_GPUWAIT ms
+ * (default 2000). Timeout -> -1 -> the present passes through native
+ * instead of hanging; the transfer is retried on the next present. */
+static uint64_t gpuwait_ns(void)
+{
+    static int ms = -1;
+    if (ms < 0) {
+        const char *e = getenv("NR_LAYER_GPUWAIT");
+        ms = e ? atoi(e) : 2000;
+        if (ms <= 0) ms = 1;
+    }
+    return (uint64_t)ms * 1000000ull;
+}
+
+static int bounded_queue_idle(device_data *data, VkQueue queue)
+{
+    PFN_vkCreateFence create_fence = (PFN_vkCreateFence)
+        data->get_device_proc(data->device, "vkCreateFence");
+    PFN_vkDestroyFence destroy_fence = (PFN_vkDestroyFence)
+        data->get_device_proc(data->device, "vkDestroyFence");
+    PFN_vkQueueSubmit submit = (PFN_vkQueueSubmit)
+        data->get_device_proc(data->device, "vkQueueSubmit");
+    PFN_vkWaitForFences wait_fences = (PFN_vkWaitForFences)
+        data->get_device_proc(data->device, "vkWaitForFences");
+    PFN_vkResetFences reset_fences = (PFN_vkResetFences)
+        data->get_device_proc(data->device, "vkResetFences");
+    if (data->idle_fence_ready && data->idle_fence_dirty) {
+        /* A timed-out marker may still be queued; resetting it is UB.
+         * Discard it unsignalled and allocate a fresh fence. */
+        destroy_fence(data->device, data->idle_fence, NULL);
+        data->idle_fence_ready = 0;
+        data->idle_fence_dirty = 0;
+    }
+    if (!data->idle_fence_ready) {
+        VkFenceCreateInfo fi;
+        memset(&fi, 0, sizeof fi);
+        fi.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        if (create_fence(data->device, &fi, NULL, &data->idle_fence)
+                != VK_SUCCESS)
+            return -1;
+        data->idle_fence_ready = 1;
+    }
+    VkSubmitInfo empty;
+    memset(&empty, 0, sizeof empty);
+    empty.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    reset_fences(data->device, 1, &data->idle_fence);
+    if (submit(queue, 1, &empty, data->idle_fence) != VK_SUCCESS)
+        return -1;
+    if (wait_fences(data->device, 1, &data->idle_fence, VK_TRUE,
+                    gpuwait_ns()) != VK_SUCCESS) {
+        static unsigned long wait_timeouts;
+        data->idle_fence_dirty = 1;
+        if ((++wait_timeouts & 7) == 1)
+            nr_log("[nr_layer] queue drain bound hit (%u ms); frame "
+                   "passes native (x%lu)", gpuwait_ns() / 1000000ull,
+                   wait_timeouts);
+        return -1;
+    }
+    return 0;
+}
+
 /* Move the presented frame between the swapchain image and the staging
- * buffer. idle sync = vkQueueWaitIdle around the transfer (default, proven);
- * semaphore sync = take over the present's wait semaphores (NR_LAYER_SYNC). */
+ * buffer. idle sync = bounded queue drain around the transfer (default,
+ * proven); semaphore sync = take over the present's wait semaphores
+ * (NR_LAYER_SYNC). */
 static int transfer(device_data *data, swapchain_data *chain, VkQueue queue,
                     uint32_t index, int to_image)
 {
@@ -1942,8 +2031,6 @@ static int transfer(device_data *data, swapchain_data *chain, VkQueue queue,
         data->get_device_proc(data->device, "vkEndCommandBuffer");
     PFN_vkQueueSubmit submit = (PFN_vkQueueSubmit)
         data->get_device_proc(data->device, "vkQueueSubmit");
-    PFN_vkQueueWaitIdle wait = (PFN_vkQueueWaitIdle)
-        data->get_device_proc(data->device, "vkQueueWaitIdle");
     PFN_vkFreeCommandBuffers free_commands = (PFN_vkFreeCommandBuffers)
         data->get_device_proc(data->device, "vkFreeCommandBuffers");
 
@@ -1956,8 +2043,12 @@ static int transfer(device_data *data, swapchain_data *chain, VkQueue queue,
                 data->get_device_proc(data->device, "vkWaitForFences");
             PFN_vkResetFences reset_fences = (PFN_vkResetFences)
                 data->get_device_proc(data->device, "vkResetFences");
-            wait_fences(data->device, 1, &data->ring_fence[slot], VK_TRUE,
-                        10ull * 1000000000ull);
+            /* Timeout: do NOT reset a fence whose submission is still
+             * in flight - drop the slot's reuse for this present instead
+             * (the present falls back to passthrough via -1). */
+            if (wait_fences(data->device, 1, &data->ring_fence[slot],
+                            VK_TRUE, gpuwait_ns()) != VK_SUCCESS)
+                return -1;
             reset_fences(data->device, 1, &data->ring_fence[slot]);
         }
         commands = data->ring_commands[slot];
@@ -2022,14 +2113,20 @@ static int transfer(device_data *data, swapchain_data *chain, VkQueue queue,
     end(commands);
 
     if (!ringed) {
-        wait(queue);
+        if (bounded_queue_idle(data, queue) != 0) {
+            free_commands(data->device, data->pool, 1, &commands);
+            return -1;
+        }
         VkSubmitInfo submission;
         memset(&submission, 0, sizeof submission);
         submission.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         submission.commandBufferCount = 1;
         submission.pCommandBuffers = &commands;
         submit(queue, 1, &submission, VK_NULL_HANDLE);
-        wait(queue);
+        if (bounded_queue_idle(data, queue) != 0) {
+            free_commands(data->device, data->pool, 1, &commands);
+            return -1;
+        }
         free_commands(data->device, data->pool, 1, &commands);
         return 0;
     }
@@ -2062,7 +2159,7 @@ static int transfer(device_data *data, swapchain_data *chain, VkQueue queue,
         PFN_vkWaitForFences wait_fences = (PFN_vkWaitForFences)
             data->get_device_proc(data->device, "vkWaitForFences");
         if (wait_fences(data->device, 1, &data->ring_fence[slot], VK_TRUE,
-                        10ull * 1000000000ull) != VK_SUCCESS)
+                        gpuwait_ns()) != VK_SUCCESS)
             return -1;
     }
     return 0;
@@ -2169,7 +2266,11 @@ static int patch_enabled(void)
 {
     if (g_patch < 0) {
         const char *e = getenv("NR_LAYER_PATCH");
-        g_patch = !e || strcmp(e, "0") != 0;
+        /* OPT-IN, default OFF: the field test showed the raw patched
+         * region reads as a moving "selection rectangle" over the
+         * processed background - the cure looked worse than the ~15 fps
+         * cursor cadence it fixed. NR_LAYER_PATCH=1 to experiment. */
+        g_patch = e && strcmp(e, "0") != 0 && *e;
         const char *c = getenv("NR_LAYER_PATCH_CAP");
         if (c && *c) {
             long v = atol(c);

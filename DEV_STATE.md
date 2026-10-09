@@ -3372,3 +3372,44 @@ in-process path, default 1 Mpx (~1280x800). Bigger extents skip the
 engine and fall through to the TCP daemon/native path - graceful
 degradation instead of a desktop hang. 0 disables for managed setups
 once a bigger extent is actually validated. Deployed x86+x64.
+
+## 2026-10-09 owner manager test REJECTED - patch artifact + load freeze
+
+Owner verdict: "result unacceptable". Four findings, disposition:
+
+1. Manager panel toggles missing -> root cause: production bundle was
+   STALE (m13/deskpanel.py absent, ui.py/i18n.py predated the desk-panel
+   work). _build_production.py already listed the files; the bundle just
+   had not been rebuilt since. Rebuilt; production m13 now byte-identical
+   to repo (deskpanel.py/ui.py/i18n.py + tools/desk_overlay.py hashes
+   verified). Settings now show "Benchmark panel" with clock/fps/load
+   checkboxes.
+
+2. GTA IV froze ~55-60 s on the first letters screen, then recovered.
+   Forensics: daemon m11d.log shows the engine healthy at 35 ms frames
+   before and after, with a unique 60312 ms stream gap between game
+   presents 2 and 3 - the daemon sat IDLE; the block was inside the
+   game's present call. Layer log: wnd-msg gap tick 11918750->11973921
+   matches (~55 s). Root cause: the default "idle" transfer sync calls
+   vkQueueWaitIdle on the GAME's queue with NO timeout - a backed-up
+   queue (driver recovery / the 4 watchdog daemon restarts uploading
+   ~676 MB weights each in the same window) holds the present hostage
+   indefinitely. Fix: bounded_queue_idle() - zero-command-buffer submit
+   + fence wait, NR_LAYER_GPUWAIT ms (default 2000); timeout returns -1
+   => that present passes native instead of freezing. The semaphore
+   path's 10 s slot/readback fence waits are now bound the same way,
+   and a timed-out fence is never reset while pending (dirty flag ->
+   fresh fence). Deployed x86+x64.
+
+3. Menu flicker remains = the documented external-raw-splice (whole
+   client area, no NRMK, tracks live scene); unchanged - the patch
+   serve was NOT an acceptable remedy.
+
+4. "Selection rectangle" trailing the cursor = the NR_LAYER_PATCH raw
+   region composited over the processed background. Reverted to OPT-IN
+   default OFF (NR_LAYER_PATCH=1 re-enables for experiments); the init
+   log stays silent when off. Deployed x86+x64 (hashes match build).
+
+Verification: autotest synth battery re-run - every detector still
+fires on its planted artifact. Clean state: port 48990 free, no stale
+daemon/stub/game/smoke processes, Sunshine untouched.
