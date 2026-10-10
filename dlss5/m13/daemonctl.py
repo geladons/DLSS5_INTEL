@@ -145,11 +145,23 @@ class M11dClient:
         return self._roundtrip(CMD_SETCOLORSTRENGTH, payload)
 
     def alive(self):
-        """True only when an NRCT-speaking m11d answers (Sunshine doesn't)."""
+        """True when an NRCT-speaking m11d answers (Sunshine doesn't) -
+        OR when the port accepts a connection but the daemon is too busy
+        to reply (mid engine-build the accept queue listens while the
+        single-threaded build runs ~30 s). A listening socket already
+        proves the process is alive; restarting against it spawned a
+        competing m11d per 30 s tick (foreign-daemon churn, observed
+        2026-10-09). Refused connect = truly dead."""
         try:
             self.status()
             return True
         except DaemonError:
+            pass
+        try:
+            with socket.create_connection((self.host, self.port),
+                                          timeout=2.0):
+                return True
+        except OSError:
             return False
 
     def warmup(self, w=1920, h=1080, timeout=120.0):

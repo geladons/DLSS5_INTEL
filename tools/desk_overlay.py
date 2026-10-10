@@ -22,7 +22,9 @@
 #   LOAD   - CPU % (GetSystemTimes deltas; kernel time includes idle),
 #            RAM % (GlobalMemoryStatusEx), GPU % (typeperf "GPU Engine"
 #            counters, busiest 3D/Compute/Copy engine - video engines
-#            belong to Sunshine's capture and are excluded).
+#            belong to Sunshine's capture and are excluded; typeperf is
+#            respawned on a cycle because the instance set is enumerated
+#            once at spawn - a game started later is otherwise invisible).
 #            Smoothed (EMA) so the numbers read like Task Manager, not a
 #            200 ms jitter stream.
 #
@@ -130,50 +132,94 @@ class GpuMeter(threading.Thread):
     ~30% while Task Manager shows the GPU idle. Falls back to the full
     row max if the header has no recognisable columns. First sample lands
     ~4-5 s in: typeperf spends that long enumerating ~600 counters.
+    Instances are enumerated once per process spawn, so the typeperf is
+    cycled every ~24 s - a game starting after the panel would otherwise
+    never appear in the counter list (it never did: the panel read ~5%
+    of background churn under full game load).
     """
 
     _ENG_OK = ("engtype_3D", "engtype_Compute", "engtype_Copy")
+    _CYCLE_SAMPLES = 24            # re-enumerate every ~24 s (see below)
+    _STALE_S = 15.0                # no sample this long -> value=None
 
     def __init__(self):
         super().__init__(daemon=True)
         self.value = None            # None until first sample lands
+        self._last_sample = 0.0
         self._proc = None
         self._stop = False
 
     def run(self):
-        try:
-            self._proc = subprocess.Popen(
-                ["typeperf", "-si", "1",
-                 "\\GPU Engine(*)\\Utilization Percentage"],
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                text=True, bufsize=1,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        """typeperf expands the (*) engine-instance wildcard ONCE at start:
+        a game/daemon that begins using the GPU AFTER our process spawned
+        never enters the counter list, so a panel opened before the game
+        would read background churn forever (owner report: meter stuck at
+        ~5% under load). Bound each typeperf's life to _CYCLE_SAMPLES and
+        respawn - a fresh enumeration sees late starters."""
+        while not self._stop:
+            if self._last_sample and \
+                    time.time() - self._last_sample > self._STALE_S:
+                self.value = None     # source dried up: show '--'
+            try:
+                self._proc = subprocess.Popen(
+                    ["typeperf", "-si", "1", "-sc",
+                     str(self._CYCLE_SAMPLES),
+                     "\\GPU Engine(*)\\Utilization Percentage"],
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    text=True, bufsize=1,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            except OSError:
+                self.value = None
+                return
             cols = None              # engine-column indices from header
-            for line in self._proc.stdout:
-                if self._stop:
-                    break
-                line = line.strip()
-                if not line.startswith('"'):
-                    continue
-                if "(PDH" in line:   # header row - map engine columns
+            try:
+                for line in self._proc.stdout:
+                    if self._stop:
+                        break
+                    line = line.strip()
+                    if not line.startswith('"'):
+                        continue
+                    if "(PDH" in line:   # header row - map engine columns
+                        try:
+                            row = next(csv.reader(io.StringIO(line)))
+                            cols = [i for i, name in enumerate(row)
+                                    if i > 0 and any(t in name
+                                                     for t in self._ENG_OK)]
+                            if not cols and any("engtype_" in n
+                                                for n in row):
+                                # Valid enumeration, zero pipeline engines
+                                # right now -> load IS 0. Falling back to
+                                # row-max here would re-add Sunshine's
+                                # always-on video engines (~30% idle).
+                                cols = []
+                            elif not cols:
+                                cols = None   # foreign naming -> row max
+                        except csv.Error:
+                            cols = None   # header unparseable -> row max
+                        continue
                     try:
                         row = next(csv.reader(io.StringIO(line)))
-                        cols = [i for i, name in enumerate(row) if i > 0
-                                and any(t in name for t in self._ENG_OK)]
-                    except csv.Error:
-                        cols = []
-                    continue
-                try:
-                    row = next(csv.reader(io.StringIO(line)))
-                    vals = [float(row[i]) for i in cols
-                            if i < len(row) and row[i]] if cols else \
-                        [float(v) for v in row[1:] if v]
-                    if vals:
-                        self.value = max(vals)
-                except (ValueError, csv.Error):
-                    continue
-        except OSError:
-            self.value = None
+                        if cols is None:
+                            vals = [float(v) for v in row[1:] if v]
+                        elif not cols:
+                            vals = []         # no pipeline engines -> 0
+                        else:
+                            vals = [float(row[i]) for i in cols
+                                    if i < len(row) and row[i]]
+                        self.value = max(vals) if vals else 0.0
+                        self._last_sample = time.time()
+                    except (ValueError, csv.Error):
+                        continue
+            except (OSError, ValueError):
+                pass
+            try:
+                self._proc.kill()
+            except OSError:
+                pass
+            self._proc = None
+            if self._stop:
+                break
+            time.sleep(0.5)          # avoid a spin if typeperf insta-dies
 
     def stop(self):
         self._stop = True

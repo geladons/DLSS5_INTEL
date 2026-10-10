@@ -21,6 +21,7 @@
 # ============================================================================
 import json
 import os
+import time
 import tkinter as tk
 from tkinter import ttk
 
@@ -209,6 +210,9 @@ class Phase30Panel(tk.Frame):
 
         self._debounce_ids = {}
         self._dragging = set()
+        self._push_grace = {}   # key -> monotonic deadline: hold off
+                                # external set_values while the config
+                                # round-trip for the pushed value lands
         self._build()
 
     def _build(self):
@@ -335,12 +339,23 @@ class Phase30Panel(tk.Frame):
     def _schedule_push(self, key, val):
         if key in self._debounce_ids:
             self.after_cancel(self._debounce_ids[key])
+        # count the pending push as "dragging" so a status refresh cannot
+        # overwrite the widget the user just touched
+        self._dragging.add(key)
         self._debounce_ids[key] = self.after(200, lambda: self._do_push(key, val))
 
     def _do_push(self, key, val):
         self._debounce_ids.pop(key, None)
         self._vals[key] = val
+        # the config round-trip takes ~one status tick; keep external
+        # sync off this key briefly or the widget visibly snaps back
+        self._push_grace[key] = time.monotonic() + 2.0
         self.on_change(key, val)
+        self._dragging.discard(key)
+
+    def _ext_ok(self, key):
+        return (key not in self._dragging
+                and time.monotonic() >= self._push_grace.get(key, 0.0))
 
     def _on_mask_toggle(self):
         val = bool(self._var_auto_mask.get())
@@ -355,7 +370,9 @@ class Phase30Panel(tk.Frame):
                 idx = i
                 break
         self._vals["style_index"] = idx
-        self.on_change("style_index", idx)
+        # In-layer the combo cycles per click; push only the settled value
+        # (each push hits the daemon with a knob write + history reset).
+        self._schedule_push("style_index", idx)
 
     def reset_defaults(self):
         """Reset all parameters to Phase 30 defaults."""
@@ -366,28 +383,28 @@ class Phase30Panel(tk.Frame):
         """Update widget displays from external values."""
         if not values:
             return
-        if "intensity" in values and "intensity" not in self._dragging:
+        if "intensity" in values and self._ext_ok("intensity"):
             v = float(values["intensity"])
             self._var_intensity.set(v)
             self.lbl_intensity.config(text="%.2f" % v)
             self._vals["intensity"] = v
-        if "local_tone" in values and "local_tone" not in self._dragging:
+        if "local_tone" in values and self._ext_ok("local_tone"):
             v = float(values["local_tone"])
             self._var_local_tone.set(v)
             self.lbl_local_tone.config(text="%.2f" % v)
             self._vals["local_tone"] = v
-        if "local_structure" in values and "local_structure" not in self._dragging:
+        if "local_structure" in values and self._ext_ok("local_structure"):
             v = float(values["local_structure"])
             self._var_local_structure.set(v)
             self.lbl_local_structure.config(text="%.2f" % v)
             self._vals["local_structure"] = v
-        if "skin_structure" in values and "skin_structure" not in self._dragging:
+        if "skin_structure" in values and self._ext_ok("skin_structure"):
             v = float(values["skin_structure"])
             self._var_skin_structure.set(v)
             txt = tr("p30_skin_follow") if abs(v - (-1.0)) < 0.02 else ("%.2f" % v)
             self.lbl_skin_structure.config(text=txt)
             self._vals["skin_structure"] = v
-        if "color_strength" in values and "color_strength" not in self._dragging:
+        if "color_strength" in values and self._ext_ok("color_strength"):
             v = float(values["color_strength"])
             self._var_color_strength.set(v)
             self.lbl_color_strength.config(text="%.2f" % v)
@@ -396,7 +413,7 @@ class Phase30Panel(tk.Frame):
             b = bool(values["auto_mask"])
             self._var_auto_mask.set(b)
             self._vals["auto_mask"] = b
-        if "style_index" in values:
+        if "style_index" in values and self._ext_ok("style_index"):
             idx = int(values["style_index"])
             idx = min(max(idx, 0), 2)
             self._var_style.set(self._style_labels[idx])

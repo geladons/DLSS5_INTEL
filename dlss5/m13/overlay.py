@@ -143,6 +143,7 @@ class ControlOverlay:
         self._pending_push = None    # (value, time) of an in-flight push
         self._after_id_blend = None  # debounce timer for the blend knob
         self._after_id_sharpness = None  # debounce timer for sharpness
+        self._after_id_scale = None  # debounce timer for the scale preset
         self._game_hwnd = None       # foreground restore target
         self._focus_mode = False     # we took the foreground this session
         self._jail_cursor = True     # recompute per show(): fullscreen only
@@ -455,6 +456,19 @@ class ControlOverlay:
         self._debounced_blend(1.0)
 
     def _scale_selected(self, _e=None):
+        """Scale preset pick. In-layer the combo cycles on each click, so a
+        burst of clicks used to queue a multi-second engine rebuild PER
+        value (daemon log: ~24 re-inits for one choice - the screen kept
+        serving the old scale for tens of seconds and read as "preset does
+        not apply"). Debounce: only the settled selection is pushed."""
+        lbl = self.scale_var.get()
+        if self._after_id_scale:
+            self.win.after_cancel(self._after_id_scale)
+        self._after_id_scale = self.win.after(600, self._push_scale)
+        self._log("[overlay] scale selected: %s (applying on settle)" % lbl)
+
+    def _push_scale(self):
+        self._after_id_scale = None
         lbl = self.scale_var.get()
         s = preset_label_to_scale(lbl)
         self.ctl.submit(self.ctl.set_scale, s)

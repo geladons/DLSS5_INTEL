@@ -19,6 +19,7 @@
 # `self._il` back-reference - InLayerUI(overlay) reaches back into the
 # overlay object for win/ctl/cfg/dst, matching the dispatch contract.
 # ============================================================================
+import threading
 import time
 import tkinter as tk
 
@@ -143,8 +144,14 @@ class InLayerUI:
 
     PUBLISH_MS = 66        # ~15 Hz bitmap + heartbeat while armed
     DRAIN_MS = 10          # event ring poll while visible
+    HB_MS = 0.25           # heartbeat period; layer stale gate is ~2 s
     PIDCHECK_S = 1.0       # game-pid liveness revalidation cadence
-    LAYER_WAIT_S = 4.0     # armed+visible without a layer stamp -> dead
+    LAYER_WAIT_S = 12.0    # armed+visible without a layer stamp -> dead.
+                           # 4 s used to misfire on GTA IV's present gaps
+                           # (menu mode switches stall presents for many
+                           # seconds) - a false "no consumer" latched the
+                           # whole session to external. 12 s still bounds
+                           # the wait for a truly layer-less game.
 
     def __init__(self, overlay):
         self.ov = overlay
@@ -205,10 +212,34 @@ class InLayerUI:
         self._last_pub_ms = 0.0
         self._gen += 1
         self._schedule_publish()
+        self._start_heartbeat()
         self._log("[overlay] shm section open pid=%s (%s, cap %dx%d)"
                   % (pid, "Local\\DLSS5_UI_%d" % int(pid),
                      SHM_MAX_W, SHM_MAX_H))
         return True
+
+    def _start_heartbeat(self):
+        """Dedicated heartbeat thread. bump_heartbeat() is a mutex-guarded
+        seqlock write - safe off the Tk thread. The layer drops panel +
+        input capture when the hb is stale > ~2 s; running it inside the
+        Tk publish pump meant any multi-second mainloop stall (observed:
+        2.2-18.1 s while a foreign m11d restart churned the box) dropped
+        the overlay mid-session - the strobing "flicker with CTRL+ALT+G
+        open" report. A Tk-busy producer is not dead: keep the hb alive
+        and let the bitmap freeze instead of the panel blinking out."""
+        gen = self._gen
+        shm = self.shm
+
+        def beat():
+            while gen == self._gen and shm.is_open():
+                try:
+                    shm.bump_heartbeat()
+                except Exception:
+                    pass
+                time.sleep(self.HB_MS)
+
+        threading.Thread(target=beat, daemon=True,
+                         name="m13-ui-hb").start()
 
     def set_frame_flags(self, covers_screen):
         """Framed-mode flags for the armed session. The cursor sprite is

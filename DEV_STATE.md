@@ -3546,3 +3546,79 @@ window-stable; the window then VANISHES (proc alive). Record window must
 land inside +120..+165 - at_s53_bench1 with pre-roll 180 recorded only
 repeated desktop (ddarec acquired=10/emitted=2885). at_s53_bench2 used
 pre-roll 100 dur 45 (+123..+168).
+
+## 2026-10-09 Stage 54 - overlay liveness decoupling + preset debounce + GPU meter re-enumeration
+
+Owner retest after Stage 53: phantoms GONE (drift-anchor gate confirmed
+in the field). Remaining complaints: menu/overlay flicker got stronger
+(esp. with CTRL+ALT+G open), overlay presets "do not apply", GPU load
+panel reads garbage.
+
+Overlay flicker root cause chain (proven by logs + live captures):
+- In-layer overlay liveness rode ONE signal: bump_heartbeat() inside the
+  Tk-thread publish pump (~15 Hz). Any Tk mainloop stall >~2 s let the
+  layer's hb go stale -> panel AND input capture dropped, then re-armed
+  on recovery = strobing panel (the "flicker with CTRL+ALT+G open" part).
+  overlay.log showed pump stalls of 2.2-18.1 s during churn.
+- Stall amplifier found: when the game was launched externally while a
+  foreign m11d was mid engine-build, the monitor's auto-restart read
+  "daemon dead" (status() times out during the ~30 s single-threaded
+  build) and spawned a competing m11d every 30 s - VRAM/IO churn starved
+  Tk. daemonctl.alive() now falls back to a connect-only probe: a
+  listening socket = alive-but-busy, refused = dead.
+- The heartbeat now runs on a dedicated 250 ms daemon thread
+  (overlay_inlayer._start_heartbeat; shm ops were already mutex-guarded).
+  A Tk stall now freezes the panel BITMAP but keeps panel + input armed -
+  no drop/restore strobe. Process death still kills the thread -> stale
+  hb -> correct hide semantics preserved.
+- HotkeyPoller moved off the Tk after() chain to a daemon thread polling
+  GetAsyncKeyState at 120 ms; the edge fires via tk.after(0) - a press
+  during a stall is consumed once and delivered on wake instead of being
+  swallowed whole (CLOSE was lost mid-stall in the first live session).
+- Second verified defect: the layer-attach deadline LAYER_WAIT_S=4.0
+  misfires on GTA IV's present gaps - mode switches stall presents for
+  17-25 s (measured in nr_layer_win segment logs). A false "no consuming
+  layer" latched the whole session to the external window. Raised to 12 s;
+  the 17:32 live run attached at ~11.5 s - inside the new bound, would
+  have dead-pathed before.
+
+Preset controls (the "presets don't apply" complaint):
+- overlay.py scale combo: each in-layer click used to submit set_scale
+  immediately -> a click burst queued ~24 engine rebuilds (daemon log
+  showed re-init storm) and the screen served the old scale for tens of
+  seconds -> read as "doesn't apply". Now debounced 600 ms - only the
+  settled selection reaches the daemon.
+- phase30.py style combo: same treatment via the existing _schedule_push
+  debounce. Additionally set_values() could overwrite a just-touched
+  widget from the periodic snapshot before the config round-trip landed
+  (visual snapback). Pending pushes now count as "dragging" and a 2 s
+  per-key grace (_push_grace) holds external sync off until config
+  settles. Applied to all slider keys via _ext_ok().
+
+GPU meter (tools/desk_overlay.py GpuMeter):
+- typeperf expands the (*) engine-instance wildcard once per spawn - a
+  game/daemon started after the meter never entered the column list and
+  the panel stayed on background churn. Now each typeperf runs -sc 24
+  (~24 s) then respawns, so new PIDs join the enumeration every cycle.
+- Edge fixed: a valid enumeration with zero 3D/Compute/Copy instances
+  used to fall back to row-max -> re-added Sunshine's video engines (~30%
+  idle bias). It now reports 0.0; row-max fallback is kept only for a
+  truly foreign counter naming. Verified live: ~5-8% idle/DWM churn,
+  ~26-31% with GTA IV + daemon running.
+
+Config note: live config has overlay_freeze=true - CTRL+ALT+G opens the
+panel in photo-freeze mode (held frame). That's the user's toggle, left
+as-is; the freeze/unfreeze edge can still flash once by design.
+
+Live verification (at_s54_overlay2, GTA IV menu, manager + harness +
+synthetic CTRL+ALT+G injects):
+- arm -> shm open -> layer attached (abi=1) -> hide; both edges captured;
+  zero publish-pump stalls with the alive() fix in place.
+- _ui_smoke: overlay show + live gain push to the real daemon verified
+  (later gain_var assert is pre-existing test drift vs the renamed UI).
+- test_stage5: ALL PASS with a clean port (earlier failure was my foreign
+  test daemon on 48990, not a regression).
+
+Residual known limits (unchanged, documented): the select-screen
+external-raw-splice flashes remain a Windows arbitration defect - no
+user-mode fix; menu flicker on that screen persists until gameplay.
