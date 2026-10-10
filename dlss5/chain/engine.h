@@ -206,7 +206,7 @@ private:
                pipeCompose_ = VK_NULL_HANDLE, pipeEncode_ = VK_NULL_HANDLE;
     VkPipeline pipeRescale_ = VK_NULL_HANDLE, pipeFrameGen_ = VK_NULL_HANDLE,
                pipeTemporalNr_ = VK_NULL_HANDLE, pipeFgInterp_ = VK_NULL_HANDLE,
-               pipeStats_ = VK_NULL_HANDLE;
+               pipeStats_ = VK_NULL_HANDLE, pipeMotionEst_ = VK_NULL_HANDLE;
     VkBuffer bufNetRgb_ = VK_NULL_HANDLE, bufFinLow_ = VK_NULL_HANDLE;
     VkDeviceMemory memNetRgb_ = VK_NULL_HANDLE, memFinLow_ = VK_NULL_HANDLE;
     VkDescriptorSet setDown_ = VK_NULL_HANDLE, setUp_ = VK_NULL_HANDLE, setFrameGen_ = VK_NULL_HANDLE;
@@ -219,7 +219,9 @@ private:
                    memLastP_ = VK_NULL_HANDLE, memFbStats_ = VK_NULL_HANDLE, memHp_ = VK_NULL_HANDLE,
                    memPrevFrame_ = VK_NULL_HANDLE, memCurrFrame_ = VK_NULL_HANDLE, memInterpOut_ = VK_NULL_HANDLE,
                    memPrevRaw_ = VK_NULL_HANDLE, memCurProc_ = VK_NULL_HANDLE,
-                   memMidRaw_ = VK_NULL_HANDLE, memStats_ = VK_NULL_HANDLE;
+                   memMidRaw_ = VK_NULL_HANDLE, memStats_ = VK_NULL_HANDLE,
+                   memHistPrev_ = VK_NULL_HANDLE, memMv_ = VK_NULL_HANDLE,
+                   memMvRb_ = VK_NULL_HANDLE;
     VkImage imgIn_ = VK_NULL_HANDLE, imgFinal_ = VK_NULL_HANDLE;
     VkImageView imgInView_ = VK_NULL_HANDLE, viewFinal_ = VK_NULL_HANDLE;
     VkBuffer bufUpload_ = VK_NULL_HANDLE, bufRgb_ = VK_NULL_HANDLE, bufMax_ = VK_NULL_HANDLE,
@@ -228,7 +230,33 @@ private:
              bufLastPresented_ = VK_NULL_HANDLE, bufFbStats_ = VK_NULL_HANDLE, bufHp_ = VK_NULL_HANDLE,
              bufPrevFrame_ = VK_NULL_HANDLE, bufCurrFrame_ = VK_NULL_HANDLE, bufInterpOut_ = VK_NULL_HANDLE,
              bufPrevRaw_ = VK_NULL_HANDLE, bufCurProc_ = VK_NULL_HANDLE,
-             bufMidRaw_ = VK_NULL_HANDLE, bufStats_ = VK_NULL_HANDLE;
+             bufMidRaw_ = VK_NULL_HANDLE, bufStats_ = VK_NULL_HANDLE,
+             bufHistPrev_ = VK_NULL_HANDLE, bufMv_ = VK_NULL_HANDLE,
+             bufMvRb_ = VK_NULL_HANDLE;
+    // D5C_DEBUG_MV: bufMv_ is staged into host-visible bufMvRb_ every
+    // frame (record tail); every 30th completed frame logs median mv and
+    // the nonzero-block share. mvRbPtr_ is the persistent map.
+    void* mvRbPtr_ = nullptr;
+    bool mvDebug_ = false;
+    // D5C_MV_BETA / D5C_MV_INTERP runtime knobs, pushed to temporal_nr and
+    // temporal_stats as pc.c[1] (warped-pixel refresh fraction) and
+    // pc.c[2] (1 = bilinear mv between block centres, 0 = nearest block).
+    // Shipped defaults = the z1 sweep winner: BETA 0.15 + bilinear mv +
+    // the stronger zero-bias (static flicker p90 2.57% -> 0.96% on
+    // _nat_load for a screen-fixed-energy cost of 7.5% -> 8.9% vs the
+    // 7.5% temporal-off floor). PIXSTATIC stays available but off - at
+    // 1 LSB it added nothing over the zero-bias alone.
+    float mvBeta_ = 0.15f;
+    float mvInterp_ = 1.0f;
+    // D5C_MV_ZBIAS / D5C_MV_ZABS: motion_est zero-motion bias,
+    // (0,0) when SAD00 <= SADmin*(1+ZBIAS) + 64*ZABS/255.
+    // Pushed to motion_est as pc.c[1]/pc.c[2].
+    // D5C_MV_PIXSTATIC: per-pixel static override in LSB; a pixel whose
+    // unwarped input delta <= PIXSTATIC/255 forces mv=(0,0) (exact v9
+    // path). 0 = off. Pushed to temporal_nr/stats as pc.c[3].
+    float mvZbias_ = 0.15f;
+    float mvZabs_ = 2.0f;
+    float mvPixStatic_ = 0.0f;
     double lastFrameGenGpuMs_ = 0.0;
     bool havePrevProcessed_ = false;   // set after a successful processFrame
     int fgMode_ = 1;                   // 1 = transfer (+0), 2 = anchor interp (+1)

@@ -3734,3 +3734,70 @@ ec12528b0f71acd2cb0e0f5d95100a94, temporal_nr.spv
 90a0763c4faf30efbff90864861ed545, temporal_stats.spv
 5311e3e9af68c0ad051d145f41aa6cb6 to all five runtime dirs
 (m11d/layer x86/x64/m12/m8b).
+
+## Stage 57 - motion-compensated residual hold (2026-10-10)
+
+Owner report after v9: phantoms/noise on ANY motion (enhancement detail
+stays nailed to screen position during pans), and menu flashes with a
+still mouse. Measurement: the network output itself boils - on synthetic
+integer pans of a real GTA IV frame ~19-26% of pixels have a motion-
+compensated error >4/255 per frame even with temporal OFF (scale 1.0 no
+better), and the v9 hold made it worse by anchoring residual detail to
+the screen cell: screen-fixed residual energy 16.4% vs 7.5% temporal-off.
+Flow-flicker on the native flythrough frames: temporal-off 19.2% med,
+v9 20.7% med (= the owner's noise-on-motion).
+
+Fix (v10): temporal state is warped along estimated motion. New
+motion_est.comp (one 64-thread workgroup per 8x8 net-res block: luma
+SAD of current col01 vs the stored previous input P, integer full
+search +-12, zero-motion bias, parabolic subpixel refine) writes
+bufMv (binding 18, vec4 mvx/mvy/conf/- per block). Each frame
+recordTemporal first copies bufHist -> bufHistPrev (binding 17) so the
+warped neighbour reads never race temporal_nr's in-place writes;
+temporal_nr/stats read E/P/A/R at q = p - mv (verbatim on integer mv,
+bilinear for fractional on P/A/decoded-E with R from the nearest tap,
+all taps validated, out-of-image -> fresh). Pixels with |mv|>0.01
+refresh toward the fresh residual every frame at BETA with no budget;
+mv=(0,0) runs the exact v9 anchor/budget path so static output stays
+byte-identical. Runtime knobs pushed via push constants (envs):
+D5C_MV_BETA (moving-pixel refresh fraction), D5C_MV_INTERP (bilinear
+mv between 8i+3.5 block centres), D5C_MV_ZBIAS/ZABS (zero-bias:
+(0,0) when SAD00 <= SADmin*(1+ZBIAS) + 64*ZABS/255),
+D5C_MV_PIXSTATIC (per-pixel unwarped-static override, off);
+D5C_DEBUG_MV=1 logs median mv + nonzero share every 30 frames.
+
+Knob sweep (reworked replay_gate: static flicker now gates only pixels
+>16px from any input motion, FAIL p90 >2%; flow flicker FAIL med >10%
+or p90 >20%, WARN med >4%/p90 >8%): BETA 0.3->0.15->0.08 barely moves
+anything; INTERP improves flow p90 ~15-30%; the zero-bias is THE fix
+for the static-flicker regression - it pins near-static blocks at
+(0,0) so their pixels keep the v9 path (nat static p90 2.57% FAIL ->
+0.96% WARN, synpan 3.35% FAIL -> 1.49% WARN) at the cost of a little
+screen-fixed energy (7.5% -> 8.9% fixedpat share vs 7.5% temporal-off)
+and roughly doubled synpan MC-err (still ~10x under v9). PIXSTATIC=1
+added nothing on top and stays off. Shipped defaults = variant z1:
+BETA 0.15, INTERP 1, ZBIAS 0.15, ZABS 2.0.
+
+Final numbers (z1 = shipped build): _nat_load WARN (static p90
+0.96%/max 3.6%; flow flicker med 6.4% p90 13.0% - vs temporal-off
+19.2% and v9 20.7%); Temp/_pan_man.txt WARN (static p90 1.49%, flow
+med 1.1% p90 7.4%); _pan_seq PASS (static p90 0.19%); fixture:ghost
+PASS (residue <=0.02%/max 9, all flicker/osci 0). Synthetic-pan
+MC-err >4: +3,0 1.2%, +1,1 6.4%, -6,0 3.7% (v9: 19.1/21.1/31.8);
+screen-anchored phantoms ~0.03-0.4%; fixedpat screen-fixed share
+8.9% (temporal-off floor 7.5%, v9 16.4%).
+
+Menu flashes (still open): the 3-5 flashes/45 s on the GTA IV
+game-select screen are single-frame whole-frame RAW splices carrying
+no NRMK marker - the layer log shows only reuse/tcp paths after
+startup (p=raw only pre-engine-ready). Known external-raw-splice
+arbitration defect, no user-mode fix found (Stage 24 note); only
+native-res/fullscreen avoids it.
+
+Deployed (build == every production copy, md5-verified): m11d.exe
+51d27d340535b8176888b2a856dc9089, d5c_chain.dll
+705944088e17f45cd94cc2a19b581b2a, temporal_nr.spv
+b6fa969bf66398bd5f7ed779df7991af, temporal_stats.spv
+8aca92c1618a097a995e9d60f23be1ef, motion_est.spv
+35a7e410d65080545a66127e72fc797f to all five runtime dirs
+(m11d/layer x86/x64/m12/m8b).

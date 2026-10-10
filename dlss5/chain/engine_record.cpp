@@ -377,5 +377,22 @@ void ChainEngine::recordFrame(long frameIndex) {
         vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_TRANSFER_BIT,
                              VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &hb, 0, nullptr, 0, nullptr);
     }
+    // D5C_DEBUG_MV: stage this frame's block motion vectors for the
+    // post-fence log in submitAndReadback (every frame - the log only
+    // prints every 30th, the staged copy is always the latest frame's).
+    if (mvDebug_ && bufMv_ && bufMvRb_) {
+        VkBufferMemoryBarrier mvb{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+        mvb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        mvb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        mvb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        mvb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        mvb.buffer = bufMv_; mvb.offset = 0;
+        mvb.size = (VkDeviceSize)((netW_ + 7) / 8) * ((netH_ + 7) / 8) * 16;
+        vkCmdPipelineBarrier(cmd_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr,
+                             1, &mvb, 0, nullptr);
+        VkBufferCopy mcp{0, 0, mvb.size};
+        vkCmdCopyBuffer(cmd_, bufMv_, bufMvRb_, 1, &mcp);
+    }
 }
 } // namespace d5c

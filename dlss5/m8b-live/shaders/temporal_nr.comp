@@ -147,6 +147,9 @@ const float R_DONE    =   6.0 / 255.0; // residual match below -> refresh done
 const float R_STEP_MIN=   1.0 / 255.0; // floor per refresh step (sub-visible)
 const float R_FRAC    =   0.25;        // fraction of residual error per step
 const float R_FRAMES  =  16.0;         // refresh frames per anchor event
+// Warped-pixel refresh fraction is pc.c[1] (env D5C_MV_BETA, default 0.3);
+// pc.c[2] != 0 (env D5C_MV_INTERP) bilinearly blends the per-block mv
+// between block centres instead of nearest-block.
 
 // (The earlier "direction trit" experiment - a per-channel reversal sign
 // packed into the low mantissa bits of the history store - was removed:
@@ -158,12 +161,42 @@ const float R_FRAMES  =  16.0;         // refresh frames per anchor event
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 layout(std430, set = 0, binding = 3) readonly buffer FeatV { float fv[]; };
 layout(std430, set = 0, binding = 13) buffer Hist { float hs[]; };
+// Previous-frame temporal state snapshot (host copies bufHist -> here
+// before this dispatch): all prior-state reads go through hsPrev so
+// the motion-compensated warps below can sample arbitrary source
+// pixels without racing this pass's own writes to hs.
+layout(std430, set = 0, binding = 17) readonly buffer HistPrev { float hsP[]; };
+// Per-8x8-block motion vectors (motion_est.comp): vec4(mvx, mvy, conf, -)
+// in net pixels; pixel p warps its state reads to q = p - mv.
+layout(std430, set = 0, binding = 18) readonly buffer Mvs { vec4 mvs[]; };
 layout(std430, set = 0, binding = 14) buffer HeadRaw { float head[]; };
 // Gain-anchor luma sums (see temporal_stats.comp for the slot layout).
 // Read by every invocation (uniform value -> broadcast); slots [4],[5]
 // are written by invocation 0 only, disjoint from the read range.
 layout(std430, set = 0, binding = 16) buffer Stats { uint stats[]; };
 layout(push_constant) uniform Push { ivec4 a; ivec4 b; vec4 c; vec4 d; } pc;
+
+// Block motion for pixel (px,py). pc.c[2]==0: nearest block's vector.
+// pc.c[2]!=0: bilinear blend of the four nearest BLOCK CENTRES (centre of
+// block i sits at 8i+3.5); outside the centre hull the edge block's
+// vector is used unchanged (constant extrapolation, no fade to zero).
+vec2 blockMv(int px, int py, int netW, int netH) {
+    const int BW = (netW + 7) / 8, BH = (netH + 7) / 8;
+    if (pc.c[2] == 0.0)
+        return mvs[uint(py / 8) * uint(BW) + uint(px / 8)].xy;
+    const float ux = (float(px) - 3.5f) * 0.125f;
+    const float uy = (float(py) - 3.5f) * 0.125f;
+    int i0 = clamp(int(floor(ux)), 0, BW - 1);
+    int j0 = clamp(int(floor(uy)), 0, BH - 1);
+    const int i1 = min(i0 + 1, BW - 1), j1 = min(j0 + 1, BH - 1);
+    const float fx = (i1 == i0) ? 0.0f : clamp(ux - float(i0), 0.0f, 1.0f);
+    const float fy = (j1 == j0) ? 0.0f : clamp(uy - float(j0), 0.0f, 1.0f);
+    const vec2 m00 = mvs[uint(j0) * uint(BW) + uint(i0)].xy;
+    const vec2 m10 = mvs[uint(j0) * uint(BW) + uint(i1)].xy;
+    const vec2 m01 = mvs[uint(j1) * uint(BW) + uint(i0)].xy;
+    const vec2 m11 = mvs[uint(j1) * uint(BW) + uint(i1)].xy;
+    return mix(mix(m00, m10, fx), mix(m01, m11, fx), fy);
+}
 
 void main() {
     uint p = gl_GlobalInvocationID.x;
@@ -288,42 +321,94 @@ void main() {
     // sneak under a luma-only check. Metrics use cand (pre-anchor) so
     // temporal_stats computes the identical d on identical inputs.
     //
-    // Previous emitted byte, decoded from the raw stored history (the
-    // fv 7-9 copy is AABB-clamped and cannot express an emit that sits
-    // outside the current 3x3 box). Sanitised: bufHist is uninitialized
-    // device memory on the first-ever frame, and a NaN/inf there must
-    // not poison the residual reference - comparisons against NaN are
-    // all false, so the range test folds NaN to 0 as well as infs.
-    float prevB[3];
-    for (uint c = 0u; c < 3u; ++c) {
-        float sraw = hs[p * 3u + c];
-        if (!(sraw > -1e9 && sraw < 1e9)) sraw = 0.0;
-        prevB[c] = floor(clamp(sraw * 8.0 + 0.5, 0.0, 1.0) * 255.0 + 0.5);
-    }
-
-    // Previous-frame input P (hs[3N,6N)), drift anchor A (hs[6N,9N))
-    // and remaining refresh frames R (hs[9N,10N)). Same uninitialised-
-    // memory guard as prevB: garbage fails the range tests -> not valid
-    // -> fresh emit on the first-ever frame.
+    // Motion-compensated state fetch (v10): the residual state belongs
+    // to the CONTENT, not the screen cell - on a pan the un-warped hold
+    // kept enhancement detail anchored to screen position (measured:
+    // 16.4% screen-fixed residual energy vs 7.5% temporal-off = the
+    // owner's "phantoms on any motion"). E/P/A/R are therefore read
+    // from hsPrev at q = p - mv, where this pixel's content sat last
+    // frame. Integer mvs fetch the source pixel verbatim; fractional
+    // mvs bilinear-blend P, A and the DECODED emit (each tap decoded to
+    // 0..1 first, then blended - no re-snap, the blend is continuous)
+    // and take R from the nearest tap. All taps must pass the same
+    // NaN-safe range tests (uninitialised bufHist fails them) and q
+    // must stay in the image - anything else takes the fresh path.
     const uint N = uint(pc.a.x);
-    float aP[3], aA[3];
-    bool pValid = true, aValid = true;
-    for (uint c = 0u; c < 3u; ++c) {
-        float v = hs[3u * N + p * 3u + c];
-        if (!(v >= -0.01 && v <= 1.01)) pValid = false;
-        aP[c] = v;
-        float w = hs[6u * N + p * 3u + c];
-        if (!(w >= -0.01 && w <= 1.01)) aValid = false;
-        aA[c] = w;
+    const int netW = pc.a.y, netH = pc.a.z;
+    const int px = int(p % uint(netW)), py = int(p / uint(netW));
+    vec2 mv = blockMv(px, py, netW, netH);
+    // Per-pixel static override (pc.c[3] = D5C_MV_PIXSTATIC, in LSB):
+    // a pixel whose UNWARPED input delta vs the same cell's previous
+    // input is within the threshold is static no matter what the block
+    // estimator said - force mv=(0,0) so the exact v9 path (unwarped
+    // integer taps, anchor/budget, no BETA chase) applies. Blocks
+    // touching motion otherwise contaminate their still pixels with
+    // warped and bilinear-resampled state.
+    if (pc.c[3] > 0.0) {
+        const float dF0 = max(abs(col01[0] - hsP[3u * N + p * 3u + 0u]),
+                              max(abs(col01[1] - hsP[3u * N + p * 3u + 1u]),
+                                  abs(col01[2] - hsP[3u * N + p * 3u + 2u])));
+        if (dF0 <= pc.c[3] * (1.0 / 255.0)) mv = vec2(0.0);
     }
-    float Rr = hs[9u * N + p];
-    bool rValid = (Rr >= 0.0 && Rr <= R_FRAMES);
-    bool valid = pValid && aValid && rValid && (pc.d.x != 0.0);
+    const float qx = float(px) - mv.x;
+    const float qy = float(py) - mv.y;
+    bool stValid = (qx >= 0.0 && qx <= float(netW - 1)
+                    && qy >= 0.0 && qy <= float(netH - 1));
+    float aP[3], aA[3], Ew[3];
+    float Rw = 0.0;
+    if (stValid) {
+        if (mv.x == floor(mv.x) && mv.y == floor(mv.y)) {
+            const uint sp = uint(int(qy)) * uint(netW) + uint(int(qx));
+            for (uint c = 0u; c < 3u; ++c) {
+                float v = hsP[3u * N + sp * 3u + c];
+                if (!(v >= -0.01 && v <= 1.01)) stValid = false;
+                aP[c] = v;
+                float w = hsP[6u * N + sp * 3u + c];
+                if (!(w >= -0.01 && w <= 1.01)) stValid = false;
+                aA[c] = w;
+                float sraw = hsP[sp * 3u + c];
+                if (!(sraw > -1e9 && sraw < 1e9)) sraw = 0.0;
+                Ew[c] = floor(clamp(sraw * 8.0 + 0.5, 0.0, 1.0) * 255.0 + 0.5)
+                        * (1.0 / 255.0);
+            }
+            Rw = hsP[9u * N + sp];
+            if (!(Rw >= 0.0 && Rw <= R_FRAMES)) stValid = false;
+        } else {
+            const int x0 = int(floor(qx)), y0 = int(floor(qy));
+            const float fx = qx - float(x0), fy = qy - float(y0);
+            for (uint c = 0u; c < 3u; ++c) { aP[c] = 0.0; aA[c] = 0.0; Ew[c] = 0.0; }
+            for (int ty = 0; ty < 2; ++ty) {
+                for (int tx = 0; tx < 2; ++tx) {
+                    const int sx = clamp(x0 + tx, 0, netW - 1);
+                    const int sy = clamp(y0 + ty, 0, netH - 1);
+                    const uint sp = uint(sy) * uint(netW) + uint(sx);
+                    const float wgt = (tx == 0 ? 1.0 - fx : fx)
+                                    * (ty == 0 ? 1.0 - fy : fy);
+                    for (uint c = 0u; c < 3u; ++c) {
+                        float v = hsP[3u * N + sp * 3u + c];
+                        if (!(v >= -0.01 && v <= 1.01)) stValid = false;
+                        aP[c] += wgt * v;
+                        float w = hsP[6u * N + sp * 3u + c];
+                        if (!(w >= -0.01 && w <= 1.01)) stValid = false;
+                        aA[c] += wgt * w;
+                        float sraw = hsP[sp * 3u + c];
+                        if (!(sraw > -1e9 && sraw < 1e9)) sraw = 0.0;
+                        Ew[c] += wgt * floor(clamp(sraw * 8.0 + 0.5, 0.0, 1.0)
+                                             * 255.0 + 0.5) * (1.0 / 255.0);
+                    }
+                }
+            }
+            const int nx = clamp(int(floor(qx + 0.5)), 0, netW - 1);
+            const int ny = clamp(int(floor(qy + 0.5)), 0, netH - 1);
+            Rw = hsP[9u * N + uint(ny) * uint(netW) + uint(nx)];
+            if (!(Rw >= 0.0 && Rw <= R_FRAMES)) stValid = false;
+        }
+    }
+    bool valid = stValid && (pc.d.x != 0.0);
 
-    float Eb[3], rh[3], rc[3];
+    float rh[3], rc[3];
     for (uint c = 0u; c < 3u; ++c) {
-        Eb[c] = prevB[c] * (1.0 / 255.0);
-        rh[c] = Eb[c] - aP[c];
+        rh[c] = Ew[c] - aP[c];
         rc[c] = cand[c] - col01[c];
     }
     float dF = max(abs(col01[0] - aP[0]),
@@ -348,34 +433,46 @@ void main() {
         // uncapped, re-anchor, no refresh pending.
         for (uint c = 0u; c < 3u; ++c) { emitT[c] = anchored[c]; An[c] = col01[c]; }
     } else {
-        // HELD: distance from the FIXED anchor decides whether the
-        // input has really moved (noise under D_REF can never trip it).
-        // A trip re-anchors and arms a bounded R_FRAMES-step residual
-        // refresh; a budget already armed keeps stepping until it runs
-        // out or rc converges to rh.
+        // HELD: warped pixels refresh EVERY frame at pc.c[1] with no
+        // budget - while content moves, P was written under a shifted
+        // footprint so rh is stale by up to a frame of network boil; a
+        // steady 0.3 pull toward the fresh residual chases it without
+        // burning the anchor budget meant for real input drift. Still
+        // pixels (mv == (0,0), guaranteed on static content by the
+        // estimator's zero-motion bias) keep the exact v9 path ->
+        // byte-identical output frame to frame: distance from the
+        // FIXED anchor decides whether the input has really moved
+        // (noise under D_REF can never trip it); a trip re-anchors and
+        // arms a bounded R_FRAMES-step residual refresh; an armed
+        // budget keeps stepping until it runs out or rc converges.
+        const bool moving = (abs(mv.x) + abs(mv.y) > 0.01);
+        bool refresh = moving;
         for (uint c = 0u; c < 3u; ++c) An[c] = aA[c];
-        Rn = Rr;
-        bool refresh = false;
-        if (dA > D_REF) {
-            for (uint c = 0u; c < 3u; ++c) An[c] = col01[c];
-            Rn = R_FRAMES;
-        }
-        if (Rn > 0.0) {
-            if (dr < R_DONE) {
-                Rn = 0.0;
-            } else {
-                refresh = true;
-                Rn = Rn - 1.0;
+        Rn = Rw;
+        if (!moving) {
+            if (dA > D_REF) {
+                for (uint c = 0u; c < 3u; ++c) An[c] = col01[c];
+                Rn = R_FRAMES;
+            }
+            if (Rn > 0.0) {
+                if (dr < R_DONE) {
+                    Rn = 0.0;
+                } else {
+                    refresh = true;
+                    Rn = Rn - 1.0;
+                }
             }
         }
         // emit = input + held residual, the residual stepped toward the
         // fresh (gain-anchored) one proportionally: max(R_STEP_MIN,
-        // R_FRAC*|e|) per channel while a refresh is armed, pure hold
-        // (cap 0) otherwise.
+        // FRAC*|e|) per channel (FRAC = pc.c[1] while moving, R_FRAC
+        // while still) while a refresh is armed, pure hold (cap 0)
+        // otherwise.
         for (uint c = 0u; c < 3u; ++c) {
             float rt = anchored[c] - col01[c];
             float e = rt - rh[c];
-            float capc = refresh ? max(R_STEP_MIN, R_FRAC * abs(e)) : 0.0;
+            float capc = refresh ? max(R_STEP_MIN,
+                                       (moving ? pc.c[1] : R_FRAC) * abs(e)) : 0.0;
             emitT[c] = col01[c] + rh[c] + clamp(e, -capc, capc);
         }
     }

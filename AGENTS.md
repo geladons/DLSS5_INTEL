@@ -251,6 +251,35 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
     byte-snapped and stored; the identical rule must stay mirrored in
     temporal_stats.comp (readonly view of the same pre-dispatch
     E/P/A/R) or the gain anchor chases a ghost.
+    The hold is MOTION-COMPENSATED (v10/z1, 2026-10-10): an unwarped
+    residual hold drags enhancement detail in screen space on pans
+    (v9 measured: screen-fixed residual energy 16.4% vs the 7.5%
+    temporal-off floor; flow flicker on a real flythrough equal to
+    temporal-off ~20%) - temporal state belongs to the CONTENT, not
+    the screen cell. recordTemporal order each frame: vkCmdCopyBuffer
+    bufHist -> bufHistPrev (binding 17, same TOK*10 layout) +
+    transfer->compute barrier, then motion_est, temporal_stats,
+    temporal_nr. Prior state (E/P/A/R) is ALWAYS read from hsPrev -
+    the warped neighbour taps would otherwise race temporal_nr's own
+    in-place write to binding 13. motion_est.comp: one workgroup per
+    8x8 net-res block, luma of current col01 vs hsPrev's P, integer
+    SAD full search over (dx,dy) in +-12, ZERO-MOTION BIAS picks (0,0)
+    when SAD00 <= SADmin*(1+D5C_MV_ZBIAS=0.15) + 64*D5C_MV_ZABS=2/255
+    (without it 1-2 LSB noise parks a random +-1 vector on static
+    blocks and warped pixels then flicker - the z0/b15i1 static-fail),
+    parabolic subpixel refine on interior picks. bufMv (binding 18)
+    = vec4(mvx, mvy, conf, -) per block. temporal_nr/stats fetch the
+    per-pixel mv NEAREST-BLOCK or, with D5C_MV_INTERP=1 (shipped),
+    bilinear between the four nearest block centres (8i+3.5). State
+    reads warp to q = p - mv: out-of-image -> fresh; integer mv ->
+    verbatim source pixel; fractional -> bilinear P, A and the
+    byte-DECODED E (no re-snap), R from the nearest tap; all taps
+    validated. moving = |mv| > 0.01 -> refresh every frame at
+    D5C_MV_BETA=0.15 with no budget spent; !moving -> the exact v9
+    anchor/budget path (static output stays byte-identical).
+    D5C_MV_PIXSTATIC (default 0) can force mv=(0,0) per pixel when the
+    unwarped input delta is under N LSB - measured useless at 1 LSB,
+    kept off. D5C_DEBUG_MV=1 logs median mv + nonzero share /30 frames.
     MOTION GATE (host-side, engine.cpp detectSceneCut): the same 64x36
     luma thumb that detects cuts also counts moved cells (>10/255);
     fraction >TMGATE_HI (0.20) -> histSuppressed_ -> the frame records
@@ -300,8 +329,12 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
     feeds a raw BGRA sequence to a running m11d over the TCP protocol
     and scores conditioned metrics screen capture cannot see -
     transition-flash (one-frame global luma step the input did not
-    make), still-input flicker (>4/255 emit changes on input-still
-    pixels; FAIL at p90 >8%), frozen-stale (emit pinned while input
+    make), still-input flicker (info line: >4/255 emit changes on
+    input-still pixels), STATIC flicker (same >4/255 changes but only
+    pixels >16px from ANY input motion; FAIL at p90 >2%), FLOW flicker
+    (output vs the motion-warped previous output, evaluated where the
+    input's own optical flow is exact; FAIL at med >10% or p90 >20%,
+    WARN at med >4% / p90 >8%), frozen-stale (emit pinned while input
     moved), invented luma oscillation, and `fixture:ghost` (synthetic
     slide + fade-out text: FAILs when residue >6/255 remains on
     black-input pixels - the output-domain-hold ghost class).
@@ -309,15 +342,19 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
       python tools/autotest/replay_gate.py fixture:ghost
       python tools/autotest/replay_gate.py D:\dlss5_cap\_pan_seq.raw
         (341-frame real GTA IV benchmark flythrough)
+      python tools/autotest/replay_gate.py Temp\_pan_man.txt
+        (synthetic integer pans +3,0 / +1,1 / -6,0 of a real GTA IV
+        frame, manifest machine-local)
     and be checked on:
       python tools/autotest/replay_gate.py D:\dlss5_cap\_nat_load.raw
         (native GTA IV loading screen + flythrough start; built from
         at_s52_benchnat via Temp\_nat_extract.py - machine-local
         capture, not committed)
     The 2026-10-09 "picture pulses" field build FAILs (amplified f65
-    +5.6, still-flicker p90 10%/max 62%); the v9 residual-hold build
-    passes fixture:ghost + _pan_seq clean and _nat_load at WARN. Do
-    NOT ship temporal changes without running it - owner requirement.
+    +5.6, still-flicker p90 10%/max 62%); the shipped z1 motion-
+    compensated build passes fixture:ghost + _pan_seq clean and
+    _pan_man/_nat_load at WARN (static p90 ~1-1.5%, flow ~1%/6.4% med).
+    Do NOT ship temporal changes without running it - owner requirement.
     Capture harness quirks (2026-10-10): GTA IV's window now launches
     MAXIMIZED even with -windowed - capture_session.py needs
     `--park 872,400,816,638` to pin the game window onto the record

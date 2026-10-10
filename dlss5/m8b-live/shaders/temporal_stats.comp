@@ -33,13 +33,38 @@
 // ============================================================================
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 layout(std430, set = 0, binding = 3) readonly buffer FeatV { float fv[]; };
-// Read-only view of the stored history: needed for the previous emitted
-// byte (the gate==0 latch reference - the fv 7-9 copy is box-clamped and
-// cannot express an emit outside the current 3x3 neighbourhood).
-layout(std430, set = 0, binding = 13) readonly buffer Hist { float hs[]; };
+// Previous-frame temporal state (host copies bufHist -> bufHistPrev
+// before this dispatch): all prior-state reads (E/P/A/R, incl. the
+// motion-warped taps) come from here - never the live binding-13 store
+// temporal_nr is about to rewrite.
+layout(std430, set = 0, binding = 17) readonly buffer HistPrev { float hsP[]; };
+// Per-8x8-block motion vectors (motion_est.comp), same warp source as
+// temporal_nr.comp.
+layout(std430, set = 0, binding = 18) readonly buffer Mvs { vec4 mvs[]; };
 layout(std430, set = 0, binding = 14) readonly buffer HeadRaw { float head[]; };
 layout(std430, set = 0, binding = 16) buffer Stats { uint stats[]; };
 layout(push_constant) uniform Push { ivec4 a; ivec4 b; vec4 c; vec4 d; } pc;
+
+// Same blockMv as temporal_nr.comp - pc.c[2]==0 nearest block, !=0
+// bilinear between the four nearest block centres (8i+3.5), constant
+// extrapolation outside the centre hull.
+vec2 blockMv(int px, int py, int netW, int netH) {
+    const int BW = (netW + 7) / 8, BH = (netH + 7) / 8;
+    if (pc.c[2] == 0.0)
+        return mvs[uint(py / 8) * uint(BW) + uint(px / 8)].xy;
+    const float ux = (float(px) - 3.5f) * 0.125f;
+    const float uy = (float(py) - 3.5f) * 0.125f;
+    int i0 = clamp(int(floor(ux)), 0, BW - 1);
+    int j0 = clamp(int(floor(uy)), 0, BH - 1);
+    const int i1 = min(i0 + 1, BW - 1), j1 = min(j0 + 1, BH - 1);
+    const float fx = (i1 == i0) ? 0.0f : clamp(ux - float(i0), 0.0f, 1.0f);
+    const float fy = (j1 == j0) ? 0.0f : clamp(uy - float(j0), 0.0f, 1.0f);
+    const vec2 m00 = mvs[uint(j0) * uint(BW) + uint(i0)].xy;
+    const vec2 m10 = mvs[uint(j0) * uint(BW) + uint(i1)].xy;
+    const vec2 m01 = mvs[uint(j1) * uint(BW) + uint(i0)].xy;
+    const vec2 m11 = mvs[uint(j1) * uint(BW) + uint(i1)].xy;
+    return mix(mix(m00, m10, fx), mix(m01, m11, fx), fy);
+}
 
 // Same residual-domain hold as temporal_nr.comp (0..1 domain; see that
 // file for the full rationale + bufHist layout: [0,3N) emit history E,
@@ -60,6 +85,7 @@ const float R_DONE    =   6.0 / 255.0;
 const float R_STEP_MIN=   1.0 / 255.0;
 const float R_FRAC    =   0.25;
 const float R_FRAMES  =  16.0;
+// (moving-pixel fraction is pc.c[1] = D5C_MV_BETA; pc.c[2] = D5C_MV_INTERP)
 
 shared uint sLum;
 void main() {
@@ -109,37 +135,84 @@ void main() {
             float pred = clamp(col01[c] + head[p * 4u + c] * 0.25, 0.0, 1.0);
             cand[c] = pred + alpha * (h01[c] - pred);
         }
-        // Previous emitted byte from the raw stored history (same
-        // sanitise as temporal_nr: bufHist is uninitialised on frame 0).
-        float prevB[3];
-        for (uint c = 0u; c < 3u; ++c) {
-            float sraw = hs[p * 3u + c];
-            if (!(sraw > -1e9 && sraw < 1e9)) sraw = 0.0;
-            prevB[c] = floor(clamp(sraw * 8.0 + 0.5, 0.0, 1.0) * 255.0 + 0.5);
-        }
-        // Same residual hold as temporal_nr on the same stored values
-        // (read-only here; this pass runs before temporal_nr writes the
-        // P/A/R bookkeeping for next frame). Held residual rh = Eb - P
-        // needs no gate special-casing: fv[15]==0 pixels re-emit their
-        // held residual tracked onto the current input like any other.
+        // Same motion-compensated residual hold as temporal_nr on the
+        // same stored values (read-only here; E/P/A/R come from the
+        // hsPrev snapshot at q = p - mv, integer warp verbatim /
+        // fractional bilinear on P, A and the decoded emit + nearest R).
+        // Held residual rh = Ew - P needs no gate special-casing:
+        // fv[15]==0 pixels re-emit their held residual tracked onto the
+        // current input like any other.
         const uint N = uint(pc.a.x);
-        float aP[3], aA[3];
-        bool pValid = true, aValid = true;
-        for (uint c = 0u; c < 3u; ++c) {
-            float v = hs[3u * N + p * 3u + c];
-            if (!(v >= -0.01 && v <= 1.01)) pValid = false;
-            aP[c] = v;
-            float w = hs[6u * N + p * 3u + c];
-            if (!(w >= -0.01 && w <= 1.01)) aValid = false;
-            aA[c] = w;
+        const int netW = pc.a.y, netH = pc.a.z;
+        const int px = int(p % uint(netW)), py = int(p / uint(netW));
+        vec2 mv = blockMv(px, py, netW, netH);
+        // Same D5C_MV_PIXSTATIC (pc.c[3], LSB) per-pixel override as
+        // temporal_nr: unwarped input delta within the threshold forces
+        // mv=(0,0) -> the v9 static path.
+        if (pc.c[3] > 0.0) {
+            const float dF0 = max(abs(col01[0] - hsP[3u * N + p * 3u + 0u]),
+                                  max(abs(col01[1] - hsP[3u * N + p * 3u + 1u]),
+                                      abs(col01[2] - hsP[3u * N + p * 3u + 2u])));
+            if (dF0 <= pc.c[3] * (1.0 / 255.0)) mv = vec2(0.0);
         }
-        float Rr = hs[9u * N + p];
-        bool rValid = (Rr >= 0.0 && Rr <= R_FRAMES);
-        bool valid = pValid && aValid && rValid && (pc.d.x != 0.0);
-        float Eb[3], rh[3], rc[3];
+        const float qx = float(px) - mv.x;
+        const float qy = float(py) - mv.y;
+        bool stValid = (qx >= 0.0 && qx <= float(netW - 1)
+                        && qy >= 0.0 && qy <= float(netH - 1));
+        float aP[3], aA[3], Ew[3];
+        float Rw = 0.0;
+        if (stValid) {
+            if (mv.x == floor(mv.x) && mv.y == floor(mv.y)) {
+                const uint sp = uint(int(qy)) * uint(netW) + uint(int(qx));
+                for (uint c = 0u; c < 3u; ++c) {
+                    float v = hsP[3u * N + sp * 3u + c];
+                    if (!(v >= -0.01 && v <= 1.01)) stValid = false;
+                    aP[c] = v;
+                    float w = hsP[6u * N + sp * 3u + c];
+                    if (!(w >= -0.01 && w <= 1.01)) stValid = false;
+                    aA[c] = w;
+                    float sraw = hsP[sp * 3u + c];
+                    if (!(sraw > -1e9 && sraw < 1e9)) sraw = 0.0;
+                    Ew[c] = floor(clamp(sraw * 8.0 + 0.5, 0.0, 1.0) * 255.0 + 0.5)
+                            * (1.0 / 255.0);
+                }
+                Rw = hsP[9u * N + sp];
+                if (!(Rw >= 0.0 && Rw <= R_FRAMES)) stValid = false;
+            } else {
+                const int x0 = int(floor(qx)), y0 = int(floor(qy));
+                const float fx = qx - float(x0), fy = qy - float(y0);
+                for (uint c = 0u; c < 3u; ++c) { aP[c] = 0.0; aA[c] = 0.0; Ew[c] = 0.0; }
+                for (int ty = 0; ty < 2; ++ty) {
+                    for (int tx = 0; tx < 2; ++tx) {
+                        const int sx = clamp(x0 + tx, 0, netW - 1);
+                        const int sy = clamp(y0 + ty, 0, netH - 1);
+                        const uint sp = uint(sy) * uint(netW) + uint(sx);
+                        const float wgt = (tx == 0 ? 1.0 - fx : fx)
+                                        * (ty == 0 ? 1.0 - fy : fy);
+                        for (uint c = 0u; c < 3u; ++c) {
+                            float v = hsP[3u * N + sp * 3u + c];
+                            if (!(v >= -0.01 && v <= 1.01)) stValid = false;
+                            aP[c] += wgt * v;
+                            float w = hsP[6u * N + sp * 3u + c];
+                            if (!(w >= -0.01 && w <= 1.01)) stValid = false;
+                            aA[c] += wgt * w;
+                            float sraw = hsP[sp * 3u + c];
+                            if (!(sraw > -1e9 && sraw < 1e9)) sraw = 0.0;
+                            Ew[c] += wgt * floor(clamp(sraw * 8.0 + 0.5, 0.0, 1.0)
+                                                 * 255.0 + 0.5) * (1.0 / 255.0);
+                        }
+                    }
+                }
+                const int nx = clamp(int(floor(qx + 0.5)), 0, netW - 1);
+                const int ny = clamp(int(floor(qy + 0.5)), 0, netH - 1);
+                Rw = hsP[9u * N + uint(ny) * uint(netW) + uint(nx)];
+                if (!(Rw >= 0.0 && Rw <= R_FRAMES)) stValid = false;
+            }
+        }
+        bool valid = stValid && (pc.d.x != 0.0);
+        float rh[3], rc[3];
         for (uint c = 0u; c < 3u; ++c) {
-            Eb[c] = prevB[c] * (1.0 / 255.0);
-            rh[c] = Eb[c] - aP[c];
+            rh[c] = Ew[c] - aP[c];
             rc[c] = cand[c] - col01[c];
         }
         float dF = max(abs(col01[0] - aP[0]),
@@ -159,23 +232,28 @@ void main() {
         if (!valid || dF > IN_CUT || dr >= DB_CUT) {
             for (uint c = 0u; c < 3u; ++c) emitT[c] = cand[c];
         } else {
-            // Same anchor/budget decision as temporal_nr (Rn is only
-            // bookkeeping there; what matters here is whether the
-            // refresh step applies).
-            float Rn = Rr;
-            bool refresh = false;
-            if (dA > D_REF) Rn = R_FRAMES;
-            if (Rn > 0.0) {
-                if (dr < R_DONE) {
-                    Rn = 0.0;
-                } else {
-                    refresh = true;
-                    Rn = Rn - 1.0;
+            // Same moving/anchor/budget decision as temporal_nr (Rn is
+            // only bookkeeping there; what matters here is whether the
+            // refresh step applies): warped pixels refresh every frame
+            // at pc.c[1] with no budget, still pixels keep the v9 path.
+            const bool moving = (abs(mv.x) + abs(mv.y) > 0.01);
+            float Rn = Rw;
+            bool refresh = moving;
+            if (!moving) {
+                if (dA > D_REF) Rn = R_FRAMES;
+                if (Rn > 0.0) {
+                    if (dr < R_DONE) {
+                        Rn = 0.0;
+                    } else {
+                        refresh = true;
+                        Rn = Rn - 1.0;
+                    }
                 }
             }
             for (uint c = 0u; c < 3u; ++c) {
                 float e = rc[c] - rh[c];
-                float capc = refresh ? max(R_STEP_MIN, R_FRAC * abs(e)) : 0.0;
+                float capc = refresh ? max(R_STEP_MIN,
+                                           (moving ? pc.c[1] : R_FRAC) * abs(e)) : 0.0;
                 emitT[c] = col01[c] + rh[c] + clamp(e, -capc, capc);
             }
         }

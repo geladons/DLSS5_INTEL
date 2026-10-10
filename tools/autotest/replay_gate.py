@@ -17,6 +17,9 @@
 #      them moved (the slow-pan phantom mask).
 #   4. opposite-sign luma swings - global breathing (brighten-then-dim
 #      reversals the input never made).
+#   6. flow flicker - output vs the motion-warped previous output where
+#      the input itself is exactly predicted by the block flow (boiling
+#      detail / screen-anchored residual during camera motion).
 #   5. ghost residue (fixture:ghost) - held output on pixels whose input
 #      went black after text slid/faded away (2026-10-10 loading-word
 #      phantom copies; the unconditioned hold latch pinned it forever).
@@ -206,19 +209,49 @@ def analyze(seq, outs, fps_hint):
     flk8 = (((dout > 8) & still).sum((1, 2)) / den)[ok]
     p90_4, p90_8 = np.percentile(flk4, 90), np.percentile(flk8, 90)
     mx8 = flk8.max()
-    notes.append("still-px flicker>4: med %.3f p90 %.3f | >8: p90 %.3f "
-                 "max %.3f" % (np.median(flk4), p90_4, p90_8, mx8))
-    # >4/255 is visible shimmer at the shipped intensity 1.3 (2026-10-10:
-    # the owner called the benchmark "noise / digital garbage" on a build
-    # scoring p90 17.5% >4 / 3.7% >8 on the native flythrough - which the
-    # old >8-only thresholds rated WARN). Calibrated so that build FAILs.
-    if p90_8 > 0.025 or mx8 > 0.20 or p90_4 > 0.08:
-        fail("still-input flicker: p90 %.1f%% >4 / %.1f%% >8 (max %.1f%%) "
-             "of still px moved in one frame"
-             % (p90_4 * 100, p90_8 * 100, mx8 * 100))
-    elif p90_8 > 0.01 or mx8 > 0.10 or p90_4 > 0.04:
-        warn("still-input flicker p90 %.1f%% >4 / %.1f%% >8 max %.1f%%"
-             % (p90_4 * 100, p90_8 * 100, mx8 * 100))
+    notes.append("still-px flicker>4 (info, incl. flat px next to motion): "
+                 "med %.3f p90 %.3f | >8: p90 %.3f max %.3f"
+                 % (np.median(flk4), p90_4, p90_8, mx8))
+    # Gated part: still px with NO input motion within 16 px. Flat pixels
+    # next to a moving edge legitimately change once the residual moves
+    # with the content (motion-compensated hold), so the raw still metric
+    # above over-reports on camera motion; motion is scored by flow
+    # flicker below instead.
+    mv = din > 6
+    near = mv.copy()
+    for dy in range(-16, 17, 8):
+        for dx in range(-16, 17, 8):
+            near |= np.roll(np.roll(mv, dy, 1), dx, 2)
+    far = still & ~near
+    fden = far.sum((1, 2))
+    fok = fden >= 0.02 * far[0].size
+    if not fok.any():
+        fok[:] = True
+    ffl = (((dout > 4) & far).sum((1, 2)) / np.maximum(fden, 1))[fok]
+    fp90 = np.percentile(ffl, 90)
+    notes.append("static flicker>4 (still, >16px from motion): med %.4f "
+                 "p90 %.4f max %.4f" % (np.median(ffl), fp90, ffl.max()))
+    if fp90 > 0.02:
+        fail("static flicker: p90 %.2f%% of static px moved >4/255"
+             % (fp90 * 100))
+    elif fp90 > 0.01:
+        warn("static flicker p90 %.2f%%" % (fp90 * 100))
+
+    # ---- 2b. motion-conditioned (flow) flicker -----------------------
+    # Owner-visible "phantoms / noise / digital garbage on any motion":
+    # v9 scored med 20.7% on the native flythrough (== temporal off,
+    # 19.2%) and was rejected in the field -> it must FAIL here.
+    ffk = flow_flicker(seq, outs)
+    fmed, fp90w = float(np.median(ffk)), float(np.percentile(ffk, 90))
+    notes.append("flow flicker>4 (output vs motion-warped prev, where the "
+                 "input warp is exact): med %.3f p90 %.3f max %.3f"
+                 % (fmed, fp90w, ffk.max()))
+    if fmed > 0.10 or fp90w > 0.20:
+        fail("motion noise: flow flicker med %.1f%% p90 %.1f%%"
+             % (fmed * 100, fp90w * 100))
+    elif fmed > 0.04 or fp90w > 0.08:
+        warn("motion noise: flow flicker med %.1f%% p90 %.1f%%"
+             % (fmed * 100, fp90w * 100))
 
     # ---- 3. frozen-stale (phantom mask) ------------------------------
     K = min(8, len(outs) // 4)
@@ -247,6 +280,80 @@ def analyze(seq, outs, fps_hint):
              % (osc, swings))
 
     return verdict, notes
+
+
+def flow_flicker(seq, outs, search=8, blk=8):
+    """Motion-conditioned flicker: the output must move the way the input
+    moves. Per 16x16 block an integer flow is block-matched on half-res
+    input luma (+-2*search full-res px, zero-motion bias); pixels whose
+    INPUT is predicted by that flow within 2/255 must also have their
+    OUTPUT predicted within 4/255. Zero flow reduces to the still-input
+    metric; on pans it scores detail that boils or stays screen-anchored
+    while the content under it moves (2026-10-10 owner report: "phantoms
+    and digital garbage on any motion" - invisible to the still metric).
+    Returns per-frame fractions (frames with <5% valid px are skipped)."""
+    n, h, w = seq.shape[:3]
+    hh, hw = (h // 2) // blk * blk, (w // 2) // blk * blk
+    m = 2 * search + 2
+    res = []
+    for t in range(1, n):
+        a = seq[t, :2 * hh, :2 * hw, :3].astype(np.float32).mean(2)
+        b = seq[t - 1, :2 * hh, :2 * hw, :3].astype(np.float32).mean(2)
+        la = a.reshape(hh, 2, hw, 2).mean((1, 3))
+        lb = b.reshape(hh, 2, hw, 2).mean((1, 3))
+        by, bx = hh // blk, hw // blk
+        best = np.full((by, bx), np.inf, np.float32)
+        bdy = np.zeros((by, bx), np.int32)
+        bdx = np.zeros((by, bx), np.int32)
+        sad0 = None
+        for dy in range(-search, search + 1):
+            for dx in range(-search, search + 1):
+                sh = np.roll(np.roll(lb, dy, 0), dx, 1)
+                s = np.abs(la - sh).reshape(by, blk, bx, blk).sum((1, 3))
+                if dy == 0 and dx == 0:
+                    sad0 = s
+                better = s < best
+                best = np.where(better, s, best)
+                bdy = np.where(better, dy, bdy)
+                bdx = np.where(better, dx, bdx)
+        zero = sad0 <= best + blk * blk * 1.0
+        bdy[zero] = 0
+        bdx[zero] = 0
+        # full-res +-1 refinement of the doubled half-res vector (odd
+        # full-res shifts are invisible to the half-res search)
+        fy0 = np.repeat(np.repeat(bdy * 2, 2 * blk, 0), 2 * blk, 1)
+        fx0 = np.repeat(np.repeat(bdx * 2, 2 * blk, 0), 2 * blk, 1)
+        yy, xx = np.mgrid[0:2 * hh, 0:2 * hw]
+        rb = np.full((by, bx), np.inf, np.float32)
+        ry = np.zeros((by, bx), np.int32)
+        rx = np.zeros((by, bx), np.int32)
+        for ey in (-1, 0, 1):
+            for ex in (-1, 0, 1):
+                gy = np.clip(yy - fy0 - ey, 0, 2 * hh - 1)
+                gx = np.clip(xx - fx0 - ex, 0, 2 * hw - 1)
+                s = np.abs(a - b[gy, gx]).reshape(
+                    by, 2 * blk, bx, 2 * blk).sum((1, 3))
+                if ey == 0 and ex == 0:
+                    s = s - 1e-3      # tie -> keep the unrefined vector
+                better = s < rb
+                rb = np.where(better, s, rb)
+                ry = np.where(better, ey, ry)
+                rx = np.where(better, ex, rx)
+        fy = fy0 + np.repeat(np.repeat(ry, 2 * blk, 0), 2 * blk, 1)
+        fx = fx0 + np.repeat(np.repeat(rx, 2 * blk, 0), 2 * blk, 1)
+        sy, sx = yy - fy, xx - fx
+        inb = (sy >= m) & (sy < 2 * hh - m) & (sx >= m) & (sx < 2 * hw - m)
+        sy, sx = np.clip(sy, 0, 2 * hh - 1), np.clip(sx, 0, 2 * hw - 1)
+        i_t = seq[t, :2 * hh, :2 * hw, :3].astype(np.int16)
+        i_p = seq[t - 1, sy, sx, :3].astype(np.int16)
+        o_t = outs[t, :2 * hh, :2 * hw, :3].astype(np.int16)
+        o_p = outs[t - 1, sy, sx, :3].astype(np.int16)
+        valid = inb & (np.abs(i_t - i_p).max(2) <= 2)
+        if valid.mean() < 0.05:
+            continue
+        res.append(((np.abs(o_t - o_p).max(2) > 4) & valid).sum()
+                   / valid.sum())
+    return np.array(res) if res else np.zeros(1)
 
 
 def ghost_fixture(kind, w, h):

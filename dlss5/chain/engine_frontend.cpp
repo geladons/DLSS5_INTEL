@@ -23,18 +23,19 @@ bool ChainEngine::createFrontEnd() {
                            &memUpload_);
     D5C_VK_RET(vkMapMemory(c.dev, memUpload_, 0, uploadBytes, 0, &uploadPtr_));
 
-    // shared 16-binding descriptor layout (identical to m8b: the same
-    // transport shaders are used; legacy bindings stay bound to dummies)
+    // shared 19-binding descriptor layout (identical to m8b: the same
+    // transport shaders are used; legacy bindings stay bound to dummies).
+    // 17 = previous-frame temporal state copy (hsPrev), 18 = block mvs.
     {
-        VkDescriptorSetLayoutBinding binds[17]{};
+        VkDescriptorSetLayoutBinding binds[19]{};
         binds[0] = {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
         for (uint32_t i = 1; i <= 8; ++i)
             binds[i] = {i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
         binds[9] = {9, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
-        for (uint32_t i = 10; i <= 16; ++i)
+        for (uint32_t i = 10; i <= 18; ++i)
             binds[i] = {i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
         VkDescriptorSetLayoutCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        ci.bindingCount = 17; ci.pBindings = binds;
+        ci.bindingCount = 19; ci.pBindings = binds;
         D5C_VK_RET(vkCreateDescriptorSetLayout(c.dev, &ci, nullptr, &dsLayout_));
     }
     {
@@ -69,6 +70,15 @@ bool ChainEngine::createFrontEnd() {
         pipeFgInterp_ = VK_NULL_HANDLE;
     }
     if (cfg_.temporal) {
+        try {
+            pipeMotionEst_ = makePipe("motion_est");
+        } catch (const std::exception& e) {
+            // REQUIRED by the v10 temporal path: without it temporal_nr
+            // would warp state on uninitialised motion vectors - degrade
+            // the whole temporal stage instead of emitting garbage.
+            std::fprintf(stderr, "[VK] motion_est unavailable (%s) - temporal off\n", e.what());
+            cfg_.temporal = false;
+        }
         try {
             pipeTemporalNr_ = makePipe("temporal_nr");
         } catch (const std::exception& e) {
@@ -121,8 +131,34 @@ bool ChainEngine::createFrontEnd() {
     //                  fresh emit) - temporal_nr's residual hold emits
     //                  col01 + held residual while |col01 - anchor| <= D_REF
     // [9*TOK,10*TOK) = remaining refresh frames (bounded R_FRAMES budget).
-    bufHist_ = CreateBuf(c, (uint64_t)st_[0].TOK * 10 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+    bufHist_ = CreateBuf(c, (uint64_t)st_[0].TOK * 10 * 4,
+                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memHist_);
+    // bufHistPrev_ (binding 17): same layout, refreshed each frame by a
+    // whole-buffer copy at the top of recordTemporal BEFORE the temporal
+    // dispatches. temporal_stats/temporal_nr read prior state from here
+    // so the warped (motion-compensated) neighbour taps never race
+    // temporal_nr's own writes to binding 13.
+    bufHistPrev_ = CreateBuf(c, (uint64_t)st_[0].TOK * 10 * 4,
+                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memHistPrev_);
+    // bufMv_ (binding 18): one vec4 per 8x8 block of the net grid -
+    // (mvx, mvy, conf, unused) in net pixels, written by motion_est.comp.
+    const uint64_t mvFloats =
+        (uint64_t)((netW_ + 7) / 8) * (uint64_t)((netH_ + 7) / 8) * 4;
+    bufMv_ = CreateBuf(c, mvFloats * 4,
+                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memMv_);
+    // Host-visible staging for the D5C_DEBUG_MV periodic readback - only
+    // allocated when the env asked for it; the per-frame copy in
+    // recordFrame is gated on mvDebug_ as well, so the debug path costs
+    // nothing in normal operation.
+    if (mvDebug_) {
+        bufMvRb_ = CreateBuf(c, mvFloats * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                             &memMvRb_);
+        D5C_VK_RET(vkMapMemory(c.dev, memMvRb_, 0, mvFloats * 4, 0, &mvRbPtr_));
+    }
     bufRbFinal_ = CreateBuf(c, (uint64_t)W_ * H_ * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                             &memRbFinal_);
@@ -246,6 +282,8 @@ bool ChainEngine::createFrontEnd() {
         writeBufRange(setFinal_, 14, arena_.bufOf(O.oHEAD), arena_.localOff(O.oHEAD), (uint64_t)st_[0].TOK * 4 * 4);
         writeBufRange(setFinal_, 15, arena_.bufOf(O.oHeadDC), arena_.localOff(O.oHeadDC), 1024);
         writeBuf(setFinal_, 16, bufStats_, 32);
+        writeBuf(setFinal_, 17, bufHistPrev_, (uint64_t)st_[0].TOK * 10 * 4);
+        writeBuf(setFinal_, 18, bufMv_, mvFloats * 4);
     } else {
         writeImg(setFinal_, 0, imgInView_);
         writeBuf(setFinal_, 1, bufNetRgb_, (uint64_t)netW_ * netH_ * 3 * 4);
@@ -265,6 +303,8 @@ bool ChainEngine::createFrontEnd() {
         writeBufRange(setFinal_, 14, arena_.bufOf(O.oHEAD), arena_.localOff(O.oHEAD), (uint64_t)st_[0].TOK * 4 * 4);
         writeBufRange(setFinal_, 15, arena_.bufOf(O.oHeadDC), arena_.localOff(O.oHeadDC), 1024);
         writeBuf(setFinal_, 16, bufStats_, 32);
+        writeBuf(setFinal_, 17, bufHistPrev_, (uint64_t)st_[0].TOK * 10 * 4);
+        writeBuf(setFinal_, 18, bufMv_, mvFloats * 4);
 
         writeImg(setDown_, 0, imgInView_);
         writeBuf(setDown_, 1, bufRgb_, (uint64_t)W_ * H_ * 3 * 4);

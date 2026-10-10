@@ -13,6 +13,7 @@
 #include <cstring>
 #include <direct.h>
 #include <new>
+#include <vector>
 
 namespace d5c {
 
@@ -107,6 +108,22 @@ bool ChainEngine::init(const EngineConfig& cfg) {
         tmDriftSettleN_ = std::atoi(e);
     if (const char* d = std::getenv("D5C_DEBUG_TMGATE"))
         tmDebug_ = (std::atoi(d) != 0);
+    if (const char* d = std::getenv("D5C_DEBUG_MV"))
+        mvDebug_ = (std::atoi(d) != 0);
+    if (const char* d = std::getenv("D5C_MV_BETA"))
+        mvBeta_ = (float)std::atof(d);
+    if (const char* d = std::getenv("D5C_MV_INTERP"))
+        mvInterp_ = (std::atoi(d) != 0) ? 1.0f : 0.0f;
+    if (const char* d = std::getenv("D5C_MV_ZBIAS"))
+        mvZbias_ = (float)std::atof(d);
+    if (const char* d = std::getenv("D5C_MV_ZABS"))
+        mvZabs_ = (float)std::atof(d);
+    if (const char* d = std::getenv("D5C_MV_PIXSTATIC"))
+        mvPixStatic_ = (float)std::atof(d);
+    std::fprintf(stderr, "[chain] D5C_MV_BETA=%.2f D5C_MV_INTERP=%.0f "
+                         "D5C_MV_ZBIAS=%.2f D5C_MV_ZABS=%.2f D5C_MV_PIXSTATIC=%.2f\n",
+                 (double)mvBeta_, (double)mvInterp_, (double)mvZbias_,
+                 (double)mvZabs_, (double)mvPixStatic_);
     histSuppressed_ = false;
     driftValid_ = false;
     driftCalm_ = driftSettle_ = 0;
@@ -449,6 +466,32 @@ bool ChainEngine::processFrame(const uint8_t* bgraIn, uint8_t* bgraOut, long fra
                                  // next frame's features read it as history
     if (cfg_.debugDumps && frameIndex == 1) writeDebugDumps();
 
+    // D5C_DEBUG_MV: every 30th completed frame, report the median block
+    // motion and the share of blocks motion_est flagged as moving.
+    if (mvDebug_ && mvRbPtr_ && (framesDone_ % 30 == 0)) {
+        const uint64_t nb = (uint64_t)((netW_ + 7) / 8) * ((netH_ + 7) / 8);
+        const float* mv = (const float*)mvRbPtr_;
+        std::vector<float> xs, ys;
+        xs.reserve(nb); ys.reserve(nb);
+        uint64_t nz = 0;
+        for (uint64_t i = 0; i < nb; ++i) {
+            const float x = mv[i * 4], y = mv[i * 4 + 1];
+            xs.push_back(x); ys.push_back(y);
+            if (std::fabs(x) + std::fabs(y) > 0.01f) nz++;
+        }
+        if (nb) {
+            auto med = [](std::vector<float>& v) {
+                std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+                return v[v.size() / 2];
+            };
+            std::fprintf(stderr, "[chain] mv f=%llu med=(%.2f,%.2f) "
+                                 "nonzero=%.1f%%\n",
+                         (unsigned long long)framesDone_,
+                         (double)med(xs), (double)med(ys),
+                         100.0 * (double)nz / (double)nb);
+        }
+    }
+
     if (stats) {
         uint64_t ts[6]{};
         VkResult qr = vkGetQueryPoolResults(c.dev, tsPool_, 0, 6, sizeof(ts), ts,
@@ -512,11 +555,12 @@ void ChainEngine::shutdown() {
     vkDeviceWaitIdle(c.dev);
     if (uploadPtr_) vkUnmapMemory(c.dev, memUpload_);
     if (rbFinalPtr_) vkUnmapMemory(c.dev, memRbFinal_);
-    uploadPtr_ = nullptr; rbFinalPtr_ = nullptr;
+    if (mvRbPtr_) vkUnmapMemory(c.dev, memMvRb_);
+    uploadPtr_ = nullptr; rbFinalPtr_ = nullptr; mvRbPtr_ = nullptr;
     rec_.destroy(c);
-    for (VkPipeline p : {pipeDecode_, pipeFeatures_, pipeCompose_, pipeEncode_, pipeRescale_, pipeFrameGen_, pipeTemporalNr_, pipeFgInterp_, pipeStats_})
+    for (VkPipeline p : {pipeDecode_, pipeFeatures_, pipeCompose_, pipeEncode_, pipeRescale_, pipeFrameGen_, pipeTemporalNr_, pipeFgInterp_, pipeStats_, pipeMotionEst_})
         if (p) vkDestroyPipeline(c.dev, p, nullptr);
-    pipeDecode_ = pipeFeatures_ = pipeCompose_ = pipeEncode_ = pipeRescale_ = pipeFrameGen_ = pipeTemporalNr_ = pipeFgInterp_ = pipeStats_ = VK_NULL_HANDLE;
+    pipeDecode_ = pipeFeatures_ = pipeCompose_ = pipeEncode_ = pipeRescale_ = pipeFrameGen_ = pipeTemporalNr_ = pipeFgInterp_ = pipeStats_ = pipeMotionEst_ = VK_NULL_HANDLE;
     if (pipeLayout_) vkDestroyPipelineLayout(c.dev, pipeLayout_, nullptr);
     pipeLayout_ = VK_NULL_HANDLE;
     if (dpool_) vkDestroyDescriptorPool(c.dev, dpool_, nullptr);
@@ -527,21 +571,25 @@ void ChainEngine::shutdown() {
     for (VkBuffer b : {bufRgb_, bufMax_, bufT_, bufFin_, bufNr_, bufRbFinal_, bufDbg_,
                        bufUpload_, bufLastPresented_, bufFbStats_, bufHp_, bufHist_,
                        bufNetRgb_, bufFinLow_, bufPrevFrame_, bufCurrFrame_, bufInterpOut_,
-                       bufPrevRaw_, bufCurProc_, bufMidRaw_, bufStats_})
+                       bufPrevRaw_, bufCurProc_, bufMidRaw_, bufStats_,
+                       bufHistPrev_, bufMv_, bufMvRb_})
         if (b) vkDestroyBuffer(c.dev, b, nullptr);
     bufRgb_ = bufMax_ = bufT_ = bufFin_ = bufNr_ = bufRbFinal_ = bufDbg_ =
         bufUpload_ = bufLastPresented_ = bufFbStats_ = bufHp_ = bufHist_ =
         bufNetRgb_ = bufFinLow_ = bufPrevFrame_ = bufCurrFrame_ = bufInterpOut_ =
-        bufPrevRaw_ = bufCurProc_ = bufMidRaw_ = bufStats_ = VK_NULL_HANDLE;
+        bufPrevRaw_ = bufCurProc_ = bufMidRaw_ = bufStats_ =
+        bufHistPrev_ = bufMv_ = bufMvRb_ = VK_NULL_HANDLE;
     for (VkDeviceMemory m : {memRgb_, memMax_, memT_, memFin_, memNr_, memRbFinal_, memDbg_,
                              memImgFinal_, memImgIn_, memUpload_, memLastP_, memFbStats_, memHp_, memHist_,
                              memNetRgb_, memFinLow_, memPrevFrame_, memCurrFrame_, memInterpOut_,
-                             memPrevRaw_, memCurProc_, memMidRaw_, memStats_})
+                             memPrevRaw_, memCurProc_, memMidRaw_, memStats_,
+                             memHistPrev_, memMv_, memMvRb_})
         if (m) vkFreeMemory(c.dev, m, nullptr);
     memRgb_ = memMax_ = memT_ = memFin_ = memNr_ = memRbFinal_ = memDbg_ =
         memImgFinal_ = memImgIn_ = memUpload_ = memLastP_ = memFbStats_ = memHp_ = memHist_ =
         memNetRgb_ = memFinLow_ = memPrevFrame_ = memCurrFrame_ = memInterpOut_ =
-        memPrevRaw_ = memCurProc_ = memMidRaw_ = memStats_ = VK_NULL_HANDLE;
+        memPrevRaw_ = memCurProc_ = memMidRaw_ = memStats_ =
+        memHistPrev_ = memMv_ = memMvRb_ = VK_NULL_HANDLE;
     resetAnchors();
     fgMode_ = 1;
     framesDone_ = 0;

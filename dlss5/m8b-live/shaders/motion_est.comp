@@ -1,0 +1,137 @@
+#version 460
+// SPDX-License-Identifier: Apache-2.0
+// ============================================================================
+// Block motion estimation for the motion-compensated residual hold
+// (v10). One workgroup (64 threads = one per 8x8 pixel) per image block;
+// dispatch is (ceil(netW/8), ceil(netH/8), 1). Writes bufMv[block] =
+// (mvx, mvy, conf, 0) in NET pixels: the displacement that carries
+// content FROM the previous frame's position (x - mvx, y - mvy) INTO
+// pixel (x, y) - temporal_nr/temporal_stats warp their E/P/A/R reads by
+// this vector so the temporal state follows the content, not the screen
+// cell.
+//
+//   cur luma  = BT.601 of col01 = fv[p*16+4..6] * 8 + 0.5
+//   prev luma = BT.601 of P     = hsPrev[3N + p*3 + 0..2]  (last frame's
+//               input as stored by temporal_nr - same domain, no decode)
+//
+// Integer full search over (dx, dy) in [-12,12]^2 of SAD over the block,
+// cur(x,y) vs prev(x-dx, y-dy), prev coords clamped to the image. A
+// ZERO-MOTION BIAS keeps still content exactly still: (0,0) is chosen
+// whenever SAD(0,0) <= SADmin*(1+pc.c[1]) + 64*pc.c[2]/255 - pc.c[1] is
+// D5C_MV_ZBIAS (relative slack, default 0) and pc.c[2] is D5C_MV_ZABS
+// (absolute slack in units of 64/255, default 1 = half a luma LSB over
+// the block). Without it, 1-2 LSB input noise picks a random +-1 vector
+// on static regions and the warp would drag state sideways every frame.
+// Sub-pixel parabolic refine in x and y on the +-1 SAD neighbours
+// (interior, nonzero picks only). conf = 1 - SADmin/SAD(0,0) is
+// informational.
+//
+// histValid==0 (reset frame) or ANY out-of-range P tap in the block's
+// search window (uninitialised bufHist on the first-ever frame) ->
+// mv = (0,0), conf = 0: consumers treat (0,0) as the identity warp and
+// their own P/A/R validity still gates the hold.
+//
+// push a.x = TOK (= netW*netH), a.y = netW, a.z = netH, d.x = histValid.
+// ============================================================================
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(std430, set = 0, binding = 3) readonly buffer FeatV { float fv[]; };
+layout(std430, set = 0, binding = 17) readonly buffer HistPrev { float hsP[]; };
+layout(std430, set = 0, binding = 18) writeonly buffer Mvs { vec4 mvs[]; };
+layout(push_constant) uniform Push { ivec4 a; ivec4 b; vec4 c; vec4 d; } pc;
+
+shared float sCur[64];      // this block's current luma
+shared float sPrev[1024];   // 32x32 prev luma window: origin (bx*8-12, by*8-12)
+shared float sSad[625];     // SAD per integer offset, idx = (dy+12)*25+(dx+12)
+shared uint  sBad;          // out-of-range P tap count in the window
+
+void main() {
+    const int netW = pc.a.y, netH = pc.a.z;
+    const uint N = uint(pc.a.x);
+    const int bx = int(gl_WorkGroupID.x), by = int(gl_WorkGroupID.y);
+    const uint tid = gl_LocalInvocationID.x;
+    if (tid == 0u) sBad = 0u;
+    barrier();
+
+    // Current luma (edge blocks clamp their last row/col).
+    {
+        const int lx = int(tid & 7u), ly = int(tid >> 3);
+        const int px = min(bx * 8 + lx, netW - 1);
+        const int py = min(by * 8 + ly, netH - 1);
+        const uint p = uint(py) * uint(netW) + uint(px);
+        sCur[tid] = 0.299 * (fv[p * 16u + 4u] * 8.0 + 0.5)
+                  + 0.587 * (fv[p * 16u + 5u] * 8.0 + 0.5)
+                  + 0.114 * (fv[p * 16u + 6u] * 8.0 + 0.5);
+    }
+    // Previous luma: the 32x32 window the search can reach (block origin
+    // minus the +-12 range). Same NaN-safe range test temporal_nr uses -
+    // uninitialised bufHist fails it.
+    for (uint i = tid; i < 1024u; i += 64u) {
+        const int rx = int(i & 31u), ry = int(i >> 5);
+        const int sx = clamp(bx * 8 - 12 + rx, 0, netW - 1);
+        const int sy = clamp(by * 8 - 12 + ry, 0, netH - 1);
+        const uint sp = uint(sy) * uint(netW) + uint(sx);
+        const float r = hsP[3u * N + sp * 3u + 0u];
+        const float g = hsP[3u * N + sp * 3u + 1u];
+        const float b = hsP[3u * N + sp * 3u + 2u];
+        if (!(r >= -0.01 && r <= 1.01) || !(g >= -0.01 && g <= 1.01)
+            || !(b >= -0.01 && b <= 1.01))
+            atomicAdd(sBad, 1u);
+        sPrev[i] = 0.299 * r + 0.587 * g + 0.114 * b;
+    }
+    barrier();
+
+    const uint bIdx = gl_WorkGroupID.y * ((uint(netW) + 7u) / 8u)
+                    + gl_WorkGroupID.x;
+    if (pc.d.x == 0.0 || sBad != 0u) {
+        if (tid == 0u) mvs[bIdx] = vec4(0.0, 0.0, 0.0, 0.0);
+        return;
+    }
+
+    // Integer SAD for every offset, spread across the 64 threads.
+    for (uint i = tid; i < 625u; i += 64u) {
+        const int dy = int(i / 25u) - 12;
+        const int dx = int(i % 25u) - 12;
+        float s = 0.0;
+        for (int yy = 0; yy < 8; ++yy) {
+            const int pr = (yy + 12 - dy) * 32 + (12 - dx);
+            for (int xx = 0; xx < 8; ++xx)
+                s += abs(sCur[yy * 8 + xx] - sPrev[pr + xx]);
+        }
+        sSad[i] = s;
+    }
+    barrier();
+    if (tid != 0u) return;
+
+    const uint i00 = 12u * 25u + 12u;          // (dx,dy) = (0,0)
+    const float s0 = sSad[i00];
+    float sBest = s0;
+    uint iBest = i00;
+    for (uint i = 0u; i < 625u; ++i) {
+        if (sSad[i] < sBest) { sBest = sSad[i]; iBest = i; }
+    }
+    // Zero-motion bias: stay exactly still on matches within the pushed
+    // slack of the best - static blocks must produce mv=(0,0) so the v9
+    // path is preserved verbatim on still content. pc.c[1]=D5C_MV_ZBIAS
+    // (relative term), pc.c[2]=D5C_MV_ZABS (absolute, units of 64/255).
+    float sPick = sBest;
+    uint iPick = iBest;
+    if (s0 <= sBest * (1.0 + pc.c[1]) + 64.0 * pc.c[2] * (1.0 / 255.0)) {
+        sPick = s0; iPick = i00;
+    }
+    int dx = int(iPick % 25u) - 12;
+    int dy = int(iPick / 25u) - 12;
+    float mvx = float(dx), mvy = float(dy);
+    // Parabolic sub-pixel refine (interior integer picks only).
+    if ((dx != 0 || dy != 0) && dx > -12 && dx < 12 && dy > -12 && dy < 12) {
+        const uint ix = uint(dy + 12) * 25u + uint(dx + 12);
+        const uint iy = ix;
+        float den = 2.0 * (sSad[ix - 1u] - 2.0 * sPick + sSad[ix + 1u]);
+        if (den > 1e-6)
+            mvx += clamp((sSad[ix - 1u] - sSad[ix + 1u]) / den, -0.5, 0.5);
+        den = 2.0 * (sSad[iy - 25u] - 2.0 * sPick + sSad[iy + 25u]);
+        if (den > 1e-6)
+            mvy += clamp((sSad[iy - 25u] - sSad[iy + 25u]) / den, -0.5, 0.5);
+    }
+    const float conf = 1.0 - sBest / (s0 + 1e-6);
+    mvs[bIdx] = vec4(mvx, mvy, conf, 0.0);
+}
