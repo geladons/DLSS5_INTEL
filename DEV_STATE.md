@@ -3622,3 +3622,49 @@ synthetic CTRL+ALT+G injects):
 Residual known limits (unchanged, documented): the select-screen
 external-raw-splice flashes remain a Windows arbitration defect - no
 user-mode fix; menu flicker on that screen persists until gameplay.
+
+## Stage 55 - the "picture pulses" root cause + release gate (2026-10-09)
+
+Owner field report after Stage 54: phantoms gone, but benchmark pulses
+("kartinka pilsiruet") plus overlay presets still feel dead. Replay on
+the REAL GTA IV flythrough (341 frames over TCP, conditioned metrics)
+found the mechanism the screen-capture detectors structurally cannot
+see:
+
+- The drift/motion gate toggles on sustained pans. Every
+  latched->suppressed transition jumped the emit from the latch-held
+  value to the full candidate in ONE frame (gate re-engage @frame 65:
+  input mad 2.45 with no pixel >32, output +6.59 global luma, 45% of
+  pixels >8). Repeated toggles = the periodic pulse.
+- temporal_nr suppressed mode (histValid=2) no longer runs any latch:
+  the emit SLEWS from the previous emitted byte toward the anchored
+  candidate (<=4/255/frame below DB_MID, STEP_HI to DB_CUT, uncapped
+  past it). No deadband = no frozen mask (phantom stays dead: stale
+  <=0.3% on the 0.25px pan probe), and mode switches land as a ramp.
+- Gain anchor reworked in the same pass: the EMA snap is gone; stats[6]
+  now tracks the residual DC the emit may APPLY and chases dCur at
+  ~1.2/255 mean per frame. k = clamp(ema/dCur, 0, 1) - residual growth
+  becomes a multi-frame ramp, shrinking applies immediately, polarity
+  flips emit neutral input. histValid=0 frames reseed ema = dCur.
+
+Release gate added: tools/autotest/replay_gate.py - feeds a raw BGRA
+sequence to a running m11d over TCP, scores conditioned metrics:
+transition-flash, still-input flicker, frozen-stale, invented luma
+oscillation. Field build FAILs (amplified +5.6 @f65, still-flicker p90
+10% max 62%); current build WARNs (only <=3.1/255 soft steps + intended
+slew lag). Owner requirement honored: the harness now catches this
+class deterministically BEFORE a field test.
+
+Overlay preset "doesn't apply" - second half of the fix: every frozen
+reproc bump raced the ~4-6 s async engine rebuild, so the held frame
+reprocessed under the OLD scale and looked unchanged. controller.py
+_reproc_now_and_late() now schedules one coalesced trailing bump (~6.5 s)
+after every frozen-path knob push; rapid clicks collapse to a single
+late bump. Selection events themselves were already reaching the daemon
+(production overlay.log 20:13 session showed scale 0.58/0.50/1.00/0.67
+all applied).
+
+Deployed: m11d.exe b0aca34e, d5c_chain.dll 89c8432c, temporal_nr.spv
+929ef0a1, temporal_stats.spv 89770766 to all five runtime dirs
+(m11d/layer x86/x64/m12/m8b) + production/m13/controller.py - hashes
+verified identical build-vs-production everywhere.

@@ -141,6 +141,17 @@ const float DB_MID  = 64.0 / 255.0;  // low/high step-band edge
 const float DB_CUT  = 128.0 / 255.0; // >= this = real change, emit uncapped
 const float STEP_LO =  8.0 / 255.0;  // emit cap in the [DB_HOLD,DB_MID) band
 const float STEP_HI = 24.0 / 255.0;  // emit cap in the [DB_MID,DB_CUT) band
+const float STEP_SUP = 4.0 / 255.0;  // suppressed-mode slew rate below DB_MID
+// Drift-gate suppressed frames (pc.d.x==2) SLEW from the previous emit
+// toward the candidate: no deadband, no verbatim hold, so the emit can
+// never freeze a stale mask (the phantom report), and a mode transition
+// can never flash - the held-to-candidate divergence lands as a
+// <=STEP_SUP/frame ramp instead of a whole-frame pop (replay: gate
+// re-engaging at a held emit ~5/255 dark produced a +6.6 luma flash in
+// ONE frame - the field's "picture literally pulses"). Real edges still
+// track fast through the upper bands; only subtle drift slews. Raw
+// emit=cand was retired the same day: pred jitter +-1-6 LSB wrote a new
+// byte on ~2-20% of still pixels every frame.
 
 // (The earlier "direction trit" experiment - a per-channel reversal sign
 // packed into the low mantissa bits of the history store - was removed:
@@ -170,29 +181,37 @@ void main() {
     if (pc.c.x > 0.0) {
         // Residual-domain gain anchor. The network's global tone lift is
         // the mean residual dSum = pred_luma_sum - in_luma_sum (Q8 units,
-        // same N both sides). stats[6] holds its EMA (Q16 signed). The
-        // applied residual is forced to the EMA -> per-frame breathing is
-        // low-passed out while real tone shifts track within ~1/alpha
-        // frames (a jump > 50% + floor snaps instantly = scene change).
+        // same N both sides). stats[6] holds a SLEW-LIMITED track of it
+        // (Q16 signed): the residual DC the emit is allowed to apply this
+        // frame. Per-frame net noise is deadzoned out (k=1), while a
+        // net-side re-tone can only grow the applied residual at
+        // ~1.2/255 mean per frame - a global brightness slew limit. The
+        // pre-slew build let a sub-threshold input shift that flipped
+        // the net's tone decision land in ONE frame (flythrough pair
+        // 64->65: input mad 2.45, no pixel >32; output mad 9.16, 45% of
+        // pixels >8 - the field's "the picture literally pulses").
         float sIn  = float(stats[0]);
         float dCur = float(stats[1]) - sIn;
         float ema  = float(int(stats[6])) * (1.0 / 65536.0);
         float npx  = float(pc.a.x);
         // gate: residual DC too small to anchor reliably (flat input)
         if (abs(dCur) > npx * 0.5) {          // mean residual > ~0.5/256
-            float snap = abs(ema) * 0.5 + npx * 2.0;  // +2/256 mean floor
-            if (ema == 0.0 || abs(dCur - ema) > snap) ema = dCur;
-            else ema += (dCur - ema) * pc.c.x;
-            // Deadzone + tight clamp (field-validated whipsaw fix): when
-            // dCur sits inside the noise band around the EMA the delta is
-            // content noise, not a real tone change - per-frame noise must
-            // never modulate strength, so k = 1.0 there. Outside the band
-            // the correction is still bounded to -20%/+25% per frame: the
-            // old 0.25..4.0 range let k jitter with noise and rail at the
-            // flat-gate boundary (a visible processing-strength flicker).
+            const float SLEW = 3.0;           // Q8/px per frame (~1.2/255)
+            float maxStep = npx * SLEW;
+            // Scene cuts / stream starts (histValid=0) reseed: a new
+            // scene must not inherit the old scene's residual track.
+            if (ema == 0.0 || pc.d.x == 0.0) ema = dCur;
+            else ema += clamp(dCur - ema, -maxStep, maxStep);
+            // k = ema/dCur makes the ACHIEVED residual ~= ema whenever
+            // the net wants to grow it (same sign): the pop becomes a
+            // ramp. Shrinking residuals apply immediately (k<=1 - never
+            // hold stale enhancement). Opposite signs (the net flipped
+            // tone polarity mid-slew) emit the neutral raw input until
+            // ema crosses. Inside the noise deadzone k=1 outright so
+            // per-frame jitter never modulates strength.
             float dz = 0.06 * max(abs(ema), npx * 0.5);
             k = (abs(dCur - ema) <= dz) ? 1.0
-                                      : clamp(ema / dCur, 0.80, 1.25);
+                                      : clamp(ema / dCur, 0.0, 1.0);
         } else if (ema == 0.0) {
             // first contact on a flat frame - seed the EMA at 0, no scale
         }
@@ -314,12 +333,13 @@ void main() {
     // resetHistory), where bufHist still holds ANOTHER scene's emit and
     // must not anchor anything.
     bool latchOK = (gate > 0.0) || (pc.d.x != 0.0);
+    bool sup = (pc.d.x > 1.5);
     float refB[3];
     for (uint c = 0u; c < 3u; ++c)
-        refB[c] = (gate > 0.0) ? h01[c] : prevB[c] * (1.0 / 255.0);
+        refB[c] = (gate > 0.0 && !sup) ? h01[c] : prevB[c] * (1.0 / 255.0);
 
     float stepCap = 2.0;
-    if (latchOK) {
+    if (sup || latchOK) {
         float dl = abs(0.299 * (cand[0] - refB[0])
                      + 0.587 * (cand[1] - refB[1])
                      + 0.114 * (cand[2] - refB[2]));
@@ -327,10 +347,18 @@ void main() {
                        max(abs(cand[1] - refB[1]),
                            abs(cand[2] - refB[2])));
         float dMetric = max(dl, 2.5 * dc);
-        stepCap = (dMetric >= DB_CUT)  ? 2.0
-                : (dMetric >= DB_MID)  ? STEP_HI
-                : (dMetric >= DB_HOLD) ? STEP_LO
-                :                        0.0;
+        if (sup) {
+            // slew, never hold: the emit ALWAYS approaches the candidate,
+            // so neither a stale mask nor a transition flash can exist.
+            stepCap = (dMetric >= DB_CUT)  ? 2.0
+                    : (dMetric >= DB_MID)  ? STEP_HI
+                    :                        STEP_SUP;
+        } else {
+            stepCap = (dMetric >= DB_CUT)  ? 2.0
+                    : (dMetric >= DB_MID)  ? STEP_HI
+                    : (dMetric >= DB_HOLD) ? STEP_LO
+                    :                        0.0;
+        }
     }
 
     // Pass 2b: emit = the latch reference inside the deadband, else the

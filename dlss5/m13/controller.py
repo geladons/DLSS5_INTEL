@@ -37,6 +37,34 @@ M11D_LOG = os.path.join(paths.find("logs"), "m11d.log")
 NRCT_TIMEOUT = 0.8          # busy daemon may answer slowly; never block the UI
 MONITOR_PERIOD_S = 1.0
 
+# Frozen-frame reprocess coalescer. A knob push bumps the reproc flag so
+# the layer resends the held raw frame; but a scale/style push also
+# triggers an async engine rebuild (~4-6 s) and the immediate resend
+# reprocesses under the OLD engine - the frozen picture "does not
+# change" (owner field report: "I cannot change the preset"). Every
+# frozen-path bump therefore schedules ONE trailing bump that lands
+# after the rebuild has had time to hot-swap; rapid successive pushes
+# (combo cycling) collapse to a single late bump.
+_REPROC_LATE = {"gen": 0, "lock": threading.Lock()}
+_REPROC_LATE_S = 6.5
+
+
+def _reproc_now_and_late():
+    gamelaunch.reproc_bump()
+    with _REPROC_LATE["lock"]:
+        _REPROC_LATE["gen"] += 1
+        gen = _REPROC_LATE["gen"]
+
+    def _run():
+        time.sleep(_REPROC_LATE_S)
+        with _REPROC_LATE["lock"]:
+            stale = gen != _REPROC_LATE["gen"]
+        if not stale and gamelaunch.freeze_active():
+            gamelaunch.reproc_bump()
+
+    threading.Thread(target=_run, daemon=True,
+                     name="m13-reproc-late").start()
+
 
 # ------------------------------------------------------------- monitoring --
 class StateMonitor(threading.Thread):
@@ -526,7 +554,7 @@ class M13Controller:
             except DaemonError as e:
                 return False, "gain saved but daemon push failed: %s" % e
             if gamelaunch.freeze_active():
-                gamelaunch.reproc_bump()
+                _reproc_now_and_late()
                 return True, ("gain -> %.3f (live; frozen frame "
                               "reprocessing)" % g)
             return True, "gain -> %.3f (live)" % g
@@ -540,7 +568,7 @@ class M13Controller:
         if gamelaunch.freeze_active():
             # No daemon to race: the knob file/env are already written.
             # Covers the x64 in-process frozen frame (was never bumped).
-            gamelaunch.reproc_bump()
+            _reproc_now_and_late()
             return True, ("gain -> %.3f (frozen frame reprocessing)"
                           % gain)
         return False, "daemon down - gain saved for next start"
@@ -563,7 +591,7 @@ class M13Controller:
                 return False, "blend saved but daemon push failed: %s" % e
             if gamelaunch.freeze_active():
                 # AFTER the NRCT push: a resend must see the new value.
-                gamelaunch.reproc_bump()
+                _reproc_now_and_late()
                 return True, ("blend -> %.3f (live; frozen frame "
                               "reprocessing)" % blend)
             return True, "blend -> %.3f (live)" % blend
@@ -575,7 +603,7 @@ class M13Controller:
                         phase30=self.cfg.get_phase30())
             return True, "blend -> %.3f (live, screen mode)" % blend
         if gamelaunch.freeze_active():
-            gamelaunch.reproc_bump()
+            _reproc_now_and_late()
             return True, ("blend -> %.3f (live; frozen frame "
                           "reprocessing)" % blend)
         return True, "blend -> %.3f" % blend
@@ -600,7 +628,7 @@ class M13Controller:
                 return False, "scale saved but daemon push failed: %s" % e
             if gamelaunch.freeze_active():
                 # AFTER the NRCT push: a resend must see the new value.
-                gamelaunch.reproc_bump()
+                _reproc_now_and_late()
                 return True, ("scale -> %.2f (live; frozen frame "
                               "reprocessing)" % scale)
             return True, "scale -> %.2f (live)" % scale
@@ -613,7 +641,7 @@ class M13Controller:
                         phase30=self.cfg.get_phase30())
             return True, "scale -> %.2f (live, screen mode)" % scale
         if gamelaunch.freeze_active():
-            gamelaunch.reproc_bump()
+            _reproc_now_and_late()
             return True, ("scale -> %.2f (frozen frame reprocessing)"
                           % scale)
         return True, "scale -> %.2f" % scale
@@ -641,7 +669,7 @@ class M13Controller:
                         phase30=self.cfg.get_phase30())
             return True, "framegen -> %s (live, screen mode)" % ("ON" if enable else "OFF")
         if gamelaunch.freeze_active():
-            gamelaunch.reproc_bump()
+            _reproc_now_and_late()
         return True, "framegen -> %s" % ("ON" if enable else "OFF")
 
     def set_sharpness(self, val):
@@ -653,7 +681,7 @@ class M13Controller:
         # Knob file BEFORE any reproc bump (see set_blend).
         write_phase30_knobs(self._knob_blob(self.cfg.get_phase30()))
         if gamelaunch.freeze_active():
-            gamelaunch.reproc_bump()
+            _reproc_now_and_late()
         return True, "sharpness -> %.2f" % val
 
     # ------------------------------------------------------------- phase30 --
@@ -673,12 +701,12 @@ class M13Controller:
             except DaemonError as e:
                 return False, "intensity saved but daemon push failed: %s" % e
             if gamelaunch.freeze_active():
-                gamelaunch.reproc_bump()
+                _reproc_now_and_late()
                 return True, ("intensity -> %.3f (live; frozen frame "
                               "reprocessing)" % intensity)
             return True, "intensity -> %.3f (live)" % intensity
         if gamelaunch.freeze_active():
-            gamelaunch.reproc_bump()
+            _reproc_now_and_late()
             return True, ("intensity -> %.3f (live; frozen frame "
                           "reprocessing)" % intensity)
         return True, "intensity -> %.3f" % intensity
@@ -696,7 +724,7 @@ class M13Controller:
                 pass
         if gamelaunch.freeze_active():
             # AFTER the NRCT push: a resend must see the new value.
-            gamelaunch.reproc_bump()
+            _reproc_now_and_late()
         return True, "local_tone -> %.2f" % val
 
     def set_local_structure(self, val, exe=None):
@@ -712,7 +740,7 @@ class M13Controller:
                 pass
         if gamelaunch.freeze_active():
             # AFTER the NRCT push: a resend must see the new value.
-            gamelaunch.reproc_bump()
+            _reproc_now_and_late()
         return True, "local_structure -> %.2f" % val
 
     def set_skin_structure(self, val, exe=None):
@@ -728,7 +756,7 @@ class M13Controller:
                 pass
         if gamelaunch.freeze_active():
             # AFTER the NRCT push: a resend must see the new value.
-            gamelaunch.reproc_bump()
+            _reproc_now_and_late()
         return True, "skin_structure -> %.2f" % val
 
     def set_auto_mask(self, val, exe=None):
@@ -744,7 +772,7 @@ class M13Controller:
                 pass
         if gamelaunch.freeze_active():
             # AFTER the NRCT push: a resend must see the new value.
-            gamelaunch.reproc_bump()
+            _reproc_now_and_late()
         return True, "auto_mask -> %s" % ("ON" if val else "OFF")
 
     def set_style_index(self, val, exe=None):
@@ -761,7 +789,7 @@ class M13Controller:
                 pass
         if gamelaunch.freeze_active():
             # AFTER the NRCT push: a resend must see the new value.
-            gamelaunch.reproc_bump()
+            _reproc_now_and_late()
         return True, "style_index -> %d" % val
 
     def set_color_strength(self, val, exe=None):
@@ -777,7 +805,7 @@ class M13Controller:
                 pass
         if gamelaunch.freeze_active():
             # AFTER the NRCT push: a resend must see the new value.
-            gamelaunch.reproc_bump()
+            _reproc_now_and_late()
         return True, "color_strength -> %.2f" % val
 
     def set_phase30(self, params, exe=None):
@@ -808,7 +836,7 @@ class M13Controller:
                     pass
         if gamelaunch.freeze_active():
             # AFTER the NRCT push: a resend must see the new value.
-            gamelaunch.reproc_bump()
+            _reproc_now_and_late()
         return True, "Phase30 parameters updated"
 
     def reset_phase30(self, exe=None):
@@ -823,7 +851,7 @@ class M13Controller:
                 pass
         if gamelaunch.freeze_active():
             # AFTER the NRCT push: a resend must see the new value.
-            gamelaunch.reproc_bump()
+            _reproc_now_and_late()
         return True, "Phase30 parameters reset to defaults"
 
     # ---------------------------------------------------------- screen mode --

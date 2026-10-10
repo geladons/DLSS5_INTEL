@@ -242,11 +242,19 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
     MOTION GATE (host-side, engine.cpp detectSceneCut): the same 64x36
     luma thumb that detects cuts also counts moved cells (>10/255);
     fraction >TMGATE_HI (0.20) -> histSuppressed_ -> the frame records
-    histValid=0 everywhere (features d[0], temporal_stats, temporal_nr)
-    = pure prediction, temporal-off behaviour on fast content where the
-    ~40 ms cadence would drag stale structure; <TMGATE_LO (0.05) ->
-    re-engage, hysteresis holds between. History keeps refreshing on
-    suppressed frames, so re-engage is transient-free. Envs
+    histValid=2 everywhere (features d[0], temporal_stats, temporal_nr).
+    Mode 2 = SLEW: features still reads history (AABB clamp + fv[15]
+    gate all live), but temporal_nr drops the deadband latch and emits
+    prevByte + clamp(cand - prevByte, band) - 4/255/frame below DB_MID,
+    STEP_HI to DB_CUT, uncapped past it. NEVER restore a deadband here:
+    a verbatim hold freezes the emit mask on slow pans (phantom), a
+    verbatim emit=cand flashes on the latch->suppressed transition
+    (measured +6.6 global luma in ONE frame @gate re-engage = the
+    field's "picture literally pulses"), and the DB8 stepped latch
+    churned 8-24/255 pops on ~2-20% of still pixels. The slew makes a
+    mode switch a <=4/255 ramp instead. <TMGATE_LO (0.05) -> re-engage,
+    hysteresis holds between. History keeps refreshing on suppressed
+    frames, so re-engage is transient-free. Envs
     *_TMGATE=0 off, *_TMGATE_HI/LO retune, D5C_DEBUG_TMGATE=1 logs.
     DRIFT GATE (same detectSceneCut pass, 2026-10-09): per-frame velocity
     is blind to slow pans - a ~0.25 px/frame turn keeps every coarse cell
@@ -274,6 +282,18 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
     all tones) at the x86 daemon cadence without re-importing the
     Stage-45 stale-structure noise. Measured: jitter breathing 0.11 vs
     2.47/255 forced-off; pan suppresses (39.9% moved -> history off).
+    RELEASE GATE for all of the above: tools/autotest/replay_gate.py
+    feeds a raw BGRA sequence to a running m11d over the TCP protocol
+    and scores conditioned metrics screen capture cannot see -
+    transition-flash (one-frame global luma step the input did not
+    make), still-input flicker (>8/255 emit changes on input-still
+    pixels), frozen-stale (emit pinned while input moved), invented
+    luma oscillation. `python tools/autotest/replay_gate.py <seq.raw>`;
+    the 341-frame real GTA IV flythrough lives at
+    D:\dlss5_cap\_pan_seq.raw. The 2026-10-09 "picture pulses" field
+    build FAILs (amplified f65 +5.6, still-flicker p90 10%/max 62%);
+    the slew build passes WARN. Do NOT ship temporal changes without
+    running it - owner requirement.
   - Input contract = 16 feature channels exactly (input_adapter_weight
     [16,32]): ch 0-2 noise, 3 const, 4-6 scaled colour, 7-9 history,
     10-14 Phase30 controls, 15 zero. NO motion-vector/depth slots - the
@@ -281,17 +301,22 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
   - Gain anchor (binding 16, `temporal_stats.comp`): features accumulates
     the input luma sum, temporal_stats the pre-anchor output sum, and
     temporal_nr rescales the per-pixel residual so the frame's mean
-    residual follows an EMA (`DLSS5_GAIN_LOCK`/`NR_LAYER_GAIN_LOCK`/
-    `D5C_GAIN_LOCK`, default 0.08 = ON - bounded anchor; env =0
-    disables). Kills DC breathing on pans;
-    >50% residual jumps snap through (scene changes). Per-frame
-    correction k is DEADZONED (|dCur-ema| < 6% -> k=1) and clamped to
-    0.80..1.25 - never widen the clamp, a wider range re-introduces
-    the strength whipsaw fixed 2026-10-04. m8b-live binds the
-    stats buffer for shared features.comp but never reads it; missing
-    temporal_stats.spv = graceful gain-lock off. The EMA is written to
-    spare slot [7] and rotated into [6] by temporal_stats next frame -
-    never write [6] from temporal_nr (intra-dispatch race).
+    residual follows a SLEW-LIMITED EMA (`DLSS5_GAIN_LOCK`/
+    `NR_LAYER_GAIN_LOCK`/`D5C_GAIN_LOCK`, default 0.08 = ON; env =0
+    disables). stats[6] tracks the residual DC the emit may APPLY;
+    it chases the net's own dCur at <= ~1.2/255 mean per frame (SLEW=3
+    Q8) - the old hard snap re-applied a clamped residual in one frame
+    (a sub-threshold input shift that flipped the net's tone decision
+    landed as a +6.6/255 whole-frame brightness pop). k = ema/dCur
+    clamped to 0..1: growing residual becomes a ~5-frame ramp, shrinking
+    residual applies immediately (never hold stale enhancement), a
+    polarity flip emits neutral input until ema crosses. histValid=0
+    frames reseed ema = dCur so a new scene is never clamped by the old
+    scene's track. Deadzoned (|dCur-ema| < 6% -> k=1). m8b-live binds
+    the stats buffer for shared features.comp but never reads it;
+    missing temporal_stats.spv = graceful gain-lock off. The EMA is
+    written to spare slot [7] and rotated into [6] by temporal_stats
+    next frame - never write [6] from temporal_nr (intra-dispatch race).
   - Frame generation (engine_framegen.cpp): mode 1 = residual transfer
     (`framegen.comp`, `dlss5_framegen_transfer`): generated = cur_raw +
     warp(prev_processed - prev_raw, motion(prev_raw -> cur_raw)). Mode 2 =

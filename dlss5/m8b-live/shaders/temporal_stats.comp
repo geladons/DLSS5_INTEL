@@ -55,6 +55,10 @@ const float DB_MID  = 64.0 / 255.0;
 const float DB_CUT  = 128.0 / 255.0;
 const float STEP_LO =  8.0 / 255.0;
 const float STEP_HI = 24.0 / 255.0;
+// Same drift-gate suppressed mode as temporal_nr (pc.d.x==2): no latch,
+// the emit SLEWS from prevB toward cand at STEP_SUP below DB_MID -
+// a mode transition lands as a ramp, not a whole-frame flash.
+const float STEP_SUP = 4.0 / 255.0;
 
 shared uint sLum;
 void main() {
@@ -118,11 +122,12 @@ void main() {
         // enhancement residual exceeds the gate band - without this the
         // mirrored sum accumulated the raw per-frame prediction jitter.
         bool latchOK = (gate > 0.0) || (pc.d.x != 0.0);
+        bool sup = (pc.d.x > 1.5);
         float refB[3];
         for (uint c = 0u; c < 3u; ++c)
-            refB[c] = (gate > 0.0) ? h01[c] : prevB[c] * (1.0 / 255.0);
+            refB[c] = (gate > 0.0 && !sup) ? h01[c] : prevB[c] * (1.0 / 255.0);
         float stepCap = 2.0;
-        if (latchOK) {
+        if (sup || latchOK) {
             float dl = abs(0.299 * (cand[0] - refB[0])
                          + 0.587 * (cand[1] - refB[1])
                          + 0.114 * (cand[2] - refB[2]));
@@ -130,10 +135,16 @@ void main() {
                            max(abs(cand[1] - refB[1]),
                                abs(cand[2] - refB[2])));
             float dMetric = max(dl, 2.5 * dc);
-            stepCap = (dMetric >= DB_CUT)  ? 2.0
-                    : (dMetric >= DB_MID)  ? STEP_HI
-                    : (dMetric >= DB_HOLD) ? STEP_LO
-                    :                        0.0;
+            if (sup) {
+                stepCap = (dMetric >= DB_CUT)  ? 2.0
+                        : (dMetric >= DB_MID)  ? STEP_HI
+                        :                        STEP_SUP;
+            } else {
+                stepCap = (dMetric >= DB_CUT)  ? 2.0
+                        : (dMetric >= DB_MID)  ? STEP_HI
+                        : (dMetric >= DB_HOLD) ? STEP_LO
+                        :                        0.0;
+            }
         }
         // Same emit as temporal_nr: latch reference inside the deadband,
         // reference stepped toward the candidate by at most stepCap.

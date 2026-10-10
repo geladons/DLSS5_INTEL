@@ -25,8 +25,22 @@ namespace d5c {
 //   stream start / resetHistory) -> the blend is skipped outright instead
 //   of dragging a col01-substituted "history".
 void ChainEngine::recordTemporal() {
-    const float histValid = (cfg_.temporal && framesDone_ > 0
-                             && !histSuppressed_) ? 1.0f : 0.0f;
+    /* histValid is a 3-state mode: 0 = reset frame (no history read, no
+     * latch - bufHist holds another scene's emit), 1 = normal (full
+     * deadband latch), 2 = drift-gate suppressed (history stays honest
+     * in features; temporal_nr SLEWS the emit from the previous emitted
+     * byte toward the anchored candidate - never a verbatim hold, so no
+     * stale mask can form and a latch->suppressed transition lands as a
+     * <=4/255-per-frame ramp instead of a whole-frame flash: the field's
+     * "picture literally pulses" was measured as exactly that switch
+     * (gate re-engage @frame65 = +6.6 global luma in one frame).
+     * Suppression must NOT drop to 0: pure raw-prediction frames shimmer
+     * every pixel each frame, and on sustained pans the gate would hold
+     * that mode for the whole pan (out mad med 1.89 vs 0.33
+     * unsuppressed, real GTA IV flythrough replay). Real edges still
+     * track through the upper emit bands; only subtle drift slews. */
+    const float histValid = (!cfg_.temporal || framesDone_ == 0)
+                            ? 0.0f : (histSuppressed_ ? 2.0f : 1.0f);
     if (pipeStats_) {
         Push sp{};
         sp.a[0] = (int32_t)st_[0].TOK;

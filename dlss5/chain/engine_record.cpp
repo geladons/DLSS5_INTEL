@@ -85,8 +85,8 @@ void ChainEngine::recordFrame(long frameIndex) {
             p.c[1] = p30Ctrl[1]; // ch 11: tone
             p.c[2] = p30Ctrl[2]; // ch 12: structure
             p.c[3] = p30Ctrl[3]; // ch 13: skin_structure
-            p.d[0] = (cfg_.temporal && framesDone_ > 0
-                      && !histSuppressed_) ? 1.0f : 0.0f;  // histValid
+            p.d[0] = (!cfg_.temporal || framesDone_ == 0)
+                      ? 0.0f : (histSuppressed_ ? 2.0f : 1.0f);  // histValid
             p.d[1] = p30Ctrl[4]; // ch 14: auto_mask_structure
             p.d[2] = 1.0f;       // phase30Valid
             p.d[3] = 0.0f;
@@ -212,8 +212,8 @@ void ChainEngine::recordFrame(long frameIndex) {
             p.c[1] = p30Ctrl[1]; // ch 11: tone
             p.c[2] = p30Ctrl[2]; // ch 12: structure
             p.c[3] = p30Ctrl[3]; // ch 13: skin_structure
-            p.d[0] = (cfg_.temporal && framesDone_ > 0
-                      && !histSuppressed_) ? 1.0f : 0.0f;  // histValid
+            p.d[0] = (!cfg_.temporal || framesDone_ == 0)
+                      ? 0.0f : (histSuppressed_ ? 2.0f : 1.0f);  // histValid
             p.d[1] = p30Ctrl[4]; // ch 14: auto_mask_structure
             p.d[2] = 1.0f;       // phase30Valid
             p.d[3] = 0.0f;
