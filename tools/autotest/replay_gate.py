@@ -17,6 +17,9 @@
 #      them moved (the slow-pan phantom mask).
 #   4. opposite-sign luma swings - global breathing (brighten-then-dim
 #      reversals the input never made).
+#   5. ghost residue (fixture:ghost) - held output on pixels whose input
+#      went black after text slid/faded away (2026-10-10 loading-word
+#      phantom copies; the unconditioned hold latch pinned it forever).
 #
 # Usage:
 #   python replay_gate.py <sequence.raw|manifest.txt> [--w 800 --h 600]
@@ -190,19 +193,32 @@ def analyze(seq, outs, fps_hint):
              % float(np.abs(invented).max()))
 
     # ---- 2. still-input flicker -------------------------------------
-    den = np.maximum(still.sum((1, 2)), 1)
-    flk4 = ((dout > 4) & still).sum((1, 2)) / den
-    flk8 = ((dout > 8) & still).sum((1, 2)) / den
+    # Frames whose still share is <2% (scene cuts, whip pans) carry a
+    # near-zero denominator - a handful of edge pixels then reads as a
+    # 60%+ "flicker" spike. They are scored by the transition checks
+    # above, not here.
+    den = still.sum((1, 2))
+    ok = den >= 0.02 * still[0].size
+    if not ok.any():
+        ok[:] = True
+    den = np.maximum(den, 1)
+    flk4 = (((dout > 4) & still).sum((1, 2)) / den)[ok]
+    flk8 = (((dout > 8) & still).sum((1, 2)) / den)[ok]
     p90_4, p90_8 = np.percentile(flk4, 90), np.percentile(flk8, 90)
     mx8 = flk8.max()
     notes.append("still-px flicker>4: med %.3f p90 %.3f | >8: p90 %.3f "
                  "max %.3f" % (np.median(flk4), p90_4, p90_8, mx8))
-    if p90_8 > 0.05 or mx8 > 0.20:
-        fail("still-input flicker: p90 %.1f%% max %.1f%% of still px "
-             "moved >8/255 in one frame" % (p90_8 * 100, mx8 * 100))
-    elif p90_8 > 0.02 or mx8 > 0.10:
-        warn("still-input flicker p90 %.1f%% max %.1f%%"
-             % (p90_8 * 100, mx8 * 100))
+    # >4/255 is visible shimmer at the shipped intensity 1.3 (2026-10-10:
+    # the owner called the benchmark "noise / digital garbage" on a build
+    # scoring p90 17.5% >4 / 3.7% >8 on the native flythrough - which the
+    # old >8-only thresholds rated WARN). Calibrated so that build FAILs.
+    if p90_8 > 0.025 or mx8 > 0.20 or p90_4 > 0.08:
+        fail("still-input flicker: p90 %.1f%% >4 / %.1f%% >8 (max %.1f%%) "
+             "of still px moved in one frame"
+             % (p90_4 * 100, p90_8 * 100, mx8 * 100))
+    elif p90_8 > 0.01 or mx8 > 0.10 or p90_4 > 0.04:
+        warn("still-input flicker p90 %.1f%% >4 / %.1f%% >8 max %.1f%%"
+             % (p90_4 * 100, p90_8 * 100, mx8 * 100))
 
     # ---- 3. frozen-stale (phantom mask) ------------------------------
     K = min(8, len(outs) // 4)
@@ -233,14 +249,97 @@ def analyze(seq, outs, fps_hint):
     return verdict, notes
 
 
+def ghost_fixture(kind, w, h):
+    """Synthetic loading-screen fixture: bright text on black that slides
+    left 1px/frame then stops ("slide"), or fades in then out ("fade").
+    A small spinner far from the text keeps frames non-identical (the
+    live layer reuses byte-identical frames, so a real loading screen
+    only reaches the daemon because something animates). Returns
+    (seq N,H,W,4 uint8, band slices around the text row)."""
+    from PIL import Image, ImageDraw, ImageFont
+    try:
+        font = ImageFont.truetype("arialbd.ttf", 22)
+    except OSError:
+        font = ImageFont.load_default()
+    ty = h - 60
+
+    def fr(tx, alpha, spin):
+        im = Image.new("RGB", (w, h), (0, 0, 0))
+        d = ImageDraw.Draw(im)
+        v = int(230 * alpha)
+        d.text((tx, ty), "LOADING", fill=(v, v, v), font=font)
+        a = spin % 8
+        d.rectangle((w - 60 + a * 4, 40, w - 56 + a * 4, 44),
+                    fill=(200, 200, 200))
+        rgb = np.asarray(im)
+        out = np.empty((h, w, 4), np.uint8)
+        out[..., 0], out[..., 1], out[..., 2] = rgb[..., 2], rgb[..., 1], rgb[..., 0]
+        out[..., 3] = 255
+        return out
+
+    cx = w // 2 - 40
+    if kind == "slide":
+        s = [fr(cx + 140 - i, 1.0, i) for i in range(120)] + \
+            [fr(cx + 20, 1.0, i) for i in range(60)]
+    else:
+        s = [fr(cx, min(1.0, i / 30.0), i) for i in range(60)] + \
+            [fr(cx, max(0.0, 1.0 - i / 30.0), i) for i in range(40)] + \
+            [fr(cx, 0.0, i) for i in range(60)]
+    return np.stack(s), (slice(ty - 20, ty + 40), slice(0, w - 70))
+
+
+def analyze_ghost(seq, outs, band, kind):
+    """Persistent residue on pixels whose input is BLACK: the hold-latch
+    ghost (owner report 2026-10-10: the loading word smeared into faint
+    copies; moved/faded content left <32/255 residue pinned forever).
+    Scored on the last 20 frames, where the input has been settled for
+    >=20 frames - any residue there is held, not transitional. Baseline
+    (net's own halo on static text): ~0.1% of band px >6, max ~11/255."""
+    i3 = seq[-20:, :, :, :3].astype(np.int16)[:, band[0], band[1]]
+    o3 = outs[-20:, :, :, :3].astype(np.int16)[:, band[0], band[1]]
+    blk = i3.max(3) <= 2
+    om = o3.max(3)
+    share = ((om > 6) & blk).sum() / max(blk.sum(), 1)
+    mx = int(om[blk].max()) if blk.any() else 0
+    notes = ["ghost[%s]: residue>6 on black-input px %.2f%%, max %d/255"
+             % (kind, share * 100, mx)]
+    if share > 0.01 or mx > 16:
+        return "FAIL", notes + ["FAIL ghost[%s]: held residue where input "
+                                "is black (phantom trail)" % kind]
+    if share > 0.004:
+        return "WARN", notes + ["WARN ghost[%s] residue %.2f%%"
+                                % (kind, share * 100)]
+    return "PASS", notes
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("sequence")
+    ap.add_argument("sequence", help="raw/manifest path, or "
+                    "'fixture:ghost' for the synthetic loading-text gate")
     ap.add_argument("--w", type=int, default=800)
     ap.add_argument("--h", type=int, default=600)
     ap.add_argument("--port", type=int, default=48990)
     ap.add_argument("--save-out")
     args = ap.parse_args()
+
+    if args.sequence == "fixture:ghost":
+        d = Daemon(args.port, args.w, args.h)
+        rank = {"PASS": 0, "WARN": 1, "FAIL": 2}
+        worst = "PASS"
+        for kind in ("slide", "fade"):
+            seq, band = ghost_fixture(kind, args.w, args.h)
+            outs = np.empty_like(seq)
+            for i, fr in enumerate(seq):
+                outs[i] = d.frame(fr)
+            v, notes = analyze_ghost(seq, outs, band, kind)
+            v2, notes2 = analyze(seq, outs, 25.0)
+            for n in notes + notes2:
+                print("  " + n)
+            for vv in (v, v2):
+                if rank[vv] > rank[worst]:
+                    worst = vv
+        print("[replay_gate] verdict: %s" % worst)
+        return 0 if worst == "PASS" else 1
 
     seq = load_sequence(args.sequence, args.w, args.h)
     print("[replay_gate] %d input frames %dx%d -> daemon :%d"

@@ -114,7 +114,14 @@ bool ChainEngine::createFrontEnd() {
                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memFin_);
     bufNr_ = CreateBuf(c, (uint64_t)regionW_ * regionH_ * 3 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memNr_);
-    bufHist_ = CreateBuf(c, (uint64_t)st_[0].TOK * 3 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+    // Temporal history + residual-hold state (binding 13), fp32[TOK*10]:
+    // [0,3*TOK)      = emitted-byte history (scaled_color, unchanged)
+    // [3*TOK,6*TOK)  = previous frame's input col01 (rewritten every frame)
+    // [6*TOK,9*TOK)  = anchor input (col01 at the last residual refresh /
+    //                  fresh emit) - temporal_nr's residual hold emits
+    //                  col01 + held residual while |col01 - anchor| <= D_REF
+    // [9*TOK,10*TOK) = remaining refresh frames (bounded R_FRAMES budget).
+    bufHist_ = CreateBuf(c, (uint64_t)st_[0].TOK * 10 * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                          VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memHist_);
     bufRbFinal_ = CreateBuf(c, (uint64_t)W_ * H_ * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
@@ -235,7 +242,7 @@ bool ChainEngine::createFrontEnd() {
         writeBuf(setFinal_, 10, bufLastPresented_, (uint64_t)W_ * H_ * 4);
         writeBuf(setFinal_, 11, bufFbStats_, 8);
         writeBuf(setFinal_, 12, bufHp_, 65536);
-        writeBuf(setFinal_, 13, bufHist_, (uint64_t)st_[0].TOK * 3 * 4);
+        writeBuf(setFinal_, 13, bufHist_, (uint64_t)st_[0].TOK * 10 * 4);
         writeBufRange(setFinal_, 14, arena_.bufOf(O.oHEAD), arena_.localOff(O.oHEAD), (uint64_t)st_[0].TOK * 4 * 4);
         writeBufRange(setFinal_, 15, arena_.bufOf(O.oHeadDC), arena_.localOff(O.oHeadDC), 1024);
         writeBuf(setFinal_, 16, bufStats_, 32);
@@ -254,7 +261,7 @@ bool ChainEngine::createFrontEnd() {
         writeBuf(setFinal_, 10, bufLastPresented_, (uint64_t)W_ * H_ * 4);
         writeBuf(setFinal_, 11, bufFbStats_, 8);
         writeBuf(setFinal_, 12, bufHp_, 65536);
-        writeBuf(setFinal_, 13, bufHist_, (uint64_t)st_[0].TOK * 3 * 4);
+        writeBuf(setFinal_, 13, bufHist_, (uint64_t)st_[0].TOK * 10 * 4);
         writeBufRange(setFinal_, 14, arena_.bufOf(O.oHEAD), arena_.localOff(O.oHEAD), (uint64_t)st_[0].TOK * 4 * 4);
         writeBufRange(setFinal_, 15, arena_.bufOf(O.oHeadDC), arena_.localOff(O.oHeadDC), 1024);
         writeBuf(setFinal_, 16, bufStats_, 32);

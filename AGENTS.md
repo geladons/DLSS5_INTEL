@@ -201,58 +201,72 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
     first-frame layout by the same distance (fv keeps the clamped copy
     for the blend). temporal_stats.comp mirrors the same gate so
     stats[1] matches the emitted output.
-    temporal_nr then runs a HOLD/RELEASE latch on the emitted value
-    (5d238f6, flicker fix): if the pre-anchor blend candidate is within
-    DB_HOLD=32/255 of current history (same chroma-aware metric), emit =
-    history verbatim - the net's response to its own output fed back as
-    history has gain>1 (period-2 limit cycle, +-4-5 LSB), so ANY
-    proportional deadband/trickle rides the chase forever; only a hard
-    hold pins the loop. Do not soften it into a smoothstep/k_min form -
-    that reopens the chase (measured: ~24-42% movers on identical
-    frames). The emitted value is byte-snapped and stored; the identical
-    step cap must stay mirrored in temporal_stats.comp or the gain
-    anchor chases a ghost.
-    RELEASES ARE BANDED + RATE-LIMITED (release-pop fix): a candidate AT
-    the threshold used to flip hold->release->hold and emit the full
-    ~32+/255 candidate every flip (fieldfix.mp4: chroma/luma pop
-    clusters on a static loading screen). Now the emit cap is chosen by
-    the distance band: d<32/255 hold, [32,64)->STEP_LO=8/255,
-    [64,128)->STEP_HI=24/255 per channel, >=128/255 uncapped (real
-    change/scene cut lands in one frame). The stored history IS the
-    Schmitt margin: each release-step moves hist STEP closer to cand,
-    so a flipped attractor lands STEP<DB_HOLD away -> re-HOLDS; for
-    gaps <64/255 the ratchet is monotonic and provably terminates
-    (unit-proven: +-35/255 alternation collapses to one 8/255 micro-
-    step then pins). >64/255 persistent alternation can still shuttle,
-    bounded at STEP_HI/frame vs the old full-gap pops.
-    fv[15]==0 pixels are LATCHED TOO (2026-10-07 static-shimmer fix):
-    the gate compares the previous PROCESSED emit to the RAW input, so
-    still pixels whose enhancement residual exceeds the band stayed
-    gate=0 forever and re-emitted the raw unblended prediction every
-    frame - the measured 1-6 LSB wander lived entirely there (~47% of a
-    GTA IV menu frame, 95%+ re-emitting a new byte/frame; gated pixels
-    were pinned to <1%). On non-reset frames (pc.d.x=1) gate=0 pixels
-    now run the same banded latch against prevB = their own previous
-    EMITTED BYTE (the raw stored history, never the box-clamped h01 -
-    a legit emit may sit outside the 3x3 box and an h01 hold would
-    ratchet into a 2-cycle). Static pred jitter << DB_HOLD pins; real
-    motion lands >DB_CUT and emits instantly; only the history-reset
-    frame bypasses (stale bufHist must not anchor). Same bands and
-    reference rule must stay mirrored in temporal_stats.comp.
+    temporal_nr then runs a RESIDUAL-DOMAIN hold on the emitted value
+    (v9, 2026-10-10; replaces the output-domain HOLD/RELEASE latch).
+    NEVER hold the OUTPUT value again: a latch that re-emits the stored
+    byte while dist(cand, ref) < deadband ignores whether the INPUT
+    under the pixel changed, so moved/faded content leaves a permanent
+    sub-threshold ghost (proven 2026-10-10, gate
+    `replay_gate.py fixture:ghost` on the old build: slide residue
+    4.4%/max 23, fade 7.1%/max 20 of black-input pixels).
+    bufHist (binding 13, fp32[TOK*10], N = pc.a.x) layout:
+      [0,3N)   E = last emitted byte per channel (scaled_color store,
+                    unchanged; features reads it as history)
+      [3N,6N)  P = previous frame's input col01 (rewritten EVERY frame)
+      [6N,9N)  A = drift anchor input (col01 at the last fresh emit /
+                    start of the current refresh burst)
+      [9N,10N) R = remaining refresh frames (0..R_FRAMES)
+    Held residual rh = Eb - P (previous emitted byte minus the input it
+    was produced on); fresh residual rc = cand - col01 (pre-anchor);
+    residual mismatch dr via the same chroma-aware metric
+    (max(BT.601 luma dist, 2.5 * max channel dist)). FRESH emit
+    (uncapped gain-anchored candidate, A=col01, R=0) on:
+    uninitialised/out-of-range state, reset frame (pc.d.x==0),
+    per-frame input jump dF = |col01-P| > IN_CUT=24/255, or
+    dr >= DB_CUT=128/255. Otherwise emit = col01 + rh +
+    clamp(rt - rh, +-capc) where rt = anchored - col01 and capc is 0
+    outside a refresh burst: static input (col01 == P) reproduces the
+    previous emit byte-exact - the same fixed point that pins the
+    net's gain>1 period-2 limit cycle on its own output as history
+    (ANY proportional deadband/trickle rides the chase forever -
+    measured ~24-42% movers on identical frames; do not soften).
+    Slowly changing input -> output tracks input 1:1 while the held
+    residual rides along; no stale output ghost can survive an input
+    change. Residual REFRESH is anchor-armed and budgeted: when
+    |col01-A| > D_REF=12/255 (distance from a FIXED anchor - 1-2 LSB
+    input noise cannot integrate toward it; an accumulating drift
+    counter was tried first and refreshed forever on grain) the anchor
+    re-bases and arms R_FRAMES=16 frames of PROPORTIONAL steps
+    capc = max(R_STEP_MIN=1/255, R_FRAC=0.25*|rt-rh|) per channel -
+    exponential convergence, ~1/255/frame on small mismatches (below
+    the x1.69 compose gain*intensity amplification that made fixed
+    4/255 steps visible as pops) while ghost-class errors still close
+    in ~10 frames; the burst ends early once dr < R_DONE=6/255 and is
+    bounded by construction. fv[15]==0 pixels run the identical hold -
+    no gate special-casing (the 2026-10-07 static-shimmer rationale is
+    unchanged: the gate compares processed emit vs raw input so still
+    pixels with a >band residual read "moved" forever; unlatched they
+    re-emitted the raw jittering prediction - ~47% of a GTA IV menu
+    frame, 95%+ re-emitting a new byte/frame). The emitted value is
+    byte-snapped and stored; the identical rule must stay mirrored in
+    temporal_stats.comp (readonly view of the same pre-dispatch
+    E/P/A/R) or the gain anchor chases a ghost.
     MOTION GATE (host-side, engine.cpp detectSceneCut): the same 64x36
     luma thumb that detects cuts also counts moved cells (>10/255);
     fraction >TMGATE_HI (0.20) -> histSuppressed_ -> the frame records
     histValid=2 everywhere (features d[0], temporal_stats, temporal_nr).
-    Mode 2 = SLEW: features still reads history (AABB clamp + fv[15]
-    gate all live), but temporal_nr drops the deadband latch and emits
-    prevByte + clamp(cand - prevByte, band) - 4/255/frame below DB_MID,
-    STEP_HI to DB_CUT, uncapped past it. NEVER restore a deadband here:
-    a verbatim hold freezes the emit mask on slow pans (phantom), a
-    verbatim emit=cand flashes on the latch->suppressed transition
-    (measured +6.6 global luma in ONE frame @gate re-engage = the
-    field's "picture literally pulses"), and the DB8 stepped latch
-    churned 8-24/255 pops on ~2-20% of still pixels. The slew makes a
-    mode switch a <=4/255 ramp instead. <TMGATE_LO (0.05) -> re-engage,
+    Mode 2 is now SHADER-EQUIVALENT to mode 1 (v9 residual hold,
+    2026-10-10): temporal_nr/temporal_stats run the identical rule on
+    both modes - the pan/drift that tripped the gate moves every
+    pixel's input past IN_CUT, so emits go fresh and no held residual
+    can freeze a stale mask, and a mode switch lands without a
+    transition flash (the field's "picture literally pulses" was a
+    latch->emit jump: measured +6.6 global luma in ONE frame @gate
+    re-engage on the old output-hold build). Suppression must NOT drop
+    to 0: pure raw-prediction frames shimmer every pixel each frame and
+    on sustained pans the gate would hold that mode for the whole pan
+    (out mad med 1.89 vs 0.33 unsuppressed, real GTA IV flythrough
+    replay). <TMGATE_LO (0.05) -> re-engage,
     hysteresis holds between. History keeps refreshing on suppressed
     frames, so re-engage is transient-free. Envs
     *_TMGATE=0 off, *_TMGATE_HI/LO retune, D5C_DEBUG_TMGATE=1 logs.
@@ -286,14 +300,30 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
     feeds a raw BGRA sequence to a running m11d over the TCP protocol
     and scores conditioned metrics screen capture cannot see -
     transition-flash (one-frame global luma step the input did not
-    make), still-input flicker (>8/255 emit changes on input-still
-    pixels), frozen-stale (emit pinned while input moved), invented
-    luma oscillation. `python tools/autotest/replay_gate.py <seq.raw>`;
-    the 341-frame real GTA IV flythrough lives at
-    D:\dlss5_cap\_pan_seq.raw. The 2026-10-09 "picture pulses" field
-    build FAILs (amplified f65 +5.6, still-flicker p90 10%/max 62%);
-    the slew build passes WARN. Do NOT ship temporal changes without
-    running it - owner requirement.
+    make), still-input flicker (>4/255 emit changes on input-still
+    pixels; FAIL at p90 >8%), frozen-stale (emit pinned while input
+    moved), invented luma oscillation, and `fixture:ghost` (synthetic
+    slide + fade-out text: FAILs when residue >6/255 remains on
+    black-input pixels - the output-domain-hold ghost class).
+    Every temporal change must pass:
+      python tools/autotest/replay_gate.py fixture:ghost
+      python tools/autotest/replay_gate.py D:\dlss5_cap\_pan_seq.raw
+        (341-frame real GTA IV benchmark flythrough)
+    and be checked on:
+      python tools/autotest/replay_gate.py D:\dlss5_cap\_nat_load.raw
+        (native GTA IV loading screen + flythrough start; built from
+        at_s52_benchnat via Temp\_nat_extract.py - machine-local
+        capture, not committed)
+    The 2026-10-09 "picture pulses" field build FAILs (amplified f65
+    +5.6, still-flicker p90 10%/max 62%); the v9 residual-hold build
+    passes fixture:ghost + _pan_seq clean and _nat_load at WARN. Do
+    NOT ship temporal changes without running it - owner requirement.
+    Capture harness quirks (2026-10-10): GTA IV's window now launches
+    MAXIMIZED even with -windowed - capture_session.py needs
+    `--park 872,400,816,638` to pin the game window onto the record
+    region; and analyze.py takes a VIDEO FILE source - pass
+    <outdir>\capture.mp4 explicitly (a bare dir is treated as a PNG
+    frame dir and stray *.png in the outdir get picked up).
   - Input contract = 16 feature channels exactly (input_adapter_weight
     [16,32]): ch 0-2 noise, 3 const, 4-6 scaled colour, 7-9 history,
     10-14 Phase30 controls, 15 zero. NO motion-vector/depth slots - the

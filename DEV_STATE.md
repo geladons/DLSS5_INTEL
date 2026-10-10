@@ -3668,3 +3668,69 @@ Deployed: m11d.exe b0aca34e, d5c_chain.dll 89c8432c, temporal_nr.spv
 929ef0a1, temporal_stats.spv 89770766 to all five runtime dirs
 (m11d/layer x86/x64/m12/m8b) + production/m13/controller.py - hashes
 verified identical build-vs-production everywhere.
+
+## Stage 56 - residual-domain temporal hold (2026-10-10)
+
+Owner field report: menu flicker while static, loading-screen flicker
+returning after the overlay toggle, ghost copies of the "LOADING" word,
+and benchmark noise/phantoms/garbage. Root cause found by replaying the
+synthetic ghost fixture against the old build: the HOLD latch was in the
+OUTPUT domain - it re-emitted the stored byte verbatim while
+dist(cand, ref) < DB_HOLD=32/255 regardless of whether the INPUT under
+the pixel changed, so faded/moved text left a permanent sub-threshold
+ghost (slide residue 4.4%/max 23, fade 7.1%/max 20 of black-input
+pixels; the current build PASSes the same gate at 0.07%/max 10 and
+0.03%/max 7 - HEAD build kept as negative control and FAILs). The
+release-side pops were the second half: fixed-step refreshes of 4/255
+get amplified x1.69 by compose (gain 1.3 * intensity 1.3) into visible
+6-7/255 output pops on slowly drifting pixels.
+
+Fix progression (all: bufHist grew 3->6->7->10 floats/px; temporal_nr
+residual hold with exact readonly mirror in temporal_stats; host mode 2
+now shader-equivalent to mode 1):
+- v6 input anchor: hold only while input matches the anchor - kills the
+  ghost but binary hold<->candidate flips still pop.
+- v7 residual hold + drift ACCUMULATOR: emit = col01 + held residual
+  (static input re-emits byte-exact, pins the limit cycle; moving input
+  tracks 1:1 so no output ghost survives). _nat_load still-px flicker
+  p90 >4/>8: shipped 17.5%/3.7% (FAIL under the new thresholds) -> v7
+  10.9%/1.3% - the |dF| accumulator integrated 1-2 LSB input noise past
+  D_REF and refreshed forever on grain.
+- v8 drift ANCHOR + bounded budget: distance to a fixed anchor cannot
+  integrate noise; refresh = <=4 frames of fixed 4/255 steps. 8.4%/1.1%.
+- v9 proportional refresh: capc = max(1/255, 0.25*|residual error|) per
+  channel for at most 16 frames (exponential convergence, sub-visible
+  steps on small mismatches, fast on ghost-class). _nat_load 5.0%/0.6%
+  (WARN) - residual flicker concentrated NEAR moving edges (far-from-
+  motion rate 0.54%, near rate 3.7-5%, mostly single-frame events).
+_pan_seq (real GTA IV flythrough replay) v9 PASS: still-px flicker p90
+>4 = 1.3%, invented-oscillation std 0.11 with 0 opposite swings,
+transition flashes gone (the v6/v5 "picture pulses" class).
+fixture:ghost v9 PASS (numbers above).
+
+replay_gate.py grew in this pass: new fixture:ghost test, still-flicker
+>4 thresholds FAIL at p90 >8%, frames with <2% still pixels excluded
+from the still-flicker stats. Required temporal-change gates are now
+fixture:ghost + _pan_seq PASS and a check on _nat_load (machine-local
+capture from at_s52_benchnat via Temp\_nat_extract.py, not committed).
+
+Real GTA IV captures on v9: at_s55_menu_v9 (45 s main-menu idle, 10
+unique frames - the owner's flicker scenario) is clean where it counts:
+static-region-noise std p95 0.00, static-scene-flicker PASS 0 events,
+ghost-double-contour 0/10 unique. The 4 remaining menu flashes are all
+UNMARKED frames = the known external-raw-splice arbitration defect, and
+layer p=raw tags appear only at startup before the engine is ready.
+The v9 benchmark recapture FAILED mechanically - GTA IV presented a
+black client area for the full 60 s on two consecutive runs (window
+parked correctly, layer serving normally, daemon processing ~1500
+frames at ~40 ms); real-bench v9 validation is still OPEN.
+Harness quirks now documented in AGENTS.md: GTA IV launches maximized
+(captures need --park 872,400,816,638) and analyze.py takes the mp4
+explicitly.
+
+Deployed (build == every production copy, md5-verified): m11d.exe
+00f378bcc145b85884d9811ae52a7597, d5c_chain.dll
+ec12528b0f71acd2cb0e0f5d95100a94, temporal_nr.spv
+90a0763c4faf30efbff90864861ed545, temporal_stats.spv
+5311e3e9af68c0ad051d145f41aa6cb6 to all five runtime dirs
+(m11d/layer x86/x64/m12/m8b).
