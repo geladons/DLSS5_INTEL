@@ -109,6 +109,8 @@ from . import overlay_log
 VK_LBUTTON = 0x01
 DEBOUNCE_MS = 250
 STATUS_MS = 500
+SCALE_APPLY_S = 6.5    # consumer-side engine rebuild window after a scale
+                       # push (~4-6 s; mirrors controller._REPROC_LATE_S)
 FIT_MS = 500           # game-rect poll cadence while shown (resize/move)
 CURSOR_KEEP_MS = 32    # jail poll cadence (fullscreen click-escape guard)
 TOPMOST_REASSERT_S = 1.0
@@ -144,6 +146,9 @@ class ControlOverlay:
         self._after_id_blend = None  # debounce timer for the blend knob
         self._after_id_sharpness = None  # debounce timer for sharpness
         self._after_id_scale = None  # debounce timer for the scale preset
+        self._scale_apply_id = None      # apply-window end timer (scale)
+        self._scale_apply_deadline = 0.0  # monotonic rebuild ETA (~6 s)
+        self._scale_queued = False       # a pick landed mid-rebuild
         self._game_hwnd = None       # foreground restore target
         self._focus_mode = False     # we took the foreground this session
         self._jail_cursor = True     # recompute per show(): fullscreen only
@@ -460,11 +465,21 @@ class ControlOverlay:
         burst of clicks used to queue a multi-second engine rebuild PER
         value (daemon log: ~24 re-inits for one choice - the screen kept
         serving the old scale for tens of seconds and read as "preset does
-        not apply"). Debounce: only the settled selection is pushed."""
+        not apply"). Debounce: only the settled selection is pushed, and a
+        pick landing mid-rebuild is QUEUED until the in-flight one lands -
+        one trailing rebuild, never one per click."""
         lbl = self.scale_var.get()
+        if self._scale_applying():
+            if not self._scale_queued:
+                self._scale_queued = True
+                self._log("[overlay] scale pick %s queued - engine "
+                          "rebuild in flight" % lbl)
+            self._scale_state_update()
+            return
         if self._after_id_scale:
             self.win.after_cancel(self._after_id_scale)
         self._after_id_scale = self.win.after(600, self._push_scale)
+        self._scale_state_update()
         self._log("[overlay] scale selected: %s (applying on settle)" % lbl)
 
     def _push_scale(self):
@@ -473,6 +488,57 @@ class ControlOverlay:
         s = preset_label_to_scale(lbl)
         self.ctl.submit(self.ctl.set_scale, s)
         self._log("[overlay] scale set to %.2f (%s)" % (s, lbl))
+        self._scale_apply_start()
+
+    # ---- preset apply window (the ~6 s consumer-side engine rebuild) ----
+    # cfg is already written by ctl.set_scale; the rebuild itself happens
+    # inside the layer/daemon where m13 cannot observe progress. The wall
+    # clock is the only honest "applied" signal, so the window is fixed.
+    def _scale_applying(self):
+        return time.monotonic() < self._scale_apply_deadline
+
+    def _scale_apply_start(self):
+        """Open the rebuild window after a pushed scale value."""
+        self._scale_apply_deadline = time.monotonic() + SCALE_APPLY_S
+        if self._scale_apply_id is not None:
+            try:
+                self.win.after_cancel(self._scale_apply_id)
+            except Exception:
+                pass
+        self._scale_apply_id = self.win.after(
+            int(SCALE_APPLY_S * 1000), self._scale_apply_done)
+        self._scale_state_update()
+
+    def _scale_apply_done(self):
+        self._scale_apply_id = None
+        if self._scale_queued:
+            # Rebuild landed and a newer pick was queued meanwhile: push
+            # ONLY the settled final value (one rebuild, not one/click).
+            self._scale_queued = False
+            self._push_scale()
+            return
+        self._scale_state_update()
+
+    def _scale_state_update(self):
+        """Refresh the line under the preset combo: the APPLIED preset at
+        rest (full name, even if the combobox would clip it), 'applying'
+        while a debounce/rebuild runs, and 'queued' for a deferred pick."""
+        try:
+            pick = self.scale_var.get()
+            applied = scale_to_preset_label(self.ctl.cfg.get("scale"))
+            if self._after_id_scale:
+                txt = tr("ov_scale_applying", pick)
+                self.scale_state.config(text=txt, fg=AMBER)
+            elif self._scale_applying():
+                txt = tr("ov_scale_applying", applied)
+                if self._scale_queued and pick != applied:
+                    txt += "  " + tr("ov_scale_queued", pick)
+                self.scale_state.config(text=txt, fg=AMBER)
+            else:
+                self.scale_state.config(
+                    text=tr("ov_scale_current", applied), fg=MUTED)
+        except tk.TclError:
+            pass
 
     def _save_framegen(self):
         fg = bool(self.fg_var.get())
@@ -498,7 +564,17 @@ class ControlOverlay:
         self._debounced_sharpness(0.8)
 
     def sync_scale(self, s):
+        """Manager-side scale change mirror: seed the combo to the pushed
+        value and open the same apply window - the consumer runs the same
+        ~6 s rebuild no matter which UI pushed the knob."""
+        if self._after_id_scale:
+            try:
+                self.win.after_cancel(self._after_id_scale)
+            except Exception:
+                pass
+            self._after_id_scale = None
         self.scale_var.set(scale_to_preset_label(s))
+        self._scale_apply_start()
 
     def sync_framegen(self, fg):
         self.fg_var.set(bool(fg))
@@ -542,16 +618,29 @@ class ControlOverlay:
         names = {"dx9": tr("ov_game_dx9"), "dx11": tr("ov_game_dx11"),
                  "dx12": tr("ov_game_dx12"), "vulkan": tr("ov_game_vulkan"),
                  "screen": tr("ov_screen")}
-        paused = self.ctl.processing_paused()
-        if paused is True:
-            self.toggle_btn.config(text=tr("ov_resume"), bg=GREEN,
+        # Processing state: file flags (manager toggles + the m12 proxy's
+        # own CTRL+ALT+X flag flips) UNION the consumer's hotkey state the
+        # monitor reads off its log tail (layer CTRL+ALT+X/Q, m12 detach).
+        # The big button shows state+action; the header pill is the
+        # always-on readout - the in-game feedback for CTRL+ALT+X/Q.
+        pstate = self.ctl.processing_state(snap)
+        if pstate == "paused":
+            self.toggle_btn.config(text=tr("ov_proc_paused"), bg=GREEN,
                                    activebackground="#2ea043")
-        elif paused is False:
-            self.toggle_btn.config(text=tr("ov_pause"), bg=ACCENT,
+        elif pstate == "on":
+            self.toggle_btn.config(text=tr("ov_proc_on"), bg=ACCENT,
                                    activebackground="#3a70d6")
-        else:
-            self.toggle_btn.config(text=tr("ov_pause"), bg=PANEL,
+        elif pstate == "off":
+            self.toggle_btn.config(text=tr("ov_proc_off"), bg=PANEL,
                                    activebackground=PANEL2)
+        else:
+            self.toggle_btn.config(text=tr("ov_proc_none"), bg=PANEL,
+                                   activebackground=PANEL2)
+        state_key = "ov_state_" + pstate if pstate else None
+        self.state_lbl.config(
+            text=tr(state_key) if state_key else "--",
+            fg={"on": GREEN, "paused": AMBER, "off": RED}.get(
+                pstate, MUTED))
         self.mode_lbl.config(text=tr("ov_target", names.get(
             mode, tr("ov_target_none"))))
         active_game = snap.get("active_game")
@@ -871,6 +960,10 @@ class ControlOverlay:
                                       # game's confinement below
 
         self.scale_var.set(scale_to_preset_label(self.ctl.cfg.get("scale")))
+        # the combo re-seed above drops any mid-rebuild queued pick; the
+        # apply WINDOW itself survives (a rebuild does not stop at hide)
+        self._scale_queued = False
+        self._scale_state_update()
         self.fg_var.set(bool(self.ctl.cfg.get("frame_gen")))
         sh = float(self.ctl.cfg.get("sharpness") or 0.8)
         self.sharpness_var.set(sh)
@@ -1082,6 +1175,8 @@ class ControlOverlay:
         # windowed mode keeps the pointer free (and skips the warp).
         self._jail_cursor = self._game_covers_screen()
         self.scale_var.set(scale_to_preset_label(self.ctl.cfg.get("scale")))
+        self._scale_queued = False     # combo re-seeded to applied value
+        self._scale_state_update()
         self.fg_var.set(bool(self.ctl.cfg.get("frame_gen")))
         sh = float(self.ctl.cfg.get("sharpness") or 0.8)
         self.sharpness_var.set(sh)

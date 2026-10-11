@@ -501,3 +501,62 @@ def mode_resume(mode):
         return dx12_resume()
     ok, _ = dx9_resume()
     return ok, "%s resumed (processing on)" % mode.upper()
+
+
+# ------------------------------------------------- in-process hotkey state --
+# The consumers' OWN CTRL+ALT+X / CTRL+ALT+Q hotkeys bypass every m13
+# channel: the m11 layer keeps g_paused/g_off as process-internals
+# (nr_layer_win.c), the m12 proxy toggles the shared m12_pause.flag for X
+# but its CTRL+ALT+Q DETACHES the proxy outright. The only outward signal
+# for either is the component log - the overlay header reads these tail
+# markers to display a truthful ON/PAUSED/OFF state.
+LAYER_LOG = os.path.join(os.environ.get("TEMP", "."), "nr_layer_win.log")
+M12_LOG = os.path.join(os.environ.get("TEMP", "."), "m12_dxgi.log")
+_HOTKEY_TAIL = 256 * 1024
+
+
+def _tail_last_marker(path, markers, tail=_HOTKEY_TAIL):
+    """Byte-position of the LAST marker occurrence in the file tail wins
+    -> its payload. markers: ((bytes needle, payload), ...). None when
+    the file is missing or no marker survives in the tail."""
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            f.seek(max(0, size - tail))
+            data = f.read()
+    except OSError:
+        return None
+    best_at, best_val = -1, None
+    for needle, val in markers:
+        at = data.rfind(needle)
+        if at > best_at:
+            best_at, best_val = at, val
+    return best_val
+
+
+def hotkey_state(mode):
+    """'paused' | 'off' | None for the active mode's in-process consumer.
+
+    A fresh attach marker maps to None deliberately: each new game
+    process re-logs it BEFORE any hotkey can fire, so a stale marker
+    from a dead session can never masquerade as live state.
+      dx12  - 'dllmain process attach' resets; 'processing PAUSED' /
+              'processing RESUMED' track the shared flag; 'detach
+              requested' (CTRL+ALT+Q) is off.
+      layer - 'hotkeys armed' resets; 'paused/resumed by hotkey' track
+              g_paused; 'layer off by hotkey' (CTRL+ALT+Q) is off."""
+    if mode == "dx12":
+        return _tail_last_marker(M12_LOG, (
+            (b"dllmain process attach", None),
+            (b"processing RESUMED", None),
+            (b"processing PAUSED", "paused"),
+            (b"detach requested", "off"),
+        ))
+    if mode in ("dx9", "dx11", "vulkan"):
+        return _tail_last_marker(LAYER_LOG, (
+            (b"hotkeys armed", None),
+            (b"resumed by hotkey", None),
+            (b"paused by hotkey", "paused"),
+            (b"layer off by hotkey", "off"),
+        ))
+    return None

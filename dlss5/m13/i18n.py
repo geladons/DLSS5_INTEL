@@ -253,6 +253,38 @@ _S = {
     "ov_status_daemon_down_x86": {"en": "Daemon Offline (x86 required)",
                                   "ru": "Демон отключен (нужен для x86)"},
     "ov_hide_hint": {"en": "%s - hide the panel", "ru": "%s - скрыть панель"},
+    # processing state (header pill + toggle button + settings readout)
+    "ov_state_on": {"en": "ON", "ru": "ВКЛ"},
+    "ov_state_paused": {"en": "PAUSED", "ru": "ПАУЗА"},
+    "ov_state_off": {"en": "OFF", "ru": "ВЫКЛ"},
+    "ov_proc_on": {"en": "PROCESSING: ON - pause",
+                   "ru": "ОБРАБОТКА: ВКЛ - пауза"},
+    "ov_proc_paused": {"en": "PROCESSING: PAUSED - resume",
+                       "ru": "ОБРАБОТКА: ПАУЗА - вкл"},
+    "ov_proc_none": {"en": "PROCESSING: -", "ru": "ОБРАБОТКА: -"},
+    "ov_proc_off": {"en": "PROCESSING: OFF (CTRL+ALT+Q)",
+                    "ru": "ОБРАБОТКА: ВЫКЛ (CTRL+ALT+Q)"},
+    "proc_state": {"en": "processing: %s", "ru": "обработка: %s"},
+    # scale preset apply feedback: the consumer rebuilds its engine on a
+    # scale change (~6 s), so the control shows applied/applying/queued
+    # instead of looking dead
+    "ov_scale_current": {"en": "applied preset: %s",
+                         "ru": "применён пресет: %s"},
+    "ov_scale_applying": {"en": "applying: %s (~6 s rebuild)",
+                          "ru": "применяю: %s (~6 с пересборка)"},
+    "ov_scale_queued": {"en": "queued: %s", "ru": "в очереди: %s"},
+    "ov_strip_hint": {"en": "%s panel | CTRL+ALT+X pause | "
+                          "CTRL+ALT+Q off",
+                      "ru": "%s панель | CTRL+ALT+X пауза | "
+                            "CTRL+ALT+Q выкл"},
+    # ---- settings tab -----------------------------------------------------
+    "engine_box": {"en": "In-game engine controls",
+                   "ru": "Управление движком в игре"},
+    "hotkeys_hint": {
+        "en": "in game: %s opens the panel, CTRL+ALT+X pauses/resumes, "
+              "CTRL+ALT+Q disables the layer",
+        "ru": "в игре: %s открывает панель, CTRL+ALT+X пауза/продолжить, "
+              "CTRL+ALT+Q отключить слой"},
     # ---- phase30 vendor panel ---------------------------------------------
     "p30_title": {"en": "NVIDIA Phase30 Vendor Tuning",
                   "ru": "Панель тюнинга NVIDIA Phase30"},

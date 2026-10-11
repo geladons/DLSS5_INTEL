@@ -3801,3 +3801,196 @@ b6fa969bf66398bd5f7ed779df7991af, temporal_stats.spv
 8aca92c1618a097a995e9d60f23be1ef, motion_est.spv
 35a7e410d65080545a66127e72fc797f to all five runtime dirs
 (m11d/layer x86/x64/m12/m8b).
+
+## Stage 58 - overlay UX: preset apply window + processing state (2026-10-10)
+
+UI-only polish pass on the owner complaint "I cannot change the preset in
+the overlay". No engine/shader/C-layer changes; all runtime channels
+(%TEMP%\m13_phase30_knobs.json, m13_dx9_trigger.flag, m13_freeze.flag,
+m13_reproc.flag) untouched.
+
+Preset control fix (overlay.py): the in-layer preset combo cycles a value
+per click, so a click burst used to queue one ~6 s consumer engine
+rebuild PER value while the picture kept showing the old scale - reads
+as "preset does not apply". _scale_selected is now a coalescing
+state machine: settled pick (600 ms debounce) -> ONE push via
+ctl.set_scale -> fixed SCALE_APPLY_S=6.5 apply window; a pick landing
+inside the window is queued and pushed once at window end (never one
+rebuild per click). New label under the combo (overlay_widgets.py)
+shows the APPLIED preset full name at rest, "applying: X (~6 s rebuild)"
+in amber while settling/rebuilding, and "+ queued: Y" for a deferred
+pick. sync_scale (manager-side pushes) opens the same window.
+
+Processing state surfacing: CTRL+ALT+X (pause) and CTRL+ALT+Q (off) are
+owned by the consumer (m11-layer g_paused/g_off, m12 detach) - invisible
+to m13 flag files. gamelaunch.hotkey_state(mode) reads the last marker
+in the component log tails (nr_layer_win.log / m12 log; a fresh attach
+marker resets state so a dead session cannot masquerade as live).
+controller.snapshot() now carries snap["hotkey_state"] and
+ctl.processing_state(snap) unions it with the flag files -> 'on' /
+'paused' / 'off' / None. The overlay header gained a state pill
+(ON green / PAUSED amber / OFF red / -- muted), the toggle button
+relabels to pause/resume/off/disabled per state, and the bottom strip
+now prints all three hotkeys. The manager settings tab shows a live
+"processing: X" label refreshed from _render.
+
+Settings layout (ui.py): the scrollable settings tab now leads with an
+"In-game engine controls" box - preset combo + scale-state label,
+pause/resume button + live state label, freeze-mode checkbox, frame
+generation, autopause, and the hotkey-hint line - ahead of the
+lower-churn rows (weights/layers/clean/lang/bench/phase30). All
+callbacks unchanged.
+
+i18n.py: new keys in en+ru (ov_state_on/paused/off, ov_proc_*,
+ov_scale_current/applying/queued, ov_strip_hint, engine_box,
+hotkeys_hint, proc_state). Russian labels verified via isolated tr()
+lookups.
+
+Verified without live capture/daemon: py_compile all six files;
+stub-controller overlay harness (real Tk) - apply window queues a
+mid-rebuild pick, pushes it once at expiry, applied label settles;
+settings tab builds with engine box first; tr() en+ru resolution.
+
+Deployed (md5-verified) to C:\Users\<owner>\Desktop\production\m13:
+i18n.py b010a51931087bbfc4f228b8bf278ad9,
+gamelaunch.py d84cd9fa1a89fc95299e15ce1aa97415,
+controller.py 80c4406d786d7c99530da8984078c30b,
+overlay.py 41330f5e8bee59ca4c9664c7bd9de335,
+overlay_widgets.py 45fb1f3df17363526fc4f4bcfc3783d2,
+ui.py 12ccedbda764b445a4afaf3f67ae65b5.
+
+Owner checks: CTRL+ALT+G -> preset name visible under the combo; one
+pick -> "applying" for ~6 s then the new preset; clicks during the
+window -> "+ queued", one trailing rebuild only; CTRL+ALT+X flips the
+pill to PAUSED (and back); CTRL+ALT+Q shows OFF; ru locale labels if
+language=ru.
+
+## Stage 59 - extent-jitter rebuild hysteresis + bounded miss-hold (2026-10-10)
+
+Root cause of the loading-screen raw splices (1,110 p=raw in one load
+session, 383 in a benchmark run): GTA IV windowed mode jitters its
+client rect by a few px on desktop events (observed swapchain extents
+800x597, 800x599, 800x600, 800x606). DXVK recreates the swapchain per
+change; the layer reports the exact extent (nr_CreateSwapchainKHR stores
+info->imageExtent verbatim - not a DDA crop, not a layer computation),
+and m11d rebuilt the whole engine on EVERY flip (~5-6 s each). During a
+build every frame was refused and spliced raw.
+
+Daemon fix (m11d/daemon_core.cpp/.h): extent-slop serve. A request
+within +-8 px per axis (kExtentSlop) of the LIVE canvas is processed by
+the resident engine instead of scheduling a rebuild: repackClamp()
+edge-clamps the input to canvas size and the reply is cropped/edge-
+extended back to the request extent (protocol stays request-sized;
+anchor extent prevW/prevH now tracks the CANVAS so the jitter cannot
+invalidate the FG prev pair or temporal stream). A real mode change
+outside the window still rebuilds. Frame log marks compat serves with
+~WxH of the canvas.
+
+Layer fix (m11-layer/nr_layer_win.c): bounded miss-hold. New
+serve_held_miss() serves the last processed result on failure paths
+when its extent/handle no longer matches exactly - strided top-left
+crop into mapped, uncovered tail keeps the just-captured raw. Budget:
+NR_LAYER_HOLD_MISS_CAP consecutive misses (default 30 ~= 0.5 s at 60
+fps), reset wherever a fresh processed result lands. Wired into the
+probe-paced path (xheld), the process-failure splice guard, the FG
+mode-1 daemon-failure path, the FG mode-2 mid present and the
+cadence-skip branch. ensure_resources() growth now PRESERVES the old
+result buffer contents (was: freed and invalidated) and the TCP success
+path guards result_size >= needed before storing.
+
+Regression fixed on the same pass: the sheld splice guard memcpy'd the
+held frame into mapped but the write-back is gated on prc==0 - since
+the prc==2 compose commit the held copy never reached the swapchain
+image (guard silently dead). Guard-served frames now set prc=0
+("mapped holds the frame to blit" contract) so the transfer runs.
+
+Preserved semantics: raw at cold start (no result exists), raw while
+processing is off/paused, raw once the 30-frame budget is spent, and
+prc==-2 async-policy raw is never overridden by the miss-hold.
+
+Built: m11d.exe (VS2019 Release, daemon_core.cpp + main.cpp clean),
+nr_layer_win.dll x64 (cmake), nr_layer_win32.dll x86 (vcvars32 cl/link;
+benign SDK C5105 + LNK4070 warnings only).
+
+Deployed (md5-verified):
+  runtime\layer\x64\nr_layer_win.dll   4d7acfb5874949e36abe665f67c2a8eb
+  runtime\layer\x86\nr_layer_win32.dll c44ceb1274b97c6b3683c287ddb7b918
+  runtime\m11d\m11d.exe                322200f0594104cea25e45a7e97d1766
+(predeploy copies kept as *.prev / m11d_prev.exe; the live daemon keeps
+the old image until its next restart - m13 respawns it per x86 session).
+
+Live-test notes for the lead: watch for `[m11d] extent slop:` once +
+`~800x600` frame tags (compat serves), `p=xheld` in nr_layer_win.log
+during rebuild windows instead of p=raw, and confirm no edge-stretch
+artifact reads as corruption on a permanent >1 px settle (the canvas
+only migrates on a real out-of-slop change). d5c_chain.dll untouched
+(no chain source change). No live capture run on this pass.
+
+## Stage 60 - slow-zoom judder: sub-pixel mv evidence gate (2026-10-10)
+
+Owner report: the GTA IV loading portrait "slowly ZOOMS IN" and visibly
+shakes/judders; toggling processing off/on clears it (temporal-history
+effect). Reproduced synthetically: Temp/_zoom_gen.py bilinear-zooms a
+real `_pan_seq` frame 1.003x/frame around centre, crops 800x600, writes
+D:\dlss5_cap\_zoom_load.raw (135 f), _zoom_pan.raw (pan frame),
+_zoom_load10.raw (1.010x). HYPOTHESIS CONFIRMED: on z1 the 1.003x zoom
+FAILS the flow-flicker gate (med 13.1% p90 13.8%) while only 5.8-7.9%
+of blocks report nonzero mv - the integer search + zero-bias pins
+almost every 8x8 block at exact (0,0), so a true sub-pixel drift leaves
+the residual state screen-anchored (v9 byte-exact hold) until a block
+flips into the moving path. The discrete pinned/moving flip IS the
+judder: removing the zero-bias entirely (ZBIAS=0,ZABS=0) drops flow to
+5.4% but fails static flicker (2.11%) - the bias earns its keep on
+flat content, it was just too binary.
+
+Fix (v13): (1) the parabolic sub-pixel refine now runs for EVERY
+interior integer pick including (0,0) - a bias-pinned drift still shows
+a SAD slope, so the refined fraction moves the residual state with the
+content. (2) New evidence gate D5C_MV_IMPT (pc.d[1], default 0.06 SAD
+units): for a (0,0) pick the refined fraction is kept only when the
+predicted SAD improvement imp = sum_axes(den*delta^2/2) beats the
+threshold. imp ~ local gradient x drift evidence, so detailed content
+with real drift passes while SAD-flat blocks (flat sky, codec grain -
+where the parabola fit returns a meaningless +-0.5 rail vector) collapse
+to exact (0,0) and keep the v9 byte-exact path. Pinning flat content is
+visually free - there is no detail to mis-track - and it is exactly
+what the static-flicker gate measures. (3) The moving refresh in
+temporal_nr/stats is scaled by min(|mv|,1) so the sub-pixel range gets
+proportional refresh instead of full BETA steps - the static->moving
+boundary is now continuous in mv space rather than a path flip.
+(4) D5C_MV_SUBT=0.10 snaps the final sub-1 vector below the noise floor
+to exact 0. (5) Optional D5C_MV_EMA (pc.c[0], weight of new sample;
+default 1.0 = RAW = off): a per-block temporal filter with a >=1px
+instant snap and a direction-reversal restart, kept as an opt-in knob -
+measured WORSE at 0.5 (_pan_seq static 2.65% FAIL via alternation at
+the snap boundary + stale persistence; _pan_man 3.14% FAIL as it
+sustained noise vectors). Raw mv + IMPT is the shipped config.
+
+Final numbers (defaults BETA .15 INTERP 1 ZBIAS .15 ZABS 2.0 SUBT .10
+EMA 1.0 IMPT .060; z1 = Stage-57 build):
+  fixture:ghost  PASS (all flicker/osci/residue 0)         [z1 PASS]
+  _pan_seq       PASS static p90 0.18%, flow 0.0/5.5       [z1 0.19%]
+  _nat_load      WARN static 0.94%, flow 5.9/12.7          [z1 6.4/13.0]
+  _pan_man       WARN static 1.29%, flow 0.9/3.4           [z1 1.49/1.1-7.4]
+  _zoom_load     PASS static 0.57%, flow 3.0/3.3           [z1 FAIL 13.1]
+  _zoom_pan      PASS static 0.31%, flow 2.6/3.0           [z1 WARN ~10/13.7]
+  _zoom_load10   WARN static 1.50%, flow 4.6/6.0           [z1 1.70/7.1-8.4]
+Every gate passes or strictly improves on z1; _nat_load keeps its WARN
+(flow med -0.5pt, p90 -0.3pt), _pan_man keeps its WARN (static -0.20pt).
+frozen-stale p95 0.000 and invented-osci <=0.12 everywhere.
+
+Files: motion_est.comp (refine-at-0, imp gate, EMA/SUBT snap, conf),
+temporal_nr.comp + temporal_stats.comp (min(|mv|,1) refresh scale -
+mirrored), engine.h/.cpp (D5C_MV_SUBT/EMA/IMPT envs + log line),
+engine_temporal.cpp (mp.c[0]=EMA, mp.d[1]=IMPT pushes). mv buffer
+element is vec4(mvx,mvy,conf,ema-state-unused); EMA=1 collapses the
+filter to raw so the prev-read is inert at the default.
+
+Deployed (build == every production copy, md5-verified): m11d.exe
+35c17545288252767e0107c948858a9d, d5c_chain.dll
+5ab2b2a35416b2f8f1fa5bba58b2cc98, motion_est.spv
+d67f8f264c859994b7c9b19687d5903f, temporal_nr.spv
+5e0b15f1a1a1bc544fe6d6bb359e9083, temporal_stats.spv
+2e81e4006a60aa258d68b879796357a7 to all five runtime dirs
+(m11d/layer x86/x64/m12/m8b). Production daemon restarted on port 48990
+with its original args (PID 20820).

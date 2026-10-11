@@ -461,6 +461,67 @@ class ManagerUI:
         canvas.bind("<Configure>", lambda e: canvas.itemconfigure(
             inner, width=e.width))
         self.register_wheel_region(outer, canvas)
+
+        # ---- most-used runtime controls FIRST (owner: preset/pause/freeze
+        # must be findable without scrolling past the setup plumbing) ----
+        eng = ttk.LabelFrame(t, text=tr("engine_box"), padding=8)
+        eng.pack(fill="x", pady=6)
+        eng_row = ttk.Frame(eng)
+        eng_row.pack(fill="x")
+        ttk.Label(eng_row, text=tr("scale")).pack(side="left", padx=(0, 6))
+        self.scale_cb = ttk.Combobox(
+            eng_row, textvariable=self.scale_var, width=24, state="readonly",
+            values=scale_preset_labels())
+        self.scale_cb.pack(side="left", padx=(0, 14))
+        self.scale_cb.bind("<<ComboboxSelected>>", self._scale_selected)
+        self.framegen_chk = ttk.Checkbutton(
+            eng_row, text=tr("framegen"), variable=self.framegen_var,
+            command=self._framegen_toggled)
+        self.framegen_chk.pack(side="left")
+        # the explanation is a paragraph - it gets its own wrapped line;
+        # packed bare side="right" it forced the whole tab ~800 px wider
+        self.fg_hint = ttk.Label(eng, text=tr("framegen_hint"),
+                                 style="Muted.TLabel", wraplength=WRAP_PX,
+                                 justify="left")
+        self.fg_hint.pack(anchor="w", pady=(4, 0))
+        eng_row2 = ttk.Frame(eng)
+        eng_row2.pack(fill="x", pady=(6, 0))
+        ttk.Button(eng_row2, text=tr("pause_resume"),
+                   command=lambda: self.ctl.submit(
+                       self.ctl.processing_toggle)).pack(side="left")
+        # live processing state (same union the overlay header shows)
+        self.proc_state_lbl = ttk.Label(eng_row2, text="",
+                                        style="Muted.TLabel")
+        self.proc_state_lbl.pack(side="left", padx=10)
+        ttk.Label(eng, text=tr("hotkeys_hint", hotkey_label(
+            self.ctl.cfg.get("overlay_hotkey"))), style="Muted.TLabel",
+            wraplength=WRAP_PX, justify="left").pack(anchor="w", pady=(2, 0))
+
+        opts = ttk.Frame(t)
+        opts.pack(anchor="w", pady=6)
+        self.freeze_var = tk.BooleanVar(
+            value=bool(self.ctl.cfg.get("overlay_freeze")))
+        ttk.Checkbutton(opts, text=tr("opt_freeze"),
+                        variable=self.freeze_var,
+                        command=lambda: self.ctl.cfg.set(
+                            "overlay_freeze", bool(self.freeze_var.get()))
+                        ).pack(anchor="w")
+        self.ap_var = tk.BooleanVar(
+            value=bool(self.ctl.cfg.get("overlay_autopause")))
+        ttk.Checkbutton(opts, text=tr("opt_autopause"),
+                        variable=self.ap_var,
+                        command=lambda: self.ctl.cfg.set(
+                            "overlay_autopause", bool(self.ap_var.get()))
+                        ).pack(anchor="w")
+        self.focus_var = tk.BooleanVar(
+            value=bool(self.ctl.cfg.get("overlay_focus")))
+        ttk.Checkbutton(opts, text=tr("opt_focus"),
+                        variable=self.focus_var,
+                        command=lambda: self.ctl.cfg.set(
+                            "overlay_focus", bool(self.focus_var.get()))
+                        ).pack(anchor="w")
+
+        # ---- one-time setup / admin rows below the daily controls ----
         row = ttk.Frame(t)
         row.pack(anchor="w", pady=4, fill="x")
         ttk.Label(row, text=tr("weights_label")).pack(side="left")
@@ -519,51 +580,6 @@ class ManagerUI:
         lang_box.bind("<<ComboboxSelected>>", lang_changed)
         ttk.Label(lang, text=tr("language_note"),
                   style="Muted.TLabel").pack(side="left")
-
-        eng = ttk.LabelFrame(t, text=tr("scale"), padding=8)
-        eng.pack(fill="x", pady=6)
-        eng_row = ttk.Frame(eng)
-        eng_row.pack(fill="x")
-        ttk.Label(eng_row, text=tr("scale")).pack(side="left", padx=(0, 6))
-        self.scale_cb = ttk.Combobox(
-            eng_row, textvariable=self.scale_var, width=24, state="readonly",
-            values=scale_preset_labels())
-        self.scale_cb.pack(side="left", padx=(0, 14))
-        self.scale_cb.bind("<<ComboboxSelected>>", self._scale_selected)
-        self.framegen_chk = ttk.Checkbutton(
-            eng_row, text=tr("framegen"), variable=self.framegen_var,
-            command=self._framegen_toggled)
-        self.framegen_chk.pack(side="left")
-        # the explanation is a paragraph - it gets its own wrapped line;
-        # packed bare side="right" it forced the whole tab ~800 px wider
-        self.fg_hint = ttk.Label(eng, text=tr("framegen_hint"),
-                                 style="Muted.TLabel", wraplength=WRAP_PX,
-                                 justify="left")
-        self.fg_hint.pack(anchor="w", pady=(4, 0))
-
-        opts = ttk.Frame(t)
-        opts.pack(anchor="w", pady=6)
-        self.freeze_var = tk.BooleanVar(
-            value=bool(self.ctl.cfg.get("overlay_freeze")))
-        ttk.Checkbutton(opts, text=tr("opt_freeze"),
-                        variable=self.freeze_var,
-                        command=lambda: self.ctl.cfg.set(
-                            "overlay_freeze", bool(self.freeze_var.get()))
-                        ).pack(anchor="w")
-        self.ap_var = tk.BooleanVar(
-            value=bool(self.ctl.cfg.get("overlay_autopause")))
-        ttk.Checkbutton(opts, text=tr("opt_autopause"),
-                        variable=self.ap_var,
-                        command=lambda: self.ctl.cfg.set(
-                            "overlay_autopause", bool(self.ap_var.get()))
-                        ).pack(anchor="w")
-        self.focus_var = tk.BooleanVar(
-            value=bool(self.ctl.cfg.get("overlay_focus")))
-        ttk.Checkbutton(opts, text=tr("opt_focus"),
-                        variable=self.focus_var,
-                        command=lambda: self.ctl.cfg.set(
-                            "overlay_focus", bool(self.focus_var.get()))
-                        ).pack(anchor="w")
 
         bp = ttk.LabelFrame(t, text=tr("bench_panel"), padding=8)
         bp.pack(fill="x", pady=6)
@@ -727,6 +743,13 @@ class ManagerUI:
         self.games_tab.render(snap)
         if hasattr(self, "p30_panel") and self.p30_panel and snap.get("phase30"):
             self.p30_panel.set_values(snap.get("phase30"))
+        if hasattr(self, "proc_state_lbl"):
+            pstate = self.ctl.processing_state(snap)
+            self.proc_state_lbl.config(
+                text=tr("proc_state",
+                        tr("ov_state_" + pstate) if pstate else "--"),
+                foreground={"on": GREEN, "paused": AMBER,
+                            "off": RED}.get(pstate, MUTED))
         self._render_checklist(snap)
 
     def _render_checklist(self, snap):

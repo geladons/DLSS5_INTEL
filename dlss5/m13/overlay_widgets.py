@@ -59,7 +59,7 @@ def build_panel(ov):
     ov.status = tk.Label(ov.strip, text="", bg=PANEL, fg=MUTED,
                          font=("Consolas", 8), justify="left", anchor="w")
     ov.status.pack(side="left", padx=4, fill="x", expand=True)
-    tk.Label(ov.strip, text=tr("ov_hide_hint", hotkey_label(
+    tk.Label(ov.strip, text=tr("ov_strip_hint", hotkey_label(
         ov.ctl.cfg.get("overlay_hotkey"))), bg=PANEL, fg="#565b66",
         font=("Segoe UI", 8)).pack(side="right", padx=(4, 8))
 
@@ -79,6 +79,11 @@ def build_panel(ov):
     close = tk.Label(title_strip, text="✕", bg=PANEL, fg=MUTED,
                      font=("Segoe UI", 10, "bold"), padx=10, cursor="hand2")
     close.pack(side="right")
+    # Processing-state pill (ON/PAUSED/OFF): also the in-game feedback
+    # for the consumer's own CTRL+ALT+X/Q hotkeys - refreshed in _refresh.
+    ov.state_lbl = tk.Label(title_strip, text="", bg=PANEL, fg=MUTED,
+                            font=("Segoe UI", 8, "bold"))
+    ov.state_lbl.pack(side="right", padx=(0, 2))
     close.bind("<Button-1>", lambda _e: ov.hide())
     close.bind("<Enter>", lambda _e: close.config(fg=RED))
     close.bind("<Leave>", lambda _e: close.config(fg=MUTED))
@@ -120,9 +125,11 @@ def build_panel(ov):
              font=("Segoe UI", 8, "bold")).pack(side="left")
     ov.scale_var = tk.StringVar(
         value=scale_to_preset_label(ov.ctl.cfg.get("scale")))
+    # width 18 so the FULL preset name stays readable (a scale change
+    # rebuilds the engine ~6 s - the user must see what is applied)
     ov.scale_cb = ttk.Combobox(
         top_row, textvariable=ov.scale_var, state="readonly",
-        values=scale_preset_labels(), width=10)
+        values=scale_preset_labels(), width=18)
     ov.scale_cb.pack(side="left", padx=(6, 0))
     ov.scale_cb.bind("<<ComboboxSelected>>", ov._scale_selected)
     # The combobox popdown is a fresh Tk toplevel that does NOT
@@ -130,6 +137,16 @@ def build_panel(ov):
     # activation vector against exclusive-fullscreen games.
     ov.scale_cb.bind("<Button-1>", fix_popdown(ov.scale_cb),
                      add="+")
+
+    # Preset feedback line: "applied preset: X" at rest; "applying: X
+    # (~6 s rebuild)" while the consumer-side engine re-init runs, plus
+    # "queued: Y" when a mid-rebuild click is deferred (see overlay.py
+    # _scale_apply_start). Always shows the full name even when the
+    # combobox itself would clip it.
+    ov.scale_state = tk.Label(body, text="", bg=BG, fg=MUTED,
+                              font=("Segoe UI", 7), anchor="w",
+                              justify="left")
+    ov.scale_state.pack(fill="x", pady=(0, 4))
 
     ov.fg_var = tk.BooleanVar(value=bool(ov.ctl.cfg.get("frame_gen")))
     ov.fg_chk = tk.Checkbutton(

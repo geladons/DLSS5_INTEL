@@ -148,6 +148,10 @@ class StateMonitor(threading.Thread):
         active_game = self._active_game(snap)
         snap["active_game"] = active_game
         snap["active_mode"] = self._active_mode(snap)
+        # The consumer's OWN CTRL+ALT+X/Q state (layer g_paused/g_off,
+        # m12 detach) is invisible to the flag files - read it off the
+        # component log tail so the UI can show a truthful state.
+        snap["hotkey_state"] = gamelaunch.hotkey_state(snap["active_mode"])
         p30 = ctl.cfg.get_phase30(active_game)
         snap["phase30"] = p30
         snap["intensity"] = p30["intensity"]
@@ -898,6 +902,24 @@ class M13Controller:
         if mode in ("dx9", "dx11", "dx12", "vulkan"):
             return gamelaunch.mode_paused(mode)
         return None      # screen/none: not file-controllable
+
+    def processing_state(self, snap=None):
+        """Effective processing state for UI display: 'on' | 'paused' |
+        'off' | None (no live target). Unions the m13 flag files (the
+        manager's own toggles AND the m12 proxy's CTRL+ALT+X, which flips
+        the same flag) with the consumer-side hotkey state the monitor
+        reads off the component logs (m11-layer g_paused/g_off, m12
+        detach) - a state the flag files alone cannot see."""
+        snap = snap or self.snapshot()
+        mode = snap.get("active_mode")
+        if mode not in ("dx9", "dx11", "dx12", "vulkan"):
+            return None
+        hk = snap.get("hotkey_state")
+        if hk == "off":
+            return "off"
+        if hk == "paused" or gamelaunch.mode_paused(mode):
+            return "paused"
+        return "on"
 
     def active_game_pid(self):
         """Pid of the currently running managed game (for freeze/resume)."""
