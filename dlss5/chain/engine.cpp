@@ -120,10 +120,18 @@ bool ChainEngine::init(const EngineConfig& cfg) {
         mvZabs_ = (float)std::atof(d);
     if (const char* d = std::getenv("D5C_MV_PIXSTATIC"))
         mvPixStatic_ = (float)std::atof(d);
+    if (const char* d = std::getenv("D5C_MV_SUBT"))
+        mvSubt_ = (float)std::atof(d);
+    if (const char* d = std::getenv("D5C_MV_EMA"))
+        mvEma_ = (float)std::atof(d);
+    if (const char* d = std::getenv("D5C_MV_IMPT"))
+        mvImpt_ = (float)std::atof(d);
     std::fprintf(stderr, "[chain] D5C_MV_BETA=%.2f D5C_MV_INTERP=%.0f "
-                         "D5C_MV_ZBIAS=%.2f D5C_MV_ZABS=%.2f D5C_MV_PIXSTATIC=%.2f\n",
+                         "D5C_MV_ZBIAS=%.2f D5C_MV_ZABS=%.2f D5C_MV_PIXSTATIC=%.2f "
+                         "D5C_MV_SUBT=%.2f D5C_MV_EMA=%.2f D5C_MV_IMPT=%.3f\n",
                  (double)mvBeta_, (double)mvInterp_, (double)mvZbias_,
-                 (double)mvZabs_, (double)mvPixStatic_);
+                 (double)mvZabs_, (double)mvPixStatic_, (double)mvSubt_,
+                 (double)mvEma_, (double)mvImpt_);
     histSuppressed_ = false;
     driftValid_ = false;
     driftCalm_ = driftSettle_ = 0;

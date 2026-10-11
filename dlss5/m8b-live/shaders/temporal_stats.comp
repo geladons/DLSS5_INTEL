@@ -235,8 +235,10 @@ void main() {
             // Same moving/anchor/budget decision as temporal_nr (Rn is
             // only bookkeeping there; what matters here is whether the
             // refresh step applies): warped pixels refresh every frame
-            // at pc.c[1] with no budget, still pixels keep the v9 path.
-            const bool moving = (abs(mv.x) + abs(mv.y) > 0.01);
+            // at pc.c[1] * min(|mv|, 1) with no budget, still pixels
+            // keep the v9 path.
+            const float mvl = length(mv);
+            const bool moving = (mvl > 0.01);
             float Rn = Rw;
             bool refresh = moving;
             if (!moving) {
@@ -252,8 +254,10 @@ void main() {
             }
             for (uint c = 0u; c < 3u; ++c) {
                 float e = rc[c] - rh[c];
-                float capc = refresh ? max(R_STEP_MIN,
-                                           (moving ? pc.c[1] : R_FRAC) * abs(e)) : 0.0;
+                float capc = refresh ? (moving ? min(mvl, 1.0) * max(R_STEP_MIN,
+                                                                    pc.c[1] * abs(e))
+                                               : max(R_STEP_MIN, R_FRAC * abs(e)))
+                                     : 0.0;
                 emitT[c] = col01[c] + rh[c] + clamp(e, -capc, capc);
             }
         }

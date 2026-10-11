@@ -254,9 +254,30 @@ private:
     // D5C_MV_PIXSTATIC: per-pixel static override in LSB; a pixel whose
     // unwarped input delta <= PIXSTATIC/255 forces mv=(0,0) (exact v9
     // path). 0 = off. Pushed to temporal_nr/stats as pc.c[3].
+    // D5C_MV_SUBT: sub-pixel threshold in net pixels; the motion_est
+    // parabolic refine runs on every interior pick (including (0,0), so
+    // bias-pinned blocks still report their sub-pixel drift), and a
+    // final vector shorter than SUBT collapses back to exact (0,0) -
+    // refined 1-2 LSB noise lands under ~0.15 px while real drift sits
+    // higher. Pushed to motion_est as pc.c[3].
+    // D5C_MV_EMA: per-block temporal EMA on the reported vector
+    // (pc.c[0] of motion_est, weight of the new sample; 1.0 = raw).
+    // Vectors >= 1 px bypass the EMA (the +-0.5-clamped sub-pixel refine
+    // cannot reach 1 px, so real integer motion never lags). Default is
+    // RAW: smoothing <1 regressed the _pan_seq static gate (alternation
+    // at the 1px snap boundary + stale persistence after motion stops);
+    // the IMPT evidence gate already rejects flat-region noise.
+    // Kept as an opt-in knob.
+    // D5C_MV_IMPT: confidence gate on the (0,0)-pick sub-pixel refine -
+    // the predicted SAD improvement den*delta^2/2 summed over axes must
+    // beat this (SAD units, luma in 0..1). Detailed content with real
+    // drift passes; SAD-flat blocks stay (0,0). Pushed as pc.d[1].
     float mvZbias_ = 0.15f;
     float mvZabs_ = 2.0f;
     float mvPixStatic_ = 0.0f;
+    float mvSubt_ = 0.10f;
+    float mvEma_ = 1.0f;
+    float mvImpt_ = 0.06f;
     double lastFrameGenGpuMs_ = 0.0;
     bool havePrevProcessed_ = false;   // set after a successful processFrame
     int fgMode_ = 1;                   // 1 = transfer (+0), 2 = anchor interp (+1)

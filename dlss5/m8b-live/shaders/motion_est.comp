@@ -23,20 +23,40 @@
 // the block). Without it, 1-2 LSB input noise picks a random +-1 vector
 // on static regions and the warp would drag state sideways every frame.
 // Sub-pixel parabolic refine in x and y on the +-1 SAD neighbours
-// (interior, nonzero picks only). conf = 1 - SADmin/SAD(0,0) is
-// informational.
+// applies to EVERY interior pick - including (0,0): the bias only
+// settles the INTEGER competition, but a real sub-pixel displacement
+// still tilts the SAD landscape (S at the shift-side neighbour drops
+// relative to the far side), so the refined offset recovers the drift
+// the bias just overrode. Without it a slow sub-pixel zoom leaves whole
+// block regions pinned at (0,0) - the residual state stays
+// screen-anchored while the content creeps (flow flicker, owner-visible
+// judder on the GTA IV loading portrait). Blocks whose final refined
+// vector is shorter than pc.c[3] (D5C_MV_SUBT, net pixels) are written
+// back as exact (0,0): refined noise on truly static blocks concentrates
+// below ~0.1-0.2 px while real drift sits higher, so the threshold keeps
+// static regions on the byte-exact v9 path. conf = 1 - SADmin/SAD(0,0)
+// is informational.
 //
 // histValid==0 (reset frame) or ANY out-of-range P tap in the block's
 // search window (uninitialised bufHist on the first-ever frame) ->
 // mv = (0,0), conf = 0: consumers treat (0,0) as the identity warp and
 // their own P/A/R validity still gates the hold.
 //
-// push a.x = TOK (= netW*netH), a.y = netW, a.z = netH, d.x = histValid.
+// push a.x = TOK (= netW*netH), a.y = netW, a.z = netH, d.x = histValid;
+// c[0] = D5C_MV_EMA (mv EMA weight), c[1] = D5C_MV_ZBIAS, c[2] =
+// D5C_MV_ZABS, c[3] = D5C_MV_SUBT (sub-pixel noise floor, net px),
+// d[1] = D5C_MV_IMPT ((0,0)-pick refine confidence gate, SAD units).
 // ============================================================================
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 layout(std430, set = 0, binding = 3) readonly buffer FeatV { float fv[]; };
 layout(std430, set = 0, binding = 17) readonly buffer HistPrev { float hsP[]; };
-layout(std430, set = 0, binding = 18) writeonly buffer Mvs { vec4 mvs[]; };
+// Read+write: each workgroup EMA-smooths its own block's vector against
+// last frame's value (temporal consistency test - real drift keeps one
+// direction while refined noise is zero-mean, so the EMA separates slow
+// drift from SAD-flat noise jitter far better than a magnitude test).
+// The read-modify-write touches only this workgroup's own element and
+// consumers run in later dispatches, so no barrier is needed.
+layout(std430, set = 0, binding = 18) buffer Mvs { vec4 mvs[]; };
 layout(push_constant) uniform Push { ivec4 a; ivec4 b; vec4 c; vec4 d; } pc;
 
 shared float sCur[64];      // this block's current luma
@@ -121,17 +141,63 @@ void main() {
     int dx = int(iPick % 25u) - 12;
     int dy = int(iPick / 25u) - 12;
     float mvx = float(dx), mvy = float(dy);
-    // Parabolic sub-pixel refine (interior integer picks only).
-    if ((dx != 0 || dy != 0) && dx > -12 && dx < 12 && dy > -12 && dy < 12) {
+    // Parabolic sub-pixel refine on the +-1 SAD neighbours of the pick -
+    // run for EVERY interior pick including (0,0): a sub-pixel drift the
+    // zero-bias pinned still shows as a SAD slope, and the refined
+    // fraction moves the residual state with the content instead of
+    // leaving it screen-anchored. imp accumulates the predicted SAD drop
+    // at the refined offset (den * delta^2 / 2 per axis) - the evidence
+    // that the sub-pixel motion is real.
+    float imp = 0.0;
+    if (dx > -12 && dx < 12 && dy > -12 && dy < 12) {
         const uint ix = uint(dy + 12) * 25u + uint(dx + 12);
         const uint iy = ix;
         float den = 2.0 * (sSad[ix - 1u] - 2.0 * sPick + sSad[ix + 1u]);
-        if (den > 1e-6)
-            mvx += clamp((sSad[ix - 1u] - sSad[ix + 1u]) / den, -0.5, 0.5);
+        if (den > 1e-6) {
+            const float r = clamp((sSad[ix - 1u] - sSad[ix + 1u]) / den,
+                                  -0.5, 0.5);
+            mvx += r;
+            imp += den * r * r * 0.5;
+        }
         den = 2.0 * (sSad[iy - 25u] - 2.0 * sPick + sSad[iy + 25u]);
-        if (den > 1e-6)
-            mvy += clamp((sSad[iy - 25u] - sSad[iy + 25u]) / den, -0.5, 0.5);
+        if (den > 1e-6) {
+            const float r = clamp((sSad[iy - 25u] - sSad[iy + 25u]) / den,
+                                  -0.5, 0.5);
+            mvy += r;
+            imp += den * r * r * 0.5;
+        }
     }
+    // Confidence gate for (0,0) picks: the sub-pixel case is only accepted
+    // when the predicted improvement beats pc.d[1] (D5C_MV_IMPT, SAD
+    // units). imp ~ local gradient * drift evidence, so detailed content
+    // with real drift passes and SAD-flat blocks (flat sky, codec grain -
+    // where a random parabola fit produces a meaningless +-0.5 vector)
+    // stay exact (0,0). Pinning flat content is also visually free:
+    // there is no detail for the residual to mis-track.
+    if (iPick == i00 && imp < pc.d[1]) {
+        mvx = 0.0;
+        mvy = 0.0;
+    }
+    // Temporal smoothing: report the EMA of the refined vector (pc.c[0] =
+    // D5C_MV_EMA, weight of the new sample; 1.0 = raw). Vectors >= 1 px
+    // snap instantly - the +-0.5-clamped sub-pixel refine cannot reach 1
+    // px, so the EMA only ever sees the noise-prone sub-pixel range and
+    // real integer pans/cuts keep zero lag. A direction reversal
+    // (dot(rf, prev) < 0) restarts the filter at the new sample instead
+    // of integrating backwards - real drift never reverses in a frame.
+    // tid0's program order reads before it writes; no other workgroup
+    // touches this element.
+    const vec2 prev = mvs[bIdx].xy;
+    const vec2 rf = vec2(mvx, mvy);
+    vec2 em;
+    if (dot(rf, rf) >= 1.0) em = rf;
+    else if (dot(rf, prev) < 0.0) em = rf * pc.c[0];
+    else em = prev + (rf - prev) * pc.c[0];
+    // Sub-pixel gate: EMA'd vectors shorter than pc.c[3] (D5C_MV_SUBT)
+    // collapse to exact (0,0) - residual noise level in the smoothed
+    // estimate - and also reset the stored EMA state so a near-threshold
+    // block cannot slowly integrate noise across the gate.
+    if (dot(em, em) < pc.c[3] * pc.c[3]) em = vec2(0.0, 0.0);
     const float conf = 1.0 - sBest / (s0 + 1e-6);
-    mvs[bIdx] = vec4(mvx, mvy, conf, 0.0);
+    mvs[bIdx] = vec4(em.x, em.y, conf, 0.0);
 }

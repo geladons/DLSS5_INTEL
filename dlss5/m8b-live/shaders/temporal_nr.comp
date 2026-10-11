@@ -433,19 +433,26 @@ void main() {
         // uncapped, re-anchor, no refresh pending.
         for (uint c = 0u; c < 3u; ++c) { emitT[c] = anchored[c]; An[c] = col01[c]; }
     } else {
-        // HELD: warped pixels refresh EVERY frame at pc.c[1] with no
-        // budget - while content moves, P was written under a shifted
-        // footprint so rh is stale by up to a frame of network boil; a
-        // steady 0.3 pull toward the fresh residual chases it without
-        // burning the anchor budget meant for real input drift. Still
-        // pixels (mv == (0,0), guaranteed on static content by the
-        // estimator's zero-motion bias) keep the exact v9 path ->
-        // byte-identical output frame to frame: distance from the
-        // FIXED anchor decides whether the input has really moved
-        // (noise under D_REF can never trip it); a trip re-anchors and
-        // arms a bounded R_FRAMES-step residual refresh; an armed
-        // budget keeps stepping until it runs out or rc converges.
-        const bool moving = (abs(mv.x) + abs(mv.y) > 0.01);
+        // HELD: warped pixels refresh EVERY frame with no budget - while
+        // content moves, P was written under a shifted footprint so rh is
+        // stale by up to a frame of network boil; a steady pull toward
+        // the fresh residual chases it without burning the anchor budget
+        // meant for real input drift. The pull is SCALED by the motion
+        // magnitude: frac = pc.c[1] * min(|mv|, 1) - a sub-pixel mv (slow
+        // zoom drift recovered by the estimator's parabolic refine) gets
+        // a proportional trickle instead of the full BETA, so the
+        // static->moving transition is continuous rather than a discrete
+        // path flip between neighbouring blocks (the loading-portrait
+        // judder). Still pixels (mv == (0,0), guaranteed on static
+        // content by the estimator's zero-motion bias + sub-pixel
+        // threshold) keep the exact v9 path -> byte-identical output
+        // frame to frame: distance from the FIXED anchor decides whether
+        // the input has really moved (noise under D_REF can never trip
+        // it); a trip re-anchors and arms a bounded R_FRAMES-step
+        // residual refresh; an armed budget keeps stepping until it runs
+        // out or rc converges.
+        const float mvl = length(mv);
+        const bool moving = (mvl > 0.01);
         bool refresh = moving;
         for (uint c = 0u; c < 3u; ++c) An[c] = aA[c];
         Rn = Rw;
@@ -464,15 +471,18 @@ void main() {
             }
         }
         // emit = input + held residual, the residual stepped toward the
-        // fresh (gain-anchored) one proportionally: max(R_STEP_MIN,
-        // FRAC*|e|) per channel (FRAC = pc.c[1] while moving, R_FRAC
-        // while still) while a refresh is armed, pure hold (cap 0)
-        // otherwise.
+        // fresh (gain-anchored) one proportionally: moving pixels step
+        // at min(|mv|,1) * max(R_STEP_MIN, BETA*|e|) per frame (the
+        // magnitude scale keeps sub-pixel drift a gentle trickle), still
+        // pixels at max(R_STEP_MIN, R_FRAC*|e|) while an armed budget
+        // lasts, pure hold (cap 0) otherwise.
         for (uint c = 0u; c < 3u; ++c) {
             float rt = anchored[c] - col01[c];
             float e = rt - rh[c];
-            float capc = refresh ? max(R_STEP_MIN,
-                                       (moving ? pc.c[1] : R_FRAC) * abs(e)) : 0.0;
+            float capc = refresh ? (moving ? min(mvl, 1.0) * max(R_STEP_MIN,
+                                                                pc.c[1] * abs(e))
+                                           : max(R_STEP_MIN, R_FRAC * abs(e)))
+                                 : 0.0;
             emitT[c] = col01[c] + rh[c] + clamp(e, -capc, capc);
         }
     }

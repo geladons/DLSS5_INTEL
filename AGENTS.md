@@ -267,7 +267,22 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
     when SAD00 <= SADmin*(1+D5C_MV_ZBIAS=0.15) + 64*D5C_MV_ZABS=2/255
     (without it 1-2 LSB noise parks a random +-1 vector on static
     blocks and warped pixels then flicker - the z0/b15i1 static-fail),
-    parabolic subpixel refine on interior picks. bufMv (binding 18)
+    parabolic subpixel refine on ALL interior picks including (0,0) -
+    a bias-pinned sub-pixel drift still shows a SAD slope (Stage 60
+    slow-zoom judder fix: on z1 a 1.003x/frame zoom pinned ~92-94% of
+    blocks at (0,0), left the residual screen-anchored and flipped the
+    rest to the moving path - the discrete flip was the shake). For a
+    (0,0) pick the refined fraction must beat D5C_MV_IMPT=0.06
+    (pc.d[1]): imp = sum_axes(den*delta^2/2), the predicted SAD drop at
+    the refined offset, scales with local gradient so detailed content
+    with real drift passes and SAD-flat blocks (flat sky, codec grain -
+    meaningless +-0.5-rail fits) collapse to exact (0,0); pinning flat
+    content is visually free. D5C_MV_SUBT=0.10 (pc.c[3]) snaps the
+    final sub-1 vector under the noise floor to 0. D5C_MV_EMA (pc.c[0],
+    weight of new sample, default 1.0 = RAW/off) is an optional
+    per-block temporal filter with a >=1px snap and direction-reversal
+    restart - measured worse at 0.5 (_pan_seq alternation at the snap
+    boundary), kept only as a knob. bufMv (binding 18)
     = vec4(mvx, mvy, conf, -) per block. temporal_nr/stats fetch the
     per-pixel mv NEAREST-BLOCK or, with D5C_MV_INTERP=1 (shipped),
     bilinear between the four nearest block centres (8i+3.5). State
@@ -275,8 +290,10 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
     verbatim source pixel; fractional -> bilinear P, A and the
     byte-DECODED E (no re-snap), R from the nearest tap; all taps
     validated. moving = |mv| > 0.01 -> refresh every frame at
-    D5C_MV_BETA=0.15 with no budget spent; !moving -> the exact v9
-    anchor/budget path (static output stays byte-identical).
+    D5C_MV_BETA=0.15 scaled by min(|mv|,1) (continuous static->moving
+    boundary, no discrete path flip) with no budget spent; !moving ->
+    the exact v9 anchor/budget path (static output stays
+    byte-identical).
     D5C_MV_PIXSTATIC (default 0) can force mv=(0,0) per pixel when the
     unwarped input delta is under N LSB - measured useless at 1 LSB,
     kept off. D5C_DEBUG_MV=1 logs median mv + nonzero share /30 frames.

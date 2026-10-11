@@ -68,8 +68,11 @@ void ChainEngine::recordTemporal() {
         Push mp{};
         mp.a[0] = (int32_t)st_[0].TOK;
         mp.a[1] = (int32_t)netW_; mp.a[2] = (int32_t)netH_;
+        mp.c[0] = mvEma_;
         mp.c[1] = mvZbias_; mp.c[2] = mvZabs_;
+        mp.c[3] = mvSubt_;
         mp.d[0] = histValid;
+        mp.d[1] = mvImpt_;
         vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeMotionEst_);
         vkCmdPushConstants(cmd_, pipeLayout_, VK_SHADER_STAGE_COMPUTE_BIT,
                            0, sizeof(Push), &mp);
