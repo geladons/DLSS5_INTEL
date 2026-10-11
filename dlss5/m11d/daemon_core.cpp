@@ -200,19 +200,53 @@ void DaemonCore::builderLoop() {
     }
 }
 
+// Row-clamped repack between two BGRA extents (compat serve): dst gets
+// the src's top-left min-extent; pixels past a src edge replicate the
+// last src pixel/row. The synthesized strip is the engine input only -
+// the reply is cropped back to the request extent, so the pad rows never
+// reach the game (a request bigger than the canvas gets the same clamp
+// on the way out: a few edge-stretched processed rows).
+static void repackClamp(const uint8_t* src, uint32_t sw, uint32_t sh,
+                        uint8_t* dst, uint32_t dw, uint32_t dh) {
+    const uint32_t cx = std::min(sw, dw);
+    for (uint32_t r = 0; r < dh; ++r) {
+        const uint8_t* srow = src + (size_t)std::min(r, sh - 1) * sw * 4;
+        uint8_t* drow = dst + (size_t)r * dw * 4;
+        std::memcpy(drow, srow, (size_t)cx * 4);
+        for (uint32_t x = cx; x < dw; ++x)   // edge-extend the tail columns
+            std::memcpy(drow + (size_t)x * 4, drow + (size_t)(cx - 1) * 4, 4);
+    }
+}
+
 std::shared_ptr<d5c::ChainEngine> DaemonCore::requestEngine(uint32_t w,
-                                                          uint32_t h) {
+                                                          uint32_t h,
+                                                          uint32_t* outW,
+                                                          uint32_t* outH) {
     std::lock_guard<std::mutex> lk(engMu_);
-    const bool sameExtent = engine && curW == w && curH == h;
+    const bool exactExtent = engine && curW == w && curH == h;
+    // Extent slop (see the header): windowed-mode +-few-px extent jitter
+    // is served on the live canvas via repackClamp instead of scheduling
+    // a rebuild - a wobble previously cost ~5 s of refused frames.
+    const bool nearExtent = engine && !exactExtent
+        && (w <= curW + kExtentSlop && curW <= w + kExtentSlop)
+        && (h <= curH + kExtentSlop && curH <= h + kExtentSlop);
     const bool scaleDrift =
         std::abs((engine ? engine->renderScale() : scale) - scale) >= 1e-4f;
-    if (sameExtent && !scaleDrift)
+    const bool canServe = exactExtent || nearExtent;
+    if (canServe && !scaleDrift) {
+        if (outW) *outW = curW;
+        if (outH) *outH = curH;
         return engine;
-    // Engine missing, wrong extent, or wrong scale: schedule the rebuild.
-    // A same-extent engine keeps serving at the OLD scale until the
-    // replacement is hot-swapped in - a scale retune drops zero frames.
+    }
+    // Engine missing, out-of-slop extent, or wrong scale: schedule the
+    // rebuild. A serveable engine keeps answering at the OLD scale until
+    // the replacement is hot-swapped in - a scale retune drops zero frames.
     kickBuildLocked(w, h);
-    return sameExtent ? engine : nullptr;
+    if (canServe) {
+        if (outW) *outW = curW;
+        if (outH) *outH = curH;
+    }
+    return canServe ? engine : nullptr;
 }
 
 // ------------------------------------------------------------ NRCT ctrl --
@@ -408,9 +442,15 @@ bool DaemonCore::handleFrame(SOCKET s, const uint32_t hdr[4], ULONGLONG deadline
     // instead of stalling inside a multi-second init (the old synchronous
     // ensureEngine wedged the whole accept loop: frames AND NRCT queued
     // behind a 3-14 s build -> "daemon did not answer" + restart loops).
-    std::shared_ptr<d5c::ChainEngine> eng = requestEngine(w, h);
+    uint32_t engW = 0, engH = 0;
+    std::shared_ptr<d5c::ChainEngine> eng = requestEngine(w, h, &engW, &engH);
     if (!eng)
         return false;
+    // Compat serve: the request extent sits inside the +-kExtentSlop
+    // window of the LIVE canvas (windowed-mode jitter). The input is
+    // edge-clamped to the canvas below and the reply cropped back to the
+    // request extent - no engine rebuild, no refused frames.
+    const bool compat = (engW != w || engH != h);
     // Live knobs ride the frame channel. Env is spawn-frozen and already
     // applied at startup: re-reading it per frame reverted live knob
     // pushes to the launch baseline (the "env leash").
@@ -458,10 +498,13 @@ bool DaemonCore::handleFrame(SOCKET s, const uint32_t hdr[4], ULONGLONG deadline
     // above stay outside so a stalled client cannot hold the engine
     // hostage for its 8 s deadline. (serveMu_ -> engMu_ order is kept.)
     std::lock_guard<std::mutex> serveLk(serveMu_);
-    if (w != prevW || h != prevH) {
+    // Anchor/history extent tracks the ENGINE canvas, not the request: a
+    // slop-absorbed jitter must not invalidate the FG prev pair or the
+    // temporal stream (the engine's own buffers stay canvas-sized).
+    if (engW != prevW || engH != prevH) {
         havePrev = false;
-        prevW = w;
-        prevH = h;
+        prevW = engW;
+        prevH = engH;
     }
     // Frame-gap policy (GTA IV stalls 2-4 s during world streaming - a
     // history reset per hitch was the field report's "periodic bright
@@ -508,27 +551,44 @@ bool DaemonCore::handleFrame(SOCKET s, const uint32_t hdr[4], ULONGLONG deadline
     // or a refused/faulted transfer - falls back to a full process so
     // the reply is always a presentable frame (and rotates anchors
     // as a side effect).
+    // Compat repack (serveMu_ covers the shared scratch): canvas-in for
+    // the engine, request-out for the wire. Zero work when compat is off.
+    const uint8_t* engIn = inBuf.data();
+    uint8_t* engOut = outBuf.data();
+    if (compat) {
+        padInBuf_.resize((size_t)engW * engH * 4);
+        padOutBuf_.resize((size_t)engW * engH * 4);
+        repackClamp(inBuf.data(), w, h, padInBuf_.data(), engW, engH);
+        engIn = padInBuf_.data();
+        engOut = padOutBuf_.data();
+        static int slopLogged = 0;
+        if (!slopLogged) {
+            slopLogged = 1;
+            std::printf("[m11d] extent slop: request %ux%u served on the "
+                        "%ux%u canvas (edge-clamped)\n", w, h, engW, engH);
+        }
+    }
     int generated = 0;   // 0=processed, 1=transferred, 2=interpolated
     bool ok;
     if (fgiReq && fgMode >= 2 && havePrev) {
-        ok = sehInterpAnchors(eng.get(), w, h, inBuf.data(), outBuf.data(), &st);
+        ok = sehInterpAnchors(eng.get(), engW, engH, engIn, engOut, &st);
         if (ok) {
             generated = 2;
         } else {
             std::fprintf(stderr, "[m11d] interpolateAnchors failed - processing instead\n");
-            ok = sehProcessFrame(eng.get(), inBuf.data(), outBuf.data(), frameCounter, &st);
+            ok = sehProcessFrame(eng.get(), engIn, engOut, frameCounter, &st);
         }
     } else if (fgReq && fgMode && havePrev) {
-        ok = sehTransferFrame(eng.get(), w, h, inBuf.data(), outBuf.data(), &st);
+        ok = sehTransferFrame(eng.get(), engW, engH, engIn, engOut, &st);
         if (ok) {
             generated = 1;
         } else {
             std::fprintf(stderr, "[m11d] transferFrame failed - processing instead\n");
-            ok = sehProcessFrame(eng.get(), inBuf.data(), outBuf.data(), frameCounter, &st);
+            ok = sehProcessFrame(eng.get(), engIn, engOut, frameCounter, &st);
         }
     } else {
         // Clean forward processing for every frame via DLSS 5 engine
-        ok = sehProcessFrame(eng.get(), inBuf.data(), outBuf.data(), frameCounter, &st);
+        ok = sehProcessFrame(eng.get(), engIn, engOut, frameCounter, &st);
     }
     double wall = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - t0).count();
@@ -591,6 +651,8 @@ bool DaemonCore::handleFrame(SOCKET s, const uint32_t hdr[4], ULONGLONG deadline
         std::lock_guard<std::mutex> lk(engMu_);
         buildSettleUntil_ = 0;          // device is demonstrably stable again
     }
+    if (compat)
+        repackClamp(padOutBuf_.data(), engW, engH, outBuf.data(), w, h);
     if (!generated) {
         // Only a real process refreshes the prev pair - a
         // generated frame is not a reconstruction and must stay
@@ -650,8 +712,11 @@ bool DaemonCore::handleFrame(SOCKET s, const uint32_t hdr[4], ULONGLONG deadline
     // Stage timing in the chain parens: fe=features fp=featpack chain=net
     // tail=encode/compose (engine GPU timestamps; sums < wall = host side:
     // TCP recv + staging upload + reply write).
-    std::printf("[m11d] frame %ld %ux%u%s%s in %.1f ms (%s fe %.1f fp %.1f c %.1f tail %.1f)\n",
-                frameCounter, w, h, masked ? " +mask" : "",
+    char compatTag[32] = "";
+    if (compat)
+        std::snprintf(compatTag, sizeof compatTag, "~%ux%u", engW, engH);
+    std::printf("[m11d] frame %ld %ux%u%s%s%s in %.1f ms (%s fe %.1f fp %.1f c %.1f tail %.1f)\n",
+                frameCounter, w, h, compatTag, masked ? " +mask" : "",
                 generated == 2 ? " +fgi" :
                 generated == 1 ? " +fg" :
                 ((fgReq || fgiReq) ? " +fg-fallback" : ""),

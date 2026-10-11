@@ -299,6 +299,12 @@ typedef struct device_data {
     unsigned patch_run;          /* consecutive small-delta patch serves;
                                   * capped so the daemon anchor resyncs
                                   * periodically instead of drifting */
+    unsigned hold_miss_run;      /* consecutive bounded "mismatched result"
+                                  * holds: result exists but its extent or
+                                  * swapchain handle differs from the
+                                  * presenting chain (windowed-mode churn).
+                                  * Capped by NR_LAYER_HOLD_MISS_CAP; reset
+                                  * wherever a fresh processed result lands */
     unsigned char *raw;          /* freeze mode: the held UNPROCESSED frame */
     VkDeviceSize raw_size;
     int raw_held;
@@ -1835,21 +1841,40 @@ static int ensure_resources(device_data *data, VkDeviceSize needed)
             data->staging_size = needed;
             data->have_earlier = 0; /* old-extent bytes must not feed memcmp */
             /* A live async result is a POOL buffer (zero-copy publish) -
-             * claim() returns it to the pool; freeing it directly would
-             * leave a dangling a->buf[] slot and double-free at destroy. */
-            if (data->async && nr_async_claim(data->async, data->result))
+             * claim() returns it to the pool; copying it after the claim
+             * would race the pool reusing the buffer for a new reply, so a
+             * claimed result is simply dropped. */
+            if (data->async && nr_async_claim(data->async, data->result)) {
                 data->result = NULL;
-            free(data->result);
-            data->result = (unsigned char *)malloc((size_t)needed);
-            data->result_size = needed;
-            data->result_valid = 0; /* the old last-processed frame is gone */
+                data->result_size = 0;
+                data->result_valid = 0;
+            }
+            /* Grow the slot but KEEP the last processed frame: it is the
+             * only splice guard while the new extent has none yet (a 1 px
+             * extent jitter used to wipe it right before the outage that
+             * needed it). The row-bounded miss-hold keys on result_w/h and
+             * reads only result_size bytes of valid content; consumers
+             * that require the new extent still gate on result_size. */
+            if (!data->result || data->result_size < needed) {
+                unsigned char *grown =
+                    (unsigned char *)malloc((size_t)needed);
+                if (grown) {
+                    if (data->result && data->result_valid)
+                        memcpy(grown, data->result, (size_t)data->result_size);
+                    free(data->result);
+                    data->result = grown;
+                    data->result_size = needed;
+                }
+                /* malloc failed: the old (smaller) result stays valid for
+                 * miss-holds; write paths gate on result_size >= needed. */
+            }
             if (old && destroy_buffer) destroy_buffer(data->device, old, NULL);
             if (old_mem) {
                 if (old_mapped && unmap_memory)
                     unmap_memory(data->device, old_mem);
                 if (free_memory) free_memory(data->device, old_mem, NULL);
             }
-            return data->result ? 0 : -1;
+            return 0;
         }
     }
     if (mapped && unmap_memory) unmap_memory(data->device, staging_memory);
@@ -2523,6 +2548,7 @@ static int async_drain(device_data *data)
             data->result_h = d.h;
             data->result_valid = 1;
             data->holding_chain = (VkSwapchainKHR)d.chain;
+            data->hold_miss_run = 0;   /* fresh result refills the budget */
             data->result_ms = nr_now_ms();
             data->result_seq = d.seq;
             /* Content identity of the frame this result answers: the
@@ -2873,6 +2899,57 @@ static int async_serve_best(device_data *data, swapchain_data *chain,
     return -2;
 }
 
+/* Miss-hold budget (NR_LAYER_HOLD_MISS_CAP, default 30 ~= 0.5 s at 60
+ * fps): consecutive presents allowed to show the last processed frame
+ * when it does NOT match this chain's extent/handle exactly - i.e. the
+ * cases the strict holds (sheld/pheld/hold/mheld/eheld) cannot cover:
+ * swapchain recreation churns the handle, and windowed-mode jitter moves
+ * the extent by a pixel or two. Beyond the cap the held frame is too
+ * stale to trust and the present passes raw. The counter resets wherever
+ * a fresh processed result lands (result_valid = 1 sites). */
+static long hold_miss_cap(void)
+{
+    static long cap = -1;
+    if (cap < 0) {
+        const char *e = getenv("NR_LAYER_HOLD_MISS_CAP");
+        cap = e ? atol(e) : 30;
+        if (cap < 0) cap = 0;
+    }
+    return cap;
+}
+
+/* Bounded stale serve for the failure paths: a processed result exists
+ * but its extent or producing handle differs from this chain. Only the
+ * overlapping min-extent region is blitted into mapped (row-bounded;
+ * different strides cannot share a flat memcpy) - pixels the held frame
+ * cannot cover keep whatever mapped already holds (the just-captured raw
+ * frame on every post-readback path). Returns 1 when mapped was served,
+ * bumping hold_miss_run. */
+static int serve_held_miss(device_data *data, swapchain_data *chain,
+                           VkDeviceSize want)
+{
+    if (!data->result_valid || !data->result || !data->mapped
+        || data->staging_size < want
+        || !data->result_w || !data->result_h
+        || data->result_size < (VkDeviceSize)data->result_w
+                               * data->result_h * 4)
+        return 0;
+    if (data->hold_miss_run >= (unsigned long)hold_miss_cap())
+        return 0;
+    uint32_t cw = data->result_w < chain->extent.width
+                  ? data->result_w : chain->extent.width;
+    uint32_t ch = data->result_h < chain->extent.height
+                  ? data->result_h : chain->extent.height;
+    unsigned char *dst = (unsigned char *)data->mapped;
+    const unsigned char *src = data->result;
+    for (uint32_t y = 0; y < ch; y++)
+        memcpy(dst + (size_t)y * chain->extent.width * 4,
+               src + (size_t)y * data->result_w * 4, (size_t)cw * 4);
+    data->hold_miss_run++;
+    nr_degrade_note_held(&g_dg);
+    return 1;
+}
+
 static int process_frame(device_data *data, swapchain_data *chain,
                          VkQueue queue, uint32_t index)
 {
@@ -3088,6 +3165,7 @@ static int process_frame(device_data *data, swapchain_data *chain,
                 data->result_src_crc = data->last_in_crc;
                 data->earlier_pending = 0;
                 data->patch_run = 0;
+                data->hold_miss_run = 0;
             }
             dump_capture(capture_out_path, header, (const unsigned char *)data->mapped, needed);
             nr_log("[nr_layer] in-process processed %ux%u (frame %lu)",
@@ -3114,6 +3192,12 @@ static int process_frame(device_data *data, swapchain_data *chain,
             memcpy(data->mapped, data->result, (size_t)needed);
             nr_degrade_note_held(&g_dg);
             diag_path = "pheld";
+            return 0;
+        }
+        /* Mismatched-result hold (bounded): extent/handle churn must not
+         * drop the frame to raw while a usable processed frame exists. */
+        if (serve_held_miss(data, chain, needed)) {
+            diag_path = "xheld";
             return 0;
         }
         nr_log("[nr_layer] probe paced and no held result; raw out (frame %lu)",
@@ -3228,16 +3312,24 @@ static int process_frame(device_data *data, swapchain_data *chain,
                    "next generated present");
         }
     }
-    memcpy(data->result, data->mapped, (size_t)needed);
-    data->result_w = chain->extent.width;
-    data->result_h = chain->extent.height;
-    data->result_valid = 1;
-    data->holding_chain = chain->swapchain;
-    data->result_fmt = (uint32_t)chain->format;
-    data->result_src_crc = data->last_in_crc;
-    data->earlier_pending = 0;
-    data->patch_run = 0;
-    dump_capture(capture_out_path, header, data->result, needed);
+    /* result can lag `needed` when an extent grow kept the old smaller
+     * buffer (ensure_resources) - then keep it (bounded miss-hold value)
+     * instead of overrunning it; earlier_pending stays set so an
+     * identical next input does not reuse the mismatched frame. */
+    if (data->result && data->result_size >= needed) {
+        memcpy(data->result, data->mapped, (size_t)needed);
+        data->result_w = chain->extent.width;
+        data->result_h = chain->extent.height;
+        data->result_valid = 1;
+        data->holding_chain = chain->swapchain;
+        data->result_fmt = (uint32_t)chain->format;
+        data->result_src_crc = data->last_in_crc;
+        data->earlier_pending = 0;
+        data->patch_run = 0;
+        data->hold_miss_run = 0;   /* fresh result: the miss budget refills */
+    }
+    dump_capture(capture_out_path, header,
+                 (const unsigned char *)data->mapped, needed);
     nr_log("[nr_layer] processed %ux%u", chain->extent.width, chain->extent.height);
     diag_path = "tcp";
     return 0;
@@ -3333,6 +3425,7 @@ static int resend_raw(device_data *data, swapchain_data *chain)
             data->result_w = data->raw_w;
             data->result_h = data->raw_h;
             data->result_valid = 1;
+            data->hold_miss_run = 0;
             data->holding_chain = chain->swapchain;
             data->result_fmt = (uint32_t)chain->format;
             data->result_src_crc = 0;   /* answers data->raw, not live input */
@@ -3371,6 +3464,7 @@ static int resend_raw(device_data *data, swapchain_data *chain)
     data->result_w = data->raw_w;
     data->result_h = data->raw_h;
     data->result_valid = 1;
+    data->hold_miss_run = 0;
     data->holding_chain = chain->swapchain;
     data->result_fmt = (uint32_t)chain->format;
     data->result_src_crc = 0;           /* answers data->raw, not live input */
@@ -3411,6 +3505,7 @@ static int freeze_capture(device_data *data, swapchain_data *chain,
             data->result_w = chain->extent.width;
             data->result_h = chain->extent.height;
             data->result_valid = 1;
+            data->hold_miss_run = 0;
             data->holding_chain = chain->swapchain;
             data->result_fmt = (uint32_t)chain->format;
             data->result_src_crc = 0;   /* result is the raw frame itself */
@@ -3686,6 +3781,27 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                            "frame (frame %lu)", frame_counter);
                     ok = 1;
                     diag_path = "sheld";
+                    /* prc 0 = "mapped holds the frame to blit" - without
+                     * this the write-back below is gated off and the held
+                     * frame never reaches the swapchain image (regression
+                     * since the prc==2 compose path landed). */
+                    prc = 0;
+                } else if (prc != -2
+                           && serve_held_miss(data, chain, want)) {
+                    /* Miss-hold: the held frame came from a different
+                     * extent or a since-recreated chain handle - blit the
+                     * overlap region only, bounded by hold_miss_run. A raw
+                     * splice between processed neighbours is the flicker
+                     * this exists to kill (extent-jitter rebuilds used to
+                     * make it the common case on GTA IV's loading screen). */
+                    nr_log("[nr_layer] process failed; held mismatched "
+                           "result %ux%u on %ux%u (frame %lu, miss %u)",
+                           data->result_w, data->result_h,
+                           chain->extent.width, chain->extent.height,
+                           frame_counter, data->hold_miss_run);
+                    ok = 1;
+                    diag_path = "xheld";
+                    prc = 0;   /* mapped holds the frame to blit */
                 } else {
                     if (prc != -2) {
                         nr_log("[nr_layer] process failed and no held result; "
@@ -3827,6 +3943,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
              * anchor interval and re-blit the held processed anchor - no
              * engine call, no daemon round-trip at this slot. */
             int held = 0;
+            int mid_miss = 0;    /* bounded hold, mismatched result/extent */
             int deg_log = NR_DEGRADE_LOG_NONE;
             int deg = nr_degrade_is_degenerate(&g_dg, chain->extent.width,
                                                chain->extent.height, &deg_log);
@@ -3867,6 +3984,13 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                     memcpy(data->mapped, data->result, (size_t)want);
                     diag_tr = transfer(data, chain, queue, index, 1);
                     held = (diag_tr == 0);
+                } else if (serve_held_miss(data, chain, want)) {
+                    /* Bounded stale hold: the anchor's extent/handle no
+                     * longer matches exactly (swapchain churn), but raw
+                     * mid-slot splices strobe the same way. */
+                    diag_tr = transfer(data, chain, queue, index, 1);
+                    held = (diag_tr == 0);
+                    mid_miss = held;
                 }
             }
             nr_fg_note(&g_fg, held
@@ -3874,7 +3998,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                           ? NR_FG_GENERATED : NR_FG_PROCESSED)
                        : NR_FG_NATIVE);
             if (!held || !data->async)
-                diag_path = held ? "mheld" : "mnat";
+                diag_path = held ? (mid_miss ? "xheld" : "mheld") : "mnat";
         } else if (fg_enabled && fg_avail) {
             /* Framegen: generate this present from the engine's copy of the
              * last processed frame + its raw input (residual transfer).
@@ -3884,6 +4008,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
              * usable prev pair, so any complete reply is a presentable
              * frame (generated or not). */
             int generated = 0;
+            int fg_held = 0;   /* bounded hold served on a failed request */
             int fg_out = -1;   /* async: explicit NR_FG_* for shown frame */
             int deg_log = NR_DEGRADE_LOG_NONE;
             /* Same gate as process_frame: a menu/letterbox strip must not
@@ -4001,12 +4126,17 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                         /* Transient (busy daemon, engine rebuild, torn
                          * socket - a real refusal is a bare connection
                          * drop, same on the wire): back the probe off
-                         * instead of latching. The frame goes out native
-                         * (staging is never written back on failure). */
+                         * instead of latching. The frame used to go out
+                         * native; a bounded held-result serve beats the
+                         * raw splice while a processed frame exists. */
                         nr_degrade_fg_note_fail(&g_dg);
+                        if (serve_held_miss(data, chain, want)
+                            && transfer(data, chain, queue, index, 1) == 0)
+                            fg_held = 1;
                         nr_log("[nr_layer] daemon framegen failed "
-                               "(rc %d); native out, FG probe streak %u, "
-                               "next in %u slots", erc, g_dg.fg_fail,
+                               "(rc %d); %s out, FG probe streak %u, "
+                               "next in %u slots", erc,
+                               fg_held ? "held" : "native", g_dg.fg_fail,
                                g_dg.fg_skip);
                     }
                     }
@@ -4016,17 +4146,21 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                  * refused request). */
             }
             /* fg_out (async only): the serve tag already chose the exact
-             * bucket for the displayed frame; sync keeps generated/native. */
+             * bucket for the displayed frame; sync keeps generated/native
+             * (a bounded miss-hold serve counts as a processed frame). */
             nr_fg_note(&g_fg, fg_out >= 0 ? fg_out
-                       : (generated ? NR_FG_GENERATED : NR_FG_NATIVE));
+                       : (fg_held ? NR_FG_PROCESSED
+                          : (generated ? NR_FG_GENERATED : NR_FG_NATIVE)));
             if (fg_out < 0)
-                diag_path = generated ? "fgd" : "fgn";
+                diag_path = fg_held ? "xheld"
+                            : (generated ? "fgd" : "fgn");
         } else {
             /* Cadence-skipped present (NR_LAYER_LIVE=N>1): re-blit the held
              * processed result of this extent - the documented behaviour -
              * falling back to native only when nothing is held yet. A raw
              * splice between processed frames is a visible quality strobe. */
             int held = 0;
+            int cad_miss = 0;    /* bounded hold, mismatched result/extent */
             if (data->async) {
                 /* have_raw=0: this cadence-skipped present does NOT
                  * readback - mapped still holds the previous present's
@@ -4048,13 +4182,18 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_QueuePresentKHR(VkQueue queue,
                 memcpy(data->mapped, data->result, (size_t)want);
                 diag_tr = transfer(data, chain, queue, index, 1);
                 held = (diag_tr == 0);
+            } else if (serve_held_miss(data, chain, want)) {
+                /* Bounded stale hold: extent/handle mismatch only. */
+                diag_tr = transfer(data, chain, queue, index, 1);
+                held = (diag_tr == 0);
+                cad_miss = held;
             }
             nr_fg_note(&g_fg, held
                        ? ((data->async && !strcmp(diag_path, "afgi"))
                           ? NR_FG_GENERATED : NR_FG_PROCESSED)
                        : NR_FG_NATIVE);
             if (!held || !data->async)
-                diag_path = held ? "eheld" : "enat";
+                diag_path = held ? (cad_miss ? "xheld" : "eheld") : "enat";
             if (fg_enabled && !fg_avail && !g_fg.unavailable_logged) {
                 nr_log("[nr_layer] framegen requested but unavailable "
                        "(no in-process engine; daemon not up); presenting "

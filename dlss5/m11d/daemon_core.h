@@ -78,7 +78,18 @@ public:
     // nothing usable exists (cold start / extent migration): the caller
     // must then fail the frame FAST so the layer holds its last processed
     // frame instead of stalling inside init.
-    std::shared_ptr<d5c::ChainEngine> requestEngine(uint32_t w, uint32_t h);
+    // Extent slop: a windowed title (GTA IV 800x600 windowed wobbles its
+    // client rect to 800x597/599/606 on desktop events, DXVK recreates the
+    // swapchain each time, and the layer reports the exact extent) used to
+    // kick a multi-second engine rebuild per 1 px flip. A request within
+    // +-kExtentSlop of the LIVE canvas is served by the resident engine
+    // instead - handleFrame edge-clamps the payload to the canvas and
+    // crops the reply back. outW/outH receive the SERVED canvas extent
+    // atomically with the engine reference (a mid-flight hot-swap cannot
+    // skew them); on a serveable miss they carry curW/curH.
+    std::shared_ptr<d5c::ChainEngine> requestEngine(uint32_t w, uint32_t h,
+                                                    uint32_t* outW = nullptr,
+                                                    uint32_t* outH = nullptr);
 
     // Engine lifecycle for STATUS replies lives inside handleCtrlLocked:
     // resident engine OR a pending build = alive (the manager restarts a
@@ -153,4 +164,12 @@ private:
     ULONGLONG lastFaultAt_ = 0;
     static const int kWindowFaultLimit = 3;
     static const ULONGLONG kFaultWindowMs = 120000;
+    // Extent-slop compat serve (see requestEngine): scratch for the
+    // edge-clamped repack between the request extent and the engine
+    // canvas. serveMu_-guarded (only the serialized section touches them).
+    std::vector<uint8_t> padInBuf_, padOutBuf_;
+    // Per-axis tolerance in px: windowed-mode client-rect jitter of a few
+    // px is absorbed; a real mode change (any axis further out) still
+    // rebuilds. GTA IV's observed wobble is +-6 px around 800x600.
+    static const uint32_t kExtentSlop = 8;
 };
