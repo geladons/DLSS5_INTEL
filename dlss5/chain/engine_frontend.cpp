@@ -181,7 +181,7 @@ bool ChainEngine::createFrontEnd() {
     // previous frame's input/achieved-output sums (rotated in by
     // temporal_stats), [4:5] next-frame sums (temporal_nr). recordFrame
     // zeroes [0:1] every frame and the whole buffer on a history reset.
-    bufStats_ = CreateBuf(c, 32,
+    bufStats_ = CreateBuf(c, 64,
                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memStats_);
     bufHp_ = CreateBuf(c, 65536, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
@@ -281,7 +281,7 @@ bool ChainEngine::createFrontEnd() {
         writeBuf(setFinal_, 13, bufHist_, (uint64_t)st_[0].TOK * 10 * 4);
         writeBufRange(setFinal_, 14, arena_.bufOf(O.oHEAD), arena_.localOff(O.oHEAD), (uint64_t)st_[0].TOK * 4 * 4);
         writeBufRange(setFinal_, 15, arena_.bufOf(O.oHeadDC), arena_.localOff(O.oHeadDC), 1024);
-        writeBuf(setFinal_, 16, bufStats_, 32);
+        writeBuf(setFinal_, 16, bufStats_, 64);
         writeBuf(setFinal_, 17, bufHistPrev_, (uint64_t)st_[0].TOK * 10 * 4);
         writeBuf(setFinal_, 18, bufMv_, mvFloats * 4);
     } else {
@@ -302,7 +302,7 @@ bool ChainEngine::createFrontEnd() {
         writeBuf(setFinal_, 13, bufHist_, (uint64_t)st_[0].TOK * 10 * 4);
         writeBufRange(setFinal_, 14, arena_.bufOf(O.oHEAD), arena_.localOff(O.oHEAD), (uint64_t)st_[0].TOK * 4 * 4);
         writeBufRange(setFinal_, 15, arena_.bufOf(O.oHeadDC), arena_.localOff(O.oHeadDC), 1024);
-        writeBuf(setFinal_, 16, bufStats_, 32);
+        writeBuf(setFinal_, 16, bufStats_, 64);
         writeBuf(setFinal_, 17, bufHistPrev_, (uint64_t)st_[0].TOK * 10 * 4);
         writeBuf(setFinal_, 18, bufMv_, mvFloats * 4);
 

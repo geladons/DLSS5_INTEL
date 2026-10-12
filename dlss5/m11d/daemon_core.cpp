@@ -686,6 +686,18 @@ bool DaemonCore::handleFrame(SOCKET s, const uint32_t hdr[4], ULONGLONG deadline
     // ~4 MB/frame at 800x600, never enable in production runs.
     {
         static const char* const dd = std::getenv("M11D_DUMP");
+        static const char* const df = std::getenv("M11D_DEBUGFETCH");
+        if (df && *df && eng) {
+            char dp[MAX_PATH];
+            std::snprintf(dp, sizeof dp, "%s\\stats_%05lu.bin", df,
+                          (unsigned long)frameCounter);
+            eng->debugFetch(4, dp);
+            if (frameCounter % 30 == 0) {
+                std::snprintf(dp, sizeof dp, "%s\\hist_%05lu.bin", df,
+                              (unsigned long)frameCounter);
+                eng->debugFetch(0, dp);
+            }
+        }
         if (dd && *dd) {
             char path[MAX_PATH];
             const uint32_t oh[4] = { hdr[0], w, h, fmt };

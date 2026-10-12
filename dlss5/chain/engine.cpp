@@ -559,14 +559,14 @@ bool ChainEngine::debugFetch(int which, const char* path) {
     VkDeviceSize off = 0, size = 0;
     const uint64_t T0 = st_[0].TOK;
     switch (which) {
-        case 0: src = bufHist_; size = T0 * 3 * 4; break;
+        case 0: src = bufHist_; size = T0 * 10 * 4; break;
         case 1: src = arena_.bufOf(arena_.off.oFeatV);
                 off = arena_.localOff(arena_.off.oFeatV); size = T0 * 16 * 4; break;
         case 2: src = arena_.bufOf(arena_.off.oHEAD);
                 off = arena_.localOff(arena_.off.oHEAD); size = T0 * 4 * 4; break;
         case 3: src = arena_.bufOf(arena_.off.oX16);
                 off = arena_.localOff(arena_.off.oX16); size = T0 * 16 * 2; break;
-        case 4: src = bufStats_; size = 32; break;
+        case 4: src = bufStats_; size = 64; break;
         case 5: if (!bufNetRgb_) return false;
                 src = bufNetRgb_; size = (uint64_t)netW_ * netH_ * 3 * 4; break;
         default: return false;

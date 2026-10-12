@@ -16,7 +16,12 @@ void ChainEngine::recordFrame(long frameIndex) {
     // sum (both accumulated this frame). A history reset (framesDone_==0)
     // zeroes ALL slots so the anchor restarts with prev=0 => off until
     // temporal_stats/temporal_nr fill two frames of sums.
-    vkCmdFillBuffer(cmd_, bufStats_, 0, framesDone_ == 0 ? 32 : 8, 0);
+    vkCmdFillBuffer(cmd_, bufStats_, 0, framesDone_ == 0 ? 64 : 8, 0);
+    // Slots 8..15 are reserved for optional path-counter diagnostics
+    // (instrumented temporal_nr variants can count fresh/held/moving
+    // pixels; fetch via debugFetch(4)). Zero them every frame so a
+    // stale counter never leaks across runs.
+    vkCmdFillBuffer(cmd_, bufStats_, 32, 32, 0);
     {
         VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
