@@ -604,7 +604,8 @@ M12Dx12Processor::M12Dx12Processor(IDXGISwapChain *sc, ID3D12CommandQueue *queue
     : sc_(sc), fence_event_(NULL), fence_value_(0), width_(w), height_(h),
       fmt_(fmt), fmt_supported_(false), needs_rbswap_(false), row_pitch_(0),
       live_every_(live_every > 0 ? live_every : 1), present_count_(0),
-      present_trace_(0), have_processed_(false), paused_(false)
+      present_trace_(0), last_live_ms_(0), have_processed_(false),
+      paused_(false)
 {
     queue_ = queue;
     HRESULT hr = queue->GetDevice(IID_PPV_ARGS(&device_));
@@ -1085,11 +1086,18 @@ void M12Dx12Processor::onPresent()
     }
 
     present_count_++;
-    // Live capture stride (every Nth present) plus a hard minimum interval:
-    // an occluded flip window makes DXGI retry Present at full throttle,
-    // which would otherwise fire a capture every few milliseconds.
+    // Live capture stride (every Nth present). The live branch self-throttles:
+    // each hit captures + processes a frame in-process (~100 ms at 1366x768),
+    // so M12_MIN_MS is only storm insurance for pathological fast-fail retry
+    // spins (occluded flip windows), not the cadence setter - the old fixed
+    // 250 ms floor silently capped every DX12 game at ~4 fps of fresh output
+    // while stale processed frames covered the moving game ("smear").
     bool live = ((present_count_ - 1) % (UINT64)live_every_) == 0;
-    static const UINT64 min_interval_ms = 250;
+    static const UINT64 min_interval_ms = []() -> UINT64 {
+        const char *e = getenv("M12_MIN_MS");
+        long v = e ? atol(e) : 33;
+        return v < 0 ? 0 : (UINT64)v;
+    }();
     UINT64 now = GetTickCount64();
     if (live && now - last_live_ms_ < min_interval_ms) live = false;
     const int fg_mode = is_framegen_enabled() ? framegen_mode() : 1;
