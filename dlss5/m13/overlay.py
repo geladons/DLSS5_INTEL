@@ -78,8 +78,10 @@
 # live on a worker thread anyway (see InLayerUI).
 # ============================================================================
 import ctypes
+import os
 import time
 import tkinter as tk
+from collections import deque
 from ctypes import wintypes
 
 from .processes import hwnd_for_pid
@@ -89,6 +91,7 @@ from .i18n import (tr, scale_preset_labels, scale_to_preset_label,
 from .overlay_hotkey import (VK, POLL_MS, parse_hotkey,  # noqa: F401
                              hotkey_label, HotkeyPoller)
 from .overlay_inlayer import InLayerUI
+from .overlay_modal import build_modal_panel, ExternalCursor
 from .overlay_input import OverlayInputGuard
 from .overlay_widgets import (build_panel, BG, PANEL, PANEL2, FG, MUTED,
                               ACCENT, GREEN, RED, AMBER,
@@ -127,7 +130,18 @@ class ControlOverlay:
         self.win = tk.Toplevel(master)
         self.win.overrideredirect(True)          # frameless: no OS window look
         self.win.attributes("-topmost", True)
-        self._alpha = 0.88
+        # cfg overlay_style: "modal" (default) = a centered Steam-style
+        # panel on a dimmed full-client backdrop - the shm hole stays
+        # degenerate so ALL client input routes to the ring for the whole
+        # visible session; "band" = the legacy framed sidebar+strip with a
+        # see-through center hole. Style is read once at build time.
+        self._modal = (str(ctl.cfg.get("overlay_style") or "modal")
+                       != "band")
+        # Modal: a single -alpha is the only knob Tk offers, so it has to
+        # cover two duties - solid panel AND dim backdrop. 0.95 keeps the
+        # panel effectively opaque (a bright game frame ghosted through
+        # at 0.85) while the dark backdrop still reads as a scrim.
+        self._alpha = 0.95 if self._modal else 0.88
         self.win.attributes("-alpha", self._alpha)
         self.win.configure(bg=BG, cursor="arrow")
         self.win.resizable(False, False)
@@ -175,6 +189,17 @@ class ControlOverlay:
         self._fit_id = None          # game-rect poll timer
         self._last_fit_log = None    # dedup for the fit log line
         self._entry_kbd = False      # a text widget holds Tk focus
+        self._kbd_session = False    # modal: kbd_capture for the whole
+                                     # visible session (ESC = close,
+                                     # keys never leak to the game)
+        self._opaque = None          # modal: panel rect in bitmap coords
+                                     # (backdrop pixels publish at ~55%
+                                     # alpha); None = uniform alpha
+        self._extcursor = None       # external-modal own cursor window
+        self._esc_id = None          # ESC edge poll (external + belt)
+        self._esc_was = False
+        self._log_tail = deque(maxlen=6)   # System tab's log tail
+        self.win.bind("<Escape>", lambda _e: self._esc_hide())
         # Focus tracking for the shm kbd_capture flag (bit2): only while
         # an Entry-like widget in OUR toplevel holds focus does the layer
         # route key events to the ring instead of the game. bind_all sees
@@ -196,14 +221,29 @@ class ControlOverlay:
 
     # ------------------------------------------------------------- build ---
     def _build(self):
-        # Widget-tree construction lives in overlay_widgets.build_panel -
-        # it assigns every widget/var straight onto this instance.
-        build_panel(self)
+        # Widget-tree construction is delegated: overlay_widgets
+        # .build_panel (legacy framed band) or overlay_modal
+        # .build_modal_panel (centered Steam-style card). Both assign
+        # every widget/var straight onto this instance under the same
+        # attribute names.
+        if self._modal:
+            build_modal_panel(self)
+        else:
+            build_panel(self)
 
     def _log(self, msg):
         """Overlay decisions go to BOTH sinks: the UI widget (on_log) and
-        logs\\overlay.log (field reports read files, not widgets)."""
+        logs\\overlay.log (field reports read files, not widgets). The
+        modal style additionally shows the last few lines in the System
+        tab."""
         overlay_log.log(msg)
+        self._log_tail.append(msg)
+        lbl = getattr(self, "syslog_lbl", None)
+        if lbl is not None:
+            try:
+                lbl.config(text="\n".join(self._log_tail))
+            except tk.TclError:
+                pass
         try:
             self.on_log(msg)
         except Exception:
@@ -216,6 +256,26 @@ class ControlOverlay:
         the display mode = screen). Falls back to the primary monitor
         work area when no game hwnd is known."""
         gh = self._game_hwnd
+        # Re-resolve the pid's biggest top-level every query: GTA IV-style
+        # games own several top-levels and re-parent/resize them across
+        # mode switches, so a hwnd cached at show time can go stale or
+        # stop being the render window (the layer's ui_hwnd follows the
+        # guarded surface window; the biggest-top-level heuristic is the
+        # closest user-mode proxy). Adopting the fresh pick keeps the fit
+        # poll converging onto the real client instead of pinning a
+        # transient 200x200 splash / work-area fallback forever.
+        pid = None
+        try:
+            pid = self.ctl.active_game_pid()
+        except Exception:
+            pid = None
+        if pid:
+            gh2 = hwnd_for_pid(pid)
+            if gh2 and gh2 != gh:
+                self._game_hwnd = gh2
+                self._log("[overlay] game hwnd re-resolved 0x%x -> 0x%x"
+                          % (gh or 0, gh2))
+                gh = gh2
         if gh:
             try:
                 rect = client_rect_screen(gh)
@@ -235,7 +295,14 @@ class ControlOverlay:
     def _recompute_hole(self):
         """Hole rect in BITMAP coords from the LIVE widget geometry:
         (sidebar_w, 0, W, H - strip_h). Called after geometry/layout so a
-        packed band of any size stays truthful."""
+        packed band of any size stays truthful. The modal style is
+        intentionally hole-free: the whole client-sized bitmap is UI, so
+        every client pixel routes input to the ring (the layer's cursor
+        sprite is then visible over the whole client) and the backdrop
+        dim reaches every pixel."""
+        if self._modal:
+            self._hole = (0, 0, 0, 0)
+            return
         W, H = self._extent
         try:
             sw = self.sidebar.winfo_width() or SIDEBAR_W
@@ -300,11 +367,179 @@ class ControlOverlay:
             self._extent = (w, h)
         # Instance shadow: every WIDTH/HEIGHT reader sees live extent.
         self.WIDTH, self.HEIGHT = self._extent
+        self._place_panel()
         self._recompute_hole()
         if force or rect != getattr(self, "_last_fit_log", None):
             self._last_fit_log = rect
             self._log("[overlay] fit rect=%s extent=%s hole=%s inlayer=%d"
                       % (rect, self._extent, self._hole, self._inlayer))
+
+    def _place_panel(self):
+        """Modal style: (re)center the panel inside the live extent and
+        record the opaque rect the publisher uses to split panel pixels
+        (full alpha) from backdrop pixels (~55% dim scrim). The rect is
+        in toplevel == bitmap coords."""
+        if not self._modal:
+            return
+        W, H = self._extent
+        pw = min(880, max(200, W - 40))
+        ph = min(600, max(160, H - 40))
+        pw = min(pw, W)
+        ph = min(ph, H)
+        self._opaque = ((W - pw) // 2, (H - ph) // 2,
+                        (W + pw) // 2, (H + ph) // 2)
+        try:
+            # relx/rely/anchor are passed explicitly - place() merges
+            # unmentioned options with the previous config, so a stale
+            # centering anchor would silently offset the rect.
+            self.modal_panel.place(x=self._opaque[0], y=self._opaque[1],
+                                   width=pw, height=ph,
+                                   relx=0, rely=0, anchor="nw")
+        except tk.TclError:
+            pass
+
+    # -------------------------------------------------- modal tab pages ---
+    def _tab_show(self, key):
+        """Modal: switch the content page + nav highlight; the wheel
+        proxy follows the page's own scroll canvas (if any)."""
+        if not self._modal or key not in self._pages:
+            return
+        self._tab = key
+        for k, page in self._pages.items():
+            try:
+                page.pack_forget()
+            except tk.TclError:
+                pass
+        try:
+            self._pages[key].pack(fill="both", expand=True)
+        except tk.TclError:
+            pass
+        for k, btn in self._nav_btns.items():
+            try:
+                btn.config(bg=ACCENT if k == key else PANEL2,
+                           fg="#ffffff" if k == key else FG)
+            except tk.TclError:
+                pass
+        self.body_canvas.target = self._page_canvas.get(key)
+
+    def _preset_pick(self, label):
+        """Modal preset button: same debounce/queue path as the band's
+        combobox - the settled selection is what rebuilds the engine."""
+        self.scale_var.set(label)
+        self._preset_refresh()
+        self._scale_selected()
+
+    def _preset_refresh(self):
+        """Highlight the picked preset button (ACCENT); the applied one
+        is still named by scale_state's 'applied preset:' line."""
+        if not self._modal:
+            return
+        try:
+            pick = self.scale_var.get()
+        except tk.TclError:
+            return
+        for lbl, b in getattr(self, "preset_btns", {}).items():
+            try:
+                on = lbl == pick
+                bg = ACCENT if on else PANEL2
+                b.config(bg=bg)
+                kids = b.winfo_children()
+                if kids:
+                    # Two-line segment cell: name stays readable, the
+                    # pct line dims when inactive.
+                    for ch in kids:
+                        ch.config(bg=bg,
+                                  fg=("#ffffff" if on
+                                      else (MUTED
+                                            if ch is getattr(
+                                                b, "_pct_lbl", None)
+                                            else FG)))
+                else:
+                    # Legacy flat preset button.
+                    b.config(fg="#ffffff" if on else FG)
+            except tk.TclError:
+                pass
+
+    def _fg_stats_line(self):
+        """Last 'fg stats' line of the layer log for the Frame gen tab
+        (the same tail the manager log reads; ~64 KB read per tick)."""
+        try:
+            p = gamelaunch.LAYER_LOG
+            size = os.path.getsize(p)
+            with open(p, "rb") as f:
+                f.seek(max(0, size - 65536))
+                data = f.read()
+            at = data.rfind(b"fg stats")
+            if at < 0:
+                return ""
+            return data[at:].split(b"\n", 1)[0].decode(
+                "ascii", "replace").strip()[:160]
+        except OSError:
+            return ""
+
+    def _modal_refresh(self):
+        """Modal-only header/tab refreshes driven from _refresh."""
+        snap = self.ctl.snapshot()
+        active_game = snap.get("active_game")
+        try:
+            self.game_lbl.config(
+                text=os.path.basename(active_game) if active_game else "")
+            self.preset_lbl.config(
+                text=scale_to_preset_label(self.ctl.cfg.get("scale")))
+            if self._pending_push is None:
+                self.gain_val.config(
+                    text="%.2f" % round(float(self.var.get()), 3))
+            self.fg_stats_lbl.config(text=self._fg_stats_line())
+        except tk.TclError:
+            pass
+
+    # ------------------------------------------------------------- ESC ---
+    def _esc_hide(self):
+        """<Escape> (Tk binding; in-layer key events arrive via the ring):
+        close the overlay. Guarded so the async-state poll's double-fire
+        cannot run hide() twice."""
+        if self._is_shown():
+            self.hide()
+
+    def _start_esc(self):
+        """While shown, poll the physical ESC state ~80 ms: the in-layer
+        ring covers ESC, but an un-eaten key (dead ring, external mode
+        where our never-focused toplevel sees no OS keys at all) must
+        still close the modal. Edge-triggered; armed with the CURRENT
+        state so the keypress that opened the overlay cannot insta-close
+        it."""
+        self._cancel_esc()
+        try:
+            self._esc_was = bool(_u32.GetAsyncKeyState(0x1B) & 0x8000)
+            self._esc_id = self.win.after(80, self._esc_tick)
+        except tk.TclError:
+            pass
+
+    def _cancel_esc(self):
+        if self._esc_id is not None:
+            try:
+                self.win.after_cancel(self._esc_id)
+            except Exception:
+                pass
+            self._esc_id = None
+
+    def _esc_tick(self):
+        self._esc_id = None
+        if not self._is_shown():
+            return
+        try:
+            down = bool(_u32.GetAsyncKeyState(0x1B) & 0x8000)
+        except Exception:
+            down = False
+        if down and not self._esc_was:
+            self._esc_was = True
+            self.hide()
+            return
+        self._esc_was = down
+        try:
+            self._esc_id = self.win.after(80, self._esc_tick)
+        except tk.TclError:
+            pass
 
     def _fit_tick(self):
         """~500 ms poll: track the game client rect (move/resize/mode
@@ -360,7 +595,8 @@ class ControlOverlay:
                     w = None
             except tk.TclError:
                 w = None
-        on = bool(w is not None and self._entry_like(w))
+        on = bool(w is not None and self._entry_like(w)) \
+            or self._kbd_session
         if on == self._entry_kbd:
             return
         self._entry_kbd = on
@@ -539,6 +775,7 @@ class ControlOverlay:
                     text=tr("ov_scale_current", applied), fg=MUTED)
         except tk.TclError:
             pass
+        self._preset_refresh()
 
     def _save_framegen(self):
         fg = bool(self.fg_var.get())
@@ -680,6 +917,8 @@ class ControlOverlay:
         if p30 and hasattr(self, "p30_panel") and self.p30_panel and not self.p30_panel.is_dragging():
             self.p30_panel.set_values(p30)
 
+        if self._modal:
+            self._modal_refresh()
         if not self._inlayer:
             # external-mode z-order insurance only; an off-screen parked
             # toplevel has nothing to re-assert.
@@ -781,13 +1020,20 @@ class ControlOverlay:
             return
         try:
             self.win.update_idletasks()
-            # Framed layout: land the cursor on the SIDEBAR band (not the
-            # center, which is the see-through hole) so the first real
-            # click operates a control instead of passing to the game.
-            x = self.win.winfo_rootx() + min(SIDEBAR_W // 2,
-                                             self.win.winfo_width() // 2)
-            y = self.win.winfo_rooty() + min(200,
-                                             self.win.winfo_height() // 2)
+            if self._modal:
+                # Centered panel: land the pointer in the panel's middle
+                # so the first click lands on a control.
+                x = self.win.winfo_rootx() + self.win.winfo_width() // 2
+                y = self.win.winfo_rooty() + self.win.winfo_height() // 2
+            else:
+                # Framed layout: land the cursor on the SIDEBAR band (not
+                # the center, which is the see-through hole) so the first
+                # real click operates a control instead of passing to the
+                # game.
+                x = self.win.winfo_rootx() + min(
+                    SIDEBAR_W // 2, self.win.winfo_width() // 2)
+                y = self.win.winfo_rooty() + min(
+                    200, self.win.winfo_height() // 2)
             _u32.SetCursorPos(x, y)
         except (tk.TclError, ValueError, OSError):
             pass
@@ -1001,6 +1247,14 @@ class ControlOverlay:
         il.set_frame_flags(covers)
         self._combo_bindtags_off()
         il.armed()                # first frame + ui_visible + drain pump
+        if self._modal:
+            # Modal: the whole client is UI, so the keyboard belongs to
+            # the overlay for the whole session - ESC closes the panel
+            # and game keys never leak through. _focus_changed ORs this
+            # into its focus-driven flag; hide()/disarm() clear the bit.
+            self._kbd_session = True
+            self._entry_kbd = True
+            il.shm.set_kbd_capture(True)
         # Same confinement-release watchdog as external mode, minus the
         # ShowCursor/SetCursor half: the layer composites the sprite
         # cursor itself, but a game that pins the pointer (ClipCursor)
@@ -1012,6 +1266,8 @@ class ControlOverlay:
         self._input_guard.arm(self._game_hwnd, show_cursor=False,
                               pin_only=covers)
         self._start_fit()         # ~500 ms client-rect tracking
+        self._start_esc()         # ESC closes the modal (belt: ring also
+                                # delivers KeyPress Escape -> _esc_hide)
         self._log("[overlay] in-layer shown pid=%s hwnd=0x%x extent=%s"
                     % (pid or 0, hwnd or 0, self._extent))
 
@@ -1144,14 +1400,22 @@ class ControlOverlay:
                 # widget hit-testing. Focus mode keeps the real answer.
                 subclass_noactivate(hwnd)
         self.win.attributes("-alpha", self._alpha)   # undo in-layer's 0
-        try:
-            # The center hole: chroma-keyed pixels are fully transparent
-            # AND click-through - the OS forwards them to the game below.
-            # Band pixels keep -alpha 0.88 (the "semi-transparent band").
-            self.win.attributes("-transparentcolor", CHROMA)
-        except tk.TclError:
-            self._log("[overlay] -transparentcolor unsupported on this "
-                      "Tk build - hole shows as solid chroma")
+        if self._modal:
+            # Modal: the window must stay a SOLID dimmed surface - no
+            # chroma key, no see-through hole.
+            try:
+                self.win.attributes("-transparentcolor", "")
+            except tk.TclError:
+                pass
+        else:
+            try:
+                # The center hole: chroma-keyed pixels are fully
+                # transparent AND click-through - the OS forwards them
+                # to the game below. Band pixels keep -alpha.
+                self.win.attributes("-transparentcolor", CHROMA)
+            except tk.TclError:
+                self._log("[overlay] -transparentcolor unsupported on "
+                          "this Tk build - hole shows as solid chroma")
 
         # Remember the game window so hide() can hand the foreground back
         # (only used when focus mode was enabled for this session) - and so
@@ -1235,6 +1499,16 @@ class ControlOverlay:
         self._warp_cursor()
         self._cursor_keeper()
         self._start_fit()        # ~500 ms client-rect tracking
+        self._start_esc()        # ESC closes (our toplevel is never
+                               # focused, so no OS <Escape> reaches it)
+        if self._modal:
+            # Own cursor window: the game's SetCapture redirects
+            # WM_SETCURSOR to itself (the invisible-cursor field
+            # report), so a small click-through topmost toplevel tracks
+            # GetCursorPos - immune to cursor-state races.
+            if self._extcursor is None:
+                self._extcursor = ExternalCursor(self.win)
+            self._extcursor.show()
 
         if self.ap_var.get() and game_mode and not gamelaunch.mode_paused(mode):
             self.ctl.submit(self.ctl.processing_toggle)
@@ -1251,11 +1525,15 @@ class ControlOverlay:
 
     def hide(self):
         self._cancel_fit()
+        self._cancel_esc()
         self._input_guard.disarm()   # stop re-releasing the game's clip
         self._log("[overlay] hidden (inlayer=%d)" % self._inlayer)
         self.unfreeze()
         self.freeze_lbl.config(text="")
         self._return_focus()
+        if self._extcursor is not None:
+            self._extcursor.hide()
+        self._kbd_session = False
         if self._entry_kbd and self._il and self._il.is_armed():
             self._il.shm.set_kbd_capture(False)
         self._entry_kbd = False

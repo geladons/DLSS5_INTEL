@@ -23,6 +23,11 @@ _S = {
     # chars wide, the settings one 24 - long translations get truncated
     "scale_perf": {"en": "Performance (50%)", "ru": "Скорость (50%)"},
     "scale_ultra": {"en": "Ultra Perf. (33%)", "ru": "Ультра (33%)"},
+    "scale_short_native": {"en": "Native", "ru": "Нативное"},
+    "scale_short_quality": {"en": "Quality", "ru": "Качество"},
+    "scale_short_balanced": {"en": "Balanced", "ru": "Баланс"},
+    "scale_short_perf": {"en": "Perf.", "ru": "Скорость"},
+    "scale_short_ultra": {"en": "Ultra", "ru": "Ультра"},
     "framegen": {"en": "Frame Generation (default)",
                  "ru": "Генерация кадров (по умолч.)"},
     "framegen_hint": {
@@ -296,6 +301,27 @@ _S = {
                           "CTRL+ALT+Q off",
                       "ru": "%s панель | CTRL+ALT+X пауза | "
                             "CTRL+ALT+Q выкл"},
+    # ---- modal overlay (Steam/Game Bar style) --------------------------
+    "ov_tab_presets": {"en": "Presets", "ru": "Пресеты"},
+    "ov_tab_image": {"en": "Image", "ru": "Изображение"},
+    "ov_tab_fg": {"en": "Frame gen", "ru": "Генерация кадров"},
+    "ov_tab_system": {"en": "System", "ru": "Система"},
+    "ov_close": {"en": "Close", "ru": "Закрыть"},
+    "ov_footer_hint": {"en": "%s toggle  ·  ESC close  ·  "
+                            "CTRL+ALT+X pause  ·  CTRL+ALT+Q off",
+                       "ru": "%s панель  ·  ESC закрыть  ·  "
+                             "CTRL+ALT+X пауза  ·  CTRL+ALT+Q выкл"},
+    "ov_footer_hint_short": {"en": "%s toggle  ·  ESC close  ·  "
+                                  "CTRL+ALT+X pause",
+                             "ru": "%s панель  ·  ESC закрыть  ·  "
+                                   "CTRL+ALT+X пауза"},
+    "ov_log_tail": {"en": "Overlay log", "ru": "Лог оверлея"},
+    "ov_hotkeys": {"en": "Hotkeys", "ru": "Горячие клавиши"},
+    "opt_modal_overlay": {
+        "en": "Modal in-game overlay (Steam-style centered panel, "
+              "applies on next start)",
+        "ru": "Модальный игровой оверлей (панель по центру в стиле Steam, "
+              "применится при перезапуске)"},
     # ---- settings tab -----------------------------------------------------
     "engine_box": {"en": "In-game engine controls",
                    "ru": "Управление движком в игре"},

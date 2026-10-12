@@ -670,7 +670,8 @@ class DibCapture:
         finally:
             _u32.ReleaseDC(None, screen)
 
-    def grab(self, hwnd, w, h, alpha=0xE0, hole=None):
+    def grab(self, hwnd, w, h, alpha=0xE0, hole=None,
+             opaque=None, dim_alpha=0x8C):
         """-> BGRA bytes (w*h*4) of the window's current content, or None.
         The whole rect gets `alpha` - the panel band is a solid fill.
 
@@ -679,14 +680,37 @@ class DibCapture:
         Needed even though the layer skips the hole while blending: it
         keeps the published payload self-consistent (a hole-unaware
         reader still shows a clean center). Row-contiguous zero fills -
-        a few ms at 2560x1440 on the 15 Hz publish pump."""
+        a few ms at 2560x1440 on the 15 Hz publish pump.
+
+        opaque: optional (l, t, r, b) rect for the MODAL layout - the
+        centered panel. Every pixel OUTSIDE it gets dim_alpha (~55%
+        scrim over the game), pixels inside keep `alpha`. The layer's
+        src-over blend already honours per-pixel alpha, so the dim is a
+        producer-side effect with zero ABI change. Region math only -
+        no pixel scanning."""
         if w <= 0 or h <= 0 or not self._ensure(w, h):
             return None
         if not _u32.PrintWindow(hwnd, self._hdc, PW_RENDERFULLCONTENT):
             return None
         n = w * h
         buf = bytearray(ctypes.string_at(self._bits, n * 4))
-        buf[3::4] = bytes((alpha,)) * n
+        stride = w * 4
+        if opaque:
+            l, t, r, b = (int(v) for v in opaque)
+            l = min(max(0, l), w)
+            r = min(max(0, r), w)
+            t = min(max(0, t), h)
+            b = min(max(0, b), h)
+            if l < r and t < b:
+                buf[3::4] = bytes((dim_alpha,)) * n
+                row = bytes((alpha,)) * (r - l)
+                for y in range(t, b):
+                    o = y * stride + l * 4 + 3
+                    buf[o:o + (r - l) * 4:4] = row
+            else:
+                buf[3::4] = bytes((alpha,)) * n
+        else:
+            buf[3::4] = bytes((alpha,)) * n
         if hole:
             l, t, r, b = (int(v) for v in hole)
             l = min(max(0, l), w)

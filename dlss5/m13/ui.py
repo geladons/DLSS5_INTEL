@@ -520,6 +520,15 @@ class ManagerUI:
                         command=lambda: self.ctl.cfg.set(
                             "overlay_focus", bool(self.focus_var.get()))
                         ).pack(anchor="w")
+        self.modal_var = tk.BooleanVar(
+            value=str(self.ctl.cfg.get("overlay_style") or "modal")
+                  != "band")
+        ttk.Checkbutton(opts, text=tr("opt_modal_overlay"),
+                        variable=self.modal_var,
+                        command=lambda: self.ctl.cfg.set(
+                            "overlay_style",
+                            "modal" if self.modal_var.get() else "band")
+                        ).pack(anchor="w")
 
         # ---- one-time setup / admin rows below the daily controls ----
         row = ttk.Frame(t)

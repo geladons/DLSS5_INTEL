@@ -466,7 +466,18 @@ class InLayerUI:
         if w > SHM_MAX_W or h > SHM_MAX_H:
             return False                 # panel exceeds the ABI cap
         hole = getattr(self.ov, "_hole", None)
-        bgra = self.dib.grab(hwnd, w, h, hole=hole)
+        # Modal style: the centered panel is the only full-alpha region;
+        # the rest of the client publishes as a ~55% dim scrim
+        # (per-pixel alpha - the layer's src-over blend needs no ABI
+        # change). Band style: opaque stays None -> uniform alpha.
+        opaque = getattr(self.ov, "_opaque", None) \
+            if getattr(self.ov, "_modal", False) else None
+        # The modal panel publishes FULLY opaque: 0xE0 still ghosted a
+        # bright game frame through the content area (~12% bleed). Only
+        # the out-of-panel scrim stays translucent (dim_alpha).
+        bgra = self.dib.grab(hwnd, w, h,
+                             alpha=0xFF if opaque else 0xE0,
+                             hole=hole, opaque=opaque)
         if bgra is None:
             return False
         return self.shm.write_bitmap(bgra, w, h, *self.dst, hole=hole)

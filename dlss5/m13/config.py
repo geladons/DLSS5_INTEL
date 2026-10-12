@@ -51,6 +51,11 @@ DEFAULTS = {
                                  # shared memory (hidden Tk panel + shm);
                                  # "external" = classic on-screen toplevel
                                  # (fallback when the shm cannot be opened)
+    "overlay_style": "modal",    # "modal" = Steam-style centered panel on a
+                                 # dimmed full-client backdrop (all client
+                                 # input captured while visible);
+                                 # "band" = legacy framed band with a
+                                 # see-through center hole
     # ---- media tab ---------------------------------------------------------
     "media_out_dir": None,       # fixed output dir for mode "always"; None =
                                  # alongside the source (subdir "dlss5")
