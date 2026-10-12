@@ -83,9 +83,15 @@ void ChainEngine::recordTemporal() {
         Push sp{};
         sp.a[0] = (int32_t)st_[0].TOK;
         sp.a[1] = (int32_t)netW_; sp.a[2] = (int32_t)netH_;
+        sp.a[3] = (int32_t)(rfScap_ * 4.0f + 0.5f); // quarter-LSB units
+        sp.b[0] = (int32_t)(mvPrad_ + 0.5f);
+        sp.b[1] = (int32_t)(mvPth_ + 0.5f);
+        sp.b[2] = (int32_t)(mvPmarg_ + 0.5f);
+        sp.b[3] = (int32_t)(mvRsm_ + 0.5f);
         sp.c[1] = mvBeta_; sp.c[2] = mvInterp_;
         sp.c[3] = mvPixStatic_;
         sp.d[0] = histValid;
+        sp.d[1] = rfAlo_; sp.d[2] = rfAhi_; sp.d[3] = rfRlo_;
         vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeStats_);
         vkCmdPushConstants(cmd_, pipeLayout_, VK_SHADER_STAGE_COMPUTE_BIT,
                            0, sizeof(Push), &sp);
@@ -95,10 +101,16 @@ void ChainEngine::recordTemporal() {
     Push tp{};
     tp.a[0] = (int32_t)st_[0].TOK;
     tp.a[1] = (int32_t)netW_; tp.a[2] = (int32_t)netH_;
+    tp.a[3] = (int32_t)(rfScap_ * 4.0f + 0.5f); // quarter-LSB units
+    tp.b[0] = (int32_t)(mvPrad_ + 0.5f);
+    tp.b[1] = (int32_t)(mvPth_ + 0.5f);
+    tp.b[2] = (int32_t)(mvPmarg_ + 0.5f);
+    tp.b[3] = (int32_t)(mvRsm_ + 0.5f);
     tp.c[0] = pipeStats_ ? cfg_.gainLock : 0.0f;
     tp.c[1] = mvBeta_; tp.c[2] = mvInterp_;
     tp.c[3] = mvPixStatic_;
     tp.d[0] = histValid;
+    tp.d[1] = rfAlo_; tp.d[2] = rfAhi_; tp.d[3] = rfRlo_;
     vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeTemporalNr_);
     vkCmdPushConstants(cmd_, pipeLayout_, VK_SHADER_STAGE_COMPUTE_BIT,
                        0, sizeof(Push), &tp);

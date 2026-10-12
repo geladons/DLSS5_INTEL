@@ -239,21 +239,71 @@ private:
     void* mvRbPtr_ = nullptr;
     bool mvDebug_ = false;
     // D5C_MV_BETA / D5C_MV_INTERP runtime knobs, pushed to temporal_nr and
-    // temporal_stats as pc.c[1] (warped-pixel refresh fraction) and
-    // pc.c[2] (1 = bilinear mv between block centres, 0 = nearest block).
-    // Shipped defaults = the z1 sweep winner: BETA 0.15 + bilinear mv +
-    // the stronger zero-bias (static flicker p90 2.57% -> 0.96% on
-    // _nat_load for a screen-fixed-energy cost of 7.5% -> 8.9% vs the
-    // 7.5% temporal-off floor). PIXSTATIC stays available but off - at
-    // 1 LSB it added nothing over the zero-bias alone.
-    float mvBeta_ = 0.15f;
+    // temporal_stats as pc.c[1] (unconditional base pull weight on moving
+    // pixels) and pc.c[2] (1 = bilinear mv between block centres, 0 =
+    // nearest block). v12: the every-frame pull re-anchors the carried
+    // residual to the screen-fixed net grain when it dominates (the
+    // crawling grain on roads/walls), but with the smoothed carry
+    // (D5C_MV_RSM) a small base pull is pure damping - it converges
+    // tap-selection noise without re-anchoring the field. Shipped
+    // default 0.10; 0 = verbatim carry (measured 3x worse flow flicker
+    // on the GTA IV flythrough), >=0.3 reproduces the old re-anchor.
+    float mvBeta_ = 0.10f;
     float mvInterp_ = 1.0f;
+    // D5C_MV_PRAD/PTH/PMARG: per-pixel carry-tap refinement in
+    // temporal_nr/stats (pc.b[0..2]). When the block-mv warp leaves the
+    // stored previous input > PTH/255 off the current pixel, the integer
+    // taps within PRAD net px of the warp - plus always the screen cell -
+    // are rescored on max-channel |col01 - P|; a tap better by > PMARG/255
+    // relocates the carry (mv becomes p - tap). PRAD = 0 disables.
+    float mvPrad_ = 2.0f;
+    float mvPth_ = 2.0f;
+    float mvPmarg_ = 1.0f;
+    // D5C_MV_RSM: carried-residual smoothing radius in net px
+    // (pc.b[3]). On moving pixels the residual source is the mean of
+    // E - P over the (2*RSM+1)^2 taps around q instead of the single
+    // warped tap: the flicker cost of a warp error is the spatial
+    // gradient of the carried residual field, and block mvs miss by
+    // 1-4 px on grain - a smooth carried field keeps small errors
+    // cheap while staying content-attached. 0 = verbatim tap. Still
+    // pixels always keep the verbatim (byte-exact) tap. Shipped 2
+    // (5x5 neighbourhood): the best measured flow/static balance on
+    // the GTA IV flythrough (0.048/0.074 vs 0.051/0.079 at radius 1).
+    float mvRsm_ = 2.0f;
+    // D5C_RF_ALO/AHI/RLO: moving-pixel refresh-pull bands (LSB units,
+    // pc.d[1..3]). emit = col01 + rh + w*(rt - rh) with
+    //   w = max(smoothstep(ALO,AHI,dF), smoothstep(RLO,2.5*RLO,dr),
+    //           BETA*min(|mv|,1)):
+    // honest warps carry the residual verbatim; a warp that cannot
+    // explain the input (dF, post-refinement) or a residual the net no
+    // longer agrees with (dr) blends to the fresh candidate instead.
+    float rfAlo_ = 5.0f;
+    float rfAhi_ = 14.0f;
+    float rfRlo_ = 32.0f;
+    // D5C_RF_SCAP: still-pixel refresh step cap in LSB (pc.a[3]). The
+    // armed-budget refresh steps the held residual by
+    // max(R_STEP_MIN, R_FRAC*|e|) per frame - visible 5-10 LSB jumps on
+    // pixels parked next to motion whose residual went badly stale
+    // (manifest pan fixture's still-band flicker). Capping the step at
+    // ~1.5 LSB makes the convergence a sub-visible trickle inside the
+    // same 16-frame budget. <=0 = uncapped (old behaviour).
+    float rfScap_ = 1.5f;
     // D5C_MV_ZBIAS / D5C_MV_ZABS: motion_est zero-motion bias,
     // (0,0) when SAD00 <= SADmin*(1+ZBIAS) + 64*ZABS/255.
     // Pushed to motion_est as pc.c[1]/pc.c[2].
-    // D5C_MV_PIXSTATIC: per-pixel static override in LSB; a pixel whose
-    // unwarped input delta <= PIXSTATIC/255 forces mv=(0,0) (exact v9
-    // path). 0 = off. Pushed to temporal_nr/stats as pc.c[3].
+    // D5C_MV_PIXSTATIC: per-pixel static gate in LSB, shipped as a RAMP
+    // (v12): the block mv is scaled by smoothstep(c3 .. 2.25*c3, dF0)
+    // where dF0 is the pixel's unwarped input delta - a pixel whose
+    // input did not change keeps the byte-exact still path even inside
+    // a moving block, a clearly-moving pixel keeps the full warp, and
+    // the boundary band carries proportionally. The ramp replaced a
+    // hard force-to-zero: pixels whose input noise straddled the cutoff
+    // alternated carried/still frame to frame and flickered at every
+    // threshold value (manifest pan fixture ~10%/frame). Default 0.75
+    // (ramp 0.75..1.7 LSB) keeps the flow-flicker win on the flythrough;
+    // values >=2 anchor too many slow-drift pixels and degrade the
+    // motion metric (0.75 -> 0.051/0.079, 2.0 -> 0.059/0.098 on the
+    // hard pan slice). 0 = off. Pushed to temporal_nr/stats as pc.c[3].
     // D5C_MV_SUBT: sub-pixel threshold in net pixels; the motion_est
     // parabolic refine runs on every interior pick (including (0,0), so
     // bias-pinned blocks still report their sub-pixel drift), and a
@@ -274,7 +324,7 @@ private:
     // drift passes; SAD-flat blocks stay (0,0). Pushed as pc.d[1].
     float mvZbias_ = 0.15f;
     float mvZabs_ = 2.0f;
-    float mvPixStatic_ = 0.0f;
+    float mvPixStatic_ = 0.75f;
     float mvSubt_ = 0.10f;
     float mvEma_ = 1.0f;
     float mvImpt_ = 0.06f;

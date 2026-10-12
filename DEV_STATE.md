@@ -3994,3 +3994,33 @@ d67f8f264c859994b7c9b19687d5903f, temporal_nr.spv
 2e81e4006a60aa258d68b879796357a7 to all five runtime dirs
 (m11d/layer x86/x64/m12/m8b). Production daemon restarted on port 48990
 with its original args (PID 20820).
+
+## 2026-10-11 - carried-residual motion tracking (crawling grain fix)
+
+Real-flythrough replay (690 game frames of D:\dlss5_cap\_bench_game.bgra)
+showed the residual grain not tracking input motion: block mvs missed by
+1-4 px on texture, so the carried residual re-anchored to the screen and
+crawled on roads/walls (owner "digital garbage"). Fix bundle:
+
+- temporal_nr.comp + temporal_stats.comp (mirrored): per-pixel carry-tap
+  refinement (rescore taps within PRAD px + the screen cell when
+  dF > PTH), carried-residual smoothing over (2*RSM+1)^2 taps on moving
+  pixels only, evidence-weighted emit w = max(smoothstep(ALO,AHI,dF),
+  smoothstep(RLO,2.5*RLO,dr), BETA*min(|mv|,1)), PIXSTATIC as a ramp
+  smoothstep(c3..2.25*c3, dF0) replacing the hard force-to-zero,
+  still-pixel refresh step capped at SCAP LSB.
+- engine.h/.cpp: knobs D5C_MV_PRAD=2 PTH=2 PMARG=1 RSM=2, D5C_RF_ALO=5
+  AHI=14 RLO=32 SCAP=1.5; defaults BETA 0.15->0.10, PIXSTATIC 0->0.75
+  (repurposed as ramp edge). engine_temporal.cpp pushes pc.b[0..3],
+  pc.a[3], pc.d[1..3] to both temporal shaders.
+- replay_gate.py: windowed analyze() (WIN=150, 1/K-frame overlaps) -
+  identical verdict+notes on the 690-frame pair, no more OOM on
+  2388-frame captures (was ~14 GB int16).
+
+Gate _bench_game.bgra (old -> new): flow flicker med 0.071 -> 0.039,
+p90 0.122 -> 0.076 (goal <=0.04/<=0.08 met); static p90 0.0114 -> 0.0052;
+frozen-stale, breathing, transitions unchanged. fixture:ghost PASS;
+zoom_load/pan no regression; zoom_load10 improved (FAIL -> WARN).
+Deployed md5-verified to production (m11d.exe b152cda9.., d5c_chain.dll
+b5fc9e32.., temporal_nr.spv e3c6702f.., temporal_stats.spv 93aadd23..);
+production daemon restarted on 48990 (new [chain] knob line in log).

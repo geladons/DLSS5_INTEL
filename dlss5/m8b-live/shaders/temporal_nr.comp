@@ -147,9 +147,21 @@ const float R_DONE    =   6.0 / 255.0; // residual match below -> refresh done
 const float R_STEP_MIN=   1.0 / 255.0; // floor per refresh step (sub-visible)
 const float R_FRAC    =   0.25;        // fraction of residual error per step
 const float R_FRAMES  =  16.0;         // refresh frames per anchor event
-// Warped-pixel refresh fraction is pc.c[1] (env D5C_MV_BETA, default 0.3);
-// pc.c[2] != 0 (env D5C_MV_INTERP) bilinearly blends the per-block mv
-// between block centres instead of nearest-block.
+// Moving-pixel pull (v11): emit = col01 + rh + w*(rt - rh) where the
+// weight w = max(wA(dF), wR(dr), BETA*min(|mv|,1)) is EVIDENCE that the
+// carried residual is wrong - the old unconditional BETA pull
+// re-anchored the residual to the screen-fixed net grain within ~10
+// frames (measured on the GTA IV flythrough: the field's residual sits
+// at the screen cell / displaced ~4-5 px off the flow, not carried =
+// the owner-visible crawling grain). wA = smoothstep(pc.d[1], pc.d[2],
+// dF) fires when even the REFINED warp cannot explain the input
+// (pc.d[1]/pc.d[2] in LSB = env D5C_RF_ALO/AHI); wR =
+// smoothstep(pc.d[3], 2.5*pc.d[3], dr) fires when the carried residual
+// itself disagrees with the fresh one (pc.d[3] in LSB = env
+// D5C_RF_RLO). pc.c[1] (env D5C_MV_BETA, shipped default 0) is an
+// optional unconditional base pull; >=0.15 reproduces the old
+// re-anchor rate. pc.c[2] != 0 (env D5C_MV_INTERP) bilinearly blends
+// the per-block mv between block centres instead of nearest-block.
 
 // (The earlier "direction trit" experiment - a per-channel reversal sign
 // packed into the low mantissa bits of the history store - was removed:
@@ -337,18 +349,28 @@ void main() {
     const int netW = pc.a.y, netH = pc.a.z;
     const int px = int(p % uint(netW)), py = int(p / uint(netW));
     vec2 mv = blockMv(px, py, netW, netH);
-    // Per-pixel static override (pc.c[3] = D5C_MV_PIXSTATIC, in LSB):
+    // Per-pixel static gate (pc.c[3] = D5C_MV_PIXSTATIC, in LSB):
     // a pixel whose UNWARPED input delta vs the same cell's previous
-    // input is within the threshold is static no matter what the block
-    // estimator said - force mv=(0,0) so the exact v9 path (unwarped
-    // integer taps, anchor/budget, no BETA chase) applies. Blocks
-    // touching motion otherwise contaminate their still pixels with
-    // warped and bilinear-resampled state.
+    // input is ~0 is static no matter what the block estimator said.
+    // v12 ships this as a RAMP, not a hard threshold: a binary
+    // force-to-zero put every pixel whose input noise straddled the
+    // cutoff on a frame-to-frame alternation between the carried and
+    // still paths (manifest pan fixture: ~10% of the still band
+    // flickering every frame at ANY threshold value). The mv is scaled
+    // by smoothstep(c3 .. 2.25*c3, dF0): clearly-still pixels land on
+    // the exact v9 path, clearly-moving pixels keep the full warp, and
+    // the boundary band carries proportionally (fractional mv ->
+    // bilinear tap, continuous in dF0) instead of flip-flopping.
     if (pc.c[3] > 0.0) {
         const float dF0 = max(abs(col01[0] - hsP[3u * N + p * 3u + 0u]),
                               max(abs(col01[1] - hsP[3u * N + p * 3u + 1u]),
                                   abs(col01[2] - hsP[3u * N + p * 3u + 2u])));
-        if (dF0 <= pc.c[3] * (1.0 / 255.0)) mv = vec2(0.0);
+        mv *= smoothstep(pc.c[3] * (1.0 / 255.0),
+                         pc.c[3] * (2.25 / 255.0), dF0);
+        // sub-LSB effective mv -> exact still path (byte-exact): a
+        // fractional mv this small would only bilinear-smear the own
+        // cell with a neighbour.
+        if (dot(mv, mv) < 0.0025) mv = vec2(0.0);
     }
     const float qx = float(px) - mv.x;
     const float qy = float(py) - mv.y;
@@ -406,14 +428,154 @@ void main() {
     }
     bool valid = stValid && (pc.d.x != 0.0);
 
+    // Per-pixel carry-tap refinement (v11; pc.b[0] = radius in net px,
+    // pc.b[1] = dF trigger in LSB, pc.b[2] = required improvement margin
+    // in LSB - envs D5C_MV_PRAD/PTH/PMARG). The block mv is a per-8x8
+    // estimate: block-boundary blending and sub-quantization error leave
+    // the warp a fraction of a pixel off, and the carried residual then
+    // lands displaced from its content (the crawling grain on roads and
+    // walls). When the warp does not explain the input (dF above the
+    // trigger), rescore the integer taps around it on the same metric
+    // and relocate the carry to a materially better source. The screen
+    // cell itself is always a candidate, so a still pixel inside a
+    // moving block lands back on the exact v9 path. The refined
+    // displacement replaces mv for the moving test AND the residual
+    // fetch (integer tap -> verbatim E, no bilinear). Only fires while
+    // the base warp's state read is valid.
+    float dF = 1e9;
+    if (valid) {
+        dF = max(abs(col01[0] - aP[0]),
+                 max(abs(col01[1] - aP[1]),
+                     abs(col01[2] - aP[2])));
+        const int rad = pc.b[0];
+        const float th = float(pc.b[1]) * (1.0 / 255.0);
+        const float marg = float(pc.b[2]) * (1.0 / 255.0);
+        if (rad > 0 && dF > th) {
+            const int cx0 = clamp(int(floor(qx + 0.5)), 0, netW - 1);
+            const int cy0 = clamp(int(floor(qy + 0.5)), 0, netH - 1);
+            float bestS = dF;
+            int bestX = -1, bestY = -1;
+            for (int ry = -rad; ry <= rad; ++ry) {
+                for (int rx = -rad; rx <= rad; ++rx) {
+                    const int sx = clamp(cx0 + rx, 0, netW - 1);
+                    const int sy = clamp(cy0 + ry, 0, netH - 1);
+                    const uint sp2 = uint(sy) * uint(netW) + uint(sx);
+                    const float v0 = hsP[3u * N + sp2 * 3u + 0u];
+                    const float v1 = hsP[3u * N + sp2 * 3u + 1u];
+                    const float v2 = hsP[3u * N + sp2 * 3u + 2u];
+                    if (!(v0 >= -0.01 && v0 <= 1.01)
+                        || !(v1 >= -0.01 && v1 <= 1.01)
+                        || !(v2 >= -0.01 && v2 <= 1.01)) continue;
+                    const float s = max(abs(col01[0] - v0),
+                                        max(abs(col01[1] - v1),
+                                            abs(col01[2] - v2)));
+                    if (s < bestS) { bestS = s; bestX = sx; bestY = sy; }
+                }
+            }
+            {   // the screen cell: still-pixel rescue inside moving blocks
+                const uint sp2 = uint(py) * uint(netW) + uint(px);
+                const float v0 = hsP[3u * N + sp2 * 3u + 0u];
+                const float v1 = hsP[3u * N + sp2 * 3u + 1u];
+                const float v2 = hsP[3u * N + sp2 * 3u + 2u];
+                if (v0 >= -0.01 && v0 <= 1.01
+                    && v1 >= -0.01 && v1 <= 1.01
+                    && v2 >= -0.01 && v2 <= 1.01) {
+                    const float s = max(abs(col01[0] - v0),
+                                        max(abs(col01[1] - v1),
+                                            abs(col01[2] - v2)));
+                    if (s < bestS) { bestS = s; bestX = px; bestY = py; }
+                }
+            }
+            if (bestX >= 0 && bestS < dF - marg) {
+                // Winner found: re-fetch P/A/E/R at the integer tap with
+                // the same range tests; an invalid companion state drops
+                // the candidate (block result kept).
+                const uint sp2 = uint(bestY) * uint(netW) + uint(bestX);
+                float nP[3], nA[3], nE[3];
+                float nR = hsP[9u * N + sp2];
+                bool ok2 = (nR >= 0.0 && nR <= R_FRAMES);
+                for (uint c = 0u; c < 3u; ++c) {
+                    const float v = hsP[3u * N + sp2 * 3u + c];
+                    if (!(v >= -0.01 && v <= 1.01)) ok2 = false;
+                    nP[c] = v;
+                    const float w = hsP[6u * N + sp2 * 3u + c];
+                    if (!(w >= -0.01 && w <= 1.01)) ok2 = false;
+                    nA[c] = w;
+                    float sraw = hsP[sp2 * 3u + c];
+                    if (!(sraw > -1e9 && sraw < 1e9)) sraw = 0.0;
+                    nE[c] = floor(clamp(sraw * 8.0 + 0.5, 0.0, 1.0) * 255.0
+                                  + 0.5) * (1.0 / 255.0);
+                }
+                if (ok2) {
+                    for (uint c = 0u; c < 3u; ++c) {
+                        aP[c] = nP[c]; aA[c] = nA[c]; Ew[c] = nE[c];
+                    }
+                    Rw = nR;
+                    dF = bestS;
+                    mv = vec2(float(px - bestX), float(py - bestY));
+                }
+            }
+        }
+    }
+
     float rh[3], rc[3];
     for (uint c = 0u; c < 3u; ++c) {
         rh[c] = Ew[c] - aP[c];
         rc[c] = cand[c] - col01[c];
     }
-    float dF = max(abs(col01[0] - aP[0]),
-                   max(abs(col01[1] - aP[1]),
-                       abs(col01[2] - aP[2])));
+    // Carried-residual smoothing (v12; pc.b[3] = radius in net px, env
+    // D5C_MV_RSM). Under a warp error de the emit's flicker cost is
+    // |resid[q] - resid[q+de]| - the spatial gradient of the carried
+    // residual field. Block mvs are routinely off by 1-4 px on grain, so
+    // a verbatim single-tap carry re-injects the residual's
+    // high-frequency noise as frame-to-frame jitter (measured on the
+    // GTA IV flythrough: BETA=0 verbatim carry tripled flow flicker vs
+    // the shipped pull). Averaging the residual source over a small
+    // neighbourhood of q makes the carried field locally smooth: small
+    // warp errors stay cheap, the enhancement stays attached to content
+    // at texture scale, and screen-anchored mottle never gets a fixed
+    // cell to stick to. Applies to MOVING pixels only - the still path
+    // must keep rh byte-exact.
+    if (valid && length(mv) > 0.01 && pc.b[3] > 0) {
+        const int rs = pc.b[3];
+        const int bx0 = int(floor(qx + 0.5));
+        const int by0 = int(floor(qy + 0.5));
+        float sE[3], sP[3];
+        for (uint c = 0u; c < 3u; ++c) { sE[c] = 0.0; sP[c] = 0.0; }
+        float cnt = 0.0;
+        for (int dy = -rs; dy <= rs; ++dy) {
+            const int sy = by0 + dy;
+            if (sy < 0 || sy >= netH) continue;
+            for (int dx = -rs; dx <= rs; ++dx) {
+                const int sx = bx0 + dx;
+                if (sx < 0 || sx >= netW) continue;
+                const uint sp2 = uint(sy) * uint(netW) + uint(sx);
+                float pp[3], ee[3];
+                bool ok3 = true;
+                for (uint c = 0u; c < 3u; ++c) {
+                    const float v = hsP[3u * N + sp2 * 3u + c];
+                    if (!(v >= -0.01 && v <= 1.01)) ok3 = false;
+                    pp[c] = v;
+                    float sraw = hsP[sp2 * 3u + c];
+                    if (!(sraw > -1e9 && sraw < 1e9)) ok3 = false;
+                    ee[c] = floor(clamp(sraw * 8.0 + 0.5, 0.0, 1.0)
+                                  * 255.0 + 0.5) * (1.0 / 255.0);
+                }
+                if (ok3) {
+                    for (uint c = 0u; c < 3u; ++c) {
+                        sE[c] += ee[c]; sP[c] += pp[c];
+                    }
+                    cnt += 1.0;
+                }
+            }
+        }
+        // keep the verbatim tap if fewer than half the taps are usable
+        const float need = (2.0 * float(rs) + 1.0)
+                         * (2.0 * float(rs) + 1.0) * 0.5;
+        if (cnt >= need && cnt > 0.0) {
+            for (uint c = 0u; c < 3u; ++c) rh[c] = sE[c] / cnt - sP[c] / cnt;
+        }
+    }
     float dA = max(abs(col01[0] - aA[0]),
                    max(abs(col01[1] - aA[1]),
                        abs(col01[2] - aA[2])));
@@ -433,24 +595,27 @@ void main() {
         // uncapped, re-anchor, no refresh pending.
         for (uint c = 0u; c < 3u; ++c) { emitT[c] = anchored[c]; An[c] = col01[c]; }
     } else {
-        // HELD: warped pixels refresh EVERY frame with no budget - while
-        // content moves, P was written under a shifted footprint so rh is
-        // stale by up to a frame of network boil; a steady pull toward
-        // the fresh residual chases it without burning the anchor budget
-        // meant for real input drift. The pull is SCALED by the motion
-        // magnitude: frac = pc.c[1] * min(|mv|, 1) - a sub-pixel mv (slow
-        // zoom drift recovered by the estimator's parabolic refine) gets
-        // a proportional trickle instead of the full BETA, so the
-        // static->moving transition is continuous rather than a discrete
-        // path flip between neighbouring blocks (the loading-portrait
-        // judder). Still pixels (mv == (0,0), guaranteed on static
-        // content by the estimator's zero-motion bias + sub-pixel
-        // threshold) keep the exact v9 path -> byte-identical output
-        // frame to frame: distance from the FIXED anchor decides whether
-        // the input has really moved (noise under D_REF can never trip
-        // it); a trip re-anchors and arms a bounded R_FRAMES-step
-        // residual refresh; an armed budget keeps stepping until it runs
-        // out or rc converges.
+        // HELD: the emit is the input plus the carried residual, blended
+        // toward the fresh (gain-anchored) one by w - the evidence that
+        // rh is wrong (see the pull-band constants above):
+        //   wA(dF): the warped previous input does not match the current
+        //           pixel even after the per-pixel refinement -> the
+        //           carry is a stranger's residual -> trust pred.
+        //   wR(dr): the carried residual disagrees with the fresh one
+        //           beyond the grain-displacement range -> stale
+        //           enhancement intent -> converge.
+        //   BETA*min(|mv|,1): optional unconditional base pull (pc.c[1],
+        //           shipped 0 - the old every-frame re-anchor; kept as a
+        //           regression knob).
+        // Honest warps therefore carry the residual VERBATIM (w = 0):
+        // the texture stays attached to the content instead of creeping
+        // back onto the screen grid each frame. Still pixels keep the
+        // exact v9 path -> byte-identical output frame to frame:
+        // distance from the FIXED anchor decides whether the input has
+        // really moved (noise under D_REF can never trip it); a trip
+        // re-anchors and arms a bounded R_FRAMES-step residual refresh;
+        // an armed budget keeps stepping until it runs out or rc
+        // converges.
         const float mvl = length(mv);
         const bool moving = (mvl > 0.01);
         bool refresh = moving;
@@ -470,18 +635,34 @@ void main() {
                 }
             }
         }
-        // emit = input + held residual, the residual stepped toward the
-        // fresh (gain-anchored) one proportionally: moving pixels step
-        // at min(|mv|,1) * max(R_STEP_MIN, BETA*|e|) per frame (the
-        // magnitude scale keeps sub-pixel drift a gentle trickle), still
-        // pixels at max(R_STEP_MIN, R_FRAC*|e|) while an armed budget
-        // lasts, pure hold (cap 0) otherwise.
+        const float wA = smoothstep(pc.d[1] * (1.0 / 255.0),
+                                    pc.d[2] * (1.0 / 255.0), dF);
+        const float wR = smoothstep(pc.d[3] * (1.0 / 255.0),
+                                    pc.d[3] * (2.5 / 255.0), dr);
+        const float w = max(max(wA, wR), pc.c[1] * min(mvl, 1.0));
+        // Still-pixel refresh step cap (pc.a[3] = D5C_RF_SCAP in
+        // quarter-LSB units; <=0 uncapped). The R_FRAC-proportional step
+        // is visible when
+        // the held residual is badly stale: a pixel parked next to a pan
+        // re-arms every D_REF cycle and steps 5-10 LSB/frame - the
+        // manifest pan fixture's persistent still-band flicker. Capping
+        // the step below the visible threshold makes the convergence a
+        // sub-visible trickle; the 16-frame budget still retires any
+        // residual error under ~24-32 LSB, and real jumps bypass the
+        // latch via the FRESH path anyway.
+        const float scap = (pc.a[3] > 0)
+                           ? float(pc.a[3]) * (0.25 / 255.0) : 1e9;
+        // emit = input + held residual, the residual blended toward the
+        // fresh (gain-anchored) one by w: moving pixels at w*|e| (w=0 ->
+        // verbatim carry), still pixels at min(max(R_STEP_MIN,
+        // R_FRAC*|e|), scap) while an armed budget lasts, pure hold
+        // (cap 0) otherwise.
         for (uint c = 0u; c < 3u; ++c) {
             float rt = anchored[c] - col01[c];
             float e = rt - rh[c];
-            float capc = refresh ? (moving ? min(mvl, 1.0) * max(R_STEP_MIN,
-                                                                pc.c[1] * abs(e))
-                                           : max(R_STEP_MIN, R_FRAC * abs(e)))
+            float capc = refresh ? (moving ? w * abs(e)
+                                           : min(max(R_STEP_MIN,
+                                                     R_FRAC * abs(e)), scap))
                                  : 0.0;
             emitT[c] = col01[c] + rh[c] + clamp(e, -capc, capc);
         }

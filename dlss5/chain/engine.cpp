@@ -126,12 +126,35 @@ bool ChainEngine::init(const EngineConfig& cfg) {
         mvEma_ = (float)std::atof(d);
     if (const char* d = std::getenv("D5C_MV_IMPT"))
         mvImpt_ = (float)std::atof(d);
+    if (const char* d = std::getenv("D5C_MV_PRAD"))
+        mvPrad_ = (float)std::atof(d);
+    if (const char* d = std::getenv("D5C_MV_PTH"))
+        mvPth_ = (float)std::atof(d);
+    if (const char* d = std::getenv("D5C_MV_PMARG"))
+        mvPmarg_ = (float)std::atof(d);
+    if (const char* d = std::getenv("D5C_MV_RSM"))
+        mvRsm_ = (float)std::atof(d);
+    if (const char* d = std::getenv("D5C_RF_ALO"))
+        rfAlo_ = (float)std::atof(d);
+    if (const char* d = std::getenv("D5C_RF_AHI"))
+        rfAhi_ = (float)std::atof(d);
+    if (const char* d = std::getenv("D5C_RF_RLO"))
+        rfRlo_ = (float)std::atof(d);
+    if (const char* d = std::getenv("D5C_RF_SCAP"))
+        rfScap_ = (float)std::atof(d);
     std::fprintf(stderr, "[chain] D5C_MV_BETA=%.2f D5C_MV_INTERP=%.0f "
                          "D5C_MV_ZBIAS=%.2f D5C_MV_ZABS=%.2f D5C_MV_PIXSTATIC=%.2f "
-                         "D5C_MV_SUBT=%.2f D5C_MV_EMA=%.2f D5C_MV_IMPT=%.3f\n",
+                         "D5C_MV_SUBT=%.2f D5C_MV_EMA=%.2f D5C_MV_IMPT=%.3f "
+                         "D5C_MV_PRAD=%.1f D5C_MV_PTH=%.1f D5C_MV_PMARG=%.1f "
+                         "D5C_MV_RSM=%.1f "
+                         "D5C_RF_ALO=%.1f D5C_RF_AHI=%.1f D5C_RF_RLO=%.1f "
+                         "D5C_RF_SCAP=%.2f\n",
                  (double)mvBeta_, (double)mvInterp_, (double)mvZbias_,
                  (double)mvZabs_, (double)mvPixStatic_, (double)mvSubt_,
-                 (double)mvEma_, (double)mvImpt_);
+                 (double)mvEma_, (double)mvImpt_, (double)mvPrad_,
+                 (double)mvPth_, (double)mvPmarg_, (double)mvRsm_,
+                 (double)rfAlo_, (double)rfAhi_, (double)rfRlo_,
+                 (double)rfScap_);
     histSuppressed_ = false;
     driftValid_ = false;
     driftCalm_ = driftSettle_ = 0;

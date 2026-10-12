@@ -85,7 +85,9 @@ const float R_DONE    =   6.0 / 255.0;
 const float R_STEP_MIN=   1.0 / 255.0;
 const float R_FRAC    =   0.25;
 const float R_FRAMES  =  16.0;
-// (moving-pixel fraction is pc.c[1] = D5C_MV_BETA; pc.c[2] = D5C_MV_INTERP)
+// (moving-pixel pull: pc.c[1] = D5C_MV_BETA base weight, shipped 0;
+// pc.c[2] = D5C_MV_INTERP; pull bands pc.d[1..3] = D5C_RF_ALO/AHI/RLO;
+// refinement pc.b[0..2] = D5C_MV_PRAD/PTH/PMARG - see temporal_nr.comp)
 
 shared uint sLum;
 void main() {
@@ -146,14 +148,17 @@ void main() {
         const int netW = pc.a.y, netH = pc.a.z;
         const int px = int(p % uint(netW)), py = int(p / uint(netW));
         vec2 mv = blockMv(px, py, netW, netH);
-        // Same D5C_MV_PIXSTATIC (pc.c[3], LSB) per-pixel override as
-        // temporal_nr: unwarped input delta within the threshold forces
-        // mv=(0,0) -> the v9 static path.
+        // Same D5C_MV_PIXSTATIC (pc.c[3], LSB) per-pixel gate as
+        // temporal_nr: the mv is scaled by smoothstep(c3..2.25*c3, dF0)
+        // - a ramp, not a hard switch, so boundary pixels cannot
+        // alternate between the carried and still paths frame to frame.
         if (pc.c[3] > 0.0) {
             const float dF0 = max(abs(col01[0] - hsP[3u * N + p * 3u + 0u]),
                                   max(abs(col01[1] - hsP[3u * N + p * 3u + 1u]),
                                       abs(col01[2] - hsP[3u * N + p * 3u + 2u])));
-            if (dF0 <= pc.c[3] * (1.0 / 255.0)) mv = vec2(0.0);
+            mv *= smoothstep(pc.c[3] * (1.0 / 255.0),
+                             pc.c[3] * (2.25 / 255.0), dF0);
+            if (dot(mv, mv) < 0.0025) mv = vec2(0.0);
         }
         const float qx = float(px) - mv.x;
         const float qy = float(py) - mv.y;
@@ -210,14 +215,130 @@ void main() {
             }
         }
         bool valid = stValid && (pc.d.x != 0.0);
+        // Per-pixel carry-tap refinement - IDENTICAL to temporal_nr.comp
+        // (stats[1] must equal what nr emits or the gain anchor chases a
+        // ghost). pc.b[0] = radius (env D5C_MV_PRAD), pc.b[1] = dF
+        // trigger LSB (D5C_MV_PTH), pc.b[2] = margin LSB (D5C_MV_PMARG).
+        float dF = 1e9;
+        if (valid) {
+            dF = max(abs(col01[0] - aP[0]),
+                     max(abs(col01[1] - aP[1]),
+                         abs(col01[2] - aP[2])));
+            const int rad = pc.b[0];
+            const float th = float(pc.b[1]) * (1.0 / 255.0);
+            const float marg = float(pc.b[2]) * (1.0 / 255.0);
+            if (rad > 0 && dF > th) {
+                const int cx0 = clamp(int(floor(qx + 0.5)), 0, netW - 1);
+                const int cy0 = clamp(int(floor(qy + 0.5)), 0, netH - 1);
+                float bestS = dF;
+                int bestX = -1, bestY = -1;
+                for (int ry = -rad; ry <= rad; ++ry) {
+                    for (int rx = -rad; rx <= rad; ++rx) {
+                        const int sx = clamp(cx0 + rx, 0, netW - 1);
+                        const int sy = clamp(cy0 + ry, 0, netH - 1);
+                        const uint sp2 = uint(sy) * uint(netW) + uint(sx);
+                        const float v0 = hsP[3u * N + sp2 * 3u + 0u];
+                        const float v1 = hsP[3u * N + sp2 * 3u + 1u];
+                        const float v2 = hsP[3u * N + sp2 * 3u + 2u];
+                        if (!(v0 >= -0.01 && v0 <= 1.01)
+                            || !(v1 >= -0.01 && v1 <= 1.01)
+                            || !(v2 >= -0.01 && v2 <= 1.01)) continue;
+                        const float s = max(abs(col01[0] - v0),
+                                            max(abs(col01[1] - v1),
+                                                abs(col01[2] - v2)));
+                        if (s < bestS) { bestS = s; bestX = sx; bestY = sy; }
+                    }
+                }
+                {   // the screen cell: still-pixel rescue
+                    const uint sp2 = uint(py) * uint(netW) + uint(px);
+                    const float v0 = hsP[3u * N + sp2 * 3u + 0u];
+                    const float v1 = hsP[3u * N + sp2 * 3u + 1u];
+                    const float v2 = hsP[3u * N + sp2 * 3u + 2u];
+                    if (v0 >= -0.01 && v0 <= 1.01
+                        && v1 >= -0.01 && v1 <= 1.01
+                        && v2 >= -0.01 && v2 <= 1.01) {
+                        const float s = max(abs(col01[0] - v0),
+                                            max(abs(col01[1] - v1),
+                                                abs(col01[2] - v2)));
+                        if (s < bestS) { bestS = s; bestX = px; bestY = py; }
+                    }
+                }
+                if (bestX >= 0 && bestS < dF - marg) {
+                    const uint sp2 = uint(bestY) * uint(netW) + uint(bestX);
+                    float nP[3], nA[3], nE[3];
+                    float nR = hsP[9u * N + sp2];
+                    bool ok2 = (nR >= 0.0 && nR <= R_FRAMES);
+                    for (uint c = 0u; c < 3u; ++c) {
+                        const float v = hsP[3u * N + sp2 * 3u + c];
+                        if (!(v >= -0.01 && v <= 1.01)) ok2 = false;
+                        nP[c] = v;
+                        const float w = hsP[6u * N + sp2 * 3u + c];
+                        if (!(w >= -0.01 && w <= 1.01)) ok2 = false;
+                        nA[c] = w;
+                        float sraw = hsP[sp2 * 3u + c];
+                        if (!(sraw > -1e9 && sraw < 1e9)) sraw = 0.0;
+                        nE[c] = floor(clamp(sraw * 8.0 + 0.5, 0.0, 1.0)
+                                      * 255.0 + 0.5) * (1.0 / 255.0);
+                    }
+                    if (ok2) {
+                        for (uint c = 0u; c < 3u; ++c) {
+                            aP[c] = nP[c]; aA[c] = nA[c]; Ew[c] = nE[c];
+                        }
+                        Rw = nR;
+                        dF = bestS;
+                        mv = vec2(float(px - bestX), float(py - bestY));
+                    }
+                }
+            }
+        }
         float rh[3], rc[3];
         for (uint c = 0u; c < 3u; ++c) {
             rh[c] = Ew[c] - aP[c];
             rc[c] = cand[c] - col01[c];
         }
-        float dF = max(abs(col01[0] - aP[0]),
-                       max(abs(col01[1] - aP[1]),
-                           abs(col01[2] - aP[2])));
+        // Carried-residual smoothing - IDENTICAL to temporal_nr.comp
+        // (pc.b[3] = radius, env D5C_MV_RSM). Moving pixels average the
+        // residual source over a small neighbourhood of q; still pixels
+        // keep the verbatim tap so the emitted value matches exactly.
+        if (valid && length(mv) > 0.01 && pc.b[3] > 0) {
+            const int rs = pc.b[3];
+            const int bx0 = int(floor(qx + 0.5));
+            const int by0 = int(floor(qy + 0.5));
+            float sE[3], sP[3];
+            for (uint c = 0u; c < 3u; ++c) { sE[c] = 0.0; sP[c] = 0.0; }
+            float cnt = 0.0;
+            for (int dy = -rs; dy <= rs; ++dy) {
+                const int sy = by0 + dy;
+                if (sy < 0 || sy >= netH) continue;
+                for (int dx = -rs; dx <= rs; ++dx) {
+                    const int sx = bx0 + dx;
+                    if (sx < 0 || sx >= netW) continue;
+                    const uint sp2 = uint(sy) * uint(netW) + uint(sx);
+                    float pp[3], ee[3];
+                    bool ok3 = true;
+                    for (uint c = 0u; c < 3u; ++c) {
+                        const float v = hsP[3u * N + sp2 * 3u + c];
+                        if (!(v >= -0.01 && v <= 1.01)) ok3 = false;
+                        pp[c] = v;
+                        float sraw = hsP[sp2 * 3u + c];
+                        if (!(sraw > -1e9 && sraw < 1e9)) ok3 = false;
+                        ee[c] = floor(clamp(sraw * 8.0 + 0.5, 0.0, 1.0)
+                                      * 255.0 + 0.5) * (1.0 / 255.0);
+                    }
+                    if (ok3) {
+                        for (uint c = 0u; c < 3u; ++c) {
+                            sE[c] += ee[c]; sP[c] += pp[c];
+                        }
+                        cnt += 1.0;
+                    }
+                }
+            }
+            const float need = (2.0 * float(rs) + 1.0)
+                             * (2.0 * float(rs) + 1.0) * 0.5;
+            if (cnt >= need && cnt > 0.0) {
+                for (uint c = 0u; c < 3u; ++c) rh[c] = sE[c] / cnt - sP[c] / cnt;
+            }
+        }
         float dA = max(abs(col01[0] - aA[0]),
                        max(abs(col01[1] - aA[1]),
                            abs(col01[2] - aA[2])));
@@ -232,11 +353,12 @@ void main() {
         if (!valid || dF > IN_CUT || dr >= DB_CUT) {
             for (uint c = 0u; c < 3u; ++c) emitT[c] = cand[c];
         } else {
-            // Same moving/anchor/budget decision as temporal_nr (Rn is
-            // only bookkeeping there; what matters here is whether the
-            // refresh step applies): warped pixels refresh every frame
-            // at pc.c[1] * min(|mv|, 1) with no budget, still pixels
-            // keep the v9 path.
+            // Same moving/anchor/budget decision + evidence-weighted pull
+            // as temporal_nr (Rn is only bookkeeping there; what matters
+            // here is the emitted value): moving pixels blend toward the
+            // fresh residual by w = max(wA(dF), wR(dr), BETA*min(|mv|,1))
+            // - w=0 on honest warps carries the residual verbatim -
+            // still pixels keep the v9 path.
             const float mvl = length(mv);
             const bool moving = (mvl > 0.01);
             float Rn = Rw;
@@ -252,11 +374,21 @@ void main() {
                     }
                 }
             }
+            const float wA = smoothstep(pc.d[1] * (1.0 / 255.0),
+                                        pc.d[2] * (1.0 / 255.0), dF);
+            const float wR = smoothstep(pc.d[3] * (1.0 / 255.0),
+                                        pc.d[3] * (2.5 / 255.0), dr);
+            const float w = max(max(wA, wR), pc.c[1] * min(mvl, 1.0));
+            // Same still-pixel refresh step cap as temporal_nr
+            // (pc.a[3] = D5C_RF_SCAP quarter-LSB units, <=0 uncapped).
+            const float scap = (pc.a[3] > 0)
+                               ? float(pc.a[3]) * (0.25 / 255.0) : 1e9;
             for (uint c = 0u; c < 3u; ++c) {
                 float e = rc[c] - rh[c];
-                float capc = refresh ? (moving ? min(mvl, 1.0) * max(R_STEP_MIN,
-                                                                    pc.c[1] * abs(e))
-                                               : max(R_STEP_MIN, R_FRAC * abs(e)))
+                float capc = refresh ? (moving ? w * abs(e)
+                                               : min(max(R_STEP_MIN,
+                                                         R_FRAC * abs(e)),
+                                                     scap))
                                      : 0.0;
                 emitT[c] = col01[c] + rh[c] + clamp(e, -capc, capc);
             }
