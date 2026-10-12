@@ -469,4 +469,20 @@ Large files already make edits painful (main.cpp ~3900 lines). From now on:
 - Weights and reference\ binaries stay out of git.
 - Don't commit real credentials anywhere.
 
+## GitHub mirror (public) - sync procedure
+Canonical remote is gitea (master). GitHub
+(https://github.com/geladons/DLSS5_INTEL.git) carries a SANITIZED rewritten
+history (filter-repo, 2026-10): local-only notes/, Temp/, build*/ dirs,
+*.exp/*.lib/*.obj and machine paths (Users\<owner>, DEV-HOST) are stripped
+from every commit, so GitHub SHAs intentionally differ from gitea. To sync
+new work: fresh `git clone --no-hardlinks` into a staging dir, re-run
+filter-repo with the same rules (see below), `git push --force github
+master:master`. Never push the raw local history - it contains local-only
+files and machine paths. Replacement rules file (repl.txt):
+  Users\<owner>==>Users\<owner> ; Users/<owner>==>Users/<owner> ; Users\\AI==>Users\\<owner>
+  DEV-HOST==>DEV-HOST ; D:\games==>D:\games ; D:/games==>D:/games
+  invert-paths: --path notes/ --path Temp/ --path-regex ".*[/]build[^/]*[/]|^build[^/]*[/]"
+  --path-glob "*.exp" --path-glob "*.lib" --path-glob "*.obj" --path dlss5/m13/_ui_shot.png
+  --message-callback 'return message.replace(b"Users\\AI", b"Users\\<owner>").replace(b"Users/<owner>", b"Users/<owner>").replace(b"DEV-HOST", b"DEV-HOST").replace(b"downdloads", b"games")'
+
 ## Current status -> see DEV_STATE.md
