@@ -188,8 +188,11 @@ inline VkShaderModule LoadSpv(const VkCtx& c, const std::string& file) {
     return m;
 }
 
-// transport push block (decode/features/compose/encode share one layout)
-struct Push { int32_t a[4]; int32_t b[4]; float c[4]; float d[4]; };
+// transport push block (decode/features/compose/encode share one layout).
+// e[] added for the motion-adaptive residual attenuation knobs
+// (temporal_nr/stats pc.e[0..2] = D5C_RF_MA/M0/M1); shaders that declare a
+// 64-byte block simply never read it. 80 B <= the 128 B max.
+struct Push { int32_t a[4]; int32_t b[4]; float c[4]; float d[4]; float e[4]; };
 
 // one-shot command helpers (startup copies / uploads). The fence must be
 // unsignalled on entry; it is reset before returning.

@@ -142,19 +142,30 @@ bool ChainEngine::init(const EngineConfig& cfg) {
         rfRlo_ = (float)std::atof(d);
     if (const char* d = std::getenv("D5C_RF_SCAP"))
         rfScap_ = (float)std::atof(d);
+    if (const char* d = std::getenv("D5C_RF_MA"))
+        rfMa_ = (float)std::atof(d);
+    if (const char* d = std::getenv("D5C_RF_M0"))
+        rfM0_ = (float)std::atof(d);
+    if (const char* d = std::getenv("D5C_RF_M1"))
+        rfM1_ = (float)std::atof(d);
+    if (const char* d = std::getenv("D5C_RF_MREL"))
+        rfMrel_ = (float)std::atof(d);
     std::fprintf(stderr, "[chain] D5C_MV_BETA=%.2f D5C_MV_INTERP=%.0f "
                          "D5C_MV_ZBIAS=%.2f D5C_MV_ZABS=%.2f D5C_MV_PIXSTATIC=%.2f "
                          "D5C_MV_SUBT=%.2f D5C_MV_EMA=%.2f D5C_MV_IMPT=%.3f "
                          "D5C_MV_PRAD=%.1f D5C_MV_PTH=%.1f D5C_MV_PMARG=%.1f "
                          "D5C_MV_RSM=%.1f "
                          "D5C_RF_ALO=%.1f D5C_RF_AHI=%.1f D5C_RF_RLO=%.1f "
-                         "D5C_RF_SCAP=%.2f\n",
+                         "D5C_RF_SCAP=%.2f "
+                         "D5C_RF_MA=%.2f D5C_RF_M0=%.2f D5C_RF_M1=%.2f "
+                         "D5C_RF_MREL=%.2f\n",
                  (double)mvBeta_, (double)mvInterp_, (double)mvZbias_,
                  (double)mvZabs_, (double)mvPixStatic_, (double)mvSubt_,
                  (double)mvEma_, (double)mvImpt_, (double)mvPrad_,
                  (double)mvPth_, (double)mvPmarg_, (double)mvRsm_,
                  (double)rfAlo_, (double)rfAhi_, (double)rfRlo_,
-                 (double)rfScap_);
+                 (double)rfScap_, (double)rfMa_, (double)rfM0_,
+                 (double)rfM1_, (double)rfMrel_);
     histSuppressed_ = false;
     driftValid_ = false;
     driftCalm_ = driftSettle_ = 0;

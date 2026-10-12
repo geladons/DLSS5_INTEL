@@ -4024,3 +4024,26 @@ zoom_load/pan no regression; zoom_load10 improved (FAIL -> WARN).
 Deployed md5-verified to production (m11d.exe b152cda9.., d5c_chain.dll
 b5fc9e32.., temporal_nr.spv e3c6702f.., temporal_stats.spv 93aadd23..);
 production daemon restarted on 48990 (new [chain] knob line in log).
+
+2026-10-12 - motion-adaptive residual attenuation shipped (D5C_RF_MA/M0/M1/
+MREL). motion_est.comp writes a per-block motion envelope into bufMv.w
+(env = max(|mv|, MREL*env_prev) - fast attack, ~60-frame release at
+0.95). temporal_nr reads it through the same smoothed blockMv fetch and
+scales the OUTPUT residual by g = 1 - MA*smoothstep(M0,M1,env); history
+E stores the UNattenuated emit so the temporal loop never sees the gate.
+temporal_stats scores the attenuated byte (mirrored). Push block gained
+vec4 e (80 B <= 128 B). Gate on real flythrough segments: s3 flow
+0.060/0.113 -> 0.020/0.047, static p90 0.0063 -> 0.0027, both baseline
+WARNs (landing lag, motion noise) gone, only a borderline invented-luma
+note remains; s2 clean PASS; fixture:ghost PASS. Slower release was
+monotonically better (r0.95 > r0.9 > r0.8 > r0.7) - envelope jitter at
+the attenuation boundary was itself a flicker source. Shipped defaults:
+MA 0.6, M0 0.4, M1 2.5, MREL 0.95; MA=0 reproduces the previous build
+bit-exact.
+
+m12-dxgi: the fixed 250 ms live-capture floor (occluded-retry storm
+guard from f80d4fb) silently capped every DX12 game at ~4 fps of fresh
+output - stale processed blits covered the moving scene. Now M12_MIN_MS
+env, default 33 ms (live hits self-throttle at the ~100 ms engine pace;
+the floor only guards fast-fail spins). last_live_ms_ initialized.
+Metro 1366x768 should move ~4 -> ~9-10 fps of real processed frames.

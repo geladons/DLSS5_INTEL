@@ -45,7 +45,17 @@
 // push a.x = TOK (= netW*netH), a.y = netW, a.z = netH, d.x = histValid;
 // c[0] = D5C_MV_EMA (mv EMA weight), c[1] = D5C_MV_ZBIAS, c[2] =
 // D5C_MV_ZABS, c[3] = D5C_MV_SUBT (sub-pixel noise floor, net px),
-// d[1] = D5C_MV_IMPT ((0,0)-pick refine confidence gate, SAD units).
+// d[1] = D5C_MV_IMPT ((0,0)-pick refine confidence gate, SAD units),
+// d[2] = D5C_RF_MREL (motion-envelope release factor).
+//
+// bufMv[block] = (mvx, mvy, conf, env): env is the MOTION ENVELOPE for
+// residual attenuation (v13) - env = max(|mv|, MREL * env_prev) where
+// env_prev is this block's previous-frame .w (same read-modify-write
+// lifetime as the EMA prev slot: the buffer persists across frames and
+// only this workgroup touches the element). Fast attack on the
+// measured motion, exponential release so temporal_nr's attenuation
+// gate decays ~60 frames after motion stops (MREL 0.95) instead of
+// snapping. Reset/invalid frames write env = 0.
 // ============================================================================
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 layout(std430, set = 0, binding = 3) readonly buffer FeatV { float fv[]; };
@@ -186,8 +196,10 @@ void main() {
     // (dot(rf, prev) < 0) restarts the filter at the new sample instead
     // of integrating backwards - real drift never reverses in a frame.
     // tid0's program order reads before it writes; no other workgroup
-    // touches this element.
-    const vec2 prev = mvs[bIdx].xy;
+    // touches this element. prevV.w is last frame's motion envelope
+    // (env_prev for the MREL release below).
+    const vec4 prevV = mvs[bIdx];
+    const vec2 prev = prevV.xy;
     const vec2 rf = vec2(mvx, mvy);
     vec2 em;
     if (dot(rf, rf) >= 1.0) em = rf;
@@ -199,5 +211,8 @@ void main() {
     // block cannot slowly integrate noise across the gate.
     if (dot(em, em) < pc.c[3] * pc.c[3]) em = vec2(0.0, 0.0);
     const float conf = 1.0 - sBest / (s0 + 1e-6);
-    mvs[bIdx] = vec4(em.x, em.y, conf, 0.0);
+    // Motion envelope for residual attenuation: instant attack on the
+    // reported vector, MREL-decay release (pc.d[2] = D5C_RF_MREL).
+    const float env = max(length(em), pc.d[2] * prevV.w);
+    mvs[bIdx] = vec4(em.x, em.y, conf, env);
 }

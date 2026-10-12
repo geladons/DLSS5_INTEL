@@ -288,6 +288,27 @@ private:
     // ~1.5 LSB makes the convergence a sub-visible trickle inside the
     // same 16-frame budget. <=0 = uncapped (old behaviour).
     float rfScap_ = 1.5f;
+    // D5C_RF_MA / D5C_RF_M0 / D5C_RF_M1: motion-adaptive residual
+    // attenuation (v13; temporal_nr/stats pc.e[0..2]). The emit's
+    // residual is scaled by g = 1 - MA*smoothstep(M0, M1, env) where
+    // env is a per-block motion envelope motion_est stores in
+    // bufMv.w: max(|mv|, MREL * env_prev) - fast attack on the block's
+    // measured motion, exponential release (~60 frames at MREL 0.95) so
+    // full enhancement returns smoothly after motion stops. Applied to
+    // the OUTPUT only: history stores the UNattenuated emit so the
+    // temporal loop state is untouched. MA = 0 reproduces the previous
+    // build bit-exact (g == 1 skips the multiply outright). Gate-
+    // validated on the real flythrough segments: s3 flow flicker
+    // 0.060/0.113 -> 0.020/0.047, static p90 0.0063 -> 0.0027, and s2
+    // is a clean PASS at MA 0.6 / M0 0.4 / M1 2.5 / MREL 0.95 - slower
+    // release monotonically improved both flicker metrics (the
+    // envelope jitter at the attenuation boundary was itself a flicker
+    // source). M0/M1 in net px.
+    float rfMa_ = 0.6f;
+    float rfM0_ = 0.4f;
+    float rfM1_ = 2.5f;
+    // D5C_RF_MREL: envelope release factor (motion_est pc.d[2]).
+    float rfMrel_ = 0.95f;
     // D5C_MV_ZBIAS / D5C_MV_ZABS: motion_est zero-motion bias,
     // (0,0) when SAD00 <= SADmin*(1+ZBIAS) + 64*ZABS/255.
     // Pushed to motion_est as pc.c[1]/pc.c[2].

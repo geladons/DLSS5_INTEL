@@ -43,15 +43,17 @@ layout(std430, set = 0, binding = 17) readonly buffer HistPrev { float hsP[]; };
 layout(std430, set = 0, binding = 18) readonly buffer Mvs { vec4 mvs[]; };
 layout(std430, set = 0, binding = 14) readonly buffer HeadRaw { float head[]; };
 layout(std430, set = 0, binding = 16) buffer Stats { uint stats[]; };
-layout(push_constant) uniform Push { ivec4 a; ivec4 b; vec4 c; vec4 d; } pc;
+layout(push_constant) uniform Push { ivec4 a; ivec4 b; vec4 c; vec4 d;
+                                     vec4 e; } pc;
 
 // Same blockMv as temporal_nr.comp - pc.c[2]==0 nearest block, !=0
 // bilinear between the four nearest block centres (8i+3.5), constant
-// extrapolation outside the centre hull.
-vec2 blockMv(int px, int py, int netW, int netH) {
+// extrapolation outside the centre hull. Returns the full vec4:
+// .xy = mv, .w = the block's motion envelope.
+vec4 blockMv(int px, int py, int netW, int netH) {
     const int BW = (netW + 7) / 8, BH = (netH + 7) / 8;
     if (pc.c[2] == 0.0)
-        return mvs[uint(py / 8) * uint(BW) + uint(px / 8)].xy;
+        return mvs[uint(py / 8) * uint(BW) + uint(px / 8)];
     const float ux = (float(px) - 3.5f) * 0.125f;
     const float uy = (float(py) - 3.5f) * 0.125f;
     int i0 = clamp(int(floor(ux)), 0, BW - 1);
@@ -59,10 +61,10 @@ vec2 blockMv(int px, int py, int netW, int netH) {
     const int i1 = min(i0 + 1, BW - 1), j1 = min(j0 + 1, BH - 1);
     const float fx = (i1 == i0) ? 0.0f : clamp(ux - float(i0), 0.0f, 1.0f);
     const float fy = (j1 == j0) ? 0.0f : clamp(uy - float(j0), 0.0f, 1.0f);
-    const vec2 m00 = mvs[uint(j0) * uint(BW) + uint(i0)].xy;
-    const vec2 m10 = mvs[uint(j0) * uint(BW) + uint(i1)].xy;
-    const vec2 m01 = mvs[uint(j1) * uint(BW) + uint(i0)].xy;
-    const vec2 m11 = mvs[uint(j1) * uint(BW) + uint(i1)].xy;
+    const vec4 m00 = mvs[uint(j0) * uint(BW) + uint(i0)];
+    const vec4 m10 = mvs[uint(j0) * uint(BW) + uint(i1)];
+    const vec4 m01 = mvs[uint(j1) * uint(BW) + uint(i0)];
+    const vec4 m11 = mvs[uint(j1) * uint(BW) + uint(i1)];
     return mix(mix(m00, m10, fx), mix(m01, m11, fx), fy);
 }
 
@@ -147,7 +149,16 @@ void main() {
         const uint N = uint(pc.a.x);
         const int netW = pc.a.y, netH = pc.a.z;
         const int px = int(p % uint(netW)), py = int(p / uint(netW));
-        vec2 mv = blockMv(px, py, netW, netH);
+        const vec4 mv4 = blockMv(px, py, netW, netH);
+        vec2 mv = mv4.xy;
+        // Same motion-adaptive residual attenuation as temporal_nr
+        // (pc.e[0..2] = D5C_RF_MA/M0/M1, envelope in mv4.w): stats[1]
+        // must score the value actually emitted to output, so the
+        // g-attenuated byte is accumulated here too. g == 1.0 leaves
+        // the scored byte identical to the un-attenuated build.
+        float g = 1.0;
+        if (pc.e[0] > 0.0)
+            g = 1.0 - pc.e[0] * smoothstep(pc.e[1], pc.e[2], mv4.w);
         // Same D5C_MV_PIXSTATIC (pc.c[3], LSB) per-pixel gate as
         // temporal_nr: the mv is scaled by smoothstep(c3..2.25*c3, dF0)
         // - a ramp, not a hard switch, so boundary pixels cannot
@@ -394,9 +405,14 @@ void main() {
             }
         }
         // Same emit as temporal_nr (pre-anchor candidate cand), snapped
-        // to the byte grid exactly like the store there.
+        // to the byte grid exactly like the store there - but scored at
+        // the ATTENUATED byte temporal_nr writes to the head, not the
+        // unattenuated history store.
         for (uint c = 0u; c < 3u; ++c) {
-            float b = floor(clamp(emitT[c], 0.0, 1.0) * 255.0 + 0.5);
+            float bv = emitT[c];
+            if (g != 1.0)
+                bv = col01[c] + (emitT[c] - col01[c]) * g;
+            float b = floor(clamp(bv, 0.0, 1.0) * 255.0 + 0.5);
             luma += W[c] * (b * (1.0 / 255.0));
         }
         atomicAdd(sLum, uint(luma * 256.0 + 0.5));

@@ -73,6 +73,7 @@ void ChainEngine::recordTemporal() {
         mp.c[3] = mvSubt_;
         mp.d[0] = histValid;
         mp.d[1] = mvImpt_;
+        mp.d[2] = rfMrel_;
         vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeMotionEst_);
         vkCmdPushConstants(cmd_, pipeLayout_, VK_SHADER_STAGE_COMPUTE_BIT,
                            0, sizeof(Push), &mp);
@@ -92,6 +93,7 @@ void ChainEngine::recordTemporal() {
         sp.c[3] = mvPixStatic_;
         sp.d[0] = histValid;
         sp.d[1] = rfAlo_; sp.d[2] = rfAhi_; sp.d[3] = rfRlo_;
+        sp.e[0] = rfMa_; sp.e[1] = rfM0_; sp.e[2] = rfM1_;
         vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeStats_);
         vkCmdPushConstants(cmd_, pipeLayout_, VK_SHADER_STAGE_COMPUTE_BIT,
                            0, sizeof(Push), &sp);
@@ -111,6 +113,7 @@ void ChainEngine::recordTemporal() {
     tp.c[3] = mvPixStatic_;
     tp.d[0] = histValid;
     tp.d[1] = rfAlo_; tp.d[2] = rfAhi_; tp.d[3] = rfRlo_;
+    tp.e[0] = rfMa_; tp.e[1] = rfM0_; tp.e[2] = rfM1_;
     vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipeTemporalNr_);
     vkCmdPushConstants(cmd_, pipeLayout_, VK_SHADER_STAGE_COMPUTE_BIT,
                        0, sizeof(Push), &tp);

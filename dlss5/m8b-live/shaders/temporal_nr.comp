@@ -186,16 +186,21 @@ layout(std430, set = 0, binding = 14) buffer HeadRaw { float head[]; };
 // Read by every invocation (uniform value -> broadcast); slots [4],[5]
 // are written by invocation 0 only, disjoint from the read range.
 layout(std430, set = 0, binding = 16) buffer Stats { uint stats[]; };
-layout(push_constant) uniform Push { ivec4 a; ivec4 b; vec4 c; vec4 d; } pc;
+layout(push_constant) uniform Push { ivec4 a; ivec4 b; vec4 c; vec4 d;
+                                     vec4 e; } pc;
 
 // Block motion for pixel (px,py). pc.c[2]==0: nearest block's vector.
 // pc.c[2]!=0: bilinear blend of the four nearest BLOCK CENTRES (centre of
 // block i sits at 8i+3.5); outside the centre hull the edge block's
 // vector is used unchanged (constant extrapolation, no fade to zero).
-vec2 blockMv(int px, int py, int netW, int netH) {
+// Returns the full vec4: .xy = mv, .w = the block's motion envelope
+// (D5C_RF_* attenuation field - fetched with the same smoothing so the
+// gate inherits the spatial/temporal smoothness instead of flickering
+// on raw per-block picks).
+vec4 blockMv(int px, int py, int netW, int netH) {
     const int BW = (netW + 7) / 8, BH = (netH + 7) / 8;
     if (pc.c[2] == 0.0)
-        return mvs[uint(py / 8) * uint(BW) + uint(px / 8)].xy;
+        return mvs[uint(py / 8) * uint(BW) + uint(px / 8)];
     const float ux = (float(px) - 3.5f) * 0.125f;
     const float uy = (float(py) - 3.5f) * 0.125f;
     int i0 = clamp(int(floor(ux)), 0, BW - 1);
@@ -203,10 +208,10 @@ vec2 blockMv(int px, int py, int netW, int netH) {
     const int i1 = min(i0 + 1, BW - 1), j1 = min(j0 + 1, BH - 1);
     const float fx = (i1 == i0) ? 0.0f : clamp(ux - float(i0), 0.0f, 1.0f);
     const float fy = (j1 == j0) ? 0.0f : clamp(uy - float(j0), 0.0f, 1.0f);
-    const vec2 m00 = mvs[uint(j0) * uint(BW) + uint(i0)].xy;
-    const vec2 m10 = mvs[uint(j0) * uint(BW) + uint(i1)].xy;
-    const vec2 m01 = mvs[uint(j1) * uint(BW) + uint(i0)].xy;
-    const vec2 m11 = mvs[uint(j1) * uint(BW) + uint(i1)].xy;
+    const vec4 m00 = mvs[uint(j0) * uint(BW) + uint(i0)];
+    const vec4 m10 = mvs[uint(j0) * uint(BW) + uint(i1)];
+    const vec4 m01 = mvs[uint(j1) * uint(BW) + uint(i0)];
+    const vec4 m11 = mvs[uint(j1) * uint(BW) + uint(i1)];
     return mix(mix(m00, m10, fx), mix(m01, m11, fx), fy);
 }
 
@@ -348,7 +353,23 @@ void main() {
     const uint N = uint(pc.a.x);
     const int netW = pc.a.y, netH = pc.a.z;
     const int px = int(p % uint(netW)), py = int(p / uint(netW));
-    vec2 mv = blockMv(px, py, netW, netH);
+    const vec4 mv4 = blockMv(px, py, netW, netH);
+    vec2 mv = mv4.xy;
+    // Motion-adaptive residual attenuation (v13; pc.e[0..2] =
+    // D5C_RF_MA/M0/M1, env envelope in mv4.w, net px). The OUTPUT emit
+    // residual is scaled by g = 1 - MA*smoothstep(M0, M1, env): moving
+    // content drops part of the carried+fresh residual - the
+    // low-frequency enhancement blotches the owner sees boiling on
+    // roads/walls at the ~20 fps live cadence (the per-frame motion is
+    // 3x the capture's). The STORED history keeps the UNattenuated
+    // emit, so the temporal loop state is untouched and full
+    // enhancement returns as env decays (~60 frames at MREL 0.95). g is
+    // 1 on still content (env < M0) and pc.e[0] == 0 disables outright
+    // - the multiply is skipped entirely so the previous emit path is
+    // reproduced bit for bit.
+    float g = 1.0;
+    if (pc.e[0] > 0.0)
+        g = 1.0 - pc.e[0] * smoothstep(pc.e[1], pc.e[2], mv4.w);
     // Per-pixel static gate (pc.c[3] = D5C_MV_PIXSTATIC, in LSB):
     // a pixel whose UNWARPED input delta vs the same cell's previous
     // input is ~0 is static no matter what the block estimator said.
@@ -669,13 +690,23 @@ void main() {
     }
 
     // Pass 2b: snap the emit to the output byte grid so the emitted
-    // value is always an exact display byte. The SAME value feeds the
-    // head residual AND the history store - emitting and storing must
-    // never diverge or the loop wanders again.
+    // value is always an exact display byte. History E stores the
+    // UNattenuated emit - the residual loop state (next frame's rh,
+    // the features history input) must never see the attenuation or
+    // the enhancement would stay damped after motion stops. Only the
+    // head residual (what compose emits) carries the g-attenuated
+    // value, snapped on its own grid so the output is still an exact
+    // byte. g == 1.0 skips the recompute outright: the emit is then
+    // bit-identical to the un-attenuated build (still pixels, and
+    // MA=0 everywhere).
     for (uint c = 0u; c < 3u; ++c) {
         float b = floor(clamp(emitT[c], 0.0, 1.0) * 255.0 + 0.5); // emit byte
         float outp = b * (1.0 / 255.0);
-        head[hP + c] = halfr((outp - col01[c]) * 4.0);
+        float outv = outp;
+        if (g != 1.0)
+            outv = floor(clamp(col01[c] + (emitT[c] - col01[c]) * g,
+                               0.0, 1.0) * 255.0 + 0.5) * (1.0 / 255.0);
+        head[hP + c] = halfr((outv - col01[c]) * 4.0);
         float s = halfr(outp);                            // scaled_color(outp)
         s = halfr(s - 0.5);
         s = halfr(s * 0.125);
