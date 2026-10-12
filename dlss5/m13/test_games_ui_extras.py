@@ -1,5 +1,6 @@
-"""Games-tab extras row: launch_args + framegen + window must survive every
-write path (focus-out save, register-on-launch, Enable re-register)."""
+"""Games-tab extras row: framegen/temporal persist via _save_extras; launch
+options flow through apply_launch_opts (dialog OK) into the meta of a
+registered game or pending_opts until Enable/Play carries them."""
 import os, tempfile, tkinter as tk
 from tkinter import ttk
 import pytest
@@ -41,36 +42,50 @@ def tab(monkeypatch, tmp_path):
 def test_extras_survive_every_path(tab):
     t, ui = tab
     t.select(EXE)
-    assert t.args_var.get() == "" and t.fg_var.get() == "default"
-    assert not t.window_var.get()
+    assert t.fg_var.get() == "default"
 
-    t.args_var.set("-windowed -w 1280")
+    # Unregistered card: the dialog's OK parks the opts; Play carries them
+    # into the register dict together with the framegen pick.
+    t.apply_launch_opts(EXE, {"window": True, "window_w": 1280,
+                              "window_h": 720, "window_template": "gtaiv",
+                              "launch_args": "-nolauncher"})
     t.fg_var.set("off")
     t._launch()
     reg = ui.ctl.calls[-1][1]
-    assert reg.get("launch_args") == "-windowed -w 1280"
+    assert reg["window"] is True and reg["window_template"] == "gtaiv"
+    assert reg["launch_args"] == "-nolauncher"
     assert reg.get("framegen") is False
+    assert EXE not in t.pending_opts           # consumed by the launch
 
+    # Registered game: OK writes cfg directly; empty extra args remove the
+    # launch_args key.
     ui.ctl.cfg.set("games", {EXE: {"mode": "dx9", "arch": "x86", "name": "Foo",
-                                   "launch_args": "-x", "framegen": True,
-                                   "window": True}})
+                                   "framegen": True,
+                                   "launch_args": "-x"}})
     t.select(EXE)
-    assert (t.args_var.get(), t.fg_var.get(), t.window_var.get()) == \
-           ("-x", "on", True)
+    assert t.fg_var.get() == "on"
+    t.apply_launch_opts(EXE, {"window": False, "window_w": 800,
+                              "window_h": 600, "window_template": "none",
+                              "launch_args": ""})
+    m = ui.ctl.cfg.get("games")[EXE]
+    assert m["window"] is False and m["window_template"] == "none"
+    assert m["window_w"] == 800 and m["window_h"] == 600
+    assert "launch_args" not in m
 
-    t.args_var.set("-y")
-    t._save_extras()
-    assert ui.ctl.cfg.get("games")[EXE]["launch_args"] == "-y"
     t.fg_var.set("default")
     t._save_extras()
     assert "framegen" not in ui.ctl.cfg.get("games")[EXE]
 
+    # Unregistered again: pending opts survive into Enable's fresh meta.
     ui.ctl.cfg.set("games", {})
     t.select(EXE)
-    t.args_var.set("-z")
+    t.apply_launch_opts(EXE, {"window": True, "window_w": 800,
+                              "window_h": 600, "window_template": "source",
+                              "launch_args": "-z"})
     t.fg_var.set("off")
-    t.window_var.set(True)
-    t._enable_worker(EXE, "dx9", None, "-z", False, True)
+    t._enable_worker(EXE, "dx9", None, False)
     m = ui.ctl.cfg.get("games")[EXE]
     assert m["launch_args"] == "-z" and m["framegen"] is False
-    assert m["window"] is True
+    assert m["window"] is True and m["window_template"] == "source"
+    assert m["window_w"] == 800 and m["window_h"] == 600
+    assert EXE not in t.pending_opts           # consumed by the enable

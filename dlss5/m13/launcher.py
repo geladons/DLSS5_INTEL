@@ -16,7 +16,6 @@
 # ============================================================================
 import os
 import re
-import shlex
 import threading
 import time
 
@@ -252,11 +251,18 @@ class GameLauncher:
                     # -width/-height match hides the whole init cost behind
                     # the launch step instead of a raw-frame burst in-game.
                     ww, wh = 0, 0
-                    raw_args = meta.get("launch_args") or ""
-                    am = re.search(r"-width\s+(\d+)", raw_args)
-                    ah = re.search(r"-height\s+(\d+)", raw_args)
-                    if am and ah:
-                        ww, wh = int(am.group(1)), int(ah.group(1))
+                    if meta.get("window"):
+                        try:
+                            ww = int(meta.get("window_w") or 0)
+                            wh = int(meta.get("window_h") or 0)
+                        except (TypeError, ValueError):
+                            ww, wh = 0, 0
+                    if not (ww > 0 and wh > 0):
+                        raw_args = meta.get("launch_args") or ""
+                        am = re.search(r"-width\s+(\d+)", raw_args)
+                        ah = re.search(r"-height\s+(\d+)", raw_args)
+                        if am and ah:
+                            ww, wh = int(am.group(1)), int(ah.group(1))
                     if not (ww > 0 and wh > 0):
                         ww, wh = _screen_extent()
                     okw = ctl.client.warmup(ww, wh)
@@ -315,28 +321,11 @@ class GameLauncher:
                 return self._finish(game, False, msg)
 
             def do_spawn():
-                # Per-game launch args: explicit "launch_args" wins; else
-                # the "window" checkbox appends the best-effort windowed
-                # flags. Wrapper exes may eat them - best effort by design.
-                args = []
-                raw_args = meta.get("launch_args")
-                if raw_args:
-                    args = shlex.split(raw_args, posix=False)
-                    # {screen_w}/{screen_h} expand to the primary display
-                    # size at launch time. Legacy D3D9 titles that switch
-                    # display mode strobe raw frames past the layer (the
-                    # compositor alternates the exclusive surface with a
-                    # parallel raw surface the layer never sees); native-res
-                    # fullscreen avoids the mode switch entirely.
-                    if any("{" in a for a in args):
-                        import ctypes
-                        sw = ctypes.windll.user32.GetSystemMetrics(0)
-                        sh = ctypes.windll.user32.GetSystemMetrics(1)
-                        args = [a.replace("{screen_w}", str(sw))
-                                  .replace("{screen_h}", str(sh))
-                                for a in args]
-                elif meta.get("window"):
-                    args = list(gamelaunch.WINDOW_ARGS)
+                # Per-game launch args: windowed-template flags (when
+                # meta.window, substituted with window_w/window_h) then
+                # the free-form launch_args - build_launch_args owns the
+                # template table and the {screen_w}/{screen_h} expansion.
+                args = gamelaunch.build_launch_args(meta)
                 ok2, m2 = gamelaunch.launch_game(
                     target, meta["mode"], scale=ctl.cfg.get("scale"),
                     blend=ctl.cfg.get("blend"), cfg=ctl.cfg,

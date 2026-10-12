@@ -23,6 +23,7 @@
 #    frozen picture updates from the untouched original (live knobs).
 # ============================================================================
 import os
+import shlex
 import subprocess
 
 from . import deploy
@@ -34,10 +35,109 @@ M12_PAUSE = os.path.join(os.environ.get("TEMP", "."), "m12_pause.flag")
 FREEZE_FLAG = os.path.join(os.environ.get("TEMP", "."), "m13_freeze.flag")
 REPROC_FLAG = os.path.join(os.environ.get("TEMP", "."), "m13_reproc.flag")
 
-# Best-effort windowed launch: appended when a game entry sets "window"
-# and no explicit launch_args exist. Common flags; a game that ignores
-# them just launches as usual (the UI labels this "try").
+# Legacy pair kept for reference - launch args are built by
+# build_launch_args / KNOWN_TEMPLATES below ("generic" is this pair).
 WINDOW_ARGS = ("-windowed", "-window")
+
+# Windowed-launch flag templates: key -> (label, argv). {w}/{h} inside an
+# entry substitute the per-game window_w/window_h meta values at launch
+# time. Most engines take one of the shapes below; titles with no CLI
+# windowed flag at all (GTA SA, Metro Exodus) map to "none" and rely on
+# their own video settings. The UI shows the label column; "custom" is
+# not a template - it just disables substitution and keeps launch_args.
+KNOWN_TEMPLATES = {
+    "generic": ("Generic (-windowed -window)",
+                ["-windowed", "-window"]),
+    "gtaiv":   ("GTA IV / EFLC",
+                ["-windowed", "-width", "{w}", "-height", "{h}"]),
+    "unreal":  ("Unreal Engine (-windowed -ResX -ResY)",
+                ["-windowed", "-ResX={w}", "-ResY={h}"]),
+    "source":  ("Source engine (-sw -w -h)",
+                ["-sw", "-w", "{w}", "-h", "{h}"]),
+    "unity":   ("Unity (-screen-fullscreen 0)",
+                ["-screen-fullscreen", "0",
+                 "-screen-width", "{w}", "-screen-height", "{h}"]),
+    "idtech_cvar": ("id Tech / cvar (+r_fullscreen 0)",
+                    ["+r_fullscreen", "0", "+r_mode", "-1",
+                     "+r_customwidth", "{w}", "+r_customheight", "{h}"]),
+    "none":    ("None (game has no flag; use in-game settings)", []),
+}
+
+# Exes known to have no command-line windowed flag - the dialog shows the
+# informational hint for these (auto-pick "none").
+_NOFLAG_EXES = ("gta_sa.exe", "metroexodus.exe")
+
+
+def suggest_template(exe_path):
+    """Best-guess windowed-flag template for a first dialog open: exe-name
+    match for the engines with known flags, the Unreal shipping layout
+    (*-Win64-Shipping.exe or a Binaries\\Win64 path), Source binaries, a
+    UnityPlayer.dll next to the exe, 'none' for titles with no CLI
+    windowed flag, else 'generic'."""
+    base = os.path.basename(exe_path).lower() if exe_path else ""
+    if base in ("gtaiv.exe", "eflc.exe"):
+        return "gtaiv"
+    if base.endswith("-win64-shipping.exe") or \
+            "\\binaries\\win64\\" in exe_path.lower().replace("/", "\\"):
+        return "unreal"
+    if base in ("hl2.exe", "csgo.exe", "portal2.exe"):
+        return "source"
+    try:
+        if os.path.exists(os.path.join(os.path.dirname(exe_path),
+                                       "UnityPlayer.dll")):
+            return "unity"
+    except (TypeError, ValueError):
+        pass
+    if base in _NOFLAG_EXES:
+        return "none"
+    return "generic"
+
+
+def build_launch_args(meta, screen=None):
+    """Final argv tokens for the game, from its stored meta dict:
+    windowed-template flags (only when meta["window"] is true) followed
+    by the free-form launch_args string (shlex-split). {w}/{h} inside a
+    template substitute window_w/window_h (defaults 1280x720);
+    {screen_w}/{screen_h} anywhere in the final list expand to the
+    primary display extent (legacy D3D9 titles that switch display mode
+    strobe raw frames past the layer - native-res args keep the present
+    mode native). An old meta with window=true but no window_template
+    keeps the pre-template contract: launch_args already set -> "custom"
+    (the explicit string wins, no template flags); launch_args empty ->
+    "generic" (the original -windowed -window pair).
+    screen: (w, h) override for tests; None queries the desktop."""
+    args = []
+    if not isinstance(meta, dict):
+        return args
+    if meta.get("window"):
+        # "custom" (or an unknown key) means no template flags at all.
+        key = meta.get("window_template")
+        if key is None:
+            key = "custom" if (meta.get("launch_args") or "").strip() \
+                else "generic"
+        tpl = KNOWN_TEMPLATES.get(key, (None, []))[1]
+        try:
+            w = int(meta.get("window_w") or 1280)
+            h = int(meta.get("window_h") or 720)
+        except (TypeError, ValueError):
+            w, h = 1280, 720
+        for a in tpl:
+            args.append(a.replace("{w}", str(w)).replace("{h}", str(h)))
+    raw = meta.get("launch_args")
+    if raw and raw.strip():
+        args += shlex.split(raw, posix=False)
+    if any("{" in a for a in args):
+        if screen is None:
+            try:
+                import ctypes
+                screen = (ctypes.windll.user32.GetSystemMetrics(0),
+                          ctypes.windll.user32.GetSystemMetrics(1))
+            except (AttributeError, OSError):
+                screen = (1920, 1080)
+        sw, sh = screen
+        args = [a.replace("{screen_w}", str(sw))
+                 .replace("{screen_h}", str(sh)) for a in args]
+    return args
 
 
 def _cfg_value(cfg, key, default):
@@ -209,9 +309,8 @@ def engine_env(cfg=None, mode=None, arch="x64"):
 
 def _launch(exe_path, env_extra=None, args=None):
     """Game launch (cwd = game dir). Returns (ok, message).
-    args: extra command-line tokens appended after the exe (e.g. the
-    best-effort windowed flags in WINDOW_ARGS or a per-game launch_args
-    string the owner set)."""
+    args: extra command-line tokens appended after the exe, pre-built by
+    build_launch_args (windowed template flags + free-form launch_args)."""
     if not os.path.exists(exe_path):
         return False, "game exe not found: %s" % exe_path
     game_dir = os.path.dirname(exe_path)

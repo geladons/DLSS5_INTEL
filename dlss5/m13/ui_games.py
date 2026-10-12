@@ -24,6 +24,7 @@ from tkinter import filedialog, ttk
 from .gamescache import load_cache, save_cache
 from .i18n import tr
 from .icons import IconCache
+from . import ui_launchopts
 
 MODE_NAMES = {"dx9": "DX9", "dx11": "DX11", "dx12": "DX12",
               "vulkan": "Vulkan"}
@@ -126,6 +127,7 @@ class GamesTab:
         self.scanned = []
         self.cards = {}             # exe -> GameCard
         self._selected = None
+        self.pending_opts = {}      # exe -> launch-opts dict (unregistered)
         self._cols = CARD_COLS
         self.icons = IconCache(size=48)
         self._build(nb)
@@ -221,21 +223,12 @@ class GamesTab:
             inner, textvariable=self.mode_var, width=7, state="readonly",
             values=(tr("mode_auto"), "DX9", "DX11", "DX12", "Vulkan"))
         self.mode_box.pack(side="left", padx=(4, 12))
-        # Windowed checkbox: best effort - the launcher appends
-        # gamelaunch.WINDOW_ARGS ("-windowed -window") when set and no
-        # custom launch_args exist. Remembered per game.
-        self.window_var = tk.BooleanVar(value=False)
-        self.window_chk = ttk.Checkbutton(
-            inner, text=tr("window_cb"), variable=self.window_var,
-            style="Panel.TCheckbutton")
-        self.window_chk.pack(side="left", padx=(0, 12))
-        tk.Label(inner, text=tr("game_args"), bg=PANEL, fg=FG,
-                 font=("Segoe UI", 8)).pack(side="left")
-        self.args_var = tk.StringVar()
-        self.args_entry = ttk.Entry(inner, textvariable=self.args_var,
-                                    width=30)
-        self.args_entry.pack(side="left", padx=(4, 12))
-        self.args_entry.bind("<FocusOut>", lambda e: self._save_extras())
+        # Windowed mode / resolution / flag template / extra args moved
+        # into a per-game dialog; this button opens it for the selected
+        # exe (registered games persist directly, cards park pending).
+        self.opts_btn = ttk.Button(inner, text=tr("launch_opts"),
+                                   command=self._launch_opts)
+        self.opts_btn.pack(side="left", padx=(0, 12))
         tk.Label(inner, text=tr("game_fg"), bg=PANEL, fg=FG,
                  font=("Segoe UI", 8)).pack(side="left")
         self.fg_var = tk.StringVar(value=tr("fg_auto"))
@@ -311,13 +304,12 @@ class GamesTab:
         """Enable/grey the per-game options strip; state is tk.NORMAL or
         tk.DISABLED. The comboboxes are readonly so 'normal' keeps them
         pickable-but-not-typable."""
-        self.args_entry.config(state=state)
         combo = "readonly" if state == tk.NORMAL else "disabled"
         self.fg_box.config(state=combo)
         self.temporal_box.config(state=combo)
         self.mode_box.config(state=combo)
-        self.window_chk.state(["!disabled"] if state == tk.NORMAL
-                              else ["disabled"])
+        self.opts_btn.state(["!disabled"] if state == tk.NORMAL
+                            else ["disabled"])
 
     def select(self, exe):
         self._selected = exe
@@ -335,11 +327,8 @@ class GamesTab:
         self._extras_state(tk.NORMAL if exe else tk.DISABLED)
         if meta:
             self.mode_var.set(MODE_NAMES.get(meta["mode"], tr("mode_auto")))
-            self.window_var.set(bool(meta.get("window")))
         else:
             self.mode_var.set(tr("mode_auto"))
-            self.window_var.set(False)
-        self.args_var.set(meta.get("launch_args") or "")
         fgm = meta.get("framegen")
         self.fg_var.set(tr("fg_on") if fgm is True else
                         tr("fg_off") if fgm is False else tr("fg_auto"))
@@ -378,15 +367,8 @@ class GamesTab:
         meta = games.get(exe)
         if not isinstance(meta, dict):
             return
-        args = self.args_var.get().strip()
         fg = self._chosen_fg()
         changed = False
-        if (meta.get("launch_args") or "") != args:
-            if args:
-                meta["launch_args"] = args
-            else:
-                meta.pop("launch_args", None)
-            changed = True
         if meta.get("framegen") != fg:
             if fg is None:
                 meta.pop("framegen", None)
@@ -420,29 +402,49 @@ class GamesTab:
             if g.exe == exe:
                 launch = g.launch_exe if g.via_wrapper else None
         self.ctl.submit(self._enable_worker, exe, self._chosen_mode(),
-                        launch, self.args_var.get().strip(),
-                        self._chosen_fg(),
-                        bool(self.window_var.get()))
+                        launch, self._chosen_fg())
 
-    def _enable_worker(self, exe, mode, launch_exe=None, args="",
-                       framegen=None, window=False):
+    def _enable_worker(self, exe, mode, launch_exe=None, framegen=None):
         ok, msg = self.ctl.add_game(exe, mode, launch_exe=launch_exe)
         if not ok:
             return False, msg
-        # add_game wrote a fresh {mode, arch, name} meta - carry the extras
-        # row the user typed before hitting Enable (window, launch args,
-        # framegen override) into it or they are silently lost.
+        # add_game wrote a fresh {mode, arch, name} meta - carry the launch
+        # options + framegen override picked before Enable into it or they
+        # are silently lost.
         games = self.ctl.cfg.get("games") or {}
         meta = games.get(exe)
         if isinstance(meta, dict):
-            if window:
-                meta["window"] = True
-            if args:
-                meta["launch_args"] = args
+            meta.update(self.pending_opts.pop(exe, {}))
             if framegen is not None:
                 meta["framegen"] = framegen
             self.ctl.cfg.save()
         return self.ctl.game_deploy(exe)
+
+    def _launch_opts(self):
+        exe = self.selected_exe()
+        if not exe:
+            self.ui.log("mgr", tr("pick_game"))
+            return
+        ui_launchopts.LaunchOptionsDialog(self, exe)
+
+    def apply_launch_opts(self, exe, opts):
+        """OK in the launch-options dialog. Registered games persist into
+        cfg at once; options for a card that is not enabled yet park in
+        pending_opts and Enable/Play carries them into the new meta."""
+        o = dict(opts)
+        extra = o.pop("launch_args", "")
+        meta = (self.ctl.cfg.get("games") or {}).get(exe)
+        if isinstance(meta, dict):
+            meta.update(o)
+            if extra:
+                meta["launch_args"] = extra
+            else:
+                meta.pop("launch_args", None)
+            self.ctl.cfg.save()
+        else:
+            if extra:
+                o["launch_args"] = extra
+            self.pending_opts[exe] = o
 
     def _launch(self):
         exe = self.selected_exe()
@@ -450,27 +452,14 @@ class GamesTab:
             self.ui.log("mgr", tr("pick_game"))
             return
         reg = None
-        window = bool(self.window_var.get())
         games = self.ctl.cfg.get("games") or {}
-        if exe in games:
-            # Only the window bit is owned by the launch click. The extras
-            # row persists itself on focus-out/combobox-pick; writing the
-            # field values again here could strip an override the moment a
-            # stale "auto" is showing (that exact wipe killed the GTA IV
-            # framegen=false during testing).
-            if games[exe].get("window") != window:
-                games[exe]["window"] = window
-                self.ctl.cfg.save()
-        else:
+        if exe not in games:
             launch = None
             for g in self.scanned:
                 if g.exe == exe:
                     launch = g.launch_exe if g.via_wrapper else None
-            reg = {"mode": self._chosen_mode(), "launch_exe": launch,
-                   "window": window}
-            args = self.args_var.get().strip()
-            if args:
-                reg["launch_args"] = args
+            reg = {"mode": self._chosen_mode(), "launch_exe": launch}
+            reg.update(self.pending_opts.pop(exe, {}))
             fg = self._chosen_fg()
             if fg is not None:
                 reg["framegen"] = fg

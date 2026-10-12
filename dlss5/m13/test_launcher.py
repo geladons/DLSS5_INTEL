@@ -119,10 +119,14 @@ class TestHappyPath(LauncherBase):
         self.assertEqual(m_lg.call_args.kwargs["launch_args"],
                          list(gamelaunch.WINDOW_ARGS))
 
-    def test_launch_args_override_window(self):
+    def test_launch_args_combine_with_window(self):
+        # Extra args no longer suppress the windowed flags - with an
+        # explicit template the flags come first and the free-form
+        # string is appended (no template + args = legacy extras-only).
         exe = self._mk("game_x64.exe", mode="dx11")
         games = self.ctl.cfg.get("games")
         games[exe]["window"] = True
+        games[exe]["window_template"] = "generic"
         games[exe]["launch_args"] = "-novid -console"
         pl, pd = self._patches()
         with pl as m_lg, pd, \
@@ -131,7 +135,7 @@ class TestHappyPath(LauncherBase):
             ok, msg = self.launcher.launch(exe)
         self.assertTrue(ok, msg)
         self.assertEqual(m_lg.call_args.kwargs["launch_args"],
-                         ["-novid", "-console"])
+                         ["-windowed", "-window", "-novid", "-console"])
 
 
 class TestGuards(LauncherBase):

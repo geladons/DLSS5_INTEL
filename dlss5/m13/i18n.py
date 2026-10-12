@@ -190,6 +190,25 @@ _S = {
     "game_args": {"en": "Args:", "ru": "Аргументы:"},
     "game_fg": {"en": "FG:", "ru": "FG:"},
     "game_temporal": {"en": "Temporal:", "ru": "Temporal:"},
+    "launch_opts": {"en": "Launch options...",
+                    "ru": "Параметры запуска..."},
+    "lo_title": {"en": "Launch options", "ru": "Параметры запуска"},
+    "lo_windowed": {"en": "Windowed mode", "ru": "Оконный режим"},
+    "lo_width": {"en": "Width:", "ru": "Ширина:"},
+    "lo_height": {"en": "Height:", "ru": "Высота:"},
+    "lo_template": {"en": "Flag template:", "ru": "Шаблон флагов:"},
+    "lo_custom": {"en": "Custom", "ru": "Свой набор"},
+    "lo_extra": {"en": "Extra arguments:", "ru": "Доп. аргументы:"},
+    "lo_preview": {"en": "Final command line:", "ru": "Итоговая команда:"},
+    "lo_hint_noflag": {
+        "en": "This game has no command-line windowed flag - set windowed "
+              "mode in the game's own video settings; the resolution below "
+              "is informational.",
+        "ru": "У этой игры нет флага командной строки для оконного режима - "
+              "выстави окно в настройках видео самой игры; разрешение ниже "
+              "справочное."},
+    "ok": {"en": "OK", "ru": "OK"},
+    "cancel": {"en": "Cancel", "ru": "Отмена"},
     "fg_auto": {"en": "default", "ru": "дефолт"},
     "fg_on": {"en": "on", "ru": "вкл"},
     "fg_off": {"en": "off", "ru": "выкл"},
