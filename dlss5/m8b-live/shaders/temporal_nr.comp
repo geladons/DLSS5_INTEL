@@ -147,6 +147,7 @@ const float R_DONE    =   6.0 / 255.0; // residual match below -> refresh done
 const float R_STEP_MIN=   1.0 / 255.0; // floor per refresh step (sub-visible)
 const float R_FRAC    =   0.25;        // fraction of residual error per step
 const float R_FRAMES  =  16.0;         // refresh frames per anchor event
+const float E_HOLD    =   1.5 / 255.0; // sub-LSB emit deadband vs prev emit
 // Moving-pixel pull (v11): emit = col01 + rh + w*(rt - rh) where the
 // weight w = max(wA(dF), wR(dr), BETA*min(|mv|,1)) is EVIDENCE that the
 // carried residual is wrong - the old unconditional BETA pull
@@ -610,6 +611,7 @@ void main() {
 
     float An[3], Rn = 0.0;
     float emitT[3];
+    bool pinned = false;
     if (!valid || dF > IN_CUT || dr >= DB_CUT) {
         // FRESH: real input jump / residual past the cut band / reset
         // frame / uninitialised history - emit the anchored candidate
@@ -678,6 +680,25 @@ void main() {
         // verbatim carry), still pixels at min(max(R_STEP_MIN,
         // R_FRAC*|e|), scap) while an armed budget lasts, pure hold
         // (cap 0) otherwise.
+        // Emit deadband (v14): pin the emit to the previous byte while
+        // the input drift from the fixed anchor stays sub-LSB, and
+        // FREEZE P on pinned frames so rh = E - P stays invariant.
+        // Without it the emit re-derives E through the byte snap every
+        // frame: sub-LSB input jitter (downscaled dither) lands near
+        // the rounding boundary and each +-1 LSB correction integrates
+        // into E permanently, while P advancing under the pin lets the
+        // jitter erode the carried residual - together an unbounded
+        // random walk that grows visible garbage on static scenes
+        // (field report 2026-10-12, GTA IV: litter accrues second by
+        // second while still, cleans where content moves). The gate
+        // uses dA (cumulative drift from the anchor), NOT |em - Ew|
+        // (the per-frame increment): jitter keeps dA < E_HOLD and
+        // stays pinned; a real move accumulates past the band and
+        // re-emits the tracked value (emit = col01 + rh is then
+        // input + the frozen residual - the pin-window drift was never
+        // eaten), and dA > D_REF still arms a refresh. Byte-exact
+        // static input is unaffected (em == Ew == emitT).
+        pinned = (!refresh && dA <= E_HOLD);
         for (uint c = 0u; c < 3u; ++c) {
             float rt = anchored[c] - col01[c];
             float e = rt - rh[c];
@@ -685,7 +706,9 @@ void main() {
                                            : min(max(R_STEP_MIN,
                                                      R_FRAC * abs(e)), scap))
                                  : 0.0;
-            emitT[c] = col01[c] + rh[c] + clamp(e, -capc, capc);
+            float em = col01[c] + rh[c] + clamp(e, -capc, capc);
+            if (pinned) em = Ew[c];
+            emitT[c] = em;
         }
     }
 
@@ -714,9 +737,12 @@ void main() {
     }
     // Bookkeeping (every pixel, every frame): P becomes next frame's
     // previous input, A the (possibly re-anchored) drift reference, R
-    // the remaining refresh budget.
+    // the remaining refresh budget. On pinned frames P carries aP
+    // forward instead of the current input - rh = E - P then stays
+    // invariant (the emit is pinned too), so sub-LSB jitter can never
+    // be eaten by the residual bookkeeping.
     for (uint c = 0u; c < 3u; ++c) {
-        hs[3u * N + p * 3u + c] = col01[c];
+        hs[3u * N + p * 3u + c] = pinned ? aP[c] : col01[c];
         hs[6u * N + p * 3u + c] = An[c];
     }
     hs[9u * N + p] = Rn;

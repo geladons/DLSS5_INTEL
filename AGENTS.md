@@ -212,7 +212,8 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
     bufHist (binding 13, fp32[TOK*10], N = pc.a.x) layout:
       [0,3N)   E = last emitted byte per channel (scaled_color store,
                     unchanged; features reads it as history)
-      [3N,6N)  P = previous frame's input col01 (rewritten EVERY frame)
+      [3N,6N)  P = previous frame's input col01 (rewritten every frame
+                    EXCEPT pinned frames - see the E_HOLD deadband below)
       [6N,9N)  A = drift anchor input (col01 at the last fresh emit /
                     start of the current refresh burst)
       [9N,10N) R = remaining refresh frames (0..R_FRAMES)
@@ -251,6 +252,33 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
     byte-snapped and stored; the identical rule must stay mirrored in
     temporal_stats.comp (readonly view of the same pre-dispatch
     E/P/A/R) or the gain anchor chases a ghost.
+    EMIT DEADBAND + P-FREEZE (v14, 2026-10-12): byte-exact static
+    input hits the col01==P fixed point, but real captures are never
+    byte-exact - DXVK/codec dither jitters the input +-1 LSB, which at
+    net res becomes sub-LSB col01 noise. The emit then re-derives E
+    through the byte snap every frame; each +-1 LSB correction near
+    the rounding boundary integrates into E permanently while P
+    advancing under the jitter lets rh = E - P erode - together an
+    UNBOUNDED random walk that grows visible garbage on static scenes
+    (field report, GTA IV: litter accrues second by second while
+    still, cleans where content moves; reproduced on a 1244-frame
+    still segment of a real _live capture - hf energy 10 -> 30 over
+    300 frames, stored E drifting ~6 LSB/90 frames vs 0.5 LSB input
+    jitter). Fix, held path only: pinned = (!refresh && dA <=
+    E_HOLD=1.5/255) where dA is drift from the FIXED anchor A (NOT
+    the per-frame increment |em-Ew| - a monotonic sub-band drift would
+    stay pinned forever under that gate while rh absorbs the error);
+    on pinned frames emit = Ew verbatim AND P carries aP forward
+    instead of col01 so rh stays invariant - jitter can never enter
+    the residual bookkeeping. A real move accumulates past the band,
+    re-emits col01 + rh (input + frozen residual - nothing was eaten),
+    and dA > D_REF still arms a refresh as before. Two alternatives
+    measured and rejected: anchor-referenced emit col01 + (Ew - aA)
+    (emits a STALE residual when the anchor lags - fixture:ghost max
+    28 vs shipped 13) and pinning without freezing P (jitter still
+    erodes rh - walk continues at ~40% rate). Validated: dithered-
+    static hf flat 16.8 -> 17.1, E drift 0.096 LSB/90f, 96.5% pinned;
+    fixture:ghost identical to shipped (slide 0.06%/max 13).
     The hold is MOTION-COMPENSATED (v10/z1, 2026-10-10): an unwarped
     residual hold drags enhancement detail in screen space on pans
     (v9 measured: screen-fixed residual energy 16.4% vs the 7.5%
