@@ -1,7 +1,7 @@
 @echo off
 setlocal
 rem M1 DDA capture: configure, build, run. Single orchestration point (cmd
-rem batch — immune to the exec wrapper's PowerShell $-mangling). All output
+rem batch - immune to the exec wrapper's PowerShell $-mangling). All output
 rem (build + run console) lands in docs\m1-capture.log.
 
 set "REPO=%~dp0\..\.."

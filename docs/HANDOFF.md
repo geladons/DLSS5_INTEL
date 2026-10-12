@@ -2,15 +2,15 @@
 
 ## 1. Quick Start & Verification in New Session
 - **Production Bundle (User-Ready):**
-  - Path: `C:\Users\<owner>\Desktop\production`
+  - Path: `production`
   - Launcher: Run `DLSS5 Manager.vbs` (zero console flash) or `DLSS 5 Manager.cmd`.
   - Content: 113 binaries and assets verified with SHA-1 hashes; INT8 weights (`dlssnr-int8.bin`, 158 MB) packaged alongside FP16 safetensors (`dlssnr-logical.safetensors`, 291 MB); x64/x86 layer manifests patched with absolute paths.
 - **Port Assignment:**
   - `48990` is the canonical DLSSNR daemon TCP port (moved from 47990 to avoid collision with Sunshine Moonlight host).
 - **Run Bundle Selftest:**
   ```cmd
-  cd /d C:\Users\<owner>\Desktop\production\runtime\m11d
-  m11d.exe --weights "C:\Users\<owner>\Desktop\production\weights\dlssnr-logical.safetensors" --selftest "C:\Users\<owner>\Desktop\DLSS5_INTEL\work\_m9b_cmp\native_crop.bmp"
+  cd /d production\runtime\m11d
+  m11d.exe --weights "production\weights\dlssnr-logical.safetensors" --selftest "<repo>\work\_m9b_cmp\native_crop.bmp"
   ```
   Must output `[selftest] processed in ... ms` and `EXITCODE=0`.
 - **Verify Numerical Accuracy:**
@@ -92,7 +92,7 @@
    - Config persistence in `dlss5/m13/config.py` supporting global and per-game overrides.
    - Runtime propagation via environment variables, live JSON knobs (`%TEMP%\m13_phase30_knobs.json`), and TCP daemon commands (6..11).
 4. **Rebuilt Production Bundle:**
-   - Updated `_build_production.py` and regenerated bundle at `C:\Users\<owner>\Desktop\production` with all new modules and recompiled binaries.
+   - Updated `_build_production.py` and regenerated bundle at `production` with all new modules and recompiled binaries.
 
 ---
 

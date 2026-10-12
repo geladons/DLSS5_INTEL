@@ -42,3 +42,8 @@ nul
 # Agent knowledge vault (Obsidian, local-only)
 notes/
 .obsidian/
+
+# local scratch + launcher-artifacts (machine-specific, kept on disk only)
+Temp/
+*.exp
+*.lib

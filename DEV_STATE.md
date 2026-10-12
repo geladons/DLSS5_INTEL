@@ -1341,7 +1341,7 @@ r_layer_win.log shows generated ~= processed and no visible flicker; (2) Perform
 - **Builds & Verification:**
   - `ALL STAGE 5 & TASK B UNIT TESTS PASSED SUCCESSFULLY!`
   - PyTorch golden validation: `VALIDATION PASS`.
-  - Production package synchronized at `C:\Users\<owner>\Desktop\production`.
+  - Production package synchronized at `production`.
 
 ## Stage 5: UI Presets, Frame Generation Controls & Packaging in DLSS 5 Manager (`m13`) (2026-09-28 COMPLETED)
 - Commit 2276a80: Full GUI and in-game overlay integration of all new performance capabilities.
@@ -3851,7 +3851,7 @@ stub-controller overlay harness (real Tk) - apply window queues a
 mid-rebuild pick, pushes it once at expiry, applied label settles;
 settings tab builds with engine box first; tr() en+ru resolution.
 
-Deployed (md5-verified) to C:\Users\<owner>\Desktop\production\m13:
+Deployed (md5-verified) to production\m13:
 i18n.py b010a51931087bbfc4f228b8bf278ad9,
 gamelaunch.py d84cd9fa1a89fc95299e15ce1aa97415,
 controller.py 80c4406d786d7c99530da8984078c30b,

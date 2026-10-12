@@ -57,11 +57,12 @@ def get_exports(filepath):
             names.append(data[n_off:s_end].decode("ascii", errors="replace"))
     return names
 
+PROD = os.environ.get("DLSS5_PROD", os.path.expanduser(r"~\Desktop\production"))
 dlls = [
-    r"C:\Users\<owner>\Desktop\production\runtime\layer\x64\nr_layer_win.dll",
-    r"C:\Users\<owner>\Desktop\production\runtime\layer\x86\nr_layer_win32.dll",
-    r"C:\Users\<owner>\Desktop\production\runtime\m12\m12_dxgi.dll",
-    r"C:\Users\<owner>\Desktop\production\runtime\m11d\d5c_chain.dll",
+    os.path.join(PROD, "runtime", "layer", "x64", "nr_layer_win.dll"),
+    os.path.join(PROD, "runtime", "layer", "x86", "nr_layer_win32.dll"),
+    os.path.join(PROD, "runtime", "m12", "m12_dxgi.dll"),
+    os.path.join(PROD, "runtime", "m11d", "d5c_chain.dll"),
 ]
 
 for d in dlls:

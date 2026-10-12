@@ -19,12 +19,14 @@ import tempfile
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 FFMPEG_CANDIDATES = [
-    r"C:\Users\<owner>\Desktop\production\tools\ffmpeg.exe",
+    os.environ.get("FFMPEG", ""),
+    os.path.expanduser(r"~\Desktop\production\tools\ffmpeg.exe"),
     os.path.join(ROOT, "production", "tools", "ffmpeg.exe"),
     "ffmpeg",
 ]
 FFPROBE_CANDIDATES = [
-    r"C:\Users\<owner>\Desktop\production\tools\ffprobe.exe",
+    os.environ.get("FFPROBE", ""),
+    os.path.expanduser(r"~\Desktop\production\tools\ffprobe.exe"),
     os.path.join(ROOT, "production", "tools", "ffprobe.exe"),
     "ffprobe",
 ]

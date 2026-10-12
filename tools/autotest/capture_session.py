@@ -59,17 +59,18 @@ import traceback
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
-# ---- default paths (all overridable on the CLI) ---------------------------
-GAME = r"D:\games\Grand Theft Auto IV\GTAIV.exe"
-M11D = r"C:\Users\<owner>\Desktop\production\runtime\m11d\m11d.exe"
+# ---- default paths (all overridable on the CLI / via env) -----------------
+PROD = os.environ.get("DLSS5_PROD", os.path.expanduser(r"~\Desktop\production"))
+GAME = os.environ.get("GAME_EXE", r"D:\games\Grand Theft Auto IV\GTAIV.exe")
+M11D = os.path.join(PROD, "runtime", "m11d", "m11d.exe")
 WEIGHTS_CANDIDATES = [
-    r"C:\Users\<owner>\Desktop\production\weights\dlssnr-logical.safetensors",
+    os.path.join(PROD, "weights", "dlssnr-logical.safetensors"),
     os.path.join(ROOT, "work", "mlxw", "dlssnr-logical.safetensors"),
 ]
 DDAREC = os.path.join(ROOT, "dlss5", "m14-ddarec", "build", "Release", "ddarec.exe")
-FFMPEG = r"C:\Users\<owner>\Desktop\production\tools\ffmpeg.exe"
+FFMPEG = os.environ.get("FFMPEG", os.path.join(PROD, "tools", "ffmpeg.exe"))
 
-TEMP = os.environ.get("TEMP", r"C:\Users\<owner>\AppData\Local\Temp")
+TEMP = os.environ.get("TEMP", os.path.expanduser(r"~\AppData\Local\Temp"))
 KNOB_PATH = os.path.join(TEMP, "m13_phase30_knobs.json")
 TRIG_FLAG = os.path.join(TEMP, "m13_dx9_trigger.flag")
 STALE_FLAGS = ("m13_freeze.flag", "m13_reproc.flag", "m12_pause.flag")
