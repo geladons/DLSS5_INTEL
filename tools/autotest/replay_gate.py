@@ -131,13 +131,27 @@ def load_sequence(path, w, h):
     return raw[:n * px].reshape(n, h, w, 4)
 
 
+# Frames per accumulation window in analyze(): pairwise metric slices get
+# a 1-frame overlap, frozen-stale slices a K-frame overlap, so every
+# per-pair scalar is identical to the old whole-array computation while
+# peak memory stays ~a few hundred MB regardless of sequence length.
+WIN = 150
+
+
+def _udiff_max(frames, k=1):
+    """|frames[k:] - frames[:-k]|.max(3) on uint8 via max-min instead of an
+    int16 cast: for uint8 operands max(a,b)-min(a,b) is exactly |a-b|
+    (no wraparound), so the result is value-identical to the old
+    np.abs(i3[k:] - i3[:-k]).max(3) at half the memory."""
+    hi = np.maximum(frames[k:], frames[:-k])
+    hi -= np.minimum(frames[k:], frames[:-k])
+    return hi.max(3)
+
+
 def analyze(seq, outs, fps_hint):
     """seq/outs: N,H,W,4 uint8. Returns (verdict, notes)."""
-    i3 = seq[:, :, :, :3].astype(np.int16)
-    o3 = outs[:, :, :, :3].astype(np.int16)
-    din = np.abs(i3[1:] - i3[:-1]).max(3)
-    dout = np.abs(o3[1:] - o3[:-1]).max(3)
-    still = din <= 2
+    n = seq.shape[0]
+    still_size = seq.shape[1] * seq.shape[2]
 
     notes = []
     verdict = "PASS"
@@ -153,9 +167,47 @@ def analyze(seq, outs, fps_hint):
             verdict = "WARN"
         notes.append("WARN " + msg)
 
+    # ---- windowed accumulation -----------------------------------------
+    # li/lo: per-frame luma means. All pairwise metrics index the SECOND
+    # frame (pair p-1 -> p): still share (den), still-px flicker counters
+    # (n4/n8), >16px-from-motion counters (fden/fn4), and the per-pair
+    # flow-flicker values appended in pair order from window slices that
+    # carry a 1-frame overlap. Collecting scalars instead of whole
+    # sequence int16 casts keeps peak memory ~1 GB at any length.
+    li = np.empty(n)
+    lo = np.empty(n)
+    for a in range(0, n, WIN):
+        b = min(a + WIN, n)
+        li[a:b] = seq[a:b, :, :, :3].mean(axis=(1, 2, 3))
+        lo[a:b] = outs[a:b, :, :, :3].mean(axis=(1, 2, 3))
+    den = np.zeros(n - 1)
+    n4 = np.zeros(n - 1)
+    n8 = np.zeros(n - 1)
+    fden = np.zeros(n - 1)
+    fn4 = np.zeros(n - 1)
+    ffk_res = []
+    for p0 in range(1, n, WIN):
+        p1 = min(p0 + WIN, n)
+        iw = seq[p0 - 1:p1, :, :, :3]
+        ow = outs[p0 - 1:p1, :, :, :3]
+        din = _udiff_max(iw)
+        dout = _udiff_max(ow)
+        still = din <= 2
+        s = slice(p0 - 1, p1 - 1)
+        den[s] = still.sum((1, 2))
+        n4[s] = ((dout > 4) & still).sum((1, 2))
+        n8[s] = ((dout > 8) & still).sum((1, 2))
+        mv = din > 6
+        near = mv.copy()
+        for dy in range(-16, 17, 8):
+            for dx in range(-16, 17, 8):
+                near |= np.roll(np.roll(mv, dy, 1), dx, 2)
+        far = still & ~near
+        fden[s] = far.sum((1, 2))
+        fn4[s] = ((dout > 4) & far).sum((1, 2))
+        ffk_res += _flow_flicker_list(seq[p0 - 1:p1], outs[p0 - 1:p1])
+
     # ---- 1. transition flash: one-frame global luma events --------------
-    li = i3.mean(axis=(1, 2, 3))
-    lo = o3.mean(axis=(1, 2, 3))
     dl_in = np.diff(li)
     dl_out = np.diff(lo)
     invented = dl_out - dl_in
@@ -200,13 +252,12 @@ def analyze(seq, outs, fps_hint):
     # near-zero denominator - a handful of edge pixels then reads as a
     # 60%+ "flicker" spike. They are scored by the transition checks
     # above, not here.
-    den = still.sum((1, 2))
-    ok = den >= 0.02 * still[0].size
+    ok = den >= 0.02 * still_size
     if not ok.any():
         ok[:] = True
     den = np.maximum(den, 1)
-    flk4 = (((dout > 4) & still).sum((1, 2)) / den)[ok]
-    flk8 = (((dout > 8) & still).sum((1, 2)) / den)[ok]
+    flk4 = (n4 / den)[ok]
+    flk8 = (n8 / den)[ok]
     p90_4, p90_8 = np.percentile(flk4, 90), np.percentile(flk8, 90)
     mx8 = flk8.max()
     notes.append("still-px flicker>4 (info, incl. flat px next to motion): "
@@ -217,17 +268,13 @@ def analyze(seq, outs, fps_hint):
     # with the content (motion-compensated hold), so the raw still metric
     # above over-reports on camera motion; motion is scored by flow
     # flicker below instead.
-    mv = din > 6
-    near = mv.copy()
-    for dy in range(-16, 17, 8):
-        for dx in range(-16, 17, 8):
-            near |= np.roll(np.roll(mv, dy, 1), dx, 2)
-    far = still & ~near
-    fden = far.sum((1, 2))
-    fok = fden >= 0.02 * far[0].size
+    # The gated part's motion/far masks were already accumulated in the
+    # window loop above (mv = din > 6, near = the rolled dilate, far =
+    # still & ~near); only the per-pair scalars survive.
+    fok = fden >= 0.02 * still_size
     if not fok.any():
         fok[:] = True
-    ffl = (((dout > 4) & far).sum((1, 2)) / np.maximum(fden, 1))[fok]
+    ffl = (fn4 / np.maximum(fden, 1))[fok]
     fp90 = np.percentile(ffl, 90)
     notes.append("static flicker>4 (still, >16px from motion): med %.4f "
                  "p90 %.4f max %.4f" % (np.median(ffl), fp90, ffl.max()))
@@ -241,7 +288,7 @@ def analyze(seq, outs, fps_hint):
     # Owner-visible "phantoms / noise / digital garbage on any motion":
     # v9 scored med 20.7% on the native flythrough (== temporal off,
     # 19.2%) and was rejected in the field -> it must FAIL here.
-    ffk = flow_flicker(seq, outs)
+    ffk = np.array(ffk_res) if ffk_res else np.zeros(1)
     fmed, fp90w = float(np.median(ffk)), float(np.percentile(ffk, 90))
     notes.append("flow flicker>4 (output vs motion-warped prev, where the "
                  "input warp is exact): med %.3f p90 %.3f max %.3f"
@@ -255,9 +302,17 @@ def analyze(seq, outs, fps_hint):
 
     # ---- 3. frozen-stale (phantom mask) ------------------------------
     K = min(8, len(outs) // 4)
-    stale = (np.abs(o3[K:] - o3[:-K]).max(3) <= 1)
-    moved = (np.abs(i3[K:] - i3[:-K]).max(3) > 8)
-    fr = (stale & moved).mean((1, 2))
+    # Same K-lag per-frame-pair metric, accumulated over WIN-entry windows
+    # whose slices reach K frames back (identical stale/moved pairs).
+    fr_parts = []
+    for t0 in range(K, n, WIN):
+        t1 = min(t0 + WIN, n)
+        iw = seq[t0 - K:t1, :, :, :3]
+        ow = outs[t0 - K:t1, :, :, :3]
+        stale = _udiff_max(ow, K) <= 1
+        moved = _udiff_max(iw, K) > 8
+        fr_parts.append((stale & moved).mean((1, 2)))
+    fr = np.concatenate(fr_parts) if fr_parts else np.zeros(0)
     mx = fr.max() if fr.size else 0.0
     notes.append("frozen-stale: p95 %.3f max %.3f (window %d)"
                  % (np.percentile(fr, 95), mx, K))
@@ -292,6 +347,15 @@ def flow_flicker(seq, outs, search=8, blk=8):
     while the content under it moves (2026-10-10 owner report: "phantoms
     and digital garbage on any motion" - invisible to the still metric).
     Returns per-frame fractions (frames with <5% valid px are skipped)."""
+    res = _flow_flicker_list(seq, outs, search, blk)
+    return np.array(res) if res else np.zeros(1)
+
+
+def _flow_flicker_list(seq, outs, search=8, blk=8):
+    """The flow_flicker per-pair values as a list, so analyze() can call
+    it on 1-frame-overlapped window slices and concatenate in pair order
+    (windowing changes nothing per-pair: only seq[t] and seq[t-1] are
+    read inside the loop)."""
     n, h, w = seq.shape[:3]
     hh, hw = (h // 2) // blk * blk, (w // 2) // blk * blk
     m = 2 * search + 2
@@ -353,7 +417,7 @@ def flow_flicker(seq, outs, search=8, blk=8):
             continue
         res.append(((np.abs(o_t - o_p).max(2) > 4) & valid).sum()
                    / valid.sum())
-    return np.array(res) if res else np.zeros(1)
+    return res
 
 
 def ghost_fixture(kind, w, h):
