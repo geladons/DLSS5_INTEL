@@ -506,7 +506,14 @@ from every commit, so GitHub SHAs intentionally differ from gitea. To sync
 new work: fresh `git clone --no-hardlinks` into a staging dir, re-run
 filter-repo with the same rules (see below), `git push --force github
 master:master`. Never push the raw local history - it contains local-only
-files and machine paths. Replacement rules file (repl.txt):
+files and machine paths. Incremental sync WITHOUT force-push (preferred,
+verified 2026-10-12): in the staging clone fetch gitea+github, hard-reset to
+gitea/master, re-run the filter, then `git rebase --onto github/master
+<filtered-base> <filtered-head>` and verify `rev-parse <picked>^{tree} ==
+<filtered>^{tree}` for every commit before pushing fast-forward. NOTE: the
+filter also rewrites THIS section's literal rules text on the GitHub side
+(that is the point) - expect that diff. Full-rewrite fallback:
+`git push --force github master:master`. Replacement rules file (repl.txt):
   Users\<owner>==>Users\<owner> ; Users/<owner>==>Users/<owner> ; Users\\AI==>Users\\<owner>
   DEV-HOST==>DEV-HOST ; D:\games==>D:\games ; D:/games==>D:/games
   invert-paths: --path notes/ --path Temp/ --path-regex ".*[/]build[^/]*[/]|^build[^/]*[/]"
