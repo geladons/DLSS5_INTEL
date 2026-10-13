@@ -43,7 +43,8 @@ OOP module extracted from the live app (verbatim numerics):
 - `ChainArena` — slot layout, 3.5 GiB chunking, buffer device addresses
 - `ChainRecorder` — 14 pipelines, walks the 71-block U-Net graph
 - `ChainEngine` — the echo-free front-end: decode → features → featpack →
-  chain → compose → encode → readback
+  chain → temporal (`motion_est` + `temporal_stats` + `temporal_nr`,
+  motion-compensated residual state) → compose → encode → readback
 
 Shaders compile from `dlss5/m8b-live/shaders` (single source of truth for all
 consumers). Consumers: `m11d` (game modes) and `m8b-live` (screen mode).
@@ -160,11 +161,15 @@ Current verified numbers on the Intel Arc Pro B50 (Vulkan 1.4.348, XMX Xe2):
 
 | Size / Preset | Chain time | Raw FPS | With FrameGen | Result |
 |---|---|---|---|---|
+| **Live game: GTA IV 800x600, scale 0.67 (x86 daemon)** | **~45 ms engine round-trip** | **~22 fps engine** | **23.11 fps in-game benchmark avg** | **Playable — verified in the game's own benchmark (37 s)** |
 | **Performance Preset (Scale 0.50, 960x576)** | **210.2 ms steady** | **4.76 fps** | **~9.5 fps** | **Current v0.3 release; target 40-60 ms (playable)** |
 | Ultra Performance (Scale 0.33, 640x384) | 125.5 ms | 7.97 fps | ~15.9 fps | Fast test extent |
 | 500x500 window mode | ~135 ms | ~7 fps | ~14 fps | Retro window mode |
 | **1080p Native (Scale 1.00, 1920x1088)** | **547.0 ms selftest / 767.5 ms steady** | **1.30-1.83 fps** | **~2.6-3.7 fps** | Heavy compute (-320 ms reduction from v0.2) |
 | GPU Frame Generation (Optical Flow) | 0.39 ms | 2564 fps (theor.) | 2x multiplier | Bidirectional temporal interpolation |
+
+Engine memory footprint (arena, weights resident): ~0.80 GB with the FP16
+logical pack, ~3.87 GB with the INT8 pack (`m11d` startup log).
 
 For full per-kernel hardware breakdowns, speedup history, and historical metric reconciliation, see the official reference document: [docs/BENCHMARKS.md](BENCHMARKS.md).
 

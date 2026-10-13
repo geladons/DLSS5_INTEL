@@ -3,6 +3,7 @@
 > **Hardware Testbed:** Intel Arc Pro B50 (Battlemage Xe2, 16 Xe-cores, PCI DEV_E212, driver 101.8805, Vulkan 1.4.348, subgroupSize 32).  
 > **Model:** Full 71-block DLSSNR U-Net graph (`dlssnr-logical.safetensors`, 649 tensors, 278.03 MiB resident, 811 GEMM dispatches, 1402 total Vulkan compute dispatches).  
 > **Profiling:** Sub-microsecond hardware timestamp queries (`VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT`) on steady-state frames.
+> **Memory footprint (engine arena, weights resident):** ~0.80 GB with the FP16 logical pack / ~3.87 GB with the INT8 pack — measured at `m11d` startup; historical "~12 GB" figures in older docs referred to pre-arena per-buffer allocation.
 
 ---
 
@@ -19,6 +20,7 @@
 | **Ultra Performance (Scale 0.33)** | **640x384** (0.33x 1080p) | **125.50 ms** | **7.97 FPS** | **~15.9 FPS** | 8.5x faster than native baseline |
 | Low-Resolution (Scale 0.50) | 800x600 (400x300 internal) | 84.30 ms | 11.86 FPS | ~23.7 FPS | Tested on retro titles |
 | Low-Resolution (Scale 0.50) | 600x400 (300x200 internal) | 68.40 ms | 14.62 FPS | ~29.2 FPS | Tested on retro titles |
+| **Live game: GTA IV (x86 daemon path)** | **800x600, scale 0.67** | **~45 ms round-trip** | **~22 FPS engine** | **23.11 FPS in-game benchmark avg (37 s)** | Includes capture + features + chain + temporal + readback per present; every displayed frame is a real processed result (sync serve) |
 | **GPU Frame Generation** | 1080p (1920x1080) | **0.39 ms** | **2564 FPS** (theoretical) | **2x multiplier** | Optical Flow / FSR 3.1 bidirectional |
 | **In-Process Front-End Transport** | 1080p (1920x1080) | **1.50 - 2.50 ms** | - | - | Decode, features, compose, encode |
 | Single Block Execution (Scale 0.50) | 960x576 (per block avg) | ~3.28 ms | - | - | 71 blocks total |

@@ -1,5 +1,7 @@
 # HANDOFF: DLSS 5 on Intel Arc Pro B50 (Updated 2026-09-29, v0.3 Post-Release & Game Hardening)
 
+> Historical point-in-time log. Current ground truth: DEV_STATE.md, docs/TECHNICAL.md, docs/BENCHMARKS.md, AGENTS.md.
+
 ## 1. Quick Start & Verification in New Session
 - **Production Bundle (User-Ready):**
   - Path: `production`

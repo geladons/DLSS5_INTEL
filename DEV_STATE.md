@@ -4047,3 +4047,42 @@ output - stale processed blits covered the moving scene. Now M12_MIN_MS
 env, default 33 ms (live hits self-throttle at the ~100 ms engine pace;
 the floor only guards fast-fail spins). last_live_ms_ initialized.
 Metro 1366x768 should move ~4 -> ~9-10 fps of real processed frames.
+
+2026-10-12 - motion_est DC-correct still-match (v15, commit df48eda).
+Real-dump root cause of the post-transition "crawl": brightness fades
+(logo/menu black alternations) read as +-12 px displacement on ~99% of
+blocks and charged bufMv.w (env) to 12-17; the MREL=0.95 release then
+held the v13 residual attenuation down ~60 frames = output residual RMS
+crawled 12.9 -> 19.5 over ~64 frames on a byte-static menu (live replay
+repro). Fix: the block's (0,0)-tap diff minus its block mean (dc) is
+re-summed as s0dc via a shared reduction; s0dc <= SADmin -> the change
+is a brightness ramp, pin (0,0). Discrimination measured: fade frames
+~97% DC-explained, real camera pans ~8-14%. Gates: fixture:ghost PASS,
+_pan_seq PASS (flow p90 0.025), menu replay converges instantly
+(rms 19.6 on the first post-cut frame). D5C_RF_MA=0 A/B proved the
+attenuation itself was the whole crawl (19.46 flat from frame 0).
+
+2026-10-15 - residual-verified attenuation release (v16, commit
+f305a2d). Same envelope, different trigger: ANY real motion (OS cursor
+sweep over the menu, local props) charged env and the ~60-frame MREL
+clock left an under-enhanced trail that re-densified for ~3 s - the
+owner's "Photoshop lightener" mouse path and the "effect accumulates on
+static" report. Daemon repro (synthetic cursor sweep on a GTA IV menu
+frame): swept-path |residual| 14.7 -> 21.7 crawl over ~60 frames;
+temporal-off attractor 23.8; untouched regions pinned at 14.59 both
+ways. temporal_nr/stats now gate the attenuation by residual
+verification: g_eff = 1 - (1-g)*smoothstep(RLO, 2.5*RLO, dr) - dr <
+32 LSB (verified carry) releases immediately, dr >= 80 LSB (stale
+carry) stays damped exactly as v13 intended. Swept path lands at 21.7
+within ~1-2 frames and stays. Gates: fixture:ghost PASS, _pan_seq PASS
+(flow p90 0.030 vs 0.025 baseline - expected, verified pixels keep
+full residual). Deployed md5-verified to all runtime copies; production
+daemon restarted on 48990.
+
+Docs sync pass (2026-10-15): README/TECHNICAL/BENCHMARKS/CHANGELOG
+updated - real live-game numbers (~45 ms engine round-trip, 23.11 FPS
+in-game benchmark on GTA IV 800x600 scale 0.67), corrected engine-arena
+VRAM figures (0.80 GB FP16 / 3.87 GB INT8, weights resident - the old
+"~12 GB" was pre-arena per-buffer allocation), FG mode-2 cadence now
+documented for x86 (NRN3) + x64, x86 sync-serving defaults, temporal
+pipeline section added (4b), patch-serve marked opt-in/rejected-default.

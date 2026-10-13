@@ -168,32 +168,91 @@ listening), so the manager only trusts a reply whose magic is NRCT
 
 ## 4. Frame generation
 
-Two implementations exist in the C ABI (`chain_c_api.h`):
+Two algorithms live behind `NrFrameGen` (`nr_framegen.h/.c` in the layer)
+plus the daemon-side NRN2/NRN3 wire formats:
 
-- `dlss5_framegen_transfer` - **the active path**, residual motion
-  transfer: `generated = cur_raw + warp(prev_processed - prev_raw,
-  motion(prev_raw -> cur_raw))` (`dlss5/m8b-live/shaders/framegen.comp`
-  mode 1). ~0.05 ms at 640x384 on the bench GPU. Static scenes reproduce
-  the processed frame bit-exactly; no extra present and no extra latency.
-- `dlss5_interpolate_frame` - the **legacy** mode-0 interpolator that
-  blends two frames with a factor. Kept for compatibility.
+- **Mode 2 (default for opt-in FG, `*_FG_MODE=2`, LS-class 1:2 cadence):**
+  on the mid present the layer captures the REAL middle frame into
+  `data->mid` and re-blits the held processed anchor; on the anchor
+  present it calls `dlss5_framegen_interpolate` (x64 in-process) or sends
+  the mid payload as an NRN3 packet to `m11d` (x86/daemon). The generated
+  midpoint of the last two processed anchors goes out at a uniform
+  +1-present delay.
+- **Mode 1 (`dlss5_framegen_transfer`, NRN2, legacy +0-latency):**
+  residual motion transfer -
+  `generated = cur_raw + warp(prev_processed - prev_raw,
+  motion(prev_raw -> cur_raw))` (`framegen.comp` mode 1, ~0.05 ms at
+  640x384). Kept for latency-critical games.
 
 Per-consumer reality (do not generalize):
 
 - **x64 Vulkan layer** (`nr_layer_win.c` + `nr_framegen.c`): with FG
-  enabled and the in-process engine loaded, the layer runs a real 1:2
-  cadence - every second present goes through the network, the present in
-  between is produced by `dlss5_framegen_transfer`. `nr_framegen.c` tracks
-  `presents/processed/generated/native` and logs stats every 300 presents.
-  If the in-process engine is unavailable FG is reported unavailable and
-  skipped presents go through native.
-- **x86/daemon path:** no frame generation - the TCP protocol carries
-  single frames only; the layer logs "requires in-process x64 engine" once.
+  enabled and the in-process engine loaded, the layer runs the mode-2
+  cadence in-process; `nr_framegen.c` tracks
+  `presents/processed/generated/native` and logs stats every 300
+  presents (`fg stats`, `diag_path=fgi/mheld` in
+  `%TEMP%\nr_layer_win.log`).
+- **x86/daemon path:** mode 2 works over TCP - the mid payload crosses as
+  an NRN3 packet and `m11d` runs the same interpolation engine-side.
 - **DX12 proxy (`m12_dx12.cpp`):** still calls the **legacy**
-  `dlss5_interpolate_frame` (loaded at line 205, alpha 0.5) on skipped
-  presents, not residual transfer. This is a known divergence.
-- **Daemon (`m11d`):** accepts NRCT cmd 5 and stores the flag
-  (`main.cpp:486-489`) but the TCP path performs no generation.
+  `dlss5_interpolate_frame` (alpha 0.5) on skipped presents - a known
+  divergence from the mode-2 path.
+
+## 4b. Temporal stability pipeline (`temporal_nr` / `temporal_stats` / `motion_est`)
+
+Every processed frame passes a temporal stage between the 71-block head
+and `compose`. Its job: keep static output byte-exact, carry enhancement
+residual WITH the content under motion, and never let a stale residual
+survive an input change. `dlss5/chain/engine_temporal.cpp` drives it;
+`tools/autotest/replay_gate.py` is the release gate.
+
+- **Residual-domain hold (v9):** per pixel the state is
+  `rh = E - P` (last emitted byte minus the input it was produced on).
+  Held emit = `col01 + rh` stepped toward the fresh residual by
+  `w = max(wA(dF), wR(dr), BETA*|mv|)` inside a budgeted refresh
+  (`R_FRAMES=16`, proportional steps, still-pixel cap `D5C_RF_SCAP`).
+  A fresh emit (input jump > `IN_CUT`, residual mismatch >= `DB_CUT`,
+  reset frame) re-anchors outright. Static input reproduces the previous
+  emit **byte-exactly** - the fixed point that pins the gain>1 period-2
+  limit cycle. Never reintroduce an output-domain latch: it ghosts
+  moved/faded content (`fixture:ghost` gate).
+- **Emit deadband (v14):** sub-LSB input jitter is pinned via `E_HOLD`
+  and P is frozen while pinned, so dithered input cannot random-walk E
+  upward (the "litter accrues while still" defect class).
+- **Motion-compensated state (v10):** `motion_est.comp` runs one
+  workgroup per 8x8 block - full integer SAD search (+-12 px), zero-motion
+  bias, parabolic subpixel refine. E/P/A/R are fetched at `q = p - mv`
+  (integer verbatim, fractional bilinear on decoded bytes), so the
+  carried residual belongs to content, not screen coordinates.
+- **DC-correct still-match (v15):** the block's (0,0)-tap diff minus its
+  block mean (DC) is re-scored as `s0dc`; if `s0dc <= SADmin` the change
+  is a brightness ramp (fade/exposure/flash), not displacement, and the
+  block is pinned (0,0). Removes ~97% of false motion on fades while
+  keeping ~90% of real camera-motion blocks moving - without it every
+  fade charged the motion envelope and produced a ~3 s post-transition
+  enhancement crawl.
+- **Motion-envelope residual attenuation (v13+v16):**
+  `env = max(|mv|, MREL*env_prev)` per block (fast attack, MREL=0.95
+  release) scales the OUTPUT residual by `g = 1 - MA*smoothstep(M0,M1,env)`
+  to hide a carried residual that lands on wrong content. History E
+  stores the UNattenuated emit. Since v16 the attenuation multiplies by
+  `smoothstep(RLO, 2.5*RLO, dr)` - it releases on **residual
+  verification** per pixel instead of the ~60-frame envelope clock, so
+  local motion (cursor sweep, a moving prop) no longer leaves a visible
+  ~3 s under-enhanced trail that re-densifies.
+- **History sanitization:** `features.comp` AABB-clamps the history input
+  (ch 7-9) into the current 3x3 neighbourhood (+-0.004 scaled) - kills
+  cursor trails and stale-region drag. `temporal_nr` additionally gates
+  the vendor blend alpha per pixel by the clamped/unclamped distance
+  (fv[15]). All prior-state reads go through `bufHistPrev`, never the
+  live buffer being rewritten.
+- **Scene cuts:** the host thumb pass (`detectSceneCut`) plus per-pixel
+  `dF > IN_CUT` reset history influence; mode-2 suppression frames are
+  shader-equivalent to mode-1 so re-engagement is transient-free.
+
+Release gates (must PASS on every temporal change):
+`fixture:ghost`, `D:\dlss5_cap\_pan_seq.raw`, `Temp\_pan_man.txt`
+(plus `_nat_load.raw` check). See AGENTS.md for the full rule text.
 
 ## 5. Render scale and residual reconstruction
 
@@ -231,6 +290,10 @@ them at engine init / per frame.
 | `NR_LAYER_UI_MASK` | `0` disables exact-repeat reuse of a byte-identical frame (legacy name; HUD masking itself was removed in Stage 25) |
 | `NR_LAYER_INPROCESS` | `0` forces the TCP path even when `d5c_chain.dll` is loadable |
 | `NR_LAYER_PORT` / `DLSS5_PORT` | daemon port override (default 48990) |
+| `DLSS5_FG_MODE` / `NR_LAYER_FG_MODE` | frame-gen algorithm: `2` = LS-class mid-capture cadence (default), `1` = legacy residual transfer |
+| `NR_LAYER_ASYNC` / `NR_LAYER_RESIDUAL` / `NR_LAYER_GPUWARP` | x86 serving mode: shipped `0/1/1` = synchronous daemon serve with masked-delta residual warp; `ASYNC=1` alone reverts to whole-stale-frame mailbox replay (ghosting) |
+| `DLSS5_TEMPORAL` / `NR_LAYER_TEMPORAL` / `D5C_TEMPORAL` | `0` disables the temporal stage entirely (section 4b) |
+| `D5C_RF_*` / `D5C_MV_*` | engine-side temporal knobs (refresh bands, motion estimation, envelope attenuation) - full list + defaults in the `engine.cpp` init log and `AGENTS.md` |
 
 Flag files (all under `%TEMP%`): `m13_dx9_trigger.flag` (layer pause),
 `m12_pause.flag` (DX12 pause), `m13_freeze.flag` / `m13_reproc.flag`
@@ -365,25 +428,32 @@ Vulkan 1.4.348 / driver 101.8805:
 | Scale 1.00, 1920x1088, v0.3 INT8 fused | 741.83 ms / 1.35 FPS | `docs/BENCHMARKS.md` |
 | Scale 1.00, 1920x1088, v0.3 | 547 ms selftest / 767.5 ms steady | `ARCHITECTURE.md`, `DEV_STATE.md` |
 | Ultra Performance 640x384 | 125.5 ms / 7.97 FPS | `BENCHMARKS.md` |
+| **Live game: GTA IV 800x600, scale 0.67** | **~45 ms engine round-trip / 23.11 FPS avg in-game benchmark (37 s)** | production `m11d` log, `DEV_STATE.md` Stage 51 |
 | FG residual-transfer GPU cost | ~0.05 ms @640x384 (0.39 ms in older notes) | `BENCHMARKS.md`, `DEV_STATE.md` |
+| Engine arena VRAM (weights resident) | ~0.80 GB FP16 pack / ~3.87 GB INT8 pack | `m11d` startup log |
 | v0.1-demo reference | ~135 ms @500x500; ~0.9-1.1 s at 1080p-class | `CHANGELOG.md` known-limitations |
 
 "selftest" numbers are one-frame `--selftest` timings; "steady" numbers are
 sustained-loop timings; "fused" numbers come from the INT8 fused-kernel
-build. Label any new measurement the same way.
+build; "live game" numbers are daemon round-trips inside a real present
+loop (capture + features + chain + temporal + readback). Label any new
+measurement the same way.
 
 ## 11. Known limitations
 
-- **Slideshow performance.** Even the fastest preset is ~5-10 FPS with FG;
-  this is a research demo, not a playable tool.
+- **Retro/low-res is playable; 1080p-class is not.** GTA IV 800x600 @
+  scale 0.67 runs at a ~45 ms engine round-trip (23 FPS avg in the
+  in-game benchmark). 960x576+ stays in the ~4-9 FPS band even with FG;
+  treat native-res modern titles as a research demo.
 - **m8blive weights path is hard-coded** to the dev tree
   (`main.cpp:1831`) - see section 2.4. Screen mode is effectively
   dev-machine-only in the current snapshot.
-- **VRAM exclusivity.** Daemon and screen mode each reserve ~12 GB; on the
-  16 GB bench card they cannot run at the same time (manager-enforced).
+- **VRAM exclusivity.** The engine arena reserves ~0.8 GB (FP16 pack) or
+  ~3.9 GB (INT8 pack) with weights resident - several live instances now
+  coexist on the 16 GB bench card; the manager still serializes daemon
+  vs screen-mode runs as a policy.
 - **DX12 FG divergence.** The proxy uses the legacy interpolator, not
-  residual transfer (section 4).
-- **x86 path has no FG** and pays full TCP transport per frame.
+  the mode-2 cadence (section 4).
 - **No HUD masking.** Positional masking was removed in Stage 25; every
   pixel of a processed frame goes through the network. Exact-repeat reuse
   (byte-identical frame reuses the last result) is the only passthrough.
@@ -405,3 +475,10 @@ build. Label any new measurement the same way.
   frame; freeze is now opt-in (`overlay_freeze`, default off).
 - Historical handoffs claim packaged INT8 weights in the *public* bundle;
   the policy is and stays: no weights in public artifacts.
+- "~12 GB VRAM reserved" was the pre-`ChainArena` per-buffer allocation;
+  the current engine arena measures 802.0 MB (FP16) / 3873.3 MB (INT8)
+  with weights resident - `m11d` startup log is the source of truth.
+- "x86 has no frame generation" is pre-mode-2 documentation: NRN3 mid
+  payloads make FG work over the daemon path too.
+- `NR_LAYER_PATCH` defaults OFF (rejected 2026-10-09 - the raw bbox is
+  visibly unprocessed); older notes describe it as shipping-on.

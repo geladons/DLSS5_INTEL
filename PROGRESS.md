@@ -1,4 +1,6 @@
-﻿# DLSS5_INTEL — Progress Log
+# DLSS5_INTEL — Progress Log
+
+> Historical point-in-time log. Current ground truth: DEV_STATE.md, docs/TECHNICAL.md, docs/BENCHMARKS.md, AGENTS.md.
 
 Project: Intel Arc port of DLSS 5-style neural rendering, whole-desktop
 (NeuralScreen analog). Root: `C:\Users\<owner>\Desktop\DLSS5_INTEL`

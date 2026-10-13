@@ -4,15 +4,49 @@ All notable changes to this project. The day-by-day engineering log with
 measured numbers lives in [DEV_STATE.md](DEV_STATE.md); this file tracks
 user-visible milestones.
 
+## Unreleased — temporal stability pipeline (2026-10-10 .. 2026-10-15)
+
+### Added
+- **Motion-compensated temporal pipeline** (`temporal_nr` /
+  `temporal_stats` / `motion_est`): per-block SAD motion estimation
+  (+-12 px, subpixel refine, zero-motion bias) warps the residual state
+  so enhancement rides the *content*, not the screen cell. Static input
+  reproduces the previous output byte-exactly; carried residuals refresh
+  through a bounded 16-frame proportional budget.
+- **DC-correct still-match (v15)**: brightness ramps (fades, exposure,
+  flashes) are scored as DC shifts, not displacement — ~97% of false
+  "motion" on fades removed while ~90% of real camera-motion blocks keep
+  their vectors. Kills the ~3 s post-transition enhancement crawl.
+- **Residual-verified attenuation release (v16)**: the motion-envelope
+  residual attenuation now releases per-pixel on residual verification
+  (`dr`) instead of the ~60-frame envelope clock — cursor sweeps and
+  local motion no longer leave a visible under-enhanced trail that
+  re-densifies for seconds.
+- **Replay release gate** (`tools/autotest/replay_gate.py`): feeds raw
+  BGRA sequences to a running daemon and scores ghost residue, static /
+  flow flicker, frozen-stale and invented oscillation — `fixture:ghost`
+  + real GTA IV captures must PASS on every temporal change.
+- **Emit deadband (v14)**: sub-LSB input jitter can no longer
+  random-walk the emitted byte — fixes litter accumulating on static
+  scenes (GTA IV menu/intersection buildup).
+
+### Changed
+- **x86 serving is synchronous by default** (`NR_LAYER_ASYNC=0`,
+  `RESIDUAL=1`, `GPUWARP=1`): every displayed frame is a real processed
+  result at engine cadence (~45 ms @800x600 scale 0.67) instead of
+  whole-stale-frame mailbox replay.
+- **DX12 live-capture floor** (`M12_MIN_MS`, default 33 ms): Metro
+  1366x768 moved from ~4 to ~9-10 FPS of fresh processed frames.
+
 ## Unreleased — patch serve + defect-class autotest + desk panels (2026-10-09)
 
 ### Added
-- **Small-delta patch serve** (`NR_LAYER_PATCH`, on by default): a
+- **Small-delta patch serve** (`NR_LAYER_PATCH`, OPT-IN, default OFF): a
   present that differs from the last processed frame only inside a
   cursor-scale box is served instantly — held processed result plus the
-  raw changed pixels — skipping the daemon round-trip. Menu cursor now
-  tracks at the full present rate instead of the ~15 fps engine cadence
-  (owner-reported lag). Verified live on GTA IV (261 patch serves).
+  raw changed pixels — skipping the daemon round-trip. Rejected as a
+  default the same day: the raw bbox is visibly unprocessed next to the
+  enhanced frame (a raw rectangle trails the cursor). Kept as a knob.
 - **Autotest owner-defect coverage**: `static-scene-flicker` (A/B replay
   on a closed-state scene, splices classified via NRMK + lag residual),
   `phantom-spot` (transient concentrated hotspots, persistence-rejected

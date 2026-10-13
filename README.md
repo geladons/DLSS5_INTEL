@@ -36,7 +36,8 @@ expect today:
 | Auto game discovery | ✅ Works — Steam / Epic / GOG manifests + full-drive scan, PE-based API detection (finds real games, not every `.exe`) |
 | In-game overlay (`CTRL+ALT+G`) | ✅ Works — Game Bar style: topmost, never takes the game's foreground (no minimize), cursor unclip (`AttachThreadInput`); photo-mode freeze and focus steal are opt-in settings |
 | Screen / window mode (whole desktop) | 🟡 Works, but slow and rough — fine for streaming demos, not for daily use |
-| **FPS & Performance** | 🟡 **Targeting Performance 50% preset + FrameGen.** Full 71-block chain is ~210 ms @ 960x576 (scale 0.50) and ~547 ms selftest / 767 ms steady @ 1080p native on Arc Pro B50 (down from 867 ms in v0.2, -320 ms reduction). Frame generation is a real 1:2 cadence (every 2nd frame through the network, the frame between generated from it by motion-compensated residual transfer, ~0.05 ms @ 640x384; x64 in-process only). See [docs/BENCHMARKS.md](docs/BENCHMARKS.md) |
+| **FPS & Performance** | 🟡 **Playable on retro/low-res titles; 1080p-class is still a demo.** GTA IV 800x600 @ scale 0.67 runs at a ~45 ms engine round-trip — **23.1 FPS average in the in-game benchmark**. The full 71-block chain is ~210 ms @ 960x576 (scale 0.50) and ~547 ms selftest / 767 ms steady @ 1080p native on Arc Pro B50 (down from 867 ms in v0.2). Frame generation is a real 1:2 cadence (mid-frame capture + interpolation of the last two processed anchors; works in-process on x64 and over TCP on x86). See [docs/BENCHMARKS.md](docs/BENCHMARKS.md) |
+| **Temporal stability** | 🟡 Motion-compensated residual pipeline: byte-exact static output, carried enhancement follows content (not screen cells), DC-corrected motion estimation rejects fade false-positives, motion attenuation releases on residual verification (no ~3 s post-motion re-densify trails). Gated by an automated replay harness on real GTA IV captures |
 | Pause / resume | ✅ `CTRL+ALT+X` — full game FPS while paused |
 
 The performance roadmap and optimization history are documented in
@@ -83,9 +84,9 @@ layout, same knobs, same workflows) and changes the internals:
 | Area | `v0.1-demo` | Current snapshot |
 |---|---|---|
 | x64 games (Vulkan/DX12) | every frame round-tripped over TCP to `m11d` (127.0.0.1:47990) | `d5c_chain.dll` loads in-process via the C ABI — no socket, ~1.5–2.5 ms transport; TCP stays as fallback |
-| x86 (32-bit) games | TCP daemon path | unchanged in principle (the daemon still serves them), now with flap control: transient daemon failures hold the last processed frame instead of strobing native↔processed, degenerate sub-64 px swapchains bypass the daemon |
+| x86 (32-bit) games | TCP daemon path | synchronous daemon serving by default (`NR_LAYER_RESIDUAL=1` + `NR_LAYER_GPUWARP=1` masked-delta warp) — every displayed frame is a real processed result at engine cadence instead of stale-frame replay; flap control holds the last result on transient daemon failures; degenerate sub-64 px swapchains bypass the daemon |
 | Daemon port | `47990` | **`48990`** — Sunshine occupies 47990 on the bench host (old docs/diagrams still show 47990; the current default everywhere is 48990) |
-| Frame generation | implemented but effectively never fired, and when it did it blended processed with raw frames | real 1:2 cadence on the x64 in-process layer: every 2nd present is neural, the in-between frame is `framegen.comp` mode-1 residual transfer (~0.05 ms @640x384). DX12 still uses the legacy interpolator; the x86/TCP path has no FG |
+| Frame generation | implemented but effectively never fired, and when it did it blended processed with raw frames | real 1:2 cadence (mode 2, default): the layer captures the real mid frame and the daemon/engine interpolates between the last two processed anchors at a uniform +1-present delay — in-process on x64, over the NRN3 wire on x86. DX12 still uses the legacy interpolator |
 | Render scale < 1.0 | low-res output enlarged to full screen | residual reconstruction: the net runs at reduced extent, its signed delta is upscaled and added onto the native full-res frame — HUD/text detail is preserved |
 | Temporal stability | vendor noise seed keyed by frame index → shimmer on static content | pinned deterministic seed (`test_noise_seed.py` regression test) |
 | In-game overlay | could steal the game's foreground/minimize exclusive-fullscreen; opening it froze the frame | `WS_EX_NOACTIVATE` topmost panel that never takes focus; freeze (`overlay_freeze`) and focus steal (`overlay_focus`) are opt-in, off by default |
@@ -153,6 +154,11 @@ Full details, module map and the performance breakdown:
 ## Features
 
 - Live neural post-processing on **Vulkan, DX9, DX10, DX11, DX12**
+- **Temporal stability pipeline** — motion-compensated residual state
+  (enhancement rides the content, not the screen), byte-exact static
+  output, DC-corrected motion estimation (fades and flashes are not
+  "motion"), residual-verified attenuation release; gated per-change by
+  an automated replay harness on real game captures
 - **Auto-injection**: the right DLLs are copied next to the game binary per
   detected API (backups before overwrite, restore supported)
 - **Auto game discovery**: Steam library folders, Epic manifests, GOG registry,
@@ -181,8 +187,8 @@ Full details, module map and the performance breakdown:
 
 - Windows 10 / 11 (tested on Windows 11)
 - **Intel Arc GPU with 16 GB VRAM recommended** (tested: Arc Pro B50; the
-  processing path reserves ~12 GB, so the daemon and the screen overlay cannot
-  run at the same time — the manager enforces this)
+  engine arena reserves ~0.8 GB with the FP16 pack / ~3.9 GB with the INT8
+  pack, weights resident — smaller cards are untested)
 - Vulkan 1.3+ with `VK_KHR_cooperative_matrix` (Xe2 class)
 - Python 3.10+ for the manager (found automatically by the launcher)
 - The model weights — **not included**, see below
@@ -265,11 +271,15 @@ original notices (see also [NOTICE](NOTICE)):
 
 Everything else is original to this repository: the 71-block DLSSNR graph
 executor (`dlss5/chain`: `d5c::ChainEngine`, cooperative-matrix GEMM, fused
-flash attention, INT8 path, vectorized pool, arena allocator), the
-frame-generation residual transfer (`framegen.comp` mode 1), the render-scale
+flash attention, INT8 path, vectorized pool, arena allocator), the whole
+temporal stability pipeline (`temporal_nr` / `temporal_stats` /
+`motion_est` — residual-domain hold, motion-compensated state, DC-correct
+still matching, residual-verified attenuation), the frame-generation
+cadence (mid-capture interpolation + residual transfer), the render-scale
 residual reconstruction, the frame daemon `m11d`, the DX12 proxy `m12-dxgi`,
-the screen/window app `m8b-live` and the whole `m13` manager (launcher,
-deployer, overlay, game scanner).
+the screen/window app `m8b-live`, the `m13` manager (launcher, deployer,
+overlay, game scanner) and the autotest harness (`tools/autotest` —
+replay gates, defect detectors, DDA capture, virtual gamepad input).
 
 ### Design References & Inspiration
 Architectural concepts and pipeline designs referenced during research
