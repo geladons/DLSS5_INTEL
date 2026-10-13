@@ -498,7 +498,9 @@ Large files already make edits painful (main.cpp ~3900 lines). From now on:
 - Don't commit real credentials anywhere.
 
 ## GitHub mirror (public) - sync procedure
-Canonical remote is gitea (master). GitHub
+Canonical remote is gitea (master). PUSH TO GITHUB ONLY ON EXPLICIT OWNER
+REQUEST - routine work goes to gitea constantly, the mirror syncs when the
+owner asks. GitHub
 (https://github.com/geladons/DLSS5_INTEL.git) carries a SANITIZED rewritten
 history (filter-repo, 2026-10): local-only notes/, Temp/, build*/ dirs,
 *.exp/*.lib/*.obj and machine paths (Users\<owner>, DEV-HOST) are stripped
