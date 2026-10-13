@@ -726,9 +726,25 @@ void main() {
         float b = floor(clamp(emitT[c], 0.0, 1.0) * 255.0 + 0.5); // emit byte
         float outp = b * (1.0 / 255.0);
         float outv = outp;
-        if (g != 1.0)
-            outv = floor(clamp(col01[c] + (emitT[c] - col01[c]) * g,
+        if (g != 1.0) {
+            // v16: release the attenuation on RESIDUAL VERIFICATION (dr),
+            // not on the ~60-frame env clock alone. g exists to hide the
+            // CARRIED residual when it lands on the wrong content under
+            // motion - dr = |rc - rh| measures exactly that staleness, so
+            // the attenuation is kept only where dr sits in/above the wR
+            // pull band (pc.d[3]). A pixel whose residual the fresh
+            // candidate just verified (dr < RLO) shows the full residual
+            // the very next frame after motion stops: the swept-cursor
+            // path re-enhances in ~1 frame instead of crawling back over
+            // ~60 (owner field report 2026-10-15: mouse leaves a visible
+            // "lightener" trail and the whole frame re-densifies for
+            // ~3s after any movement).
+            float ge = 1.0 - (1.0 - g)
+                     * smoothstep(pc.d[3] * (1.0 / 255.0),
+                                  pc.d[3] * (2.5 / 255.0), dr);
+            outv = floor(clamp(col01[c] + (emitT[c] - col01[c]) * ge,
                                0.0, 1.0) * 255.0 + 0.5) * (1.0 / 255.0);
+        }
         head[hP + c] = halfr((outv - col01[c]) * 4.0);
         float s = halfr(outp);                            // scaled_color(outp)
         s = halfr(s - 0.5);

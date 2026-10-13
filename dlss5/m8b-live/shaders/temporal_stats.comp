@@ -417,7 +417,10 @@ void main() {
         for (uint c = 0u; c < 3u; ++c) {
             float bv = emitT[c];
             if (g != 1.0)
-                bv = col01[c] + (emitT[c] - col01[c]) * g;
+                bv = col01[c] + (emitT[c] - col01[c])
+                   * (1.0 - (1.0 - g)
+                     * smoothstep(pc.d[3] * (1.0 / 255.0),
+                                  pc.d[3] * (2.5 / 255.0), dr));
             float b = floor(clamp(bv, 0.0, 1.0) * 255.0 + 0.5);
             luma += W[c] * (b * (1.0 / 255.0));
         }

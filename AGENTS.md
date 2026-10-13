@@ -383,6 +383,25 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
     all tones) at the x86 daemon cadence without re-importing the
     Stage-45 stale-structure noise. Measured: jitter breathing 0.11 vs
     2.47/255 forced-off; pan suppresses (39.9% moved -> history off).
+    RESIDUAL-VERIFIED ATTENUATION RELEASE (v16, 2026-10-15): the v13
+    motion attenuation g = 1 - MA*smoothstep(M0,M1,env) used to release
+    purely on the MREL=0.95 envelope clock (~60 frames). Any REAL motion
+    - the OS cursor sweeping the menu, a car door, a local object -
+    charged env and left a ~3 s under-enhanced trail that visibly
+    "re-densified" (owner field report: the mouse works like a Photoshop
+    lightener and the effect strength accumulates on static; a local
+    scene change locally wipes the buildup). temporal_nr/stats now
+    release per-pixel on residual verification instead: the attenuation
+    multiplies by smoothstep(pc.d[3], 2.5*pc.d[3], dr) - the same wR
+    staleness band - so a pixel whose carried residual the fresh
+    candidate just verified (dr < RLO=32 LSB) shows the full residual
+    the next frame, while a stale carry (dr >= 80 LSB) stays damped
+    exactly as v13 intended. Repro on the daemon (synthetic cursor
+    sweep over a GTA IV menu frame): swept-path |residual| crawled
+    14.7 -> 21.7 over ~60 frames before the fix, lands at 21.7 within
+    ~1-2 frames after; temporal-off attractor 23.8. Gates:
+    fixture:ghost PASS, _pan_seq PASS (flow p90 0.030 vs 0.025 before -
+    slightly more residual energy on verified pixels, as designed).
     RELEASE GATE for all of the above: tools/autotest/replay_gate.py
     feeds a raw BGRA sequence to a running m11d over the TCP protocol
     and scores conditioned metrics screen capture cannot see -
