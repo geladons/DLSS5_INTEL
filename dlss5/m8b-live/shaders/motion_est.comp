@@ -72,6 +72,7 @@ layout(push_constant) uniform Push { ivec4 a; ivec4 b; vec4 c; vec4 d; } pc;
 shared float sCur[64];      // this block's current luma
 shared float sPrev[1024];   // 32x32 prev luma window: origin (bx*8-12, by*8-12)
 shared float sSad[625];     // SAD per integer offset, idx = (dy+12)*25+(dx+12)
+shared float sDc[64];       // per-pixel (0,0) diff for the DC/fade check
 shared uint  sBad;          // out-of-range P tap count in the window
 
 void main() {
@@ -129,9 +130,29 @@ void main() {
         }
         sSad[i] = s;
     }
+    // (0,0)-tap raw diff per pixel, for the DC-corrected still-match:
+    // sPrev origin is (bx*8-12, by*8-12) so the identity tap sits at
+    // window offset (12,12).
+    {
+        const int lx = int(tid & 7u), ly = int(tid >> 3);
+        sDc[tid] = sCur[tid] - sPrev[(ly + 12) * 32 + (lx + 12)];
+    }
     barrier();
     if (tid != 0u) return;
 
+    // DC-corrected (0,0) SAD: remove the block's mean diff, then re-sum.
+    // A brightness ramp (fade/exposure/flash) leaves |d - dc| ~= noise,
+    // so s0dc beats every displacement the raw SAD "found"; real motion
+    // keeps the corrected mismatch large.
+    float s0dc;
+    {
+        float dcs = 0.0;
+        for (uint i = 0u; i < 64u; ++i) dcs += sDc[i];
+        const float dc = dcs * (1.0 / 64.0);
+        float a = 0.0;
+        for (uint i = 0u; i < 64u; ++i) a += abs(sDc[i] - dc);
+        s0dc = a;
+    }
     const uint i00 = 12u * 25u + 12u;          // (dx,dy) = (0,0)
     const float s0 = sSad[i00];
     float sBest = s0;
@@ -139,13 +160,26 @@ void main() {
     for (uint i = 0u; i < 625u; ++i) {
         if (sSad[i] < sBest) { sBest = sSad[i]; iBest = i; }
     }
-    // Zero-motion bias: stay exactly still on matches within the pushed
-    // slack of the best - static blocks must produce mv=(0,0) so the v9
-    // path is preserved verbatim on still content. pc.c[1]=D5C_MV_ZBIAS
-    // (relative term), pc.c[2]=D5C_MV_ZABS (absolute, units of 64/255).
+    // DC-corrected still-match (v15): if the (0,0) difference is
+    // explained by a per-block brightness offset, the frame changed by
+    // a fade/exposure ramp/flash, not by displacement - and the best
+    // SAD offset is a spurious "match" the brightness shift let win by
+    // luck. Charging the attenuation envelope or warping the residual
+    // state on it damps the whole frame for ~60 MREL release frames
+    // (the post-transition "enhancement crawl": output visibly re-
+    // grows its residual for ~3 s after every GTA IV fade/logo/menu
+    // cut - field report + real-dump reproduction 2026-10-12). Fade
+    // frames: ~97% of moved blocks DC-explained; real camera motion:
+    // ~8-14%. sDc was reduced across the block below.
     float sPick = sBest;
     uint iPick = iBest;
-    if (s0 <= sBest * (1.0 + pc.c[1]) + 64.0 * pc.c[2] * (1.0 / 255.0)) {
+    if (s0dc <= sBest
+        || s0 <= sBest * (1.0 + pc.c[1]) + 64.0 * pc.c[2] * (1.0 / 255.0)) {
+        // Zero-motion bias: stay exactly still on matches within the
+        // pushed slack of the best - static blocks must produce mv=(0,0)
+        // so the v9 path is preserved verbatim on still content.
+        // pc.c[1]=D5C_MV_ZBIAS (relative term), pc.c[2]=D5C_MV_ZABS
+        // (absolute, units of 64/255).
         sPick = s0; iPick = i00;
     }
     int dx = int(iPick % 25u) - 12;

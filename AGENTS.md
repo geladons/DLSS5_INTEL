@@ -291,7 +291,20 @@ DEV-HOST (Win 11), GPU passed through. Owner plays games via Sunshine
     the warped neighbour taps would otherwise race temporal_nr's own
     in-place write to binding 13. motion_est.comp: one workgroup per
     8x8 net-res block, luma of current col01 vs hsPrev's P, integer
-    SAD full search over (dx,dy) in +-12, ZERO-MOTION BIAS picks (0,0)
+    SAD full search over (dx,dy) in +-12, DC-CORRECTED STILL-MATCH
+    (v15, 2026-10-12): the block's (0,0)-tap diff minus its mean (dc)
+    is re-summed as s0dc; when s0dc <= SADmin the frame-to-frame change
+    is a brightness ramp (fade/exposure/flash), not displacement, so
+    the block is pinned (0,0) even when an offset won the raw SAD.
+    Without it every GTA IV logo/menu fade and post-black return
+    charged bufMv.w (env) on ~90% of blocks; the MREL=0.95 release then
+    held the residual attenuation gate down ~60 frames = a ~3 s visible
+    "enhancement crawl" after every transition (real-dump repro: output
+    residual RMS 12.9 -> 19.5 over ~64 frames on a byte-static menu;
+    with the DC check the first post-cut frame lands at the attractor
+    directly). Measured discrimination: fade frames ~97% of moved
+    blocks DC-explained, real camera pans ~8-14%. ZERO-MOTION BIAS
+    picks (0,0)
     when SAD00 <= SADmin*(1+D5C_MV_ZBIAS=0.15) + 64*D5C_MV_ZABS=2/255
     (without it 1-2 LSB noise parks a random +-1 vector on static
     blocks and warped pixels then flicker - the z0/b15i1 static-fail),
